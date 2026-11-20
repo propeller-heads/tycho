@@ -18,8 +18,8 @@ use crate::{
     consts::ZERO_ADDRESS,
     params::{emit_specific_pools, parse_curve_params},
     policy::{
-        created_policies, created_policy_key, decode_created_policy, merge_attributes,
-        policy_entity_changes, policy_state_writes,
+        created_policies, created_policy_key, merge_attributes, policy_entity_changes,
+        policy_state_writes, PolicyGrant,
     },
     pool_changes::emit_eth_deltas,
     pool_factories,
@@ -133,7 +133,7 @@ pub fn store_created_policies(block: eth::v2::Block, store: StoreSetRaw) {
             store.set(
                 created.ordinal,
                 created_policy_key(&created.policy),
-                &created.encode_store_value(),
+                &created.grant.encode(),
             );
         }
     }
@@ -636,7 +636,7 @@ pub fn map_protocol_changes(
                 created_policies_store
                     .get_last(created_policy_key(policy))
                     .as_deref()
-                    .and_then(decode_created_policy)
+                    .and_then(PolicyGrant::decode)
             },
             |ordinal, key| policy_states_store.get_at(ordinal, key),
         );

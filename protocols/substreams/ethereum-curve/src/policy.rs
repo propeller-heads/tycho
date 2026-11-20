@@ -37,20 +37,34 @@ const GRANT_TERM_ATTRIBUTES: [(&str, &[u8]); 4] = [
     (POLICY_MIN_FEE_ATTRIBUTE, &[0]),
 ];
 
+/// The pool that a grant policy was created for, and the version of its grant rules.
+#[derive(Debug, PartialEq)]
+pub struct PolicyGrant {
+    pub pool: Vec<u8>,
+    pub version: Vec<u8>,
+}
+
+impl PolicyGrant {
+    /// Encodes the grant for the created policy store.
+    pub fn encode(&self) -> Vec<u8> {
+        [self.pool.as_slice(), &self.version].concat()
+    }
+
+    /// Decodes a value of the created policy store.
+    pub fn decode(value: &[u8]) -> Option<Self> {
+        (value.len() > 20).then(|| {
+            let (pool, version) = value.split_at(20);
+            Self { pool: pool.to_vec(), version: version.to_vec() }
+        })
+    }
+}
+
 /// A grant policy that a transaction creates.
 #[derive(Debug, PartialEq)]
 pub struct CreatedPolicy {
     pub ordinal: u64,
     pub policy: Vec<u8>,
-    pub pool: Vec<u8>,
-    pub version: Vec<u8>,
-}
-
-impl CreatedPolicy {
-    /// Encodes the pool and the version for the created policy store.
-    pub fn encode_store_value(&self) -> Vec<u8> {
-        [self.pool.as_slice(), &self.version].concat()
-    }
+    pub grant: PolicyGrant,
 }
 
 /// A value that a transaction writes to the policy state store.
@@ -74,14 +88,6 @@ pub fn grant_term_key(policy: &[u8], attribute: &str) -> String {
 /// Key of a grant policy in the created policy store.
 pub fn created_policy_key(policy: &[u8]) -> String {
     Hex(policy).to_string()
-}
-
-/// Splits a value of the created policy store into the pool and the version.
-pub fn decode_created_policy(value: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    (value.len() > 20).then(|| {
-        let (pool, version) = value.split_at(20);
-        (pool.to_vec(), version.to_vec())
-    })
 }
 
 /// The policy attributes of a new Twocrypto pool, before it sets a policy.
@@ -110,8 +116,7 @@ pub fn created_policies(tx: &TransactionTrace) -> Vec<CreatedPolicy> {
             policies.push(CreatedPolicy {
                 ordinal: log.ordinal,
                 policy: log.address.clone(),
-                pool: event.pool,
-                version: uint_bytes(&event.version),
+                grant: PolicyGrant { pool: event.pool, version: uint_bytes(&event.version) },
             });
         }
     }
@@ -161,12 +166,12 @@ pub fn policy_state_writes(
 /// a pool changes a grant term, the matching attribute of the pool changes. A grant policy
 /// created after its pool sets it gives its version when it is created.
 ///
-/// `created_policy` returns the pool and the version that a grant policy was created for.
+/// `created_policy` returns the grant of a grant policy.
 /// `policy_state_at` returns the value of the policy state store at an ordinal.
 pub fn policy_entity_changes(
     tx: &TransactionTrace,
     is_tracked_pool: impl Fn(&[u8]) -> bool,
-    created_policy: impl Fn(&[u8]) -> Option<(Vec<u8>, Vec<u8>)>,
+    created_policy: impl Fn(&[u8]) -> Option<PolicyGrant>,
     policy_state_at: impl Fn(u64, &str) -> Option<Vec<u8>>,
 ) -> Vec<EntityChanges> {
     let Some(receipt) = tx.receipt.as_ref() else {
@@ -178,7 +183,7 @@ pub fn policy_entity_changes(
     };
     for log in &receipt.logs {
         if FyndPolicyCreated::match_and_decode(log).is_some() {
-            let Some((pool, version)) = created_policy(&log.address) else {
+            let Some(PolicyGrant { pool, version }) = created_policy(&log.address) else {
                 continue;
             };
             if is_tracked_pool(&pool) && is_attached(&pool, &log.address, log.ordinal) {
@@ -204,7 +209,7 @@ pub fn policy_entity_changes(
         let Some((name, value)) = decode_grant_term(log) else {
             continue;
         };
-        let Some((pool, _)) = created_policy(&log.address) else {
+        let Some(PolicyGrant { pool, .. }) = created_policy(&log.address) else {
             continue;
         };
         if is_attached(&pool, &log.address, log.ordinal) {
@@ -220,13 +225,13 @@ fn pool_policy_attributes(
     pool: &[u8],
     policy: &[u8],
     ordinal: u64,
-    created_policy: impl Fn(&[u8]) -> Option<(Vec<u8>, Vec<u8>)>,
+    created_policy: impl Fn(&[u8]) -> Option<PolicyGrant>,
     policy_state_at: impl Fn(u64, &str) -> Option<Vec<u8>>,
 ) -> Vec<Attribute> {
     let mut attributes = vec![attribute(POLICY_ATTRIBUTE, policy.to_vec(), ChangeType::Update)];
     let version = created_policy(policy)
-        .filter(|(created_for, _)| created_for == pool)
-        .map(|(_, version)| version);
+        .filter(|grant| grant.pool == pool)
+        .map(|grant| grant.version);
     let Some(version) = version else {
         attributes.extend(zero_grant_attributes(ChangeType::Update));
         return attributes;
@@ -375,8 +380,8 @@ mod tests {
     }
 
     /// The created policy store: `POLICY` was created for `POOL`, at version 1.
-    fn created_policy(policy: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-        (policy == POLICY).then(|| (POOL.to_vec(), vec![1]))
+    fn created_policy(policy: &[u8]) -> Option<PolicyGrant> {
+        (policy == POLICY).then(|| PolicyGrant { pool: POOL.to_vec(), version: vec![1] })
     }
 
     /// The policy state store: the last value of a key written at or before an ordinal.
@@ -457,10 +462,17 @@ mod tests {
             vec![CreatedPolicy {
                 ordinal: 3,
                 policy: POLICY.to_vec(),
-                pool: POOL.to_vec(),
-                version: vec![1],
+                grant: PolicyGrant { pool: POOL.to_vec(), version: vec![1] },
             }]
         );
+    }
+
+    #[test]
+    fn test_policy_grant_encode_decode() {
+        let grant = PolicyGrant { pool: POOL.to_vec(), version: vec![1] };
+
+        assert_eq!(PolicyGrant::decode(&grant.encode()), Some(grant));
+        assert_eq!(PolicyGrant::decode(&POOL), None);
     }
 
     #[test]
