@@ -161,7 +161,9 @@ Records look like this (`.claude/knowledge/*.md`, below each file's `<!-- pieces
    every conversation comment, resolved and outdated included, paginated:
    `gh api --paginate repos/{owner}/{repo}/pulls/<n>/comments`, `.../pulls/<n>/reviews`,
    `.../issues/<n>/comments`. Add `--existing`, and for a follow-up review the `--since` report's
-   findings, pre-existing list and earlier-findings table. Keep each comment's commit.
+   findings, pre-existing list and earlier-findings table. Keep each comment's commit. Merge the
+   sources into one list: a finding that restates an `--existing` entry (same file and claim) is
+   kept once, as that entry, with its id; one that restates another source's finding is kept once.
 
 4. **Plan the passes** with the planning script, from the repo root:
 
@@ -477,11 +479,13 @@ Beside it, the same findings as data for scripts (the `tycho-integrate` ledger r
   `earlier_id`: the id of the earlier finding it restates, when an earlier finding carried an id
   (an `--existing` file may give each entry one, such as `F12`); a finding that restates an earlier
   one reports it there rather than as new;
-- `earlier`: every earlier finding, as `{"id", "status", "evidence", "rule", "file", "claim"}`, with
-  the status of section 4 (`fixed`, `open`, `deferred`, `disproven`). An entry the `--existing` file
-  gave no id is numbered `E<n>` in file order, and `rule`, `file` and `claim` are always filled in,
-  so the caller matches it to its own ids (the `tycho-integrate` ledger matches by file and claim)
-  instead of by position;
+- `earlier`: every earlier finding of the merged list of step 3, once each, as `{"id", "status",
+  "evidence", "rule", "file", "claim"}`, with the status of section 4 (`fixed`, `open`, `deferred`,
+  `disproven`). A finding that restates an `--existing` entry, from the `--since` report or a PR
+  comment, is reported only under that entry's id. Every entry without an id, from any source, is
+  numbered `E<n>`, counting from 1 in the order `--existing`, `--since` report, PR comments. `rule`,
+  `file` and `claim` are always filled in, so the caller matches an `E<n>` entry to its own ids (the
+  `tycho-integrate` ledger matches by file and claim) instead of by position;
 - `refuted`: the refuted findings, as `{"rule", "file", "claim", "counter_evidence"}`;
 - `not_run`: the parts that did not run, one string each.
 
