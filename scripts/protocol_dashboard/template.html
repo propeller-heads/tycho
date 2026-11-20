@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protocol Integrations</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --col: #eef0f3; --text: #1b1f24; --muted: #5d6673;
+    --border: #d9dde3; --accent: #3355dd;
+    --open: #1f883d; --draft: #6e7781; --merged: #8250df; --closed: #cf222e;
+    --ok: #1f883d; --no: #b7bdc6; --unknown: #bf8700;
+    --warn-bg: #fff4d6; --warn-text: #7a5300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #181c22; --col: #13171c; --text: #e6e9ed; --muted: #9aa4b1;
+      --border: #2b313a; --accent: #7d9bff;
+      --open: #3fb950; --draft: #8b949e; --merged: #a371f7; --closed: #f85149;
+      --ok: #3fb950; --no: #3a414b; --unknown: #d29922;
+      --warn-bg: #2e2510; --warn-text: #e3b341;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 20px 16px 8px; max-width: 100%; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; }
+  .pill.bad { border-color: var(--unknown); color: var(--unknown); }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; overflow-x: auto; border-bottom: 1px solid var(--border); }
+  nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; color: var(--muted);
+               font: inherit; cursor: pointer; white-space: nowrap; }
+  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  nav .count { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  main { padding: 16px; }
+  /* All eight stages side by side on a desktop screen; narrower screens scroll the board. */
+  .board { display: grid; grid-template-columns: repeat(8, minmax(150px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 8px; }
+  .column.empty-col { opacity: .75; }
+  .column { background: var(--col); border: 1px solid var(--border); border-radius: 8px; padding: 8px; min-height: 120px; }
+  .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 2px 4px 8px;
+               display: flex; justify-content: space-between; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .card .name { font-weight: 600; word-break: break-all; }
+  .card .row { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 6px; font-size: 12px; color: var(--muted); align-items: center; }
+  .pr { display: inline-flex; align-items: center; gap: 4px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+  .s-open { background: var(--open); } .s-draft { background: var(--draft); }
+  .s-merged { background: var(--merged); } .s-closed { background: var(--closed); }
+  .chk { display: inline-flex; align-items: center; gap: 3px; }
+  .chk i { width: 14px; height: 14px; border-radius: 3px; display: inline-grid; place-items: center; font-style: normal;
+           font-size: 10px; color: #fff; background: var(--no); }
+  .chk i.ok { background: var(--ok); } .chk i.unknown { background: var(--unknown); }
+  .flag { margin-top: 6px; padding: 4px 6px; border-radius: 4px; background: var(--warn-bg); color: var(--warn-text); font-size: 12px; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 4px; }
+  section.extra { margin-top: 24px; }
+  section.extra h3 { font-size: 14px; margin: 0 0 8px; }
+  section.extra ul { margin: 0; padding-left: 18px; }
+  .card.untracked { background: transparent; border-style: dashed; }
+  .card.untracked .name { font-weight: 500; color: var(--muted); }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; margin-left: 6px; font-weight: 400; font-family: system-ui, sans-serif; }
+  .swatch { display: inline-block; width: 14px; height: 10px; border: 1px dashed var(--muted); border-radius: 2px; vertical-align: -1px; }
+  .tag.wait { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; }
+  .column .hint { font-size: 11px; color: var(--muted); margin: -4px 4px 8px; text-transform: none; letter-spacing: 0; }
+  .waiting { display: grid; gap: 4px; margin: 0 0 12px; font-size: 13px; }
+  .waiting b { font-weight: 600; }
+  .waiting .names { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 0 0 12px; font-size: 13px; }
+  .legend { font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Protocol Integrations</h1>
+  <div class="meta" id="meta"></div>
+</header>
+<nav id="tabs" role="tablist"></nav>
+<main>
+  <div class="toolbar">
+    <label><input type="checkbox" id="show-untracked" checked> Show protocols that aren't on the project</label>
+  </div>
+  <div id="waiting" class="waiting"></div>
+  <div class="legend">
+    <span><span class="swatch"></span> dashed = not on the project</span>
+    <span><span class="dot s-open"></span> open PR</span>
+    <span><span class="dot s-draft"></span> draft</span>
+    <span><span class="dot s-merged"></span> merged</span>
+    <span><span class="dot s-closed"></span> closed</span>
+    <span>On main for this chain: <b>T</b> integration test · <b>C</b> executor config</span>
+    <span>Checks: <b>R</b>eview · <b>M</b>erged · e<b>X</b>ecutor · <b>D</b>ev · <b>P</b>rod (amber = can't tell)</span>
+  </div>
+  <div id="board" class="board" role="tabpanel"></div>
+  <div id="extra"></div>
+</main>
+<script>
+const DATA = /*__DATA__*/null;
+
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v; else n.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) n.append(k);
+  return n;
+};
+const link = (href, text) => href ? el("a", { href, target: "_blank", rel: "noopener", text }) : document.createTextNode(text);
+
+function header() {
+  document.getElementById("title").textContent = DATA.project.title || "Protocol Integrations";
+  const meta = document.getElementById("meta");
+  meta.append(el("span", { text: `Generated ${DATA.generatedAt}` }));
+  meta.append(el("span", {}, link(DATA.project.url, "GitHub project")));
+  if (DATA.mainSha) meta.append(el("span", { class: "mono", text: `main @ ${DATA.mainSha.slice(0, 9)}` }));
+  if (DATA.runUrl) meta.append(el("span", {}, link(DATA.runUrl, "workflow run")));
+  for (const [src, state] of Object.entries(DATA.sources)) {
+    meta.append(el("span", { class: "pill" + (state === "ok" ? "" : " bad"), title: state, text: `${src}: ${state === "ok" ? "ok" : state.split(":")[0]}` }));
+  }
+}
+
+function card(c) {
+  const node = el("div", { class: "card" + (c.tracked ? "" : " untracked") });
+  node.append(el("div", { class: "name mono", title: c.tracked ? "" : "Not on the project" }, c.protocol));
+
+  if (c.prs.length) {
+    node.append(el("div", { class: "row" }, c.prs.map(p =>
+      el("span", { class: "pr", title: `${p.title} (${p.state}${p.author ? ", " + p.author : ""})` },
+        el("span", { class: `dot s-${p.state}` }), link(p.url, `#${p.number}`)))));
+  } else if (c.items.length) {
+    const titled = c.items.filter(i => i.kind !== "PullRequest");
+    node.append(el("div", { class: "row" }, titled.map(i => i.url ? link(i.url, i.title) : el("span", { text: i.title }))));
+  }
+
+  const L = c.layers || {};
+  const C = c.checks || {};
+  const box = (label, v, title) => el("span", { class: "chk", title },
+    el("i", { class: v === true ? "ok" : v === null || v === undefined ? "unknown" : "", text: label }));
+  node.append(el("div", { class: "row" },
+    box("T", L.test, "Integration test for this chain on main"),
+    box("C", L.deployment, "Executor deployment config for this chain on main"),
+    el("span", { text: "·" }),
+    box("R", C["In review"], "Open PR"), box("M", C["Merged"], "All PRs merged"),
+    box("X", C["Executor deployed"], c.executor ? `Executor ${c.executor}` : "No executor on main"),
+    box("D", C["In Dev"], C["In Dev"] == null ? "Not checked" : "Running in a dev indexer"),
+    box("P", C["In Prod"], C["In Prod"] == null ? "Not checked" : "Running in a prod indexer")));
+
+  if (c.manual && c.manual !== c.stage) node.append(el("div", { class: "note", text: `Project status: ${c.manual}` }));
+  for (const f of c.flags) node.append(el("div", { class: "flag", text: f }));
+  return node;
+}
+
+// Tabs count the chain's project cards and, separately, what waits for dev or prod.
+function chains() {
+  const counts = {}, waits = {};
+  for (const c of DATA.cards) {
+    if (c.graveyard) continue;
+    counts[c.chain] = (counts[c.chain] || 0) + (c.tracked ? 1 : 0);
+    waits[c.chain] = (waits[c.chain] || 0) + (c.waiting ? 1 : 0);
+  }
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a] || waits[b] - waits[a] || a.localeCompare(b))
+    .map(ch => [ch, counts[ch], waits[ch]]);
+}
+
+const HINTS = { "Executor deployed": "waiting for dev", "In Dev": "waiting for prod" };
+let current = null;
+let showUntracked = true;
+try { showUntracked = localStorage.getItem("show-untracked") !== "0"; } catch (e) {}
+
+function waiting(cards) {
+  const box = document.getElementById("waiting");
+  box.replaceChildren();
+  for (const [env, label] of [["dev", "Waiting for dev"], ["prod", "Waiting for prod"]]) {
+    const names = cards.filter(c => c.waiting === env).map(c => c.protocol).sort();
+    box.append(el("div", {}, el("b", { text: `${label} (${names.length}): ` }),
+      el("span", { class: "names", text: names.length ? names.join(", ") : "nothing" })));
+  }
+}
+
+function show(chain) {
+  current = chain;
+  for (const b of document.querySelectorAll("nav button")) b.setAttribute("aria-selected", String(b.dataset.chain === chain));
+  try { history.replaceState(null, "", "#" + chain); } catch (e) {}
+  const board = document.getElementById("board");
+  board.replaceChildren();
+  const all = DATA.cards.filter(c => c.chain === chain && !c.graveyard);
+  waiting(all);
+  const cards = all.filter(c => showUntracked || c.tracked);
+  for (const stage of DATA.stages) {
+    const inCol = cards.filter(c => c.stage === stage)
+      .sort((a, b) => (b.tracked - a.tracked) || a.protocol.localeCompare(b.protocol));
+    board.append(el("div", { class: "column" + (inCol.length ? "" : " empty-col") },
+      el("h2", {}, el("span", { text: stage }), el("span", { text: String(inCol.length) })),
+      HINTS[stage] ? el("div", { class: "hint", text: HINTS[stage] }) : null,
+      inCol.length ? inCol.map(card) : el("div", { class: "empty", text: "—" })));
+  }
+}
+
+function extra() {
+  const box = document.getElementById("extra");
+  if (DATA.unassigned.length) {
+    box.append(el("section", { class: "extra" },
+      el("h3", { text: `Missing Protocol or Chains (${DATA.unassigned.length})` }),
+      el("ul", {}, DATA.unassigned.map(i => el("li", {}, i.url ? link(i.url, i.title) : el("span", { text: i.title }),
+        el("span", { class: "note", text: ` — ${i.status || "no status"}` }))))));
+  }
+  const dead = DATA.cards.filter(c => c.graveyard);
+  if (dead.length) {
+    box.append(el("section", { class: "extra" },
+      el("h3", { text: `Graveyard (${dead.length})` }),
+      el("ul", {}, dead.map(c => el("li", { class: "mono", text: `${c.chain} · ${c.protocol}` })))));
+  }
+}
+
+header();
+const toggle = document.getElementById("show-untracked");
+toggle.checked = showUntracked;
+toggle.addEventListener("change", () => {
+  showUntracked = toggle.checked;
+  try { localStorage.setItem("show-untracked", showUntracked ? "1" : "0"); } catch (e) {}
+  if (current) show(current);
+});
+const tabs = document.getElementById("tabs");
+const list = chains();
+for (const [ch, n, w] of list) {
+  const b = el("button", { role: "tab", "data-chain": ch, title: `${n} on the project, ${w} waiting for dev or prod` },
+    ch, el("span", { class: "count", text: String(n) }), w ? el("span", { class: "tag wait", text: `${w} waiting` }) : null);
+  b.addEventListener("click", () => show(ch));
+  tabs.append(b);
+}
+extra();
+const wanted = decodeURIComponent(location.hash.slice(1));
+if (list.length) show(list.some(([c]) => c === wanted) ? wanted : list[0][0]);
+else document.getElementById("board").append(el("div", { class: "empty", text: "No protocols in the project yet." }));
+</script>
+</body>
+</html>
