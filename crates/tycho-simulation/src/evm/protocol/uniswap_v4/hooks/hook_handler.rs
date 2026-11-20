@@ -16,7 +16,8 @@ use crate::evm::{
         hooks::{
             models::{
                 AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
-                BeforeSwapParameters, HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
+                BeforeSwapParameters, HookSpotFees, StateContext, SwapOutcome, SwapParams,
+                WithGasEstimate,
             },
             utils::{has_permission, HookOptions},
         },
@@ -209,6 +210,21 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         Err(SimulationError::RecoverableError(
             "get_amount_ranges is not implemented for this hook".into(),
         ))
+    }
+
+    /// The hook as it stands after the swap `get_amount_out` just quoted, for a hook whose own
+    /// storage changes with the swap (an observation, a consumed inventory), so that the state the
+    /// quote returns prices the next swap of a route correctly.
+    ///
+    /// `context` and `swap_params` are the ones `before_swap` saw, so the pool's price, tick and
+    /// liquidity are those from before the swap. It runs after the swap passed every check, so a
+    /// refused swap leaves no handler behind. `None` keeps the hook as it is, which is the default.
+    fn handler_after_swap(
+        &self,
+        _context: &StateContext,
+        _swap_params: &SwapParams,
+    ) -> Result<Option<Box<dyn HookHandler>>, SimulationError> {
+        Ok(None)
     }
 
     // Called on each state update to update the internal state of the HookHandler

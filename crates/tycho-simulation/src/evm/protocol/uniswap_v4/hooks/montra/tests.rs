@@ -167,6 +167,9 @@ fn context() -> StateContext {
         currency_1: Address::repeat_byte(1),
         fees: UniswapV4Fees::new(0, 0, DYNAMIC_FEE_FLAG),
         tick_spacing: 200,
+        sqrt_price_x96: U256::ZERO,
+        tick: 0,
+        liquidity: 0,
     }
 }
 

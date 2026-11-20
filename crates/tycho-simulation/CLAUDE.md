@@ -36,10 +36,14 @@ for any protocol indexed by Tycho.
     Unichain, Pons V2 is the native handler for Robinhood, PancakeSwap Infinity's
     `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC, and Montra's
     `LaunchHook` (`montra/`, `uniswap_v4_hooks` pools of the with-hooks package's Elysium
-    manifest) is the native handler on Elysium. A handler can price itself without simulation
+    manifest) is a native handler on Elysium, as is the Ascend launchpad hook (`ascend/`, the
+    same manifest's `ascend_*` attributes: a fee, an EMA observation and a bid that fills sells).
+    A handler can price itself without simulation
     through the optional `HookHandler` methods `spot_fees`, `max_amount_in`, `check_swap_outcome`
     and `swaps_from_empty_range`; their contracts, and which of them must be answered together,
-    are in `hooks/hook_handler.rs`. A registered handler is
+    are in `hooks/hook_handler.rs`. A hook whose own storage a swap changes returns the updated
+    handler from `handler_after_swap`, which `UniswapV4State::get_amount_out` installs in the
+    state it returns. A registered handler is
     instantiated whatever the hook address bits say, and decides which callbacks run through
     `HookHandler::has_permission`, because Infinity keeps permissions in the pool key. The
     `pancakeswap_infinity_cl_hooks` system skips the address-bit check entirely, so its pools fail

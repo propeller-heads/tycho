@@ -12,6 +12,7 @@
 //! [`UniswapV4State`]: crate::evm::protocol::uniswap_v4::state::UniswapV4State
 
 pub mod angstrom;
+pub mod ascend;
 pub mod generic_vm_hook_handler;
 pub mod hook_handler;
 pub mod hook_handler_creator;

@@ -19,6 +19,9 @@ use crate::{
             uniswap_v4::{
                 hooks::{
                     angstrom::hook_handler_creator::AngstromHookCreator,
+                    ascend::{
+                        hook_handler::ASCEND_HOOK_ELYSIUM, hook_handler_creator::AscendHookCreator,
+                    },
                     generic_vm_hook_handler::GenericVMHookHandler,
                     hook_handler::HookHandler,
                     montra::{
@@ -228,6 +231,10 @@ pub fn initialize_hook_handlers() -> Result<(), SimulationError> {
     // Montra's LaunchHook is deployed on Elysium alone, and only the Elysium manifest of the
     // with-hooks package emits the `montra_*` attributes its creator reads.
     register_hook_handler(Chain::Elysium, MONTRA_HOOK_ELYSIUM, Box::new(MontraHookCreator))?;
+
+    // The Ascend launchpad hook is deployed on Elysium alone, and only the Elysium manifest of
+    // the with-hooks package emits the `ascend_*` attributes its creator reads.
+    register_hook_handler(Chain::Elysium, ASCEND_HOOK_ELYSIUM, Box::new(AscendHookCreator))?;
 
     Ok(())
 }

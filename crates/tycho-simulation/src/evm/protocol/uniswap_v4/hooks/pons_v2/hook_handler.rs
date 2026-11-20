@@ -287,6 +287,9 @@ mod tests {
                 currency_1: address!("e47a6c4f082f6a2b49d20eaca35f8d4583651f4d"),
                 fees: UniswapV4Fees::new(0, 0, 0),
                 tick_spacing: 200,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
+                liquidity: 0,
             },
             sender: SENDER,
             swap_params: SwapParams {
@@ -466,6 +469,9 @@ mod tests {
                         currency_1: Address::ZERO,
                         fees: UniswapV4Fees::new(0, 0, 0),
                         tick_spacing: 200,
+                        sqrt_price_x96: U256::ZERO,
+                        tick: 0,
+                        liquidity: 0,
                     },
                     sender: SENDER,
                     swap_params: SwapParams {

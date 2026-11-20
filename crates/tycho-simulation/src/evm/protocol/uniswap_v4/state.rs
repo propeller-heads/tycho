@@ -318,6 +318,12 @@ impl UniswapV4State {
         })
     }
 
+    /// The pool's square-root price, current tick and active liquidity, which a hook that
+    /// bounds limits reads in [`HookHandler::max_amount_in`].
+    pub(crate) fn price_tick_liquidity(&self) -> (U256, i32, u128) {
+        (self.sqrt_price, self.tick.value(), self.liquidity)
+    }
+
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
         self.pending_overrides.as_deref()
     }
@@ -947,6 +953,9 @@ impl ProtocolSim for UniswapV4State {
             currency_1: if zero_for_one { token_out_address } else { token_in_address },
             fees: self.fees.clone(),
             tick_spacing: self.tick_spacing,
+            sqrt_price_x96: self.sqrt_price,
+            tick: self.tick.value(),
+            liquidity: self.liquidity,
         };
 
         // The hooks must see the limit an executed swap sends: the full price range, like the
@@ -1040,9 +1049,9 @@ impl ProtocolSim for UniswapV4State {
         if let Some(ref hook) = self.hook {
             if hook.has_permission(HookOptions::AfterSwap) {
                 let after_swap_params = AfterSwapParameters {
-                    context: state_context,
+                    context: state_context.clone(),
                     sender: *EXTERNAL_ACCOUNT,
-                    swap_params,
+                    swap_params: swap_params.clone(),
                     delta: swap_delta,
                     hook_data: Bytes::new(),
                 };
@@ -1080,7 +1089,17 @@ impl ProtocolSim for UniswapV4State {
         };
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
-        let new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
+        let mut new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
+        // A hook whose own storage the swap changed (an observation, a consumed inventory) prices
+        // the next swap of a route from the state it leaves.
+        if let Some(hook) = &self.hook {
+            if let Some(next_hook) = hook
+                .handler_after_swap(&state_context, &swap_params)
+                .map_err(|e| hook_call_error("HandlerAfterSwap", e))?
+            {
+                new_state.hook = Some(next_hook);
+            }
+        }
 
         // Add hook gas costs to baseline swap cost.
         // before_swap_gas / after_swap_gas capture the hook contract's internal

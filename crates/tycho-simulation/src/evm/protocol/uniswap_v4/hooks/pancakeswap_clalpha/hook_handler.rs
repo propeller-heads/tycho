@@ -253,6 +253,9 @@ mod tests {
                 currency_1: Address::repeat_byte(1),
                 fees: UniswapV4Fees::new(0, 0, 67),
                 tick_spacing: 10,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
+                liquidity: 0,
             },
             sender: Address::ZERO,
             swap_params: SwapParams {
