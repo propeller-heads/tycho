@@ -5,7 +5,7 @@ use std::any::Any;
 use alloy::primitives::{Address as AlloyAddress, U256};
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -42,8 +42,8 @@ const FEE_DENOMINATOR: f64 = 1e10;
 const STABLESWAP_GAS: u64 = 150_000;
 /// Representative gas cost of a CryptoSwap exchange (heavier math + price oracle update).
 const CRYPTOSWAP_GAS: u64 = 350_000;
-/// Policy versions whose grant pricing [`CurveState::exclusive_view`] models.
-const SUPPORTED_POLICY_VERSIONS: [u64; 1] = [1];
+/// Policy version whose grant pricing [`CurveState::exclusive_view`] models.
+const SUPPORTED_POLICY_VERSION: u64 = 1;
 /// Gas a grant adds to a CryptoSwap exchange: the grant submission and the policy's fee hook.
 const GRANT_GAS: u64 = 176_000;
 
@@ -85,7 +85,8 @@ enum Pricing {
     /// At the pool's own fee.
     #[default]
     Public,
-    /// At the policy's `min_fee`, with the gas of the grant.
+    /// At the policy's `min_fee`, with the gas of the grant, while the policy gives grants.
+    /// At the pool's own fee otherwise.
     Exclusive,
 }
 
@@ -121,26 +122,36 @@ impl CurveState {
     /// Returns a copy that quotes swaps with a grant from the pool's policy: at the policy's
     /// `min_fee`, with the gas of the grant. `None` for a StableSwap pool, an unsupported policy
     /// version, a killed policy or a zero `min_fee`. Ignores who signs the grants.
+    ///
+    /// While a later policy update stops the grants, the copy quotes at the pool's own fee.
     pub fn exclusive_view(&self) -> Option<Self> {
         if !self.can_grant() {
             return None;
         }
         let mut view = Self { pricing: Pricing::Exclusive, ..self.clone() };
-        set_fixed_fee(&mut view.pool, self.policy.min_fee())?;
+        self.apply_grant(&mut view.pool)?;
         Some(view)
     }
 
     /// Whether quotes price a swap with a grant from the policy.
     pub fn is_exclusive_view(&self) -> bool {
-        self.pricing == Pricing::Exclusive
+        self.pricing == Pricing::Exclusive && self.can_grant()
     }
 
     /// Whether the policy gives grants this code can price.
     fn can_grant(&self) -> bool {
-        let is_supported = SUPPORTED_POLICY_VERSIONS
-            .iter()
-            .any(|version| self.policy.version() == U256::from(*version));
-        is_supported && !self.policy.is_killed() && !self.policy.min_fee().is_zero()
+        self.policy.version() == U256::from(SUPPORTED_POLICY_VERSION) &&
+            !self.policy.is_killed() &&
+            !self.policy.min_fee().is_zero()
+    }
+
+    /// Sets the fee of every swap on `pool` to the policy's `min_fee`. `None` if the policy gives
+    /// no grants or `pool` is a StableSwap pool.
+    fn apply_grant(&self, pool: &mut Pool) -> Option<()> {
+        if !self.can_grant() {
+            return None;
+        }
+        set_fixed_fee(pool, self.policy.min_fee())
     }
 
     fn admin_fee(&self) -> Result<U256, SimulationError> {
@@ -454,12 +465,17 @@ impl ProtocolSim for CurveState {
         };
         let mut pool = build_pool(&state)
             .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))?;
+        let was_granted = self.is_exclusive_view();
         self.policy = policy;
-        // An exclusive view whose policy stops giving grants prices at the pool's own fee again.
-        if self.is_exclusive_view() &&
-            !(self.can_grant() && set_fixed_fee(&mut pool, self.policy.min_fee()).is_some())
-        {
-            self.pricing = Pricing::Public;
+        if self.pricing == Pricing::Exclusive {
+            let is_granted = self.apply_grant(&mut pool).is_some();
+            if is_granted != was_granted {
+                info!(
+                    pool = %self.pool_address,
+                    is_granted,
+                    "curve exclusive view changes between grant and public pricing"
+                );
+            }
         }
         self.pool = pool;
         self.admin_fee = state.admin_fee;
@@ -935,6 +951,25 @@ mod tests {
 
         assert!(!view.is_exclusive_view());
         assert_eq!(view.fee(), 0.0003);
+    }
+
+    #[test]
+    fn test_exclusive_view_delta_transition_revived() {
+        let mut view = exclusive_view_after_delta(POLICY_KILLED_ATTRIBUTE, vec![1]);
+        let balances = vec![u("2466241139205"), u("4200057336"), u("1595469030050811720465")];
+        let attributes = HashMap::from([
+            (
+                vm::POOL_STATE_ADJUSTED.to_string(),
+                encode_raw_state(&raw_pool_state(balances)).expect("encode"),
+            ),
+            (POLICY_KILLED_ATTRIBUTE.to_string(), Bytes::from(vec![0])),
+        ]);
+
+        view.delta_transition(delta(attributes), &HashMap::new(), &Balances::default())
+            .expect("delta transition failed");
+
+        assert!(view.is_exclusive_view());
+        assert_eq!(view.fee(), 0.00001);
     }
 
     #[test]
