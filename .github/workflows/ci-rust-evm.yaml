@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         id: filter
         with:
           files: |
@@ -54,7 +54,7 @@ jobs:
 
       # The pAMM simulation overrides test dials the live Titan sockets and makes real RPC calls,
       # so it runs only when the code it covers changes, or on a manual dispatch.
-      - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+      - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         id: price-level-stream
         with:
           files: |

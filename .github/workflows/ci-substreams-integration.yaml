@@ -40,25 +40,25 @@ jobs:
 
       - name: Check if any files changed under protocol-testing
         id: protocol-testing-files-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         with:
           files: protocols/testing/**
 
       - name: Check if any files changed under substreams
         id: substreams-files-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         with:
           files: protocols/substreams/**
 
       - name: Check if Dockerfile changed
         id: dockerfile-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         with:
           files: protocols/testing/run.Dockerfile
 
       - name: Check if Cargo.toml changed
         id: cargo-toml-changed
-        uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
+        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96  # v47.0.6
         with:
           files: protocols/testing/Cargo.toml
 
