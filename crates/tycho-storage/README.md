@@ -63,11 +63,15 @@ export LIBRARY_PATH=<PATH-TO-LIB>:$LIBRARY_PATH
 mise install github:diesel-rs/diesel
 ```
 
-3. Start the Postgres Service:
+3. Start the Postgres Service from the repository root:
 
 ```bash
-docker-compose up -d db
+touch docker/.env
+TYCHO_IMAGE=unused docker compose -f docker/docker-compose.yaml up -d db
 ```
+
+Compose checks every service in the file, and the `tycho-indexer` service needs `TYCHO_IMAGE` and
+`docker/.env` to exist. Only `db` starts, so any image name and an empty `.env` work.
 
 4. Set Environment Variables:
 
@@ -80,7 +84,7 @@ export ETH_RPC_URL="url-here"
 5. Setup/Update the Database:
 
 ```bash
-diesel migration run --migration-dir ./tycho-storage/migrations
+diesel migration run --migration-dir ./crates/tycho-storage/migrations
 ```
 
 ## Formatting

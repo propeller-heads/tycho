@@ -32,6 +32,9 @@
     },
     "rfq:native": {
       "router_v6": "0x4777A6B3A9A889ABfd4C7666Bdd2a7AB633293be"
+    },
+    "subsidy": {
+      "payer_address": "0x08A2427C12Cf9e90Cb7EA57f8242A828c9dc4987"
     }
   },
   "base": {
@@ -44,6 +47,9 @@
     },
     "rfq:native": {
       "router_v6": "0x9706D3fff42571305Fc201F996ADC0e768d72911"
+    },
+    "subsidy": {
+      "payer_address": "0x75Ad3d90b69632EE9dd27E8eA796A93513aB7B4b"
     }
   },
   "arbitrum": {
@@ -64,6 +70,9 @@
     },
     "rfq:native": {
       "router_v6": "0x1fDED89D98CBeADd96a109D28689c2638025dad3"
+    },
+    "subsidy": {
+      "payer_address": "0xB4a06a31b74A5345EE5507593F77923b5E4f0ee7"
     }
   },
   "plasma": {},

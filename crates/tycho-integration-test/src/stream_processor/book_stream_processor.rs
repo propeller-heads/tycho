@@ -22,6 +22,7 @@ use tycho_simulation::{
     },
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
+        euclid::{self, feed::EuclidFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
@@ -33,18 +34,25 @@ use tycho_test::execution::encoding::USER_ADDR;
 use crate::stream_processor::{StreamUpdate, StreamUpdatePayload};
 
 /// The venues that sign binding quotes. The pAMM venues are [`PammVenue`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RfqVenue {
     Bebop,
+    Euclid,
     Hashflow,
     Liquorice,
     Native,
+}
+
+impl RfqVenue {
+    /// The venues whose quotes need no credentials, so they run unless RFQ is disabled.
+    pub const KEYLESS: [RfqVenue; 1] = [RfqVenue::Euclid];
 }
 
 impl Display for RfqVenue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqVenue::Bebop => write!(f, "{}", bebop::PROTOCOL_SYSTEM),
+            RfqVenue::Euclid => write!(f, "{}", euclid::PROTOCOL_SYSTEM),
             RfqVenue::Hashflow => write!(f, "{}", hashflow::PROTOCOL_SYSTEM),
             RfqVenue::Liquorice => write!(f, "{}", liquorice::PROTOCOL_SYSTEM),
             RfqVenue::Native => write!(f, "{}", native::PROTOCOL_SYSTEM),
@@ -84,13 +92,15 @@ impl Display for PammVenue {
     }
 }
 
-/// Which RFQ venues the book stream runs: each venue whose credentials are set. A venue without
-/// them is skipped, since RFQ has no explicit venue list.
+/// Which RFQ venues the book stream runs: each venue whose credentials are set, and every venue
+/// that needs none ([`RfqVenue::KEYLESS`]). A venue without its credentials is skipped, since
+/// RFQ has no explicit venue list.
 #[derive(Clone, PartialEq, Eq)]
 pub enum RfqSelection {
     /// `--disable-rfq`: no RFQ venue.
     Disabled,
-    /// The venues whose credentials were found, possibly none.
+    /// The venues whose credentials were found, possibly none. The keyless venues run beside
+    /// them and are not listed.
     Credentials(HashMap<RfqVenue, (String, String)>),
 }
 
@@ -99,10 +109,13 @@ impl std::fmt::Debug for RfqSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RfqSelection::Disabled => write!(f, "Disabled"),
-            RfqSelection::Credentials(credentials) => f
-                .debug_tuple("Credentials")
-                .field(&credentials.keys().collect::<Vec<_>>())
-                .finish(),
+            RfqSelection::Credentials(credentials) => {
+                let mut venues: Vec<_> = credentials.keys().collect();
+                venues.sort_by_key(ToString::to_string);
+                f.debug_tuple("Credentials")
+                    .field(&venues)
+                    .finish()
+            }
         }
     }
 }
@@ -150,15 +163,35 @@ impl RfqSelection {
         RfqSelection::Credentials(credentials)
     }
 
+    /// The venues to build a feed for, each with its credentials: the keyed venues whose
+    /// credentials were found, then the keyless ones with empty credentials.
+    fn venues(&self) -> Vec<(RfqVenue, String, String)> {
+        let RfqSelection::Credentials(credentials) = self else {
+            return Vec::new();
+        };
+        credentials
+            .iter()
+            .map(|(venue, (user, key))| (*venue, user.clone(), key.clone()))
+            .chain(
+                RfqVenue::KEYLESS
+                    .into_iter()
+                    .map(|venue| (venue, String::new(), String::new())),
+            )
+            .collect()
+    }
+
     /// Why this selection added no feed, for the warning when no book feed runs.
     fn why_empty(&self) -> &'static str {
         match self {
             RfqSelection::Disabled => "RFQ is disabled by --disable-rfq",
             RfqSelection::Credentials(credentials) if credentials.is_empty() => {
                 "no RFQ credentials are set (BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, \
-                 LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY)"
+                 LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY), and no keyless RFQ \
+                 venue serves this chain"
             }
-            RfqSelection::Credentials(_) => "no RFQ venue with credentials serves this chain",
+            RfqSelection::Credentials(_) => {
+                "no RFQ venue with credentials, nor any keyless one, serves this chain"
+            }
         }
     }
 }
@@ -268,12 +301,7 @@ impl BookStreamProcessor {
             env::var(name).ok()
         })?;
 
-        let no_credentials = HashMap::new();
-        let credentials = match &self.rfq {
-            RfqSelection::Disabled => &no_credentials,
-            RfqSelection::Credentials(credentials) => credentials,
-        };
-        for (protocol, (user, key)) in credentials {
+        for (protocol, user, key) in self.rfq.venues() {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
                 warn!(
                     "Skipping {protocol}: it prices its books' TVL in USD stablecoins, and none \
@@ -291,7 +319,7 @@ impl BookStreamProcessor {
                     let mut bebop_builder = BebopFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .origin_address(
                         Bytes::from_str(USER_ADDR)
@@ -320,8 +348,8 @@ impl BookStreamProcessor {
                     let mut builder = HashflowFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -344,8 +372,8 @@ impl BookStreamProcessor {
                     let mut builder = LiquoriceFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        user.clone(),
-                        key.clone(),
+                        user,
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -364,13 +392,35 @@ impl BookStreamProcessor {
                         .add(liquorice::PROTOCOL_SYSTEM, liquorice_feed)
                         .expect("each provider is added once");
                 }
+                RfqVenue::Euclid => {
+                    // Euclid serves Ethereum; on any other chain the feed is skipped rather
+                    // than failing the whole processor.
+                    let mut builder =
+                        EuclidFeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens));
+                    if self.all_pairs {
+                        builder = builder.all_pairs();
+                    }
+                    match builder.build() {
+                        Ok(euclid_feed) => {
+                            feeds
+                                .add(euclid::PROTOCOL_SYSTEM, euclid_feed)
+                                .expect("each provider is added once");
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Euclid RFQ not supported on chain {:?}, skipping: {e}",
+                                self.chain
+                            )
+                        }
+                    }
+                }
                 RfqVenue::Native => {
                     // Native serves a fixed set of chains; on any other chain the feed is
                     // skipped rather than failing the whole processor.
                     let mut builder = NativeFeedBuilder::new(
                         book_config.clone(),
                         Arc::clone(usd_quote_tokens),
-                        key.clone(),
+                        key,
                     )
                     .feed_config(HttpFeedConfig {
                         poll_interval: Duration::from_secs(30),
@@ -777,6 +827,29 @@ mod tests {
         venues.sort();
         // Hashflow needs both its user and its key.
         assert_eq!(venues, [bebop::PROTOCOL_SYSTEM, native::PROTOCOL_SYSTEM]);
+    }
+
+    /// Euclid's gateway is public: it runs beside the keyed venues without credentials, and not
+    /// at all with RFQ disabled.
+    #[test]
+    fn the_keyless_venues_run_unless_rfq_is_disabled() {
+        let venues = |selection: RfqSelection| -> Vec<RfqVenue> {
+            selection
+                .venues()
+                .into_iter()
+                .map(|(venue, ..)| venue)
+                .collect()
+        };
+        assert_eq!(venues(RfqSelection::from_cli(false, secrets(&[]))), [RfqVenue::Euclid]);
+        assert_eq!(
+            venues(RfqSelection::from_cli(false, secrets(&[("BEBOP_KEY", "key")]))),
+            [RfqVenue::Bebop, RfqVenue::Euclid]
+        );
+        assert!(venues(RfqSelection::Disabled).is_empty());
+        // With no credentials, the warning still names the variables to set.
+        assert!(RfqSelection::from_cli(false, secrets(&[]))
+            .why_empty()
+            .contains("BEBOP_KEY"));
     }
 
     /// Runs the processor in the current-thread test runtime, which polls none of the spawned

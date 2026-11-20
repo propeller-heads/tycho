@@ -109,7 +109,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_onchain: bool,
 
-    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)
+    /// Disable the RFQ book feeds (Bebop, Hashflow, Liquorice, Native, Euclid)
     #[arg(long, default_value_t = false)]
     disable_rfq: bool,
 
@@ -2016,7 +2016,7 @@ async fn process_state(
             Some(Arc::from(state.clone_box())),
             token_in,
             token_out,
-            amount_in.clone(),
+            amount_in,
             chain,
             None,
             amount_out_result.gas,
@@ -2504,8 +2504,8 @@ mod tests {
     #[rstest]
     #[case::direct("pricelevelstream:fermiswap", Some("fermiswap"))]
     #[case::auto_detected(
-        "pricelevelstream:0x5979458912f80b96d30d4220af8e2e4925a33320",
-        Some("0x5979458912f80b96d30d4220af8e2e4925a33320")
+        "pricelevelstream:0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
+        Some("0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977")
     )]
     #[case::indexed_pamm("vm:fermiswap", None)]
     #[case::other_protocol("uniswap_v3", None)]

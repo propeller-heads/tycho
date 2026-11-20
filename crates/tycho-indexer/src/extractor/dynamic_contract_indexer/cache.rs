@@ -1288,7 +1288,8 @@ mod tests {
         let result = cache
             .get_all("mixed".to_string())
             .unwrap();
-        assert_eq!(result.collect::<Vec<_>>(), vec![&301, &300]); // Latest pending first, then permanent
+        // Latest pending first, then permanent
+        assert_eq!(result.collect::<Vec<_>>(), vec![&301, &300]);
 
         // Test 5: Key in multiple pending layers and permanent
         cache.insert_permanent("multi".to_string(), 400);
@@ -1317,7 +1318,8 @@ mod tests {
         let result = cache
             .get_all("sparse".to_string())
             .unwrap();
-        assert_eq!(result.collect::<Vec<_>>(), vec![&503, &501, &500]); // Skips block2, includes others
+        // Skips block2, includes others
+        assert_eq!(result.collect::<Vec<_>>(), vec![&503, &501, &500]);
 
         // Test 7: Key only in multiple pending layers (no permanent)
         cache
@@ -1336,7 +1338,8 @@ mod tests {
         let result = cache
             .get_all("multi".to_string())
             .unwrap();
-        assert_eq!(result.collect::<Vec<_>>(), vec![&402, &401, &400]); // Block3 data removed after revert
+        // Block3 data removed after revert
+        assert_eq!(result.collect::<Vec<_>>(), vec![&402, &401, &400]);
 
         // Test 9: After finality, get_all should include finalized data in permanent
         cache

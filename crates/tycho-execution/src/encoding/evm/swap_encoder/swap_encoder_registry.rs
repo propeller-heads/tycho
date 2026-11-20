@@ -21,7 +21,7 @@ use crate::encoding::{
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
             bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
+            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
@@ -260,6 +260,9 @@ impl SwapEncoderRegistry {
             "rfq:bebop" => {
                 Ok(Box::new(BebopSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "rfq:euclid" => {
+                Ok(Box::new(EuclidSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             "rfq:hashflow" => {
                 Ok(Box::new(HashflowSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -401,7 +404,7 @@ mod tests {
         for protocol in [
             FALLBACK_KEY,
             "fallback:fermiswap",
-            "fallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
+            "fallback:0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
         ] {
             let resolved = registry
                 .get_encoder(protocol)
@@ -554,10 +557,9 @@ mod tests {
 
     #[test]
     fn test_registry_configured_with_subsidizing_executor_without_payer() {
-        let executors =
-            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+        let executors = r#"{"polygon": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
 
-        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+        let result = SwapEncoderRegistry::new(Chain::Polygon)
             .add_default_encoders(Some(executors.to_string()));
 
         assert!(

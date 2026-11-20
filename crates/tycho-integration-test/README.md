@@ -17,7 +17,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 ## Supported Protocols
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
-- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set
+- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set, and Euclid, whose gateway is public and which runs on Ethereum without credentials. Euclid's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
 - **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai on Base when listed). BaiBai's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
@@ -32,7 +32,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `RPC_URL`       | Blockchain RPC endpoint; BaiBai's feed polls it too, so it must be a Base node with `--pamm baibai` | `https://eth-mainnet.alchemyapi.io/v2/...` |
 | `TYCHO_API_KEY` | API key for Tycho services; defaults to `sampletoken` | `your-api-key`                             |
 | `TYCHO_NO_TLS`  | Connect to Tycho over plain HTTP/WS (a local instance) | `true`                     |
-| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped | |
+| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped. Euclid needs none and runs on Ethereum | |
 | `METRIC_API_KEY` | Metric (pAMM) credentials; required when `--pamm` lists `metric` | |
 
 ### Command Line Arguments
@@ -50,7 +50,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--protocol-tvl-thresholds` | -         | Comma-separated `protocol=threshold` pairs. Each one replaces `--tvl-threshold` for its protocol. Every named protocol must be enabled |
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
-| `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
+| `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native, Euclid)                                             |
 | `--disable-pamm`           | `false`    | Skip the pAMM book feeds. Conflicts with `--pamm`                                                                |
 | `--pamm`                   | `metric`   | Comma-separated pAMM venues to run (`metric`, `baibai`); replaces the default list. `baibai` runs on Base only and reads its books over `RPC_URL`. A listed venue missing its credentials, or whose feed fails to build, fails the run |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
