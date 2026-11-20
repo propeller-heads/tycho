@@ -11,7 +11,8 @@ use tycho_common::{
 };
 
 use super::{
-    convert_int, orm, schema, storage_error_from_diesel, PostgresError, PostgresGateway, MAX_TS,
+    convert_int, instance::write::block::upsert_blocks, orm, schema, storage_error_from_diesel,
+    PostgresError, PostgresGateway, MAX_TS,
 };
 
 impl PostgresGateway {
@@ -21,50 +22,7 @@ impl PostgresGateway {
         blocks: &[Block],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        use super::schema::block::dsl::*;
-        if blocks.is_empty() {
-            warn!("Upsert blocks called with empty blocks!");
-            return Ok(());
-        }
-        let block_chain_id = self.get_chain_id(&blocks[0].chain)?;
-        let new_blocks = blocks
-            .iter()
-            .map(|new| {
-                Ok(orm::NewBlock {
-                    hash: new.hash.clone(),
-                    parent_hash: new.parent_hash.clone(),
-                    chain_id: block_chain_id,
-                    main: true,
-                    number: convert_int(new.number, "block number")?,
-                    ts: new.ts,
-                })
-            })
-            .collect::<Result<Vec<_>, StorageError>>()?;
-
-        // Insert in batches to avoid exceeding PostgreSQL parameter limit
-        // assumes that block with the same hash will not appear with different values
-        let block_count = new_blocks.len();
-        async {
-            for chunk in new_blocks.chunks(orm::NewBlock::MAX_BATCH_SIZE) {
-                diesel::insert_into(block)
-                    .values(chunk)
-                    .on_conflict_do_nothing()
-                    .execute(conn)
-                    .await
-                    .map_err(|err| {
-                        storage_error_from_diesel(
-                            err,
-                            "Block",
-                            &format!("Batch: {} and {} more", chunk[0].hash, chunk.len() - 1),
-                            None,
-                        )
-                    })?;
-            }
-            Ok::<(), StorageError>(())
-        }
-        .instrument(debug_span!("insert_blocks", count = block_count))
-        .await?;
-        Ok(())
+        upsert_blocks(&self.chain_id_cache, blocks, conn).await
     }
 
     #[instrument(skip_all)]

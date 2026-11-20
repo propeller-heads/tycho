@@ -31,7 +31,7 @@ use tycho_common::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
             ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -44,10 +44,11 @@ use tycho_common::{
 };
 
 use super::{
+    instance::{gateway::PostgresGatewayNew, origins::BatchOrigins},
     is_transaction_conflict,
     pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
-    PostgresError, PostgresGateway,
+    InstanceId, PostgresError, PostgresGateway,
 };
 
 /// Represents different types of database write operations.
@@ -157,6 +158,9 @@ pub struct DBTransaction {
     block_range: BlockRange,
     size: usize,
     operations: Vec<WriteOp>,
+    /// Instance whose tables the operations go to. `None` writes the shared tables of the old
+    /// schema.
+    instance: Option<InstanceId>,
     tx: oneshot::Sender<Result<(), StorageError>>,
     /// Purely used to add an attribute to the span when the transaction is commited
     owner: Option<String>,
@@ -320,6 +324,8 @@ pub(crate) struct DBCacheWriteExecutor {
     chain: Chain,
     pool: Pool<AsyncPgConnection>,
     state_gateway: PostgresGateway,
+    /// Writes the batches of a gateway bound to an instance.
+    instance_gateway: PostgresGatewayNew,
     persisted_block: Option<models::blockchain::Block>,
     msg_receiver: mpsc::Receiver<DBCacheMessage>,
     max_retries: u64,
@@ -345,7 +351,23 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        Self { name, chain, pool, state_gateway, persisted_block, msg_receiver, max_retries: 3 }
+        // Shares the name caches, so both gateways know the same chains and protocols.
+        let instance_gateway = PostgresGatewayNew::with_caches(
+            state_gateway.chain_id_cache.clone(),
+            state_gateway
+                .protocol_system_id_cache
+                .clone(),
+        );
+        Self {
+            name,
+            chain,
+            pool,
+            state_gateway,
+            instance_gateway,
+            persisted_block,
+            msg_receiver,
+            max_retries: 3,
+        }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -386,6 +408,16 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        if let Some(instance) = new_db_tx.instance {
+                            // Read before any write, so a batch whose transactions don't resolve
+                            // writes nothing.
+                            let origins = BatchOrigins::from_ops(&new_db_tx.operations)?;
+                            for op in new_db_tx.operations.iter() {
+                                self.execute_instance_write_op(instance, &origins, op, conn)
+                                    .await?;
+                            }
+                            return Ok(());
+                        }
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
@@ -563,6 +595,54 @@ impl DBCacheWriteExecutor {
         };
         Ok(())
     }
+
+    /// Executes one op of a batch of `instance` on the instance tables.
+    ///
+    /// Stores no transactions: a versioned row takes the block and order of its change from
+    /// `origins`.
+    /// Fails with [`StorageError::Unsupported`] for an op the instance tables don't take yet.
+    #[instrument(skip_all, fields(op = operation.variant_name(), %instance))]
+    async fn execute_instance_write_op(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        operation: &WriteOp,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), PostgresError> {
+        trace!(op=?operation, %instance, name="ExecuteInstanceWriteOp");
+        match operation {
+            WriteOp::UpsertBlock(blocks) => {
+                self.instance_gateway
+                    .upsert_block(blocks, conn)
+                    .await?
+            }
+            // Read into the origins before the first op; there is no table to write.
+            WriteOp::UpsertTx(_) => {}
+            WriteOp::SaveExtractionState(state) => {
+                self.instance_gateway
+                    .save_state(instance, origins, state, conn)
+                    .await?
+            }
+            WriteOp::InsertContract(_) |
+            WriteOp::UpdateContracts(_) |
+            WriteOp::InsertAccountBalances(_) |
+            WriteOp::InsertProtocolComponents(_) |
+            WriteOp::InsertTokens(_) |
+            WriteOp::UpdateTokens(_) |
+            WriteOp::InsertComponentBalances(_) |
+            WriteOp::UpsertProtocolState(_) |
+            WriteOp::InsertEntryPoints(_) |
+            WriteOp::InsertEntryPointTracingParams(_) |
+            WriteOp::UpsertTracedEntryPoints(_) => {
+                return Err(StorageError::Unsupported(format!(
+                    "{} for instance {instance}",
+                    operation.variant_name()
+                ))
+                .into());
+            }
+        };
+        Ok(())
+    }
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]
@@ -588,6 +668,8 @@ pub struct CachedGateway {
 
     // TODO: Remove Mutex. It is not needed but avoids changing the Extractor trait.
     open_tx: Arc<Mutex<Option<OpenTx>>>,
+    /// Instance this gateway writes for, see [`CachedGateway::for_instance`].
+    instance: Option<InstanceId>,
     /// Height of the newest block whose staged writes reached the store. `0` means
     /// nothing flushed yet, so a real flushed height of 0 reads as `None`.
     flushed_block_height: AtomicU64,
@@ -603,6 +685,7 @@ impl Clone for CachedGateway {
         Self {
             // create a separate open tx state for new instances
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // each instance tracks the flush progress of its own transactions
             flushed_block_height: AtomicU64::new(0),
             tx: self.tx.clone(),
@@ -628,6 +711,7 @@ impl CachedGateway {
                     block_range: BlockRange::new(block, block),
                     size: 0,
                     operations: vec![],
+                    instance: self.instance,
                     tx,
                     owner: owner.map(String::from),
                     caller_span: tracing::Span::none(),
@@ -718,6 +802,7 @@ impl CachedGateway {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
+            instance: None,
             flushed_block_height: AtomicU64::new(0),
             pool,
             pool_label: EXTRACTION_POOL,
@@ -731,10 +816,14 @@ impl CachedGateway {
     ///
     /// Use this instead of `clone()` when the intent is to create an independent writer
     /// (e.g. for a restarted extractor) rather than sharing cache state.
+    ///
+    /// It keeps the instance set by [`CachedGateway::for_instance`], so a restarted extractor
+    /// writes to the same instance.
     pub fn new_instance(&self) -> Self {
         CachedGateway {
             tx: self.tx.clone(),
             open_tx: Arc::new(Mutex::new(None)),
+            instance: self.instance,
             // a fresh writer has not flushed anything yet
             flushed_block_height: AtomicU64::new(0),
             pool: self.pool.clone(),
@@ -742,6 +831,18 @@ impl CachedGateway {
             state_gateway: self.state_gateway.clone(),
             lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
+    }
+
+    /// Creates a fresh gateway, as [`CachedGateway::new_instance`] does, whose writes go to the
+    /// tables of `instance` instead of the shared tables.
+    ///
+    /// A batch of this gateway fails when it holds an operation that the instance tables don't
+    /// support yet, and nothing of that batch is written. `upsert_tx` stores nothing: the write
+    /// executor reads the transactions of a batch only for the block and order of each versioned
+    /// change. Reads still go to the shared tables, so it does not read back the extraction state
+    /// that it writes.
+    pub fn for_instance(&self, instance: InstanceId) -> Self {
+        CachedGateway { instance: Some(instance), ..self.new_instance() }
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
@@ -878,12 +979,13 @@ impl ContractStateGateway for CachedGateway {
     async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contract(id, version, include_slots, &mut conn)
+            .get_contract(id, protocol_system, version, include_slots, &mut conn)
             .await
     }
 
@@ -891,6 +993,7 @@ impl ContractStateGateway for CachedGateway {
     async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -898,7 +1001,15 @@ impl ContractStateGateway for CachedGateway {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contracts(chain, addresses, version, include_slots, pagination_params, &mut conn)
+            .get_contracts(
+                chain,
+                protocol_system,
+                addresses,
+                version,
+                include_slots,
+                pagination_params,
+                &mut conn,
+            )
             .await
     }
 
@@ -951,12 +1062,13 @@ impl ContractStateGateway for CachedGateway {
     async fn get_account_balances(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_account_balances(chain, addresses, version, false, &mut conn)
+            .get_account_balances(chain, protocol_system, addresses, version, false, &mut conn)
             .await
     }
 }
@@ -984,7 +1096,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)
@@ -1143,12 +1255,13 @@ impl ProtocolGateway for CachedGateway {
     async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: &str,
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_component_balances(chain, ids, version, &mut conn)
+            .get_component_balances(chain, Some(system), ids, version, &mut conn)
             .await
     }
 
@@ -1360,13 +1473,14 @@ impl StateSnapshotGateway for CachedGateway {
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
-    use diesel::{sql_query, QueryableByName};
+    use diesel::{prelude::*, sql_query, QueryableByName};
     use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
     use crate::postgres::{
-        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+        db_fixtures, db_fixtures::yesterday_one_am, instance::schema::tycho as instance_schema,
+        orm, testing::run_against_db,
     };
 
     #[tokio::test]
@@ -1866,6 +1980,146 @@ mod test_serial_db {
         .await;
     }
 
+    /// Starts a write executor and returns a gateway bound to a new, ready instance.
+    async fn setup_instance_gateway(
+        connection_pool: &Pool<AsyncPgConnection>,
+    ) -> (CachedGateway, InstanceId, JoinHandle<()>) {
+        let mut connection = connection_pool
+            .get()
+            .await
+            .expect("Failed to get a connection from the pool");
+        let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+        db_fixtures::insert_token(
+            &mut connection,
+            chain_id,
+            "0000000000000000000000000000000000000000",
+            "ETH",
+            18,
+            Some(100),
+        )
+        .await;
+        let protocol_system_id =
+            db_fixtures::insert_protocol_system(&mut connection, "vm:test".to_owned()).await;
+        let instance = db_fixtures::insert_instance(&mut connection, protocol_system_id, "1").await;
+        let gateway = PostgresGateway::from_connection(&mut connection).await;
+        let (tx, rx) = mpsc::channel(10);
+        let write_executor = DBCacheWriteExecutor::new(
+            "ethereum".to_owned(),
+            Chain::Ethereum,
+            connection_pool.clone(),
+            gateway.clone(),
+            rx,
+        )
+        .await;
+        let handle = write_executor.run();
+        let cached_gw =
+            CachedGateway::new(tx, connection_pool.clone(), gateway).for_instance(instance);
+        (cached_gw, instance, handle)
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_instance_gateway_writes_instance_tables() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let state = get_sample_extraction(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            cached_gw
+                .save_state(&state)
+                .await
+                .expect("Save state ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let fetched_block = cached_gw
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
+                .await
+                .expect("Failed to fetch block");
+            assert_eq!(fetched_block, block_1);
+            let fetched_tx = cached_gw.get_tx(&tx_1.hash).await;
+            assert!(matches!(fetched_tx, Err(StorageError::NotFound(_, _))), "{fetched_tx:?}");
+            let old_state = cached_gw
+                .get_state(&state.name, &Chain::Ethereum)
+                .await;
+            assert!(matches!(old_state, Err(StorageError::NotFound(_, _))), "{old_state:?}");
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let (cursor, block_number): (Option<Bytes>, i64) =
+                instance_schema::extraction_state::table
+                    .filter(instance_schema::extraction_state::instance_id.eq(instance))
+                    .select((
+                        instance_schema::extraction_state::cursor,
+                        instance_schema::extraction_state::block_number,
+                    ))
+                    .get_result(&mut connection)
+                    .await
+                    .expect("instance extraction state stored");
+            assert_eq!(cursor, Some(Bytes::from(state.cursor.clone())));
+            assert_eq!(block_number, 1);
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_fresh_gateway_keeps_instance() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            handle.abort();
+
+            assert_eq!(cached_gw.new_instance().instance, Some(instance));
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_instance_batch_with_unsupported_op_writes_nothing() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, _instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let block_1 = get_sample_block(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .add_component_balances(&[])
+                .await
+                .expect("Staging balances ok");
+            let res = cached_gw.commit_transaction(0).await;
+            handle.abort();
+
+            assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
+            let fetched_block = cached_gw
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
+                .await;
+            assert!(
+                matches!(fetched_block, Err(StorageError::NotFound(_, _))),
+                "{fetched_block:?}"
+            );
+        })
+        .await;
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway_flushed_block_height() {
         run_against_db(|connection_pool| async move {
@@ -2026,6 +2280,7 @@ mod test_serial_db {
             block_range: BlockRange::new(&block, &block),
             size: operations.len(),
             operations,
+            instance: None,
             tx: os_tx,
             owner: None,
             caller_span: tracing::Span::none(),

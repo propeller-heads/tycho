@@ -22,8 +22,51 @@ postgres/
 ├── snapshot.rs         — one-transaction read of all live contracts and components for the entity cache (StateSnapshotGateway)
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
-└── schema.rs           — auto-generated Diesel table! macros
+├── schema.rs           — auto-generated Diesel table! macros
+└── instance/           — per-instance `tycho` schema; written by gateways bound to an instance, not yet read by the public gateways; callers run each read in one `snapshot_transaction`
+    ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
+    ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
+    ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
+    ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
+    ├── read/           — its read methods, one file per domain
+    │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
+    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
+    │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
+    │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
+    │   └── version.rs  — the check that the current tables can answer a version
+    ├── write/          — its write methods, one file per domain
+    │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
+    │   └── extraction_state.rs — cursor and last block of each instance
+    ├── orm.rs          — Diesel row and insert structs for every `tycho` table
+    ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
+    └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
 ```
+
+## Instance schema (`tycho`)
+
+The protocol-isolation schema lives next to the tables above until the data migration moves each
+protocol into an instance. Every per-instance table is list-partitioned by `instance_id`, one leaf
+per instance (`<table>_i<id>`), and every key starts with `instance_id`. History of the five
+versioned entities is in `*_history` tables, partitioned by day on `valid_to` across all
+instances. No table has a DEFAULT partition.
+
+- Create an instance's leaves with `tycho.create_instance_leaves(id)` then
+  `tycho.attach_instance_leaves(id)`; an import loads between the two. Foreign keys exist only
+  between the leaves of one instance. Tests use `db_fixtures::insert_instance` on a connection from
+  `testing::instance_test_connection()`, which runs instance tests one at a time.
+- History days come from `tycho.premake_history_partitions()` (pg_cron, 00:15), not from
+  pg_partman's `run_maintenance()`, which makes no day for a partition set without rows.
+  `drop_expired_partitions()` drops expired days of both the old partitioned tables and the
+  history tables.
+- `public.protocol_system.active_instance_id` records which instance readers see.
+  `public.token.address` is how instance tables refer to tokens.
+- `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
+  `execute_instance_write_op` on `PostgresGatewayNew`, instead of `execute_write_op` on the old
+  gateway. No transactions are stored: versioned rows take their block timestamp and tx index
+  from the batch (`instance::origins`), and `UpsertTx` writes nothing. It writes blocks and
+  `tycho.extraction_state` so far; any other op fails the whole batch with
+  `StorageError::Unsupported`. At cut-over, `execute_write_op` and the
+  old gateway are deleted, and `PostgresGatewayNew` is renamed.
 
 ## Architecture
 
@@ -68,7 +111,9 @@ reload corrects.
 
 Every gateway checkout and the DB writer checkout go through `pool::checkout`. It opens a
 `db_pool_checkout` span and records the wait in `db_pool_checkout_duration_seconds{pool}`. The
-`pool` label is `extraction`, `rpc` or `direct`. A 1 s sampler sets
+`pool` label is `extraction`, `rpc` or `direct`. The `rpc` and `direct` pools serve requests and set
+`plan_cache_mode = force_custom_plan` on each connection: a generic plan locks every
+instance-table partition. The `extraction` pool keeps `auto`. A 1 s sampler sets
 `db_pool_connections{pool,state}`, `db_pool_waiting{pool}` and `db_pool_max_size{pool}`. Traced
 entry point reads load rows with a connection (`load_traced_entry_point_rows`) and return the
 connection before they decode the JSON (`decode_traced_entry_points`). Do not hold a connection
@@ -91,7 +136,8 @@ queries. `versioning::apply_versioning()` sets `valid_to` on the previous row wh
 version is inserted. Historical rows are never mutated.
 
 History is bounded, though: pg_cron jobs prune it outside the Rust code. `drop_expired_partitions()`
-drops expired partitions of `protocol_state`, `component_balance` and `contract_storage`, and
+drops expired partitions of `protocol_state`, `component_balance` and `contract_storage` (and of
+the `tycho.*_history` tables), and
 `cleanup_orphaned_transactions()` deletes transaction rows nothing references any more (tracked via
 `transaction_cleanup_progress`). Both read the horizon from the `partition_retention_config` table
 (default 1 month). See `scripts/prune_transaction_table.md`.

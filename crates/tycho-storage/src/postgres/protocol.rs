@@ -10,7 +10,6 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
-use num_bigint::BigUint;
 use tracing::{debug_span, error, instrument, trace, warn, Instrument, Level};
 use tycho_common::{
     models::{
@@ -18,7 +17,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Balance, Chain, ChangeType, ComponentId, FinancialType, ImplementationType,
         PaginationParams, ProtocolType, StoreVal, TxHash,
     },
@@ -27,8 +26,8 @@ use tycho_common::{
 };
 
 use super::{
-    convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts, orm, page_window,
-    schema, storage_error_from_diesel, truncate_to_byte_limit,
+    compare_balances, convert_int, count_to_i64, maybe_lookup_block_ts, maybe_lookup_version_ts,
+    orm, page_window, schema, storage_error_from_diesel, truncate_to_byte_limit,
     versioning::{apply_partitioned_versioning, VersioningEntry},
     PostgresError, PostgresGateway, WithOrdinal, WithTxHash, MAX_TS, MAX_VERSION_TS,
 };
@@ -440,7 +439,7 @@ impl PostgresGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
         conn: &mut AsyncPgConnection,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         let chain_id = self.get_chain_id(chain)?;
         let token_ids: HashMap<i64, Address> = schema::token::table
             .inner_join(schema::account::table)
@@ -455,8 +454,10 @@ impl PostgresGateway {
         let rows = schema::protocol_component::table
             .inner_join(schema::protocol_component_holds_token::table)
             .inner_join(schema::component_balance::table)
+            .inner_join(schema::protocol_system::table)
             .select((
                 schema::component_balance::token_id,
+                schema::protocol_system::name,
                 schema::protocol_component::external_id,
                 schema::component_balance::new_balance,
             ))
@@ -464,11 +465,17 @@ impl PostgresGateway {
             .filter(schema::component_balance::balance_float.ge(min_balance.unwrap_or(0f64)))
             .filter(schema::component_balance::valid_to.eq(MAX_TS))
             .filter(schema::component_balance::token_id.eq_any(token_ids.keys()))
-            .get_results::<(i64, String, Bytes)>(conn)
+            .order_by(schema::protocol_component::id)
+            .get_results::<(i64, String, String, Bytes)>(conn)
             .await
             .map_err(PostgresError::from)?;
 
-        Ok(largest_balance_per_token(rows, &token_ids))
+        let owners = rows
+            .into_iter()
+            .map(|(token_id, protocol_system, component_id, balance)| {
+                (token_id, TokenOwner { protocol_system, component_id, balance })
+            });
+        Ok(largest_balance_per_token(owners, &token_ids))
     }
 
     pub async fn add_protocol_components(
@@ -789,7 +796,7 @@ impl PostgresGateway {
         };
 
         let balances = if retrieve_balances {
-            self.get_component_balances(chain, ids, at.as_ref(), conn)
+            self.get_component_balances(chain, system.as_deref(), ids, at.as_ref(), conn)
                 .await?
         } else {
             HashMap::new()
@@ -1575,6 +1582,7 @@ impl PostgresGateway {
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: Option<&str>,
         ids: Option<&[&str]>,
         at: Option<&Version>,
         conn: &mut AsyncPgConnection,
@@ -1600,6 +1608,15 @@ impl PostgresGateway {
         if let Some(external_ids) = ids {
             component_query =
                 component_query.filter(schema::protocol_component::external_id.eq_any(external_ids))
+        }
+        if let Some(system) = system {
+            component_query = component_query.filter(
+                schema::protocol_component::protocol_system_id.eq_any(
+                    schema::protocol_system::table
+                        .filter(schema::protocol_system::name.eq(system))
+                        .select(schema::protocol_system::id),
+                ),
+            );
         }
         let protocol_components: HashMap<i64, String> = component_query
             .get_results::<(i64, String)>(conn)
@@ -2026,32 +2043,28 @@ impl PostgresGateway {
     }
 }
 
-/// Keeps, per token, the component with the largest balance. Rows are `(token_id, component_id,
-/// balance)`. On a tie the first row stays. Rows whose token id is not in `token_ids` are ignored.
+/// Keeps, per token, the owner with the largest balance. Rows are `(token_id, owner)`. On a tie
+/// the first row stays. Rows whose token id is not in `token_ids` are ignored.
 fn largest_balance_per_token(
-    rows: impl IntoIterator<Item = (i64, ComponentId, Bytes)>,
+    rows: impl IntoIterator<Item = (i64, TokenOwner)>,
     token_ids: &HashMap<i64, Address>,
-) -> HashMap<Address, (ComponentId, Bytes)> {
-    let mut largest: HashMap<Address, (ComponentId, Bytes)> = HashMap::new();
-    for (token_id, component_id, balance) in rows {
+) -> HashMap<Address, TokenOwner> {
+    let mut largest: HashMap<Address, TokenOwner> = HashMap::new();
+    for (token_id, owner) in rows {
         let Some(token) = token_ids.get(&token_id) else {
             continue;
         };
         let replace = match largest.get(token) {
-            Some((_, current)) => compare_balances(&balance, current) == Ordering::Greater,
+            Some(current) => {
+                compare_balances(&owner.balance, &current.balance) == Ordering::Greater
+            }
             None => true,
         };
         if replace {
-            largest.insert(token.clone(), (component_id, balance));
+            largest.insert(token.clone(), owner);
         }
     }
     largest
-}
-
-/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
-/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
-fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
-    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 #[cfg(test)]
@@ -3829,21 +3842,35 @@ mod test {
         assert_eq!(res, exp);
     }
 
+    fn owner(protocol_system: &str, component_id: &str, balance: &str) -> TokenOwner {
+        TokenOwner {
+            protocol_system: protocol_system.to_string(),
+            component_id: component_id.to_string(),
+            balance: Bytes::from(balance),
+        }
+    }
+
     #[rstest]
-    #[case::dai(&[DAI], HashMap::from([
-        (Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"), (
-            "state3".to_string(),
-            Bytes::from("0x00000000000000000000000000000000000000000000006c6b935b8bbd400000")
-        ))]))]
-    #[case::weth(&[WETH], HashMap::from([
-        (Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), (
-            "state1".to_string(),
-            Bytes::from("0x0000000000000000000000000000000000000000000000000de0b6b3a7640000")
-        ))]))]
+    #[case::dai(&[DAI], HashMap::from([(
+        Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f"),
+        owner(
+            "ambient",
+            "state3",
+            "0x00000000000000000000000000000000000000000000006c6b935b8bbd400000",
+        ),
+    )]))]
+    #[case::weth(&[WETH], HashMap::from([(
+        Bytes::from("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
+        owner(
+            "ambient",
+            "state1",
+            "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        ),
+    )]))]
     #[tokio::test]
     async fn test_get_token_owners(
         #[case] tokens: &[&str],
-        #[case] exp: HashMap<Address, (String, Bytes)>,
+        #[case] exp: HashMap<Address, TokenOwner>,
     ) {
         let mut conn = setup_db().await;
         setup_data(&mut conn).await;
@@ -3879,18 +3906,13 @@ mod test {
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = rows
             .iter()
-            .map(|(component_id, balance)| {
-                (1_i64, component_id.to_string(), Bytes::from(*balance))
-            });
+            .map(|(component_id, balance)| (1_i64, owner("vm:curve", component_id, balance)));
 
         let res = largest_balance_per_token(rows, &token_ids);
 
         assert_eq!(
             res,
-            HashMap::from([(
-                token,
-                ("curve".to_string(), Bytes::from("0x08c7be39eaf21f5b7efb68"))
-            )])
+            HashMap::from([(token, owner("vm:curve", "curve", "0x08c7be39eaf21f5b7efb68"))])
         );
     }
 
@@ -3899,14 +3921,14 @@ mod test {
         let token = Bytes::from(USDTB);
         let token_ids = HashMap::from([(1_i64, token.clone())]);
         let rows = vec![
-            (1_i64, "first".to_string(), Bytes::from("0x00ff")),
-            (1_i64, "second".to_string(), Bytes::from("0xff")),
-            (2_i64, "unknown_token".to_string(), Bytes::from("0xffff")),
+            (1_i64, owner("vm:curve", "first", "0x00ff")),
+            (1_i64, owner("uniswap_v4", "second", "0xff")),
+            (2_i64, owner("vm:curve", "unknown_token", "0xffff")),
         ];
 
         let res = largest_balance_per_token(rows, &token_ids);
 
-        assert_eq!(res, HashMap::from([(token, ("first".to_string(), Bytes::from("0x00ff")))]));
+        assert_eq!(res, HashMap::from([(token, owner("vm:curve", "first", "0x00ff"))]));
     }
 
     #[tokio::test]
@@ -3969,11 +3991,85 @@ mod test {
         .collect();
 
         let res = gw
-            .get_component_balances(&Chain::Ethereum, Some(&["state1"]), None, &mut conn)
+            .get_component_balances(&Chain::Ethereum, None, Some(&["state1"]), None, &mut conn)
             .await
             .expect("retrieving balances failed!");
 
         assert_eq!(res, exp);
+    }
+
+    #[tokio::test]
+    async fn test_get_component_balances_of_one_protocol() {
+        let mut conn = setup_db().await;
+        setup_data(&mut conn).await;
+        let gw = EVMGateway::from_connection(&mut conn).await;
+        let chain_id = schema::chain::table
+            .filter(schema::chain::name.eq("ethereum"))
+            .select(schema::chain::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch chain id");
+        let zigzag_id = schema::protocol_system::table
+            .filter(schema::protocol_system::name.eq("zigzag"))
+            .select(schema::protocol_system::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch protocol system id");
+        let type_id = schema::protocol_type::table
+            .select(schema::protocol_type::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch protocol type id");
+        let tx_id = schema::transaction::table
+            .select(schema::transaction::id)
+            .order_by(schema::transaction::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch transaction id");
+        let weth_id = schema::token::table
+            .filter(schema::token::symbol.eq("WETH"))
+            .select(schema::token::id)
+            .first::<i64>(&mut conn)
+            .await
+            .expect("Failed to fetch token id");
+        let zigzag_component = db_fixtures::insert_protocol_component(
+            &mut conn,
+            "zigzag_pool",
+            chain_id,
+            zigzag_id,
+            type_id,
+            tx_id,
+            Some(vec![weth_id]),
+            None,
+        )
+        .await;
+        db_fixtures::insert_component_balance(
+            &mut conn,
+            Balance::from(1u8).lpad(32, 0),
+            Bytes::zero(32),
+            1.0,
+            weth_id,
+            tx_id,
+            zigzag_component,
+            None,
+        )
+        .await;
+
+        for (system, expected) in
+            [("ambient", vec!["state1", "state3"]), ("zigzag", vec!["zigzag_pool"])]
+        {
+            let balances = gw
+                .get_component_balances(&Chain::Ethereum, Some(system), None, None, &mut conn)
+                .await
+                .expect("retrieving balances failed");
+
+            let ids: Vec<&str> = balances
+                .keys()
+                .map(String::as_str)
+                .sorted()
+                .collect();
+            assert_eq!(ids, expected, "{system}");
+        }
     }
 
     #[tokio::test]
@@ -4086,6 +4182,7 @@ mod test {
         let res = gw
             .get_component_balances(
                 &Chain::Ethereum,
+                None,
                 Some(&["state3"]),
                 Some(&Version::from_block_number(Chain::Ethereum, 1)),
                 &mut conn,

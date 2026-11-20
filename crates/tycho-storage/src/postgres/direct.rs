@@ -19,7 +19,7 @@ use tycho_common::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
             ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -54,6 +54,11 @@ impl DirectGateway {
 
     async fn checkout(&self) -> Result<PooledConnection, StorageError> {
         pool::checkout(&self.pool, DIRECT_POOL).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &Pool<AsyncPgConnection> {
+        &self.pool
     }
 
     pub async fn get_delta(
@@ -161,12 +166,13 @@ impl ContractStateGateway for DirectGateway {
     async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contract(id, version, include_slots, &mut conn)
+            .get_contract(id, protocol_system, version, include_slots, &mut conn)
             .await
     }
 
@@ -174,6 +180,7 @@ impl ContractStateGateway for DirectGateway {
     async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -181,7 +188,15 @@ impl ContractStateGateway for DirectGateway {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_contracts(chain, addresses, version, include_slots, pagination_params, &mut conn)
+            .get_contracts(
+                chain,
+                protocol_system,
+                addresses,
+                version,
+                include_slots,
+                pagination_params,
+                &mut conn,
+            )
             .await
     }
 
@@ -246,12 +261,13 @@ impl ContractStateGateway for DirectGateway {
     async fn get_account_balances(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_account_balances(chain, addresses, version, false, &mut conn)
+            .get_account_balances(chain, protocol_system, addresses, version, false, &mut conn)
             .await
     }
 }
@@ -279,7 +295,7 @@ impl ProtocolGateway for DirectGateway {
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError> {
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_token_owners(chain, tokens, min_balance, &mut conn)
@@ -453,12 +469,13 @@ impl ProtocolGateway for DirectGateway {
     async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: &str,
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
         let mut conn = self.checkout().await?;
         self.state_gateway
-            .get_component_balances(chain, ids, version, &mut conn)
+            .get_component_balances(chain, Some(system), ids, version, &mut conn)
             .await
     }
 

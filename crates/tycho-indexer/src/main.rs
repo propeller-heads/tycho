@@ -1084,7 +1084,7 @@ mod test_serial_db {
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
-                .get_contracts(&chain, None, None, true, None)
+                .get_contracts(&chain, "", None, None, true, None)
                 .await
                 .unwrap()
                 .entity;
@@ -1116,7 +1116,7 @@ mod test_serial_db {
             initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
-                .get_contracts(&chain, None, None, true, None)
+                .get_contracts(&chain, "", None, None, true, None)
                 .await
                 .unwrap()
                 .entity;
@@ -1149,7 +1149,7 @@ mod test_serial_db {
             initialize_accounts(accounts, 20378315, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
-                .get_contracts(&chain, None, None, true, None)
+                .get_contracts(&chain, "", None, None, true, None)
                 .await
                 .unwrap()
                 .entity;

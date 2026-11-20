@@ -8,7 +8,7 @@ use deepsize::DeepSizeOf;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
-use super::{Address, Balance};
+use super::{Address, Balance, ComponentId};
 use crate::{dto::ResponseToken, models::Chain, traits::TokenOwnerFinding, Bytes};
 
 /// Cost related to a token transfer, for example amount of gas in evm chains.
@@ -145,6 +145,14 @@ impl TokenQuality {
     pub fn bad(reason: impl ToString) -> Self {
         Self::Bad { reason: reason.to_string() }
     }
+}
+
+/// The component with the largest balance of a token, and its protocol system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenOwner {
+    pub protocol_system: String,
+    pub component_id: ComponentId,
+    pub balance: Bytes,
 }
 
 /// A store for tracking token owners and their balances.
