@@ -6,6 +6,7 @@ import {
     SafeERC20,
     IERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     IUniswapV3Pool
 } from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
@@ -16,6 +17,7 @@ error UniswapV3Executor__InvalidDataLength();
 
 contract UniswapV3Executor is IExecutor, ICallback {
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     uint160 private constant _MIN_SQRT_RATIO = 4295128739;
     uint160 private constant _MAX_SQRT_RATIO =
@@ -49,8 +51,7 @@ contract UniswapV3Executor is IExecutor, ICallback {
             receiver,
             zeroForOne,
             // positive means exactIn
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            int256(amountIn),
+            amountIn.toInt256(),
             zeroForOne ? _MIN_SQRT_RATIO + 1 : _MAX_SQRT_RATIO - 1,
             ""
         );

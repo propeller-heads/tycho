@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import "@permit2/src/interfaces/IAllowanceTransfer.sol";
 import "@src/executors/SlipstreamsExecutor.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Constants} from "../Constants.sol";
 import {Permit2TestHelper} from "../Permit2TestHelper.sol";
 import {Test} from "../../lib/forge-std/src/Test.sol";
@@ -162,6 +163,25 @@ contract SlipstreamsExecutorTest is Test, TestUtils, Constants {
 
         vm.expectRevert(SlipstreamsExecutor__InvalidDataLength.selector);
         slipstreamsExposed.decodeData(invalidParams);
+    }
+
+    /// A negative amount would make the pool run an exact-output swap.
+    function testSwapAmountInAboveInt256Max() public {
+        uint256 amountIn = 1 << 255;
+        bytes memory data = abi.encodePacked(
+            BASE_WETH,
+            BASE_USDC,
+            IUniswapV3Pool(SLIPSTREAMS_WETH_USDC_POOL).tickSpacing(),
+            SLIPSTREAMS_WETH_USDC_POOL,
+            true
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafeCast.SafeCastOverflowedUintToInt.selector, amountIn
+            )
+        );
+        slipstreamsExposed.swap(amountIn, data, address(this));
     }
 
     function testSlipstreamsCallback() public {

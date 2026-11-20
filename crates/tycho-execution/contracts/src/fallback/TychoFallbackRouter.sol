@@ -3,6 +3,7 @@ pragma solidity ^0.8.26;
 
 import {LibBytes} from "@solady/utils/LibBytes.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     ReentrancyGuardTransient
 } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
@@ -77,6 +78,7 @@ abstract contract TychoFallbackRouter is
     using TransientSlot for TransientSlot.AddressSlot;
     using TransientSlot for TransientSlot.Uint256Slot;
     using SafeERC20 for IERC20;
+    using SafeCast for uint256;
 
     /// @notice The protocols a fallback may use.
     enum FallbackProtocol {
@@ -341,11 +343,7 @@ abstract contract TychoFallbackRouter is
         address pool = _decodeUniswapV3(data);
         (bool zeroForOne, uint160 sqrtPriceLimit) = _uniswapV3Params(swap_);
         (int256 amount0, int256 amount1) = uniswapV3StaticQuoter.quote(
-            pool,
-            zeroForOne,
-            // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-            int256(swap_.amountIn),
-            sqrtPriceLimit
+            pool, zeroForOne, swap_.amountIn.toInt256(), sqrtPriceLimit
         );
         // forge-lint: disable-next-line(unsafe-typecast) Exact-input V3 swap math never yields a positive output delta.
         return uint256(-(zeroForOne ? amount1 : amount0));
@@ -515,8 +513,7 @@ abstract contract TychoFallbackRouter is
             .swap(
                 swap_.receiver,
                 zeroForOne,
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                int256(swap_.amountIn),
+                swap_.amountIn.toInt256(),
                 sqrtPriceLimit,
                 ""
             );
@@ -713,8 +710,7 @@ abstract contract TychoFallbackRouter is
             key,
             SwapParams({
                 zeroForOne: zeroForOne,
-                // forge-lint: disable-next-line(unsafe-typecast) Only a hostile token reaches 2^255, and it already controls its own balances; the effect stays on that token.
-                amountSpecified: -int256(swap_.amountIn),
+                amountSpecified: -swap_.amountIn.toInt256(),
                 sqrtPriceLimitX96: zeroForOne
                     ? TickMath.MIN_SQRT_PRICE + 1
                     : TickMath.MAX_SQRT_PRICE - 1
