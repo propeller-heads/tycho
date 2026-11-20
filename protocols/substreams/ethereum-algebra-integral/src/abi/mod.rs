@@ -1,10 +1,6 @@
-#[allow(
-    clippy::clone_on_copy,
-    clippy::get_first,
-    clippy::needless_return,
-    clippy::len_zero,
-    clippy::redundant_static_lifetimes,
-    clippy::unnecessary_cast,
-    clippy::useless_asref
-)]
+#![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+
 pub mod beacon;
+pub mod factory;
+pub mod plugin;
+pub mod pool;

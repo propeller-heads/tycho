@@ -25,8 +25,8 @@ pub struct PluginModule {
 /// Every module the package indexes.
 pub const MODULES: &[&PluginModule] = &[
     &algebra::dynamic_fee::MODULE,
+    &algebra::farming::MODULE,
     &nami::anti_sniper::MODULE,
-    &nami::farming::MODULE,
     &nami::fee_override::MODULE,
     &nami::mevx::MODULE,
 ];
@@ -37,6 +37,11 @@ pub(crate) fn fields_at(slot: &[u8; 32]) -> impl Iterator<Item = &'static Storag
         .iter()
         .flat_map(|module| module.fields.iter())
         .filter(move |field| field.slot() == slot)
+}
+
+/// Whether some module indexes a field stored at `slot`.
+pub fn is_module_slot(slot: &[u8]) -> bool {
+    <&[u8; 32]>::try_from(slot).is_ok_and(|slot| fields_at(slot).next().is_some())
 }
 
 #[cfg(test)]

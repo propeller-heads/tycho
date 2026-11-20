@@ -1,0 +1,19 @@
+substreams_yaml_path: ./robinhood-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  - name: test_weth_usdg_pool
+    start_block: 86166359
+    stop_block: 87922688
+    expected_components:
+      - id: "0xa730c5d09dd9926f798530d52e572d7594b952f3"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes: {}
+        creation_tx: "0x624ca7d5a1f20e9be93425489b09139d9359bf68e8e3be8476e725a75595f2ea"
+        skip_simulation: false

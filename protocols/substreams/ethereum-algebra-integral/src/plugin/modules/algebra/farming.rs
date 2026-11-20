@@ -1,4 +1,4 @@
-//! Algebra's farming proxy module as Nami deploys it (`FarmingProxyStorage`).
+//! Algebra's farming proxy module (`FarmingProxyStorage`).
 //!
 //! With an incentive set, the plugin's `afterSwap` moves the incentive's virtual pool to the new
 //! tick, which costs gas on every swap. The incentive's address is all the simulation reads.
