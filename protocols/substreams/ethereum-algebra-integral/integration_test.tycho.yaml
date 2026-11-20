@@ -6,6 +6,9 @@ module_name: "map_protocol_changes"
 skip_balance_check: false
 initialized_accounts:
 tests:
+  # The pool is created with an adaptive fee under implementation 0x6580d2f0…3788. Its fee is
+  # made flat and its beacon is upgraded to implementation 0x7360C820…CABD at block 26297415,
+  # both before the stop block.
   - name: test_weth_usdc_pool
     start_block: 26171941
     stop_block: 26330000

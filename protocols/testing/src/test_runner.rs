@@ -24,6 +24,7 @@ use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::{
     evm::{
         protocol::{
+            algebra_integral::plugin::deployments::initialize_plugin_handlers,
             u256_num::bytes_to_u256,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
@@ -1138,6 +1139,7 @@ impl TestRunner {
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;
+        initialize_plugin_handlers().into_diagnostic()?;
 
         let state_msgs: HashMap<String, StateSyncMessage<BlockHeader>> = HashMap::from([(
             String::from(protocol_system),
