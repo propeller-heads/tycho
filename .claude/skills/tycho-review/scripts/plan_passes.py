@@ -71,12 +71,14 @@ DEFINITION = [
 ]
 
 
-def git(*args, check=True):
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=check).stdout
+# A user's git config (an external diff driver, textconv, color) must not change what the script
+# parses. Kept here, in `git()`, so a new call site cannot miss them.
+CMD_OPTS = {"diff": ("--no-ext-diff", "--no-textconv", "--no-color"), "grep": ("--no-color",)}
 
 
-# A user's git config (an external diff driver, textconv, color) must not change what a diff counts.
-DIFF_OPTS = ("--no-ext-diff", "--no-textconv", "--no-color")
+def git(cmd, *args, check=True):
+    argv = ["git", "-c", "color.ui=never", cmd, *CMD_OPTS.get(cmd, ()), *args]
+    return subprocess.run(argv, capture_output=True, text=True, check=check).stdout
 
 
 def kinds(path: str, text: str) -> set:
@@ -314,7 +316,7 @@ def follow_up(a, base: str, files: list, diff_of: dict) -> dict:
     rng = f"{base}...{old}"
     old_files = set(git("diff", "--name-only", rng).split())
     for f in sorted(set(files) | old_files):
-        before = Counter(changed_lines(git("diff", *DIFF_OPTS, rng, "--", f, check=False))) if f in old_files else Counter()
+        before = Counter(changed_lines(git("diff", rng, "--", f, check=False))) if f in old_files else Counter()
         now = Counter(changed_lines(diff_of[f])) if f in diff_of else Counter()
         if before == now:
             res["unchanged"].append(f)
@@ -406,7 +408,7 @@ def main():
         diff_of = {}
         tracked_changes = set(git("diff", "--name-only", *rng).split())
         for f in files:
-            d = git("diff", *DIFF_OPTS, *rng, "--", f, check=False)
+            d = git("diff", *rng, "--", f, check=False)
             if not d and Path(f).is_file() and f not in tracked_changes:  # untracked: the whole file is new
                 d = "".join("+" + l for l in Path(f).read_text(errors="replace").splitlines(True))
             diff_of[f] = d
