@@ -22,34 +22,37 @@ use tycho_common::{
 };
 
 use crate::{
-    evm::protocol::{
-        algebra_integral::{
-            plugin::{
-                registry::{instantiate_plugin_handler, PluginCreationParams},
-                PluginHandler, PluginSwap, StorageOverrides, BEFORE_SWAP_FLAG, DYNAMIC_FEE_FLAG,
-                PLUGIN_CONFIG_ATTRIBUTE,
-            },
-            swap_math::{
-                amount_to_i256, get_token0_delta, get_token1_delta, move_price_towards_target,
-                FEE_DENOMINATOR,
-            },
-        },
-        clmm::clmm_swap_to_price,
-        safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
-        utils::{
-            add_fee_markup,
-            solidity_math::mul_div_rounding_up,
-            uniswap::{
-                liquidity_math::add_liquidity_delta,
-                sqrt_price_math::sqrt_price_q96_to_f64,
-                tick_math::{
-                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                    MIN_SQRT_RATIO, MIN_TICK,
+    evm::{
+        protocol::{
+            algebra_integral::{
+                plugin::{
+                    registry::{instantiate_plugin_handler, PluginCreationParams},
+                    PluginHandler, PluginSwap, StorageOverrides, BEFORE_SWAP_FLAG,
+                    DYNAMIC_FEE_FLAG, PLUGIN_CONFIG_ATTRIBUTE,
                 },
-                SwapResults,
+                swap_math::{
+                    amount_to_i256, get_token0_delta, get_token1_delta, move_price_towards_target,
+                    FEE_DENOMINATOR,
+                },
+            },
+            clmm::clmm_swap_to_price,
+            safe_math::{safe_add_u256, safe_sub_u256},
+            u256_num::u256_to_biguint,
+            utils::{
+                add_fee_markup,
+                solidity_math::mul_div_rounding_up,
+                uniswap::{
+                    liquidity_math::add_liquidity_delta,
+                    sqrt_price_math::sqrt_price_q96_to_f64,
+                    tick_math::{
+                        get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                        MIN_SQRT_RATIO, MIN_TICK,
+                    },
+                    SwapResults,
+                },
             },
         },
+        simulation::{BlockEnvOverrides, PendingOverrides},
     },
     protocol::errors::InvalidSnapshotError,
 };
@@ -925,6 +928,46 @@ impl ProtocolSim for AlgebraIntegralState {
         }
     }
 
+    /// Runs the plugin of every quote from this state against the pending block: its storage
+    /// joins the overrides the plugin is quoted with, under what swaps from this state wrote,
+    /// and its block becomes the execution block. `overrides` must be [`PendingOverrides`].
+    fn set_pending_overrides(
+        &mut self,
+        overrides: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), SimulationError> {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the downcast error is the original `Arc<dyn Any>`, which has no message"
+        )]
+        let pending = overrides
+            .downcast::<PendingOverrides>()
+            .map_err(|_| {
+                SimulationError::FatalError(
+                    "Algebra Integral pending overrides must be `PendingOverrides`".to_string(),
+                )
+            })?;
+        if let Some(storage) = &pending.storage {
+            let mut merged = storage.clone();
+            for (address, slots) in self.plugin_overrides.iter() {
+                merged
+                    .entry(*address)
+                    .or_default()
+                    .extend(
+                        slots
+                            .iter()
+                            .map(|(slot, value)| (*slot, *value)),
+                    );
+            }
+            self.plugin_overrides = Arc::new(merged);
+        }
+        if let Some(BlockEnvOverrides { number: Some(number), timestamp: Some(timestamp) }) =
+            &pending.block
+        {
+            self.apply_block(&BlockContext::new(*number, *timestamp));
+        }
+        Ok(())
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -1110,6 +1153,92 @@ mod tests {
                 .map(|name| name.to_string())
                 .collect::<HashSet<_>>(),
         }
+    }
+
+    /// A pool on Ethereum whose plugin has no native handler, so its hook runs in the VM: it
+    /// answers with the fee in its storage slot 0, 1000 at first, and then stores 3000 there.
+    fn vm_plugin_pool(pool_byte: u8) -> (AlgebraIntegralState, Address) {
+        use crate::evm::protocol::algebra_integral::plugin::vm::test_support::{
+            load_pool_and_plugin, stateful_plugin_code,
+        };
+        let (address, plugin) =
+            (Address::repeat_byte(pool_byte), Address::repeat_byte(pool_byte + 1));
+        load_pool_and_plugin(
+            address,
+            plugin,
+            stateful_plugin_code(3_000),
+            HashMap::from([(U256::ZERO, U256::from(1_000))]),
+        );
+        let setup = PluginSetup {
+            plugin: Some(plugin),
+            config: BEFORE_SWAP_FLAG | DYNAMIC_FEE_FLAG,
+            implementation: Some(Address::repeat_byte(0xc4)),
+            attributes: HashMap::new(),
+        };
+        let mut state = pool(Some(Chain::Ethereum), setup, 1_000)
+            .expect("an unknown plugin on Ethereum should get the VM handler");
+        state.pool = address;
+        state.plugin_slot = state
+            .build_plugin_slot()
+            .expect("the VM handler should build");
+        (state, plugin)
+    }
+
+    #[test]
+    fn vm_plugin_sees_what_an_earlier_swap_wrote_until_the_next_delta() {
+        let (pool, _) = vm_plugin_pool(0xB1);
+        assert_eq!(pool.fee(), 0.001);
+
+        let quote = pool
+            .get_amount_out(one_token(), &token0(), &token1())
+            .expect("the VM plugin should quote");
+        let mut after_swap = quote
+            .new_state
+            .as_any()
+            .downcast_ref::<AlgebraIntegralState>()
+            .expect("an Algebra state")
+            .clone();
+
+        // The hook stored 3000 during the swap; the pool it was quoted from is unchanged.
+        assert_eq!(after_swap.fee(), 0.003);
+        assert_eq!(pool.fee(), 0.001);
+
+        // A delta is the indexed state of a new block, which replaces what was anticipated.
+        apply(&mut after_swap, delta(&[], &[]));
+        assert_eq!(after_swap.fee(), 0.001);
+    }
+
+    #[test]
+    fn pending_overrides_reach_the_vm_plugin_under_later_swap_writes() {
+        let (mut pool, plugin) = vm_plugin_pool(0xB3);
+        let pending = PendingOverrides {
+            storage: Some(HashMap::from([(
+                plugin,
+                HashMap::from([(U256::ZERO, U256::from(2_000))]),
+            )])),
+            native_balances: None,
+            block: Some(BlockEnvOverrides { number: Some(101), timestamp: Some(1_012) }),
+        };
+
+        pool.set_pending_overrides(Arc::new(pending))
+            .expect("pending overrides should be accepted");
+
+        assert_eq!(pool.fee(), 0.002);
+        assert_eq!(pool.execution_block_number, 101);
+        assert_eq!(pool.execution_block_timestamp, 1_012);
+        let quote = pool
+            .get_amount_out(one_token(), &token0(), &token1())
+            .expect("the VM plugin should quote");
+        assert_eq!(quote.new_state.fee(), 0.003);
+    }
+
+    #[test]
+    fn pending_overrides_of_another_type_are_rejected() {
+        let mut pool = static_fee_pool();
+
+        assert!(pool
+            .set_pending_overrides(Arc::new(0u8))
+            .is_err());
     }
 
     fn apply(pool: &mut AlgebraIntegralState, delta: ProtocolStateDelta) {

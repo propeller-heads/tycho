@@ -21,6 +21,7 @@ pub mod composed;
 pub mod deployments;
 pub mod modules;
 pub mod registry;
+pub mod vm;
 
 /// Attribute holding a pool's `pluginConfig`.
 pub const PLUGIN_CONFIG_ATTRIBUTE: &str = "plugin_config";
