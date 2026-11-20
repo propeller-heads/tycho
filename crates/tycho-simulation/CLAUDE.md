@@ -50,7 +50,7 @@ for any protocol indexed by Tycho.
   - `ProtocolStreamBuilder::via_fallback_router(name)` publishes a registered exchange's
     components as `fallback:{name}` (id, attributes and decoder unchanged), so a natively indexed
     `IPropAMM` venue executes through the PropAMM fallback router. A stream publishes each venue
-    on one path only.
+    on one path only; `build` fails when `name` is not a registered exchange.
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the
   error.
   - `SnapshotFeed` is the contract: `run(publisher)` consumes the source and publishes through a

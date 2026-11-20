@@ -239,13 +239,13 @@ impl BlockStepController {
     }
 }
 
+/// Protocol system family of components routed through tycho-execution's fallback router.
+pub const FALLBACK_PROTOCOL_FAMILY: &str = "fallback";
+
 /// Builds and configures the multi protocol stream described in the [module-level docs](self).
 ///
 /// See the module documentation for details on protocols, configuration options, and
 /// stream behavior.
-/// Protocol system family of components routed through tycho-execution's fallback router.
-pub const FALLBACK_PROTOCOL_FAMILY: &str = "fallback";
-
 pub struct ProtocolStreamBuilder {
     decoder: TychoStreamDecoder<BlockHeader>,
     stream_builder: TychoStreamBuilder,
@@ -265,6 +265,9 @@ pub struct ProtocolStreamBuilder {
     /// Names of all exchanges registered on the builder, used to decide which built-in override
     /// providers to auto-register at build time.
     registered_exchanges: HashSet<String>,
+    /// Exchanges whose components are published as `fallback:{name}`, checked against
+    /// `registered_exchanges` at build time.
+    fallback_router_venues: HashSet<String>,
 }
 
 impl ProtocolStreamBuilder {
@@ -287,6 +290,7 @@ impl ProtocolStreamBuilder {
             step_trigger_rx: None,
             override_providers: HashMap::new(),
             registered_exchanges: HashSet::new(),
+            fallback_router_venues: HashSet::new(),
         }
     }
 
@@ -351,13 +355,32 @@ impl ProtocolStreamBuilder {
     /// tycho-execution's fallback router: it quotes the venue on-chain and, when the venue
     /// quotes worse or reverts, runs the fallback pool the solver names in `user_data`.
     ///
-    /// For natively indexed `IPropAMM` venues (e.g. `"biconomy"`). Call it after registering the
-    /// exchange. The components keep their id and state; a stream publishes each venue on one
-    /// path only.
+    /// For natively indexed `IPropAMM` venues (e.g. `"biconomy"`). The components keep their id
+    /// and state; a stream publishes each venue on one path only. `build` fails when `name` is
+    /// not a registered exchange.
     pub fn via_fallback_router(mut self, name: &str) -> Self {
-        self.decoder
-            .label_components(name, format!("{FALLBACK_PROTOCOL_FAMILY}:{name}"));
+        self.fallback_router_venues
+            .insert(name.to_string());
         self
+    }
+
+    /// Labels the components of every `via_fallback_router` venue on the decoder.
+    ///
+    /// # Errors
+    ///
+    /// `SetUpError` naming the first venue that is not a registered exchange: its components
+    /// would otherwise keep their own protocol system and skip the fallback router.
+    fn install_fallback_router_labels(&mut self) -> Result<(), StreamError> {
+        for name in &self.fallback_router_venues {
+            if !self.registered_exchanges.contains(name) {
+                return Err(StreamError::SetUpError(format!(
+                    "via_fallback_router({name}): no exchange is registered under this name"
+                )));
+            }
+            self.decoder
+                .label_components(name, format!("{FALLBACK_PROTOCOL_FAMILY}:{name}"));
+        }
+        Ok(())
     }
 
     /// Adds a specific exchange to the stream with decoder context.
@@ -806,6 +829,7 @@ impl ProtocolStreamBuilder {
         (impl Stream<Item = Result<Update, StreamDecodeError>>, PendingBlockProcessor),
         StreamError,
     > {
+        self.install_fallback_router_labels()?;
         for protocol_system in self.pending_indexers.keys() {
             if !self
                 .registered_exchanges
@@ -893,6 +917,7 @@ impl ProtocolStreamBuilder {
     pub async fn build(
         mut self,
     ) -> Result<impl Stream<Item = Result<Update, StreamDecodeError>>, StreamError> {
+        self.install_fallback_router_labels()?;
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
@@ -1127,6 +1152,48 @@ mod tests {
                 .contains("subscription buffer size must be greater than zero"),
             "the underlying Tycho stream builder should return the configuration error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_unregistered_fallback_router_venue() {
+        use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let error = ProtocolStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .exchange::<UniswapV2State>(
+                "uniswap_v2",
+                ComponentFilter::with_tvl_range(1.0, 1.0),
+                None,
+            )
+            .via_fallback_router("uniswap_v3")
+            .build()
+            .await;
+
+        let Err(error) = error else {
+            panic!("a fallback router venue with no registered exchange must be rejected");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("via_fallback_router(uniswap_v3)"),
+            "the error should name the venue: {error}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_router_venue_may_precede_its_exchange() {
+        use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let mut builder = ProtocolStreamBuilder::new("not a valid endpoint", Chain::Ethereum)
+            .via_fallback_router("uniswap_v2")
+            .exchange::<UniswapV2State>(
+                "uniswap_v2",
+                ComponentFilter::with_tvl_range(1.0, 1.0),
+                None,
+            );
+
+        builder
+            .install_fallback_router_labels()
+            .expect("a registered exchange can be routed through the fallback router");
     }
 
     #[tokio::test]
