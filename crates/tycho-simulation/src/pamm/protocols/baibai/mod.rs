@@ -137,7 +137,7 @@ pub(crate) const BASE_ROUTER: Address = address!("d374c00614f95492D816b5957E3797
 /// Tycho's `BaibaiFallbackRouter` on Base, the taker the books are priced for when the feed is
 /// built [`with_fallback_router`](BaibaiFeedBuilder::with_fallback_router).
 pub(crate) const BASE_FALLBACK_ROUTER: Address =
-    address!("08B33Db32e64E175991b24f405BFbFf02ad134B0");
+    address!("3A57167E95a00c31fa86D93aDa39484CaD590Fb4");
 
 #[cfg(test)]
 mod test_support;

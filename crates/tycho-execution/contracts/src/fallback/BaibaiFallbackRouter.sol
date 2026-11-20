@@ -59,11 +59,20 @@ contract BaibaiFallbackRouter is TychoFallbackRouter {
     }
 
     /// @notice Quotes BaiBai and `fallbackSwap` and runs whichever quotes more; a BaiBai swap
-    /// that fails falls through to `fallbackSwap`.
+    /// that fails falls through to `fallbackSwap`. Input the entrypoint does not pull goes back
+    /// to the caller.
     /// @dev The caller MUST transfer `swap_.amountIn` of `swap_.tokenIn` here first.
     function swap(Swap calldata swap_, bytes calldata fallbackSwap) external {
         // BaiBai needs no data beyond the swap's tokens.
         _swap(swap_, address(entrypoint), fallbackSwap[0:0], fallbackSwap);
+
+        // A fallback swaps all of `amountIn`, so only an entrypoint that pulls less leaves a
+        // remainder.
+        IERC20 tokenIn = IERC20(swap_.tokenIn);
+        uint256 remainder = tokenIn.balanceOf(address(this));
+        if (remainder > 0) {
+            tokenIn.safeTransfer(msg.sender, remainder);
+        }
     }
 
     /// @dev Low-level so an entrypoint that reverts, or returns nothing decodable after an

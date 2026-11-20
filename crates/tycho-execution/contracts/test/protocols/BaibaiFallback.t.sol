@@ -21,6 +21,38 @@ import {
     BaibaiFallbackRouter__ZeroQuoteToken
 } from "../../src/fallback/BaibaiFallbackRouter.sol";
 
+/// @notice An entrypoint that pulls half the input it is approved for and pays `amountOut`.
+contract MockPartialBaibaiEntrypoint {
+    address public immutable quoteToken;
+    uint256 public immutable amountOut;
+
+    constructor(address quoteToken_, uint256 amountOut_) {
+        quoteToken = quoteToken_;
+        amountOut = amountOut_;
+    }
+
+    function quoteFor(address, address, uint256, address)
+        external
+        view
+        returns (uint256, uint256)
+    {
+        return (amountOut, 0);
+    }
+
+    function swapExactAmountIn(
+        address,
+        address tokenIn,
+        uint256 amountIn,
+        uint256,
+        address to
+    ) external returns (uint256) {
+        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn / 2);
+        address tokenOut = tokenIn == quoteToken ? address(0) : quoteToken;
+        IERC20(tokenOut).transfer(to, amountOut);
+        return amountOut;
+    }
+}
+
 /// @notice Runs the router as `deploy-fallback-router.js` deploys it on Base, against BaiBai's
 /// entrypoint with the chain's WETH/USDC Uniswap V3 pool as fallback.
 contract BaibaiFallbackRouterTest is FallbackRouterAssertions, TestUtils {
@@ -191,6 +223,34 @@ contract BaibaiFallbackRouterTest is FallbackRouterAssertions, TestUtils {
         _assertRouterDrained(address(router), BASE_WETH, BASE_USDC);
         assertEq(
             IERC20(BASE_WETH).allowance(address(router), BAIBAI_ENTRYPOINT), 0
+        );
+    }
+
+    /// Input the entrypoint does not pull goes back to the caller, as the TychoRouter's input.
+    function testReturnsInputTheEntrypointDoesNotPull() public {
+        uint256 amountOut = 1e6;
+        MockPartialBaibaiEntrypoint halfPuller =
+            new MockPartialBaibaiEntrypoint(BASE_USDC, amountOut);
+        deal(BASE_USDC, address(halfPuller), amountOut);
+        BaibaiFallbackRouter partialRouter = _deployRouter(address(halfPuller));
+        deal(BASE_WETH, address(partialRouter), WETH_IN);
+
+        vm.recordLogs();
+        partialRouter.swap(
+            FallbackSwaps.swap(BASE_WETH, BASE_USDC, WETH_IN, BOB),
+            FallbackSwaps.uniswapV3(address(0xdead))
+        );
+
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), amountOut);
+        assertEq(
+            IERC20(BASE_WETH).balanceOf(address(this)), WETH_IN - WETH_IN / 2
+        );
+        _assertNoFallbackSwap(address(partialRouter), vm.getRecordedLogs());
+        _assertRouterDrained(address(partialRouter), BASE_WETH, BASE_USDC);
+        assertEq(
+            IERC20(BASE_WETH)
+                .allowance(address(partialRouter), address(halfPuller)),
+            0
         );
     }
 

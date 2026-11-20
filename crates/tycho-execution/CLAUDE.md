@@ -254,7 +254,8 @@ the swap data carries no primary. The quote is a low-level `staticcall` to `quot
 BaiBai charges each taker its own fee, and the router is the taker, so BaiBai must set the router's fee (whitelist it)
 for its quotes to match the direct executor's. A revert, fewer than two words returned, or tokens that are not a base
 and the quote token quote zero. The router approves the entrypoint for `amountIn`, calls `swapExactAmountIn` with a
-zero minimum and the receiver as recipient, and revokes the approval.
+zero minimum and the receiver as recipient, and revokes the approval. Input the entrypoint does not pull goes back
+to the caller, as for Bebop.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
