@@ -124,7 +124,7 @@ jobs:
         # utils::slipstreams) live under evm but have no RPC dependency.
         run: |
           cargo nextest run --workspace --all-features --locked \
-            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation)))) | (package(tycho-simulation) and (test(evm::protocol::lunarbase::) | test(evm::protocol::utils::slipstreams::) | test(evm::protocol::aerodrome_slipstreams::)))'
+            -E 'not (test(serial_db) | test(db_) | package(tycho-storage) | test(evm) | test(fork) | (package(protocol-testing) and (test(rpc) | test(test_token_balance_validation)))) | (package(tycho-simulation) and (test(evm::protocol::lunarbase::) | test(evm::protocol::utils::slipstreams::) | test(evm::protocol::aerodrome_slipstreams::) | test(evm::protocol::algebra_integral::)))'
 
   test-unit-skip:
     name: Unit tests (no external deps)

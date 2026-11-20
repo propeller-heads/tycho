@@ -3,7 +3,8 @@ use tycho_simulation::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
             aero_basic::state::AeroBasicState,
-            aerodrome_slipstreams::state::AerodromeSlipstreamsState, biconomy::BiconomyState,
+            aerodrome_slipstreams::state::AerodromeSlipstreamsState,
+            algebra_integral::state::AlgebraIntegralState, biconomy::BiconomyState,
             ekubo::state::EkuboState, ekubo_v3::state::EkuboV3State, etherfi::state::EtherfiState,
             filters::ekubo_v3_extension_filter, fluid::FluidV1, lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
@@ -61,6 +62,12 @@ pub fn register_protocol(
             decoder_context,
         ),
         "ramses_v3" => stream_builder.exchange_with_decoder_context::<RamsesV3State>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        "nami_v4" => stream_builder.exchange_with_decoder_context::<AlgebraIntegralState>(
             protocol_system,
             tvl_filter,
             None,

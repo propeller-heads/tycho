@@ -17,6 +17,7 @@ use tycho_simulation::{
             aero_basic::state::AeroBasicState,
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            algebra_integral::state::AlgebraIntegralState,
             balancer_v3::BalancerV3State,
             biconomy::BiconomyState,
             cowamm::state::CowAMMState,
@@ -294,6 +295,7 @@ impl ProtocolStreamProcessor {
                 "vm:balancer_v3".to_string(),
                 "aero_cl".to_string(),
                 "aero_basic".to_string(),
+                "nami_v4".to_string(),
             ],
             Chain::Base => vec![
                 "uniswap_v2".to_string(),
@@ -357,6 +359,7 @@ impl ProtocolStreamProcessor {
                     "pancakeswap_infinity_cl".to_string(),
                     "aero_cl".to_string(),
                     "aero_basic".to_string(),
+                    "nami_v4".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -484,6 +487,10 @@ impl ProtocolStreamProcessor {
             }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
+            }
+            "nami_v4" => {
+                stream =
+                    stream.exchange::<AlgebraIntegralState>("nami_v4", tvl_filter.clone(), None);
             }
             "rocketpool" => {
                 stream = stream.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None);

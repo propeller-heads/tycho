@@ -96,6 +96,9 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
+        ("ethereum-nami-v4", "ethereum-algebra-integral"),
+        ("base-nami-v4", "ethereum-algebra-integral"),
+        ("robinhood-nami-v4", "ethereum-algebra-integral"),
     ])
 });
 
