@@ -30,7 +30,7 @@ mod tests {
     use substreams_ethereum::pb::eth::v2::StorageChange;
 
     use super::*;
-    use crate::plugin::attributes::{plugin_attributes, Emission};
+    use crate::plugin::attributes::creation_attributes;
 
     /// `feeConfig` of plugin 0xb0918bddea10fcc127bbe816725b2be536cebb8a on Robinhood at block
     /// 116347875: base fee 500, both gammas 1, alphas and betas 0.
@@ -45,7 +45,7 @@ mod tests {
             ..Default::default()
         };
 
-        let attributes = plugin_attributes(&[write], Emission::Creation);
+        let attributes = creation_attributes(&[write], &[&MODULE]);
 
         let decoded: Vec<(&str, &[u8])> = attributes
             .iter()
