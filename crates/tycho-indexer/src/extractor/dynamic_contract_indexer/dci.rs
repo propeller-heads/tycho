@@ -707,6 +707,26 @@ where
         }
     }
 
+    /// Returns this indexer with its tracer replaced by `wrap(tracer)`.
+    pub(crate) fn map_tracer<T2>(
+        self,
+        wrap: impl FnOnce(T) -> T2,
+    ) -> DynamicContractIndexer<AE, T2, G>
+    where
+        T2: EntryPointTracer + Send + Sync,
+    {
+        DynamicContractIndexer {
+            chain: self.chain,
+            protocol: self.protocol,
+            entrypoint_gw: self.entrypoint_gw,
+            storage_source: self.storage_source,
+            tracer: wrap(self.tracer),
+            cache: self.cache,
+            address_byte_len: self.address_byte_len,
+            max_retry_count: self.max_retry_count,
+        }
+    }
+
     /// Sets the maximum number of retry attempts for failed TracingParams.
     ///
     /// When a TracingParams fails to trace, the DCI will retry it when the associated component

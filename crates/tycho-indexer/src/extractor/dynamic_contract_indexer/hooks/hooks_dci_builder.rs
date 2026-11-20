@@ -27,6 +27,7 @@ use crate::extractor::{
             hook_orchestrator::{DefaultUniswapV4HookOrchestrator, HookOrchestratorRegistry},
             integrations::register_integrations,
             metadata_orchestrator::BlockMetadataOrchestrator,
+            router_code_tracer::RouterCodeTracer,
             rpc_metadata_provider::RPCMetadataProvider,
         },
     },
@@ -101,7 +102,9 @@ where
     }
 
     /// Builds the UniswapV4HookDCI with the configured parameters
-    pub(crate) fn build(self) -> Result<UniswapV4HookDCI<AE, T, G>, ExtractionError> {
+    pub(crate) fn build(
+        self,
+    ) -> Result<UniswapV4HookDCI<AE, RouterCodeTracer<T>, G>, ExtractionError> {
         let mut generator_registry = MetadataGeneratorRegistry::new();
         let mut parser_registry = MetadataResponseParserRegistry::new();
         let mut provider_registry = ProviderRegistry::new();
@@ -150,6 +153,10 @@ where
             }
         };
 
+        let inner_dci = self.inner_dci.map_tracer(|tracer| {
+            RouterCodeTracer::new(tracer, self.router_address.clone(), router_code.clone())
+        });
+
         let config = HookEntrypointConfig::new(
             Some(10),
             1,
@@ -179,7 +186,7 @@ where
 
         // Create and return configured Hook DCI
         Ok(UniswapV4HookDCI::new(
-            self.inner_dci,
+            inner_dci,
             metadata_orchestrator,
             hook_registry,
             self.db_gateway,
