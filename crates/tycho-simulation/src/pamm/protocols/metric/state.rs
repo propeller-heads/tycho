@@ -16,6 +16,7 @@ use tycho_common::{
 use crate::{
     book::{component::PairState, sim},
     pamm::protocols::metric::models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
+    utils::saturating_sub,
 };
 
 /// Gas estimate for one MetricExecutor swap (pool swap + callback settlement).
@@ -242,10 +243,16 @@ impl MetricState {
             }
         }
 
-        // No depth bins, or the aggregate inventory truncates the walkable depth: either way the
-        // aggregate is the binding output cap, and get_amount_out rejects anything beyond it
-        // (as insufficient liquidity or depth-exhausted respectively). Estimate the matching
-        // input from the top-of-book price.
+        // The aggregate inventory cuts the walkable depth short, so the aggregate is the binding
+        // output cap. The input the walk takes to reach it is the sell limit, so a swap of that
+        // input pays exactly the aggregate, and a swap after a partial fill sees what is left.
+        if let Some(last_bin) = bins.last() {
+            let walk = depth_output_for_input(bins, &last_bin.cumulative_input_volume, &aggregate)?;
+            return Ok((walk.consumed_input, aggregate));
+        }
+
+        // No depth bins: the aggregate is the binding output cap, and get_amount_out rejects
+        // anything beyond it. Estimate the matching input from the top-of-book price.
         let buy_limit = aggregate;
         let buy_limit_human = sim::to_human(&buy_limit, buy_decimals);
         let sell_limit = sim::to_atomic(buy_limit_human * sell_per_buy, sell_decimals)?;
@@ -296,6 +303,8 @@ struct DepthQuote {
 #[derive(Debug)]
 struct DepthFill {
     output: BigUint,
+    /// The input the walk took; the rest of the input it was given is unused.
+    consumed_input: BigUint,
     exhausted: bool,
 }
 
@@ -415,9 +424,7 @@ impl ProtocolSim for MetricState {
         let (merged_out, refusal) =
             self.price_input(direction, &merged_in, price, token_in, token_out)?;
         let (amount, gas) = match previous {
-            Some(previous) => {
-                (sim::saturating_sub(&merged_out, &previous.amount_out), BigUint::ZERO)
-            }
+            Some(previous) => (saturating_sub(&merged_out, &previous.amount_out), BigUint::ZERO),
             None => (merged_out.clone(), BigUint::from(METRIC_SWAP_GAS)),
         };
         let new_state = Self {
@@ -441,8 +448,8 @@ impl ProtocolSim for MetricState {
         let (sell_limit, buy_limit) = self.unfilled_limits(direction)?;
         Ok(match fill {
             Some(fill) => (
-                sim::saturating_sub(&sell_limit, &fill.amount_in),
-                sim::saturating_sub(&buy_limit, &fill.amount_out),
+                saturating_sub(&sell_limit, &fill.amount_in),
+                saturating_sub(&buy_limit, &fill.amount_out),
             ),
             None => (sell_limit, buy_limit),
         })
@@ -533,7 +540,11 @@ fn depth_output_for_input(
     max_output: &BigUint,
 ) -> Result<DepthFill, SimulationError> {
     if amount_in.is_zero() || max_output.is_zero() {
-        return Ok(DepthFill { output: BigUint::ZERO, exhausted: !amount_in.is_zero() });
+        return Ok(DepthFill {
+            output: BigUint::ZERO,
+            consumed_input: BigUint::ZERO,
+            exhausted: !amount_in.is_zero(),
+        });
     }
 
     let mut previous_output = BigUint::ZERO;
@@ -582,7 +593,11 @@ fn depth_output_for_input(
         break;
     }
 
-    Ok(DepthFill { output, exhausted: !remaining_input.is_zero() })
+    Ok(DepthFill {
+        output,
+        consumed_input: amount_in - &remaining_input,
+        exhausted: !remaining_input.is_zero(),
+    })
 }
 
 #[cfg(test)]
@@ -901,8 +916,8 @@ mod tests {
     #[test]
     fn get_limits_aggregate_truncates_depth() {
         let mut state = state();
-        // Aggregate inventory (1000 USDC) is below the 3000 USDC depth total, so the exact
-        // last-bin input does not apply and the limit falls back to the top-of-book estimate.
+        // Aggregate inventory (1000 USDC) is below the 3000 USDC depth total, so the limit is the
+        // input the walk takes for 1000 USDC of that bin.
         state.bid_ask.total_token1_available = Some(big("1000000000"));
         state.bid_ask.depth.bids = vec![MetricDepthBin {
             bin_idx: 0,
@@ -918,9 +933,59 @@ mod tests {
 
         // Output limit follows the aggregate inventory, not the deeper book.
         assert_eq!(buy_limit, BigUint::from(1_000_000_000u64));
-        // Input limit estimated at the top-of-book bid (3000): 1000 USDC / 3000 = 1/3 WETH,
-        // rounded through the f64 estimate path (this fallback is an estimate by design).
-        assert_eq!(sell_limit, BigUint::from(333_333_333_333_333_312u128));
+        // Input the walk takes for 1000 USDC of the 3000 USDC bin: 1.0169 WETH × 1000 / 3000,
+        // rounded up. The top-of-book estimate (1000 / 3000 = 1/3 WETH) fell short of it.
+        assert_eq!(sell_limit, BigUint::from(338_983_050_847_457_627u128));
+    }
+
+    /// Bids of 1 WETH for 3000 USDC and 1 WETH for 2000 USDC, with 4000 USDC of inventory, so the
+    /// inventory cuts the book short. The limit's input must pay its output, and a swap after a
+    /// partial fill must still see the input it has left.
+    #[test]
+    fn limits_agree_with_the_fills_on_a_truncated_book() {
+        let mut state = state();
+        state.bid_ask.total_token1_available = Some(big("4000000000"));
+        state.bid_ask.depth.bids = vec![
+            MetricDepthBin {
+                bin_idx: 0,
+                // 3000 * 2^64
+                price: big("55340232221128654848000"),
+                cumulative_volume: big("3000000000"),
+                cumulative_input_volume: big("1000000000000000000"),
+            },
+            MetricDepthBin {
+                bin_idx: 1,
+                // 2000 * 2^64
+                price: big("36893488147419103232000"),
+                cumulative_volume: big("5000000000"),
+                cumulative_input_volume: big("2000000000000000000"),
+            },
+        ];
+        let (sell_limit, buy_limit) = state
+            .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
+            .unwrap();
+        assert_eq!(buy_limit, big("4000000000"));
+        let whole = state
+            .get_amount_out(sell_limit.clone(), &weth(), &usdc())
+            .unwrap();
+        assert_eq!(whole.amount, buy_limit);
+        assert!(state
+            .get_amount_out(sell_limit + BigUint::from(1u8), &weth(), &usdc())
+            .is_err());
+
+        let partial = state
+            .get_amount_out(big("1400000000000000000"), &weth(), &usdc())
+            .unwrap();
+        let (rest_sell, rest_buy) = partial
+            .new_state
+            .get_limits(weth().address, usdc().address)
+            .unwrap();
+        assert_eq!(rest_buy, big("200000000"));
+        let rest = partial
+            .new_state
+            .get_amount_out(rest_sell, &weth(), &usdc())
+            .unwrap();
+        assert_eq!(rest.amount, rest_buy);
     }
 
     #[test]

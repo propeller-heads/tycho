@@ -36,9 +36,10 @@ use tycho_common::{
 use crate::{
     book::{
         component::{encode_swap_directions, pair_book, PairState, SWAP_DIRECTIONS_ATTRIBUTE},
-        sim, Book, Books,
+        Book, Books,
     },
     protocol::models::ProtocolComponent,
+    utils::saturating_sub,
 };
 
 /// Which components a feed publishes for its venue. The venue's feed builder picks the layout.
@@ -514,8 +515,8 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
                 .get_limits(sell_token.clone(), buy_token.clone())
                 .map(|(sell, buy)| match filled {
                     Some(fill) => (
-                        sim::saturating_sub(&sell, &fill.amount_in),
-                        sim::saturating_sub(&buy, &fill.amount_out),
+                        saturating_sub(&sell, &fill.amount_in),
+                        saturating_sub(&buy, &fill.amount_out),
                     ),
                     None => (sell, buy),
                 });
@@ -571,7 +572,7 @@ impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
         let continued = |mut result: GetAmountOutResult| {
             let merged_out = result.amount.clone();
             if let Some(previous) = previous {
-                result.amount = sim::saturating_sub(&merged_out, &previous.amount_out);
+                result.amount = saturating_sub(&merged_out, &previous.amount_out);
                 result.gas = BigUint::zero();
             }
             let fill = PairFill {

@@ -19,7 +19,7 @@ use tycho_common::{
 };
 
 use super::{overrides::PammSimulationOverrides, telemetry};
-use crate::{book::sim::saturating_sub, utils::decimals_scale};
+use crate::utils::{decimals_scale, saturating_sub};
 
 /// How long the quotes of one price level message stay quotable: one slot after the message's `ts`.
 /// Titan prices the block it is building, so quotes older than one slot were priced for a block
