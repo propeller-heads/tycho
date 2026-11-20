@@ -643,23 +643,9 @@ pub fn map_protocol_changes(
         if changes.is_empty() {
             continue;
         }
-        let tx = Transaction {
-            to: trx.to.clone(),
-            from: trx.from.clone(),
-            hash: trx.hash.clone(),
-            index: trx.index.into(),
-        };
         let entity_changes = &mut transaction_changes
-            .entry(tx.index)
-            .or_insert_with(|| TransactionChanges {
-                tx: Some(tx.clone()),
-                contract_changes: vec![],
-                component_changes: vec![],
-                balance_changes: vec![],
-                entrypoints: vec![],
-                entity_changes: vec![],
-                entrypoint_params: vec![],
-            })
+            .entry(trx.index.into())
+            .or_default()
             .entity_changes;
         for change in changes {
             merge_attributes(entity_changes, change.component_id, change.attributes);
