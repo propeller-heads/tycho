@@ -1,6 +1,14 @@
 //! The Elysium manifest's terminal module: the block changes the shared Uniswap V4 pipeline
 //! aggregates, plus the `montra_*` attributes and the pause state decoded from the Montra hook's
-//! storage writes.
+//! storage writes, and the `ascend_*` attributes decoded from the Ascend hook's.
+//!
+//! Ascend pools (`ascend_hooks`) take the same path with their own five watched slots
+//! ([`crate::ascend`]). Every write to one of them counts, whatever the transaction, its caller or
+//! the function that made it: swaps (the observation, and on a fill the bid), the launch and
+//! `fundBid` (spec S21 maps all 30 `SSTORE` sites of the hook). A pool is created with all ten
+//! `ascend_*` attributes from the launch transaction's writes, a word it did not write read as
+//! zero (`Bid` words 0 and 1 start at zero). No `paused` is emitted for Ascend pools: the hook's
+//! `setPaused` stops launches only (spec S22) and the Readme says so.
 //!
 //! Every write to a pool's watched `PoolConfig` words (0 to 2) or `PoolKey` words counts, whatever
 //! the transaction, its caller or the function that made it: swaps (stage, LP-line hold,
@@ -44,10 +52,13 @@ use substreams_ethereum::{pb::eth::v2 as eth, Event};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::prelude::*;
 
-use crate::montra::{
-    params::Params,
-    pool_config::{sets_seeded_flag, slot_store_key, ConfigWord, HookWord, SlotOwner},
-    storage_writes::{storage_writes, SlotWrite},
+use crate::{
+    ascend::AscendWord,
+    montra::{
+        params::Params,
+        pool_config::{sets_seeded_flag, slot_store_key, ConfigWord, HookWord, SlotOwner},
+        storage_writes::{storage_writes, SlotWrite},
+    },
 };
 
 #[substreams::handlers::map]
@@ -67,7 +78,7 @@ pub fn map_montra_enriched_block_changes(
     montra_slots: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let params = Params::parse(&params)?;
-    let launches = created_launches(&created_pools)?;
+    let launches = created_launches(&params, &created_pools)?;
     let hook_writes = collect_hook_writes(&block, &params, &montra_slots, &launches)?;
 
     let changes = collect_transaction_changes(
@@ -85,16 +96,31 @@ pub fn map_montra_enriched_block_changes(
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }
 
-/// The creation transaction of every pool `map_montra_pools_created` created in this block, by
-/// component id. Fails when a change of `created_pools` has no transaction.
-fn created_launches(created_pools: &BlockEntityChanges) -> Result<HashMap<String, Transaction>> {
+/// A pool `map_montra_pools_created` created in this block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launch {
+    /// The creation transaction.
+    tx: Transaction,
+    /// Whether the pool's hook is an Ascend hook, not a Montra one.
+    ascend: bool,
+}
+
+/// The creation of every pool `map_montra_pools_created` created in this block, by component id.
+/// Fails when a change of `created_pools` has no transaction.
+fn created_launches(
+    params: &Params,
+    created_pools: &BlockEntityChanges,
+) -> Result<HashMap<String, Launch>> {
     let mut launches = HashMap::new();
     for change in &created_pools.changes {
         let tx = change.tx.as_ref().ok_or_else(|| {
             anyhow!("map_montra_pools_created emitted a change without a transaction")
         })?;
         for component in &change.component_changes {
-            launches.insert(component.id.clone(), tx.clone());
+            let ascend = component
+                .get_attribute_value("hooks")
+                .is_some_and(|hook| params.is_ascend_hook(&hook));
+            launches.insert(component.id.clone(), Launch { tx: tx.clone(), ascend });
         }
     }
     Ok(launches)
@@ -107,6 +133,9 @@ struct PoolWrites {
     config: [Option<SlotWrite>; ConfigWord::ALL.len()],
     /// Whether the transaction changed a `PoolKey` word.
     changes_key: bool,
+    /// Whether this is an Ascend pool; its words are in `ascend`, indexed by [`AscendWord`].
+    is_ascend: bool,
+    ascend: [Option<SlotWrite>; AscendWord::ALL.len()],
     /// Whether the transaction placed this pool's seed: it made the seed's writes
     /// ([`PoolWrites::writes_seed_words`]) and the hook added liquidity to this pool on the
     /// `PoolManager` ([`hook_added_liquidity`]). `seed(poolId, startTick, supply)` takes no key:
@@ -122,7 +151,45 @@ impl PoolWrites {
         match word {
             HookWord::Config(word) => self.config[word as usize] = Some(write),
             HookWord::Key(_) => self.changes_key |= write.old_value != write.new_value,
+            HookWord::Ascend(word) => {
+                self.is_ascend = true;
+                self.ascend[word as usize] = Some(write);
+            }
         }
+    }
+
+    /// The `ascend_*` attributes of the five watched words as the transaction left them, a word
+    /// it did not write read as zero.
+    fn final_ascend_attributes(&self, change: ChangeType) -> Vec<Attribute> {
+        AscendWord::ALL
+            .into_iter()
+            .flat_map(|word| {
+                let value = self.ascend[word as usize]
+                    .as_ref()
+                    .map_or([0u8; 32], |write| write.new_value);
+                word.attributes(&value)
+            })
+            .map(|(name, value)| attribute(name, value, change))
+            .collect()
+    }
+
+    /// The `ascend_*` attributes whose decoded value the transaction changed.
+    fn changed_ascend_attributes(&self) -> Vec<Attribute> {
+        AscendWord::ALL
+            .into_iter()
+            .filter_map(|word| {
+                self.ascend[word as usize]
+                    .as_ref()
+                    .map(|write| (word, write))
+            })
+            .flat_map(|(word, write)| {
+                word.attributes(&write.old_value)
+                    .into_iter()
+                    .zip(word.attributes(&write.new_value))
+                    .filter(|((_, old), (_, new))| old != new)
+                    .map(|(_, (name, new))| attribute(name, new, ChangeType::Update))
+            })
+            .collect()
     }
 
     /// Whether the transaction made the writes of `seed`: word 0's `seeded` flag went from clear
@@ -174,6 +241,12 @@ impl PoolWrites {
     /// The pool's state in its creation transaction: every `montra_*` attribute, created. The pool
     /// is created paused unless the transaction placed its seed.
     fn launch_state(&self) -> HookStateChange {
+        if self.is_ascend {
+            return HookStateChange {
+                attributes: self.final_ascend_attributes(ChangeType::Creation),
+                pause_change: None,
+            };
+        }
         HookStateChange {
             attributes: self.final_attributes(ChangeType::Creation),
             pause_change: (!self.places_seed).then_some(PauseChange::Pause),
@@ -187,6 +260,12 @@ impl PoolWrites {
     /// emits nothing. A changed `PoolKey` word pauses the pool, also when the same transaction
     /// places the seed.
     fn update_state(&self) -> HookStateChange {
+        if self.is_ascend {
+            return HookStateChange {
+                attributes: self.changed_ascend_attributes(),
+                pause_change: None,
+            };
+        }
         let (attributes, mut pause_change) = if self.places_seed {
             (self.final_attributes(ChangeType::Update), Some(PauseChange::Unpause))
         } else {
@@ -228,11 +307,12 @@ fn collect_hook_writes(
     block: &eth::Block,
     params: &Params,
     montra_slots: &impl StoreGet<String>,
-    launches: &HashMap<String, Transaction>,
+    launches: &HashMap<String, Launch>,
 ) -> Result<HookWrites> {
     let mut hook_writes = HookWrites::new();
+    let hooks = params.all_hooks();
     for trace in block.transactions() {
-        let writes = storage_writes(trace, &params.montra_hooks)?;
+        let writes = storage_writes(trace, &hooks)?;
         if writes.is_empty() {
             continue;
         }
@@ -246,7 +326,7 @@ fn collect_hook_writes(
             let owner = SlotOwner::from_store_value(&value)?;
             if launches
                 .get(&owner.component_id)
-                .is_some_and(|launch| launch.index > tx_index)
+                .is_some_and(|launch| launch.tx.index > tx_index)
             {
                 continue;
             }
@@ -261,18 +341,22 @@ fn collect_hook_writes(
         for (component_id, pool_writes) in &mut pools {
             // The receipt is read only in the one transaction of a pool's life that sets the
             // `seeded` flag.
-            pool_writes.places_seed = pool_writes.writes_seed_words() &&
+            // An Ascend pool has no seed: its pool data is written at launch and it is never
+            // paused.
+            pool_writes.places_seed = !pool_writes.is_ascend &&
+                pool_writes.writes_seed_words() &&
                 hook_added_liquidity(trace, params, component_id)?;
         }
         hook_writes.insert(tx_index, (Transaction::from(trace), pools));
     }
     for (component_id, launch) in launches {
         hook_writes
-            .entry(launch.index)
-            .or_insert_with(|| (launch.clone(), BTreeMap::new()))
+            .entry(launch.tx.index)
+            .or_insert_with(|| (launch.tx.clone(), BTreeMap::new()))
             .1
             .entry(component_id.clone())
-            .or_default();
+            .or_default()
+            .is_ascend |= launch.ascend;
     }
     Ok(hook_writes)
 }
@@ -343,7 +427,7 @@ struct HookStateChange {
 /// [`builder_with`] does not copy.
 fn with_hook_state(
     changes: Vec<TransactionChanges>,
-    launches: &HashMap<String, Transaction>,
+    launches: &HashMap<String, Launch>,
     hook_writes: HookWrites,
 ) -> Result<Vec<TransactionChanges>> {
     let mut by_index = BTreeMap::new();
@@ -367,7 +451,7 @@ fn with_hook_state(
         };
         for (component_id, pool_writes) in pools {
             let state = match launches.get(&component_id) {
-                Some(launch) if launch.index == index => pool_writes.launch_state(),
+                Some(launch) if launch.tx.index == index => pool_writes.launch_state(),
                 _ => pool_writes.update_state(),
             };
             if !state.attributes.is_empty() {
@@ -433,7 +517,7 @@ mod tests {
         address_list::Address,
         montra::{
             pool_config::{pool_slots, HookWord, KeyWord},
-            test_fixtures::{params, HOOK, POOL_ID, POOL_MANAGER, TOKEN},
+            test_fixtures::{params, ASCEND_HOOK, HOOK, POOL_ID, POOL_MANAGER, TOKEN},
         },
         storage::{pad32, Word},
     };
@@ -681,7 +765,7 @@ mod tests {
     }
 
     fn run(block: &eth::Block, created_pools: &BlockEntityChanges) -> Vec<TransactionChanges> {
-        let launches = created_launches(created_pools).unwrap();
+        let launches = created_launches(&params(), created_pools).unwrap();
         let hook_writes = collect_hook_writes(block, &params(), &store(), &launches).unwrap();
         // The shared pipeline's changes for the creation, as `collect_transaction_changes` builds
         // them from `created_pools`.
@@ -839,7 +923,8 @@ mod tests {
         let mut created = created_pools(1);
         created.changes[0].tx = None;
 
-        let error = created_launches(&created).expect_err("a change without a transaction fails");
+        let error = created_launches(&params(), &created)
+            .expect_err("a change without a transaction fails");
 
         assert_eq!(
             error.to_string(),
@@ -959,7 +1044,7 @@ mod tests {
     fn test_seed_transaction_without_a_receipt_fails_the_block() {
         let mut launch = trace(1, launch_writes(), vec![seed_log(&POOL_MANAGER, &POOL_ID, &HOOK)]);
         launch.receipt = None;
-        let launches = created_launches(&created_pools(1)).unwrap();
+        let launches = created_launches(&params(), &created_pools(1)).unwrap();
 
         let error = collect_hook_writes(&block(vec![launch]), &params(), &store(), &launches)
             .expect_err("a seed transaction without a receipt fails");
@@ -1441,5 +1526,351 @@ mod tests {
         .unwrap();
 
         assert_eq!(hook_writes, HookWrites::new());
+    }
+
+    // Ascend pools. Pool 0xa138ea3b... of the hook 0xe0def422..., written with the layouts of
+    // `crate::ascend`.
+    const ASCEND_POOL: &str = "0xa138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5";
+    const ASCEND_POOL_ID: Word =
+        hex!("a138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5");
+    // PoolData word 2 at launch: fee 10000, startTick -168600, launchedAt 1794307976, tokenIs0 0,
+    // an arbitrary creator (spec S8).
+    const ASCEND_WORD_2: Word =
+        hex!("002710fd6d68006af2f78800aabbccddeeff00112233445566778899aabbccdd");
+    // PoolData word 3 at launch (spec S20): d 0, observedTick -400800, emaUpdatedAt 0x6afecd23,
+    // an arbitrary EMA.
+    const ASCEND_WORD_3: Word =
+        hex!("00000000f9e260006afecd2300000000000000000883956ab34ccb0338ab12cd");
+    // Bid word 2: windowStart 0, maxClip 0xa49e728e240f3a9d (spec S9).
+    const ASCEND_BID_WORD_2: Word =
+        hex!("00000000000000000000000000000000000000a49e728e240f3a9d0000000000");
+
+    fn ascend_store() -> FakeStore {
+        let mut store = FakeStore(HashMap::new());
+        for (word, slot) in crate::ascend::pool_slots(&ASCEND_POOL_ID) {
+            let owner = SlotOwner { component_id: ASCEND_POOL.to_string(), word };
+            store
+                .0
+                .insert(slot_store_key(&ASCEND_HOOK, &slot), owner.to_store_value());
+        }
+        store
+    }
+
+    // A write by the Ascend hook to `word` of the pool.
+    fn ascend_write(word: AscendWord, old: Word, new: Word, ordinal: u64) -> StorageChange {
+        let (_, slot) = crate::ascend::pool_slots(&ASCEND_POOL_ID)
+            .into_iter()
+            .find(|(hook_word, _)| *hook_word == HookWord::Ascend(word))
+            .unwrap();
+        StorageChange {
+            address: ASCEND_HOOK.to_vec(),
+            key: slot.to_vec(),
+            old_value: old.to_vec(),
+            new_value: new.to_vec(),
+            ordinal,
+        }
+    }
+
+    fn created_ascend_pool(index: u64) -> BlockEntityChanges {
+        BlockEntityChanges {
+            block: None,
+            changes: vec![TransactionEntityChanges {
+                tx: Some(tx(index)),
+                component_changes: vec![ProtocolComponent::new(ASCEND_POOL)
+                    .with_tokens(&[TOKEN, [0xaa; 20]])
+                    .with_attributes(&[
+                        ("pool_id", ASCEND_POOL_ID.to_vec()),
+                        ("hooks", ASCEND_HOOK.to_vec()),
+                    ])],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn run_ascend(
+        block: &eth::Block,
+        created_pools: &BlockEntityChanges,
+    ) -> Vec<TransactionChanges> {
+        let launches = created_launches(&params(), created_pools).unwrap();
+        let hook_writes =
+            collect_hook_writes(block, &params(), &ascend_store(), &launches).unwrap();
+        with_hook_state(vec![], &launches, hook_writes).unwrap()
+    }
+
+    fn attributes_of_ascend(change: &TransactionChanges) -> Vec<(String, Vec<u8>, ChangeType)> {
+        attributes_of(change, ASCEND_POOL)
+    }
+
+    // The launch writes `PoolData` words 2 and 3 and `Bid` word 2 (spec S20), and not `Bid`
+    // words 0 and 1: every attribute is created, those two as zero, and the pool is not paused.
+    #[test]
+    fn test_ascend_launch_creates_every_attribute_from_its_final_words() {
+        let launch = vec![
+            ascend_write(AscendWord::Terms, [0; 32], ASCEND_WORD_2, 10),
+            ascend_write(AscendWord::Observation, [0; 32], ASCEND_WORD_3, 11),
+            ascend_write(AscendWord::Window, [0; 32], ASCEND_BID_WORD_2, 12),
+        ];
+
+        let changes = run_ascend(&block(vec![trace(1, launch, vec![])]), &created_ascend_pool(1));
+
+        assert_eq!(changes.len(), 1);
+        let created = ChangeType::Creation;
+        let zero_word = vec![0u8; 32];
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                ("ascend_bid_filled_in_window".to_string(), zero_word.clone(), created),
+                ("ascend_bid_inventory".to_string(), zero_word, created),
+                (
+                    "ascend_bid_max_clip".to_string(),
+                    hex!("0000000000000000a49e728e240f3a9d").to_vec(),
+                    created
+                ),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0), created),
+                ("ascend_discount".to_string(), u64_bytes(0), created),
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000883956ab34ccb0338ab12cd").to_vec(),
+                    created
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6afecd23), created),
+                ("ascend_fee_pips".to_string(), u64_bytes(10000), created),
+                ("ascend_observed_tick".to_string(), hex!("fff9e260").to_vec(), created),
+                ("ascend_start_tick".to_string(), hex!("fffd6d68").to_vec(), created),
+                ("ascend_token_is_currency0".to_string(), vec![0], created),
+            ]
+        );
+        assert_eq!(paused_of(&changes[0]), None);
+    }
+
+    // A pool whose hook wrote nothing in the creation transaction still gets every attribute, as
+    // zero, and no pause: the simulation refuses its zero fee.
+    #[test]
+    fn test_ascend_launch_whose_hook_wrote_nothing_is_created_with_zeros() {
+        let changes = run_ascend(&block(vec![]), &created_ascend_pool(1));
+
+        let attributes = attributes_of_ascend(&changes[0]);
+        assert_eq!(attributes.len(), 11);
+        assert!(attributes
+            .iter()
+            .all(|(_, _, change)| *change == ChangeType::Creation));
+        assert!(attributes.contains(&(
+            "ascend_fee_pips".to_string(),
+            u64_bytes(0),
+            ChangeType::Creation
+        )));
+        assert_eq!(paused_of(&changes[0]), None);
+    }
+
+    // A swap with dt > 0 rewrites word 3 only: the EMA and its timestamp change, the tick and the
+    // discount do not, and only the changed attributes are updated.
+    #[test]
+    fn test_ascend_swap_updates_only_the_attributes_it_changed() {
+        let mut after = ASCEND_WORD_3;
+        after[12..32].copy_from_slice(&hex!("00000000000000000883956ab34ccb0338ab12ce"));
+        after[7..12].copy_from_slice(&hex!("006afecd24"));
+
+        let changes = run_ascend(
+            &block(vec![trace(
+                4,
+                vec![ascend_write(AscendWord::Observation, ASCEND_WORD_3, after, 3)],
+                vec![],
+            )]),
+            &BlockEntityChanges::default(),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tx, Some(tx(4)));
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000883956ab34ccb0338ab12ce").to_vec(),
+                    ChangeType::Update
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6afecd24), ChangeType::Update),
+            ]
+        );
+    }
+
+    // A fill consumes the inventory, adds to the window's filled amount and moves the window:
+    // `Bid` words 0, 1 and 2 in one transaction, word 0 written twice (the first old value and the
+    // last new value net by ordinal).
+    #[test]
+    fn test_ascend_fill_updates_the_bid_words_netted_by_ordinal() {
+        let word = |value: u8| {
+            let mut word = [0u8; 32];
+            word[31] = value;
+            word
+        };
+        let mut window_after = ASCEND_BID_WORD_2;
+        window_after[27..32].copy_from_slice(&hex!("006b000000"));
+        let writes = vec![
+            ascend_write(AscendWord::Inventory, word(9), word(5), 1),
+            ascend_write(AscendWord::Inventory, word(5), word(4), 4),
+            ascend_write(AscendWord::Filled, word(0), word(3), 2),
+            ascend_write(AscendWord::Window, ASCEND_BID_WORD_2, window_after, 3),
+        ];
+
+        let changes =
+            run_ascend(&block(vec![trace(6, writes, vec![])]), &BlockEntityChanges::default());
+
+        let updated = ChangeType::Update;
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                ("ascend_bid_filled_in_window".to_string(), word(3).to_vec(), updated),
+                ("ascend_bid_inventory".to_string(), word(4).to_vec(), updated),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0x6b000000), updated),
+            ]
+        );
+    }
+
+    // The one fill on history: tx 0xffd66b8f... in block 3527702 on pool 0x21e12450.... Its
+    // storage diff of the hook (debug_traceTransaction, prestateTracer in diff mode, on the
+    // Elysium node) holds `PoolData` word 3 and `Bid` words 0, 1 and 2, as written here.
+    #[test]
+    fn test_ascend_fill_of_the_chain_updates_the_observation_and_the_bid() {
+        let writes = vec![
+            ascend_write(
+                AscendWord::Observation,
+                hex!("a6faee65fdd4eb006af2315200000000000000000035c99cb59808be1c46b249"),
+                hex!("9c77377cfdd4e0006af23cac00000000000000000035caf9bfe08f36589a8b9c"),
+                1,
+            ),
+            ascend_write(
+                AscendWord::Inventory,
+                hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb24"),
+                hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+                2,
+            ),
+            ascend_write(
+                AscendWord::Filled,
+                [0; 32],
+                hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb23"),
+                3,
+            ),
+            ascend_write(
+                AscendWord::Window,
+                ASCEND_BID_WORD_2,
+                hex!("00000000000000000000000000000000000000a49e728e240f3a9d006af23cac"),
+                4,
+            ),
+        ];
+
+        let changes =
+            run_ascend(&block(vec![trace(5, writes, vec![])]), &BlockEntityChanges::default());
+
+        let updated = ChangeType::Update;
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                (
+                    "ascend_bid_filled_in_window".to_string(),
+                    hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb23")
+                        .to_vec(),
+                    updated
+                ),
+                (
+                    "ascend_bid_inventory".to_string(),
+                    hex!("0000000000000000000000000000000000000000000000000000000000000001")
+                        .to_vec(),
+                    updated
+                ),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0x6af23cac), updated),
+                ("ascend_discount".to_string(), u64_bytes(0x9c77377c), updated),
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000035caf9bfe08f36589a8b9c").to_vec(),
+                    updated
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6af23cac), updated),
+                ("ascend_observed_tick".to_string(), hex!("fffdd4e0").to_vec(), updated),
+            ]
+        );
+    }
+
+    // `fundBid` writes `Bid` word 0 only.
+    #[test]
+    fn test_ascend_fund_bid_updates_the_inventory() {
+        let mut funded = [0u8; 32];
+        funded[24..].copy_from_slice(&1_000_000_000_000_000_000u64.to_be_bytes());
+
+        let changes = run_ascend(
+            &block(vec![trace(
+                2,
+                vec![ascend_write(AscendWord::Inventory, [0; 32], funded, 1)],
+                vec![],
+            )]),
+            &BlockEntityChanges::default(),
+        );
+
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![("ascend_bid_inventory".to_string(), funded.to_vec(), ChangeType::Update)]
+        );
+    }
+
+    // A write to a watched slot by another contract, a write to an unwatched slot of the hook
+    // (`accruedFees` at slot 6) and a write that changes no decoded value (the creator bytes of
+    // word 2) emit nothing.
+    #[test]
+    fn test_ascend_foreign_unwatched_and_undecoded_writes_emit_nothing() {
+        let mut other_contract = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 1);
+        other_contract.address = POOL_MANAGER.to_vec();
+        let mut unwatched = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 2);
+        unwatched.key = vec![0x06];
+        let mut creator_changed = ASCEND_WORD_2;
+        creator_changed[31] ^= 1;
+        let undecoded = ascend_write(AscendWord::Terms, ASCEND_WORD_2, creator_changed, 3);
+
+        let changes = run_ascend(
+            &block(vec![trace(2, vec![other_contract, unwatched, undecoded], vec![])]),
+            &BlockEntityChanges::default(),
+        );
+
+        assert_eq!(changes, vec![]);
+    }
+
+    // The Montra hook writing the Ascend pool's slot is not that pool's write: the store keys a
+    // slot by the hook it belongs to.
+    #[test]
+    fn test_ascend_slot_written_by_the_montra_hook_is_ignored() {
+        let mut write = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 1);
+        write.address = HOOK.to_vec();
+
+        let hook_writes = collect_hook_writes(
+            &block(vec![trace(2, vec![write], vec![])]),
+            &params(),
+            &ascend_store(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(hook_writes, HookWrites::new());
+    }
+
+    // A write before the pool's creation transaction in the same block is skipped, as for Montra.
+    #[test]
+    fn test_ascend_writes_before_the_creation_transaction_are_skipped() {
+        let launch = vec![
+            ascend_write(AscendWord::Terms, [0; 32], ASCEND_WORD_2, 10),
+            ascend_write(AscendWord::Observation, [0; 32], ASCEND_WORD_3, 11),
+        ];
+        let early = vec![ascend_write(AscendWord::Inventory, [0; 32], ASCEND_WORD_2, 1)];
+
+        let changes = run_ascend(
+            &block(vec![trace(0, early, vec![]), trace(1, launch, vec![])]),
+            &created_ascend_pool(1),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tx, Some(tx(1)));
+        assert!(attributes_of_ascend(&changes[0]).contains(&(
+            "ascend_bid_inventory".to_string(),
+            vec![0; 32],
+            ChangeType::Creation
+        )));
     }
 }

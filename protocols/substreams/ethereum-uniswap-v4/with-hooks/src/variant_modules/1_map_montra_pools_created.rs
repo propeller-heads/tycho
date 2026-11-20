@@ -1,6 +1,6 @@
-//! Creates a component for every pool the `PoolManager` initialises with a Montra hook. The
-//! Elysium manifest runs it in place of `map_pools_created`, which creates every pool whose hook
-//! has swap permissions. Both build the component with [`pool_creation`].
+//! Creates a component for every pool the `PoolManager` initialises with a Montra or an Ascend
+//! hook. The Elysium manifest runs it in place of `map_pools_created`, which creates every pool
+//! whose hook has swap permissions. Both build the component with [`pool_creation`].
 
 use ethereum_uniswap_v4_shared::abi::pool_manager::events::Initialize;
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
@@ -18,10 +18,17 @@ pub fn map_montra_pools_created(
 }
 
 /// One [`pool_creation`] per `Initialize` the configured `PoolManager` emitted in `block` for a
-/// pool whose `PoolKey.hooks` is a configured Montra hook. Besides the emitter check, the hook list
-/// is the only filter: no pool of another hook is created, Montra's own later hooks included, and
-/// every pool of a listed hook is, whatever its tokens, fee or tick spacing. Every Montra pool's
-/// `key_lp_fee` is 0x800000, the dynamic-fee flag; the `montra_*` attributes carry its fees.
+/// pool whose `PoolKey.hooks` is a configured Montra or Ascend hook. Besides the emitter check, the
+/// hook lists are the only filter: no pool of another hook is created, Montra's own later hooks
+/// included, and every pool of a listed hook is, whatever its tokens, fee or tick spacing. Every
+/// pool of these hooks has `key_lp_fee` 0x800000, the dynamic-fee flag; the `montra_*` and
+/// `ascend_*` attributes carry its fees.
+///
+/// Deployment assumption: the Ascend launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the
+/// same transaction as `Initialize` (spec S20, every one of the 4962 launches to block 8365800).
+/// `map_montra_enriched_block_changes` reads those writes for the pool's `ascend_*` attributes, so
+/// a pool initialised without them would get zero for every attribute, and the simulation refuses
+/// a pool whose fee or EMA is zero.
 pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<TransactionEntityChanges> {
     block
         .logs()
@@ -31,7 +38,9 @@ pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<Transact
         .filter_map(|view| {
             Initialize::match_and_decode(view.log).map(|event| (view.receipt.transaction, event))
         })
-        .filter(|(_, event)| params.is_montra_hook(&event.hooks))
+        .filter(|(_, event)| {
+            params.is_montra_hook(&event.hooks) || params.is_ascend_hook(&event.hooks)
+        })
         .map(|(tx, event)| pool_creation(tx, event, &params.pool_manager))
         .collect()
 }
@@ -48,7 +57,7 @@ mod tests {
     use crate::{
         address_list::Address,
         montra::test_fixtures::{
-            initialize_log, launch_block, params, HOOK, LAUNCH_TX, POOL_MANAGER,
+            initialize_log, launch_block, params, ASCEND_HOOK, HOOK, LAUNCH_TX, POOL_MANAGER,
         },
     };
 
@@ -91,12 +100,26 @@ mod tests {
         assert_eq!(changes, vec![]);
     }
 
+    /// An `Initialize` of a pool of the Ascend hook creates the pool, with the hook as a static
+    /// attribute, exactly as for a Montra pool.
+    #[test]
+    fn test_ascend_initialize_creates_the_pool() {
+        let changes = pools_created(
+            &params(),
+            &launch_block(vec![initialize_log(&POOL_MANAGER, &ASCEND_HOOK)]),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].component_changes[0].static_att[2].value, ASCEND_HOOK.to_vec());
+    }
+
     #[test]
     fn test_every_listed_hook_creates_pools() {
         let second_hook = hex!("0000000000000000000000000000000000000080");
         let params = Params {
             pool_manager: POOL_MANAGER,
             montra_hooks: BTreeSet::from([HOOK, second_hook]),
+            ascend_hooks: BTreeSet::from([ASCEND_HOOK]),
         };
 
         let changes = pools_created(
@@ -104,6 +127,7 @@ mod tests {
             &launch_block(vec![
                 initialize_log(&POOL_MANAGER, &HOOK),
                 initialize_log(&POOL_MANAGER, &second_hook),
+                initialize_log(&POOL_MANAGER, &ASCEND_HOOK),
             ]),
         );
 
@@ -114,7 +138,7 @@ mod tests {
                     .value
                     .clone())
                 .collect::<Vec<_>>(),
-            vec![HOOK.to_vec(), second_hook.to_vec()]
+            vec![HOOK.to_vec(), second_hook.to_vec(), ASCEND_HOOK.to_vec()]
         );
     }
 }

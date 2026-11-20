@@ -8,7 +8,7 @@ manifests:
 | `ethereum-uniswap-v4-with-hooks.yaml` | every pool whose hook has swap permissions (`map_pools_created`) |
 | `unichain-uniswap-v4-with-hooks.yaml` | every pool whose hook has swap permissions (`map_pools_created`) |
 | `robinhood-uniswap-v4-with-hooks.yaml` | every pool whose hook has swap permissions (`map_pools_created`) |
-| `elysium-uniswap-v4-with-hooks.yaml` | pools of the hooks in `montra_hooks` only (`map_montra_pools_created`) |
+| `elysium-uniswap-v4-with-hooks.yaml` | pools of the hooks in `montra_hooks` and `ascend_hooks` only (`map_montra_pools_created`) |
 
 ## Montra on Elysium
 
@@ -98,3 +98,79 @@ swap often lands in a block with the same timestamp as the latest one. Inside an
 window a buy is then quoted at up to one second's decay below the rate it pays (97,000 pips for
 a 10-second window from 990,000 to 20,000), and a pool holding past its LP line can be quoted
 with its LP fee on one second early. Outside those windows the estimate changes nothing.
+
+## Ascend on Elysium
+
+An Ascend pool is a Uniswap V4 pool of the same `PoolManager` whose `PoolKey.hooks` is the Ascend
+launchpad hook (`0xe0def4221b9840a610d4e7d55812a79a6431a8ec`, `AscendLaunchpadV5`). Only the
+launchpad creates its pools and its liquidity: one position per pool, never removed. The hook
+takes a fee in `beforeSwap`/`afterSwap`, observes the price into an EMA and a discount, and fills
+sells from a per-pool bid inventory of the quote token. Those values live in hook storage and no
+V4 event carries them. 4962 pools exist up to block 8365800, all with the dynamic-fee flag and tick
+spacing 200.
+
+### What the Elysium manifest emits for Ascend
+
+- One component per pool, created from `PoolManager.Initialize` when `hooks` is listed in the
+  manifest's `ascend_hooks` parameter, by the same module as the Montra pools. The component id is
+  the pool id.
+- The hook's pricing state as `ascend_*` state attributes, decoded from every write to five slots
+  of the pool, in any transaction: `PoolData` words 2 and 3 (base slot 4) and `Bid` words 0 to 2
+  (base slot 2). `src/ascend/mod.rs` owns the layout and the attribute formats. The attributes
+  are `ascend_fee_pips`, `ascend_token_is_currency0`, `ascend_start_tick`,
+  `ascend_ema_sqrt_price_x96`, `ascend_ema_updated_at`, `ascend_observed_tick`,
+  `ascend_discount`, `ascend_bid_inventory`, `ascend_bid_filled_in_window`,
+  `ascend_bid_window_start` and `ascend_bid_max_clip`, all state attributes, created with the
+  pool. The fee, orientation and start tick sit in mutable hook storage with no verified source,
+  so they are state attributes, not static ones as Pons' fee terms are.
+- No `paused`. `setPaused` (slot 8) stops launches only: quotes in both directions are the same
+  with it set, and the swap path never reads it. This is a switch deliberately not indexed.
+- No entrypoints, contracts or storage, as for Montra (see "Rollout: no hooks DCI on Elysium").
+
+The writes cover every writer of the five slots: the hook's 30 `SSTORE` sites were mapped to
+traced functions. A swap writes `PoolData` word 3, and on a fill `Bid` words 0 to 2; the launch
+writes `PoolData` words 0 to 3 and `Bid` word 2; `fundBid` writes `Bid` word 0. `collect`, `claim`,
+`setQuoteConfig`, `setPaused` and the ownership functions write slots that do not price a swap.
+`PoolData` words 0 and 1 (token, builder fee, quote) are not watched: the swap does not charge the
+builder fee and the tokens come from the `PoolKey`. One function selector (`0xea72eef4`) is not
+decoded; it has no `SSTORE` site of its own, and any write it caused to a watched slot would be
+decoded anyway.
+
+Deployment assumption: the launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the same
+transaction as `Initialize` (every one of the 4962 launches to block 8365800). A pool initialised
+without them would get zero for every attribute, and the simulation refuses such a pool. K+0 and
+K+1 (`Bid` words 0 and 1) are not written at launch and start at zero.
+
+### Balances of Ascend pools
+
+As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test.
+The bid inventory is quote the hook holds at its own address, paid out only through fills; it is
+not in the pool's amounts and not counted in the balance, so a pool's payable size on a fill is
+larger than its indexed balance. The hook's fee claims are ERC-6909 balances at the `PoolManager`,
+outside the pool's amounts too.
+
+### Upgrade boundary for Ascend
+
+The hook and the library it calls are not upgradeable: one code hash at blocks 423647 and
+8365800, no proxy slot, no `DELEGATECALL`, `CREATE` or `SELFDESTRUCT`, so the layout in
+`src/ascend/mod.rs` cannot move under a deployed pool.
+
+| Dependency | Upgradeable | How the package follows it, or what breaks |
+|---|---|---|
+| Quote tokens: WHYPE (EIP-1967 proxy), USDC, KNTQ and wNVDAx (beacon proxies of `0x659f40efd07d70224b7ac61e4721f6f3e11b625e`) | yes | Not followed. An upgrade that rejects `transfer(hook, 0)` silently blocks fills the simulation still quotes. The simulation does not model the hook's balance guards, which decline a fill only on a strict shortfall and hold today because the hook's quote balance equals the summed inventories; an upgrade that leaves the hook holding less (a rebase, a transfer fee, a seizure) would make the hook decline fills the simulation quotes. |
+| A new Ascend hook | n/a | `map_montra_pools_created` creates none of its pools until a maintainer adds its address to `ascend_hooks`, after checking its layout against `src/ascend/mod.rs`. `store_montra_slots` keys each slot by the pool's own hook. |
+| A grouped V4 route in which an earlier hop delivers the launched token as a credit | n/a | The hook's token guard sees a balance short of what the fill needs; the simulation does not model it. |
+
+### Store cost of Ascend
+
+`store_montra_slots` keeps five keys per Ascend pool, about 24,800 keys at 4962 pools, each value
+about 70 bytes.
+
+### Quotes in the next block
+
+A sell on a pool with bid inventory depends on the block timestamp through the observation and the
+600 s window. The decoder prices the next block at the latest timestamp plus one second. Elysium
+stamps whole seconds about every 100 ms, so a swap often lands in a block that carries the latest
+timestamp, where a pool whose price moved since its last observation rejects the fill, while the
+quote at plus one second re-observes and may include it. The difference reaches only sells on the
+45 pools ever funded, and the route's minimum output bounds it.

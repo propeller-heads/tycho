@@ -13,6 +13,7 @@ use anyhow::{anyhow, Result};
 
 use crate::{
     address_list::Address,
+    ascend::AscendWord,
     storage::{is_uint_window, mapping_slot, read_uint, word_at_offset, Word},
 };
 
@@ -25,7 +26,7 @@ const POOL_CONFIG_WORDS: u8 = 4;
 
 /// A field packed into a storage word: `width` bytes starting `low` bytes from the low end.
 #[derive(Clone, Copy)]
-struct Field {
+pub(crate) struct Field {
     low: usize,
     width: usize,
 }
@@ -34,13 +35,13 @@ impl Field {
     /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
     /// [`is_uint_window`] holds for the window, the check `read_uint` makes. Every field is a
     /// constant, so the panic fails the build.
-    const fn new(low: usize, width: usize) -> Self {
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
         assert!(is_uint_window(low, width), "a field is a window read_uint reads");
         Self { low, width }
     }
 
     /// The field read as an unsigned big-endian integer.
-    fn unsigned(self, word: &Word) -> u64 {
+    pub(crate) fn unsigned(self, word: &Word) -> u64 {
         read_uint(word, self.low, self.width)
             .expect("Field::new admits only windows read_uint reads")
     }
@@ -49,18 +50,18 @@ impl Field {
 /// A two's-complement field packed into a storage word, at most 4 bytes wide so that it fits an
 /// `i32`.
 #[derive(Clone, Copy)]
-struct SignedField(Field);
+pub(crate) struct SignedField(Field);
 
 impl SignedField {
     /// The signed field `width` bytes wide starting `low` bytes from the low end of a word. Panics
     /// unless the field is at most 4 bytes wide and [`Field::new`] accepts it.
-    const fn new(low: usize, width: usize) -> Self {
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
         assert!(width <= 4, "a signed field fits an i32");
         Self(Field::new(low, width))
     }
 
     /// The field read as a two's-complement integer of its width, sign-extended.
-    fn read(self, word: &Word) -> i32 {
+    pub(crate) fn read(self, word: &Word) -> i32 {
         let shift = 64 - 8 * self.0.width as u32;
         ((self.0.unsigned(word) << shift) as i64 >> shift) as i32
     }
@@ -151,6 +152,8 @@ pub(crate) enum KeyWord {
 pub(crate) enum HookWord {
     Config(ConfigWord),
     Key(KeyWord),
+    /// A word of an Ascend hook's per-pool storage ([`crate::ascend`]).
+    Ascend(AscendWord),
 }
 
 impl HookWord {
@@ -169,20 +172,24 @@ impl HookWord {
         match self {
             Self::Config(word) => word as u8,
             Self::Key(word) => POOL_CONFIG_WORDS + word as u8,
+            Self::Ascend(word) => word.index(),
         }
     }
 
     fn from_index(index: u8) -> Option<Self> {
         Self::ALL
             .into_iter()
+            .chain(AscendWord::ALL.map(Self::Ascend))
             .find(|word| word.index() == index)
     }
 
-    /// The word's slot for the pool whose `PoolConfig` and `PoolKey` start at `config` and `key`.
-    fn slot(self, config: &Word, key: &Word) -> Word {
+    /// The word's slot for the pool whose `PoolConfig` and `PoolKey` start at `config` and `key`;
+    /// `None` for an Ascend word, whose slots [`crate::ascend::pool_slots`] derives.
+    fn slot(self, config: &Word, key: &Word) -> Option<Word> {
         match self {
-            Self::Config(word) => word_at_offset(config, u64::from(word as u8)),
-            Self::Key(word) => word_at_offset(key, u64::from(word as u8)),
+            Self::Config(word) => Some(word_at_offset(config, u64::from(word as u8))),
+            Self::Key(word) => Some(word_at_offset(key, u64::from(word as u8))),
+            Self::Ascend(_) => None,
         }
     }
 }
@@ -194,7 +201,10 @@ pub(crate) fn pool_slots(pool_id: &Word) -> Vec<(HookWord, Word)> {
     let key = mapping_slot(pool_id, POOL_KEY_MAPPING_SLOT);
     HookWord::ALL
         .into_iter()
-        .map(|word| (word, word.slot(&config, &key)))
+        .filter_map(|word| {
+            word.slot(&config, &key)
+                .map(|slot| (word, slot))
+        })
         .collect()
 }
 
@@ -367,6 +377,8 @@ mod tests {
     #[case::last_config_word(HookWord::Config(ConfigWord::EarlyBuyFee), "0x1f3b:2")]
     #[case::first_key_word(HookWord::Key(KeyWord::Currency0), "0x1f3b:4")]
     #[case::last_key_word(HookWord::Key(KeyWord::FeeTickSpacingHooks), "0x1f3b:6")]
+    #[case::first_ascend_word(HookWord::Ascend(AscendWord::Terms), "0x1f3b:7")]
+    #[case::last_ascend_word(HookWord::Ascend(AscendWord::Window), "0x1f3b:11")]
     fn test_slot_owner_store_value_names_the_word_index(
         #[case] word: HookWord,
         #[case] value: &str,
@@ -383,9 +395,9 @@ mod tests {
         "0x1f3b:3",
         "store_montra_slots value `0x1f3b:3` has no valid word index"
     )]
-    #[case::index_past_the_key(
-        "0x1f3b:7",
-        "store_montra_slots value `0x1f3b:7` has no valid word index"
+    #[case::index_past_the_ascend_words(
+        "0x1f3b:12",
+        "store_montra_slots value `0x1f3b:12` has no valid word index"
     )]
     #[case::index_not_a_number(
         "0x1f3b:x",

@@ -17,6 +17,8 @@ use crate::{
 pub(crate) const POOL_MANAGER: Address = hex!("e2e105d3f7209a9da11f83ccf3e7398a753823f1");
 /// The Montra `LaunchHook`.
 pub(crate) const HOOK: Address = hex!("6b1216a40b65c83e9c9e18a562c446697b8cf8ec");
+/// The Ascend launchpad hook.
+pub(crate) const ASCEND_HOOK: Address = hex!("e0def4221b9840a610d4e7d55812a79a6431a8ec");
 /// Pool 0x35bd0e6a..., launched in tx 0xe6956588... at block 1029110, native HYPE against
 /// [`TOKEN`].
 pub(crate) const POOL_ID: Word =
@@ -30,9 +32,13 @@ pub(crate) const LAUNCH_TX: [u8; 32] =
 const INITIALIZE_TOPIC: Word =
     hex!("dd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438");
 
-/// The Elysium manifest's parameters: [`POOL_MANAGER`] and [`HOOK`].
+/// The Elysium manifest's parameters: [`POOL_MANAGER`], [`HOOK`] and [`ASCEND_HOOK`].
 pub(crate) fn params() -> Params {
-    Params { pool_manager: POOL_MANAGER, montra_hooks: BTreeSet::from([HOOK]) }
+    Params {
+        pool_manager: POOL_MANAGER,
+        montra_hooks: BTreeSet::from([HOOK]),
+        ascend_hooks: BTreeSet::from([ASCEND_HOOK]),
+    }
 }
 
 fn word(bytes: &[u8]) -> Word {
