@@ -59,9 +59,13 @@ EXECUTOR_FAMILIES = {
     "rfq:aqua0": "uniswap_v4",
 }
 BIN_POOL_MANAGER_CHAINS = {"base", "bsc"}  # SwapEncoderRegistry::has_bin_pool_manager
-# Executor entries that no indexer serves: quotes, fallbacks and helpers. The indexers can't say
-# whether these are live, so they get no untracked card and tracked ones show "can't tell".
-NOT_INDEXED_PREFIXES = ("rfq:", "fallback", "pamm:", "propamm:", "pricelevelstream")
+# RFQ venues quote off-chain, so no indexer serves them: an executor for the chain on main means
+# they are live in dev and prod.
+RFQ_PREFIX = "rfq:"
+# Other executor entries that no indexer serves: fallbacks, book feeds and helpers. The indexers
+# can't say whether these are live, so they get no untracked card and tracked ones show "can't
+# tell".
+NOT_INDEXED_PREFIXES = ("fallback", "pamm:", "propamm:", "pricelevelstream")
 NOT_INDEXED = {"native_wrapper", "subsidy"}
 
 PROJECT_QUERY = """
@@ -375,8 +379,21 @@ class Indexers:
         return None if found is None else hook in found
 
 
+def is_rfq(system: str) -> bool:
+    return system.startswith(RFQ_PREFIX)
+
+
 def is_indexed(system: str) -> bool:
-    return system not in NOT_INDEXED and not system.startswith(NOT_INDEXED_PREFIXES)
+    return (
+        not is_rfq(system)
+        and system not in NOT_INDEXED
+        and not system.startswith(NOT_INDEXED_PREFIXES)
+    )
+
+
+def is_tracked_kind(system: str) -> bool:
+    """Whether the dashboard can say where this system is live: indexed, or RFQ."""
+    return is_rfq(system) or is_indexed(system)
 
 
 def decode_hex_text(value: str) -> str:
@@ -437,7 +454,11 @@ def build_cards(items: list[dict], repo: MainRepo, indexers: Indexers | None) ->
             "Executor deployed": executor is not None,
         }
         for env, name in (("dev", "In Dev"), ("prod", "In Prod")):
-            if indexers is None or not is_indexed(system):
+            if is_rfq(system):
+                # Live once its code is merged and the chain has its executor. Some RFQ venues
+                # reuse an existing executor (rfq:aqua0), so the executor alone isn't enough.
+                checks[name] = executor is not None and checks["Merged"]
+            elif indexers is None or not is_indexed(system):
                 checks[name] = None  # not checked, or not something an indexer serves
             elif hook:
                 # One extractor serves every hook; a hook is live once a pool carries its tag.
@@ -515,19 +536,24 @@ def untracked_cards(tracked: list[dict], repo: MainRepo, indexers: Indexers | No
     cards = []
     for chain in sorted(chains):
         on_main = repo.test_systems.get(chain, set())
-        executors = {k for k in (repo.executors.get(chain) or {}) if is_indexed(k)}
+        executors = {k for k in (repo.executors.get(chain) or {}) if is_tracked_kind(k)}
         dev = (indexers.systems("dev", chain) if indexers else None) or set()
         prod = (indexers.systems("prod", chain) if indexers else None) or set()
         for system in sorted(on_main | executors | dev | prod):
-            if (chain, system) in known or not is_indexed(system):
+            if (chain, system) in known or not is_tracked_kind(system):
                 continue
             executor = repo.executor(chain, system)
+            if is_rfq(system):
+                in_dev = in_prod = executor is not None
+            else:
+                in_dev = indexers.runs("dev", chain, system) if indexers else None
+                in_prod = indexers.runs("prod", chain, system) if indexers else None
             checks: dict[str, bool | None] = {
                 "In review": False,
                 "Merged": system in on_main,
                 "Executor deployed": executor is not None,
-                "In Dev": indexers.runs("dev", chain, system) if indexers else None,
-                "In Prod": indexers.runs("prod", chain, system) if indexers else None,
+                "In Dev": in_dev,
+                "In Prod": in_prod,
             }
             reached = [RANK[n.lower()] for n in ("Merged", "Executor deployed", "In Dev", "In Prod") if checks[n]]
             stage = max(reached, default=RANK["merged"])
