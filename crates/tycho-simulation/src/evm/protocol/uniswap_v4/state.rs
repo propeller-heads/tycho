@@ -30,13 +30,13 @@ use crate::{
                 hook_handler::HookHandler,
                 models::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                    StateContext, SwapParams,
+                    StateContext, SwapOutcome, SwapParams,
                 },
             },
             utils::{
                 add_fee_markup,
                 uniswap::{
-                    i24_be_bytes_to_i32, liquidity_math,
+                    i24_be_bytes_to_i32,
                     lp_fee::{self, is_dynamic},
                     pool_tick::PoolTick,
                     sqrt_price_math::{
@@ -49,7 +49,7 @@ use crate::{
                         get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
                         MIN_TICK,
                     },
-                    StepComputation, SwapResults, SwapState,
+                    StepComputation, SwapResults, SwapState, FEE_PIPS_DENOMINATOR,
                 },
             },
             vm::constants::EXTERNAL_ACCOUNT,
@@ -338,7 +338,17 @@ impl UniswapV4State {
             });
         }
 
-        if self.liquidity == 0 {
+        // On chain, v4-core's `Pool.swap` has no liquidity check: from a price outside every
+        // position its step loop moves through the empty range to the next initialized tick and
+        // takes up the liquidity there. A pool refuses such a swap unless its hook opts in
+        // (`HookHandler::swaps_from_empty_range`), because `get_limits` reports a zero limit at
+        // zero active liquidity unless the hook bounds the limits itself.
+        let hook_swaps_from_empty_range = self
+            .hook
+            .as_ref()
+            .is_some_and(|hook| hook.swaps_from_empty_range());
+        if self.liquidity == 0 && (!hook_swaps_from_empty_range || self.has_no_initialized_ticks())
+        {
             return Err(SimulationError::RecoverableError("No liquidity".to_string()));
         }
         let price_limit = if let Some(limit) = sqrt_price_limit {
@@ -409,6 +419,12 @@ impl UniswapV4State {
                     (tick, info)
                 }
                 Err(tick_err) => match tick_err.kind {
+                    // Past the last initialized tick, v4-core's step loop goes on through the
+                    // empty range to the price limit, swapping nothing more; a hook that follows
+                    // v4 there then judges the outcome.
+                    TickListErrorKind::TicksExeeded if hook_swaps_from_empty_range => {
+                        (if zero_for_one { MIN_TICK } else { MAX_TICK }, None)
+                    }
                     TickListErrorKind::TicksExeeded => {
                         let new_state = self.clone_post_swap(
                             state.sqrt_price,
@@ -480,10 +496,8 @@ impl UniswapV4State {
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
-                    let liquidity_raw = info.net_liquidity;
-                    let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
-                        liquidity_math::add_liquidity_delta(state.liquidity, liquidity_net)?;
+                        info.liquidity_after_crossing(state.liquidity, zero_for_one)?;
                     gas_used = safe_add_u256(gas_used, U256::from(self.gas_costs.per_tick))?;
                 }
                 state.tick =
@@ -532,13 +546,7 @@ impl UniswapV4State {
         token_in: &Bytes,
         token_out: &Bytes,
     ) -> (BigUint, BigUint) {
-        // Create dummy token objects with proper addresses. This is fine since `get_amount_out`
-        // only uses the token addresses.
-        let token_in_obj =
-            Token::new(token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100);
-        let token_out_obj =
-            Token::new(token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100);
-
+        let (token_in_obj, token_out_obj) = limit_probe_tokens(token_in, token_out);
         self.find_max_amount(&token_in_obj, &token_out_obj)
     }
 
@@ -604,12 +612,18 @@ impl UniswapV4State {
     }
 
     /// The pool's own spot buy price for `base` in units of `quote`: the amount of `quote` one
-    /// `base` costs at the current price, marked up by the pool's swap fee and ignoring any hook.
-    fn core_spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+    /// `base` costs at the current price, marked up by the pool's swap fee at the LP fee
+    /// `lp_fee_override` (`None`: the pool's own) and ignoring any hook fee.
+    fn core_spot_price(
+        &self,
+        base: &Token,
+        quote: &Token,
+        lp_fee_override: Option<u32>,
+    ) -> Result<f64, SimulationError> {
         let base_is_currency0 = base < quote;
         let fee_pips = self
             .fees
-            .calculate_swap_fees_pips(base_is_currency0, None)?;
+            .calculate_swap_fees_pips(base_is_currency0, lp_fee_override)?;
         let fee = fee_pips as f64 / 1_000_000.0;
 
         let price = if base_is_currency0 {
@@ -625,8 +639,7 @@ impl UniswapV4State {
     /// when the pool has no hook, or when its hook does not model its fee analytically and has
     /// to be simulated instead.
     ///
-    /// Fails if the hook would keep the whole output or more, which is not a rate a price can be
-    /// marked up by.
+    /// Fails if the hook's fee or its conversion to `f64` fails.
     fn hook_fee_rate(&self, zero_for_one: bool) -> Result<Option<f64>, SimulationError> {
         let Some(hook) = &self.hook else { return Ok(None) };
 
@@ -635,16 +648,34 @@ impl UniswapV4State {
             return Ok(None);
         };
 
-        let rate = u256_to_f64(fee)? / u256_to_f64(probe)?;
-        if rate >= 1.0 {
-            return Err(SimulationError::FatalError(format!(
-                "Hook {} keeps {rate} of the output, leaving no price to quote",
-                hook.address()
-            )));
-        }
-
-        Ok(Some(rate))
+        Ok(Some(u256_to_f64(fee)? / u256_to_f64(probe)?))
     }
+}
+
+/// The error `get_amount_out` reports for a hook call `stage` (`BeforeSwap`, `CheckSwapOutcome`,
+/// `AfterSwap`) that failed with `error`: a hook's `InvalidInput` refuses this one swap and passes
+/// through, and any other error means the hook cannot be simulated, which is fatal.
+///
+/// The pass-through holds for every hook. A native hook returns `InvalidInput` for an input its
+/// contract reverts on. The generic VM hook returns it only from `coerce_error`
+/// (`vm/utils.rs`) for a call that ran out of gas, which a smaller input can avoid, so a refused
+/// amount does not stop consumers from simulating the pool.
+fn hook_call_error(stage: &str, error: SimulationError) -> SimulationError {
+    match error {
+        SimulationError::InvalidInput(..) => error,
+        e @ (SimulationError::FatalError(_) | SimulationError::RecoverableError(_)) => {
+            SimulationError::FatalError(format!("{stage} hook simulation failed: {e:?}"))
+        }
+    }
+}
+
+/// Tokens carrying only the addresses `get_limits` was given, for quoting a limit through
+/// `get_amount_out`, which reads nothing of a token but its address.
+fn limit_probe_tokens(token_in: &Bytes, token_out: &Bytes) -> (Token, Token) {
+    (
+        Token::new(token_in, "TOKEN_IN", 18, 0, &[Some(10_000)], Default::default(), 100),
+        Token::new(token_out, "TOKEN_OUT", 18, 0, &[Some(10_000)], Default::default(), 100),
+    )
 }
 
 #[typetag::serde]
@@ -686,11 +717,28 @@ impl ProtocolSim for UniswapV4State {
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
         if let Some(hook) = &self.hook {
             // Buying `base` means selling `quote` into the pool, so the hook sees a swap whose
-            // input is `quote` and whose output, the leg it charges, is `base`. A hook that
-            // prices that cut analytically needs no simulation: its price is the pool's own buy
-            // price marked up by the cut.
-            if let Some(rate) = self.hook_fee_rate(quote < base)? {
-                return Ok(add_fee_markup(self.core_spot_price(base, quote)?, rate));
+            // input is `quote` and whose output is `base`. A hook that states the fees of that
+            // swap is priced from them: the pool's buy price at the LP fee the hook sets, marked
+            // up by the hook's own rate. A hook that prices its cut of the output analytically
+            // is priced the same way at the pool's own LP fee.
+            let analytic = match hook.spot_fees(quote < base)? {
+                Some(fees) => Some((
+                    fees.lp_fee_override,
+                    f64::from(fees.hook_fee_pips) / f64::from(FEE_PIPS_DENOMINATOR),
+                )),
+                None => self
+                    .hook_fee_rate(quote < base)?
+                    .map(|rate| (None, rate)),
+            };
+            if let Some((lp_fee_override, rate)) = analytic {
+                if rate >= 1.0 {
+                    return Err(SimulationError::FatalError(format!(
+                        "Hook {} keeps {rate} of the swap, leaving no price to quote",
+                        hook.address()
+                    )));
+                }
+                let core = self.core_spot_price(base, quote, lp_fee_override)?;
+                return Ok(add_fee_markup(core, rate));
             }
 
             match hook.spot_price(base, quote) {
@@ -751,7 +799,7 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
-        self.core_spot_price(base, quote)
+        self.core_spot_price(base, quote, None)
     }
 
     fn get_amount_out(
@@ -807,17 +855,9 @@ impl ProtocolSim for UniswapV4State {
                     hook_data: Bytes::new(),
                 };
 
-                // A hook that refuses this swap, such as one gating trading on a start time,
-                // reports `InvalidInput`; only a failure to simulate the hook is fatal.
                 let before_swap_result = hook
                     .before_swap(before_swap_params, None, None)
-                    .map_err(|e| match e {
-                        SimulationError::InvalidInput(..) => e,
-                        e @ (SimulationError::FatalError(_) |
-                        SimulationError::RecoverableError(_)) => SimulationError::FatalError(
-                            format!("BeforeSwap hook simulation failed: {e:?}"),
-                        ),
-                    })?;
+                    .map_err(|e| hook_call_error("BeforeSwap", e))?;
 
                 before_swap_gas = before_swap_result.gas_estimate;
                 before_swap_delta = before_swap_result.result.amount_delta;
@@ -863,6 +903,17 @@ impl ProtocolSim for UniswapV4State {
         // Perform the swap with potential hook modifications
         let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
 
+        if let Some(hook) = &self.hook {
+            hook.check_swap_outcome(
+                zero_for_one,
+                &SwapOutcome {
+                    sqrt_price_x96: result.sqrt_price,
+                    amount_unfilled: result.amount_remaining.unsigned_abs(),
+                },
+            )
+            .map_err(|e| hook_call_error("CheckSwapOutcome", e))?;
+        }
+
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
 
@@ -883,11 +934,7 @@ impl ProtocolSim for UniswapV4State {
 
                 let after_swap_result = hook
                     .after_swap(after_swap_params, storage_overwrites, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "AfterSwap hook simulation failed: {e:?}"
-                        ))
-                    })?;
+                    .map_err(|e| hook_call_error("AfterSwap", e))?;
                 after_swap_gas = after_swap_result.gas_estimate;
                 // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
                 // returned delta when AFTER_SWAP_RETURNS_DELTA_FLAG is set too. Without that
@@ -946,6 +993,27 @@ impl ProtocolSim for UniswapV4State {
         if let Some(hook) = &self.hook {
             if !hook.swaps_enabled() {
                 return Ok((BigUint::zero(), BigUint::zero()));
+            }
+            // A hook that bounds what settles reports the input; the output is what a swap of
+            // that input returns, so quotes and limits come from one computation.
+            if let Some(max_in) = hook.max_amount_in(self, sell_token < buy_token)? {
+                if max_in.is_zero() {
+                    return Ok((BigUint::zero(), BigUint::zero()));
+                }
+                let max_in = u256_to_biguint(max_in);
+                let (token_in, token_out) = limit_probe_tokens(&sell_token, &buy_token);
+                let max_out = self
+                    .get_amount_out(max_in.clone(), &token_in, &token_out)?
+                    .amount;
+                return Ok((max_in, max_out));
+            }
+            // Such a hook quotes swaps out of an empty range, which the limits derived from the
+            // pool's liquidity below report as zero.
+            if hook.swaps_from_empty_range() {
+                return Err(SimulationError::FatalError(format!(
+                    "hook {} swaps from an empty range but reports no max_amount_in",
+                    hook.address()
+                )));
             }
             // Check if pool has no liquidity & ticks -> hook manages liquidity
             if self.liquidity == 0 && self.has_no_initialized_ticks() {
@@ -1047,12 +1115,9 @@ impl ProtocolSim for UniswapV4State {
             // For zero_for_one, liquidity is removed when crossing a tick
             // For one_for_zero, liquidity is added when crossing a tick
             if let Some(info) = next_tick_info {
-                let liquidity_raw = info.net_liquidity;
-                let liquidity_delta = if zero_for_one { -liquidity_raw } else { liquidity_raw };
-
                 // Check if applying this liquidity delta would cause underflow
                 // If so, stop here rather than continuing with invalid state
-                match liquidity_math::add_liquidity_delta(current_liquidity, liquidity_delta) {
+                match info.liquidity_after_crossing(current_liquidity, zero_for_one) {
                     Ok(new_liquidity) => {
                         current_liquidity = new_liquidity;
                     }
@@ -1178,13 +1243,26 @@ impl ProtocolSim for UniswapV4State {
     /// fees and dynamic LP fees.
     ///
     /// Note: This implementation does not invoke hooks, as it is a query-only operation meant to
-    /// determine available liquidity at a given price without executing an actual swap. It only
-    /// asks the hook whether swaps are enabled, and returns `InvalidInput` when they are not.
+    /// determine available liquidity at a given price without executing an actual swap. It asks
+    /// the hook two things, and returns `InvalidInput` when swaps are not enabled, and when the
+    /// hook answers [`HookHandler::spot_fees`] for the direction: such a hook sets the swap's LP
+    /// fee and charges its own, which the query would leave out. It also fails as `spot_fees`
+    /// fails.
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        let zero_for_one = params.token_in().address < params.token_out().address;
         if let Some(hook) = &self.hook {
             if !hook.swaps_enabled() {
                 return Err(SimulationError::InvalidInput(
                     format!("hook {} does not allow swaps in the execution block", hook.address()),
+                    None,
+                ));
+            }
+            if hook.spot_fees(zero_for_one)?.is_some() {
+                return Err(SimulationError::InvalidInput(
+                    format!(
+                        "hook {} sets the swap's fees, which query_pool_swap does not apply",
+                        hook.address()
+                    ),
                     None,
                 ));
             }
@@ -1194,7 +1272,6 @@ impl ProtocolSim for UniswapV4State {
         }
 
         // Calculate total fee (protocol + LP fee) for V4
-        let zero_for_one = params.token_in().address < params.token_out().address;
         let fee_pips = self
             .fees
             .calculate_swap_fees_pips(zero_for_one, None)?;
@@ -1298,8 +1375,12 @@ mod tests {
                 uniswap_v4::hooks::{
                     angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
                     generic_vm_hook_handler::GenericVMHookHandler,
-                    models::{AfterSwapDelta, AmountRanges, BeforeSwapOutput, WithGasEstimate},
+                    models::{
+                        AfterSwapDelta, AmountRanges, BeforeSwapOutput, HookSpotFees,
+                        WithGasEstimate,
+                    },
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
+                    test_hook::{ExtensionTestHook, SpotFeesAnswer},
                 },
                 utils::uniswap::{
                     lp_fee,
@@ -2250,6 +2331,17 @@ mod tests {
         /// Price the hook answers `spot_price` with. `None` models a hook that leaves the price
         /// to the pool by failing recoverably.
         spot_price_override: Option<u64>,
+        /// How `after_swap` fails, if it does.
+        after_swap_failure: Option<AfterSwapFailure>,
+    }
+
+    /// The two ways a hook's `after_swap` can fail.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AfterSwapFailure {
+        /// The hook refuses the swap's outcome, as a revert would.
+        Refuses,
+        /// The hook cannot be simulated.
+        CannotSimulate,
     }
 
     impl HookHandler for AfterSwapTestHook {
@@ -2272,7 +2364,18 @@ mod tests {
             _: Option<HashMap<Address, HashMap<U256, U256>>>,
             _: Option<HashMap<Address, HashMap<U256, U256>>>,
         ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
-            Ok(WithGasEstimate { gas_estimate: AFTER_SWAP_TEST_HOOK_GAS, result: self.delta })
+            match self.after_swap_failure {
+                Some(AfterSwapFailure::Refuses) => {
+                    Err(SimulationError::InvalidInput("refused by the hook".into(), None))
+                }
+                Some(AfterSwapFailure::CannotSimulate) => {
+                    Err(SimulationError::RecoverableError("the hook did not run".into()))
+                }
+                None => Ok(WithGasEstimate {
+                    gas_estimate: AFTER_SWAP_TEST_HOOK_GAS,
+                    result: self.delta,
+                }),
+            }
         }
 
         fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
@@ -2341,6 +2444,7 @@ mod tests {
             delta: I128::unchecked_from(AFTER_SWAP_TEST_HOOK_DELTA),
             analytic_fee_bps: None,
             spot_price_override: None,
+            after_swap_failure: None,
         })
     }
 
@@ -2354,6 +2458,7 @@ mod tests {
             delta: I128::ZERO,
             analytic_fee_bps: Some(analytic_fee_bps),
             spot_price_override: None,
+            after_swap_failure: None,
         })
     }
 
@@ -2372,6 +2477,7 @@ mod tests {
             delta: I128::ZERO,
             analytic_fee_bps,
             spot_price_override: Some(TEST_HOOK_SPOT_PRICE),
+            after_swap_failure: None,
         })
     }
 
@@ -2436,6 +2542,39 @@ mod tests {
             with_delta.gas,
             hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
         );
+    }
+
+    /// A hook's `after_swap` refusal reaches the caller as `InvalidInput`, as a `before_swap` one
+    /// does; any other `after_swap` failure is fatal.
+    #[rstest]
+    #[case::refusal_passes_through(AfterSwapFailure::Refuses, true)]
+    #[case::other_failure_is_fatal(AfterSwapFailure::CannotSimulate, false)]
+    fn test_after_swap_failure_reaches_the_caller_by_kind(
+        #[case] failure: AfterSwapFailure,
+        #[case] expect_invalid_input: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(AfterSwapTestHook {
+            address: construct_hook_address(&[HookOptions::AfterSwap]),
+            delta: I128::ZERO,
+            analytic_fee_bps: None,
+            spot_price_override: None,
+            after_swap_failure: Some(failure),
+        }));
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if expect_invalid_input => {
+                assert_eq!(msg, "refused by the hook");
+            }
+            Err(SimulationError::FatalError(msg)) if !expect_invalid_input => {
+                assert!(msg.starts_with("AfterSwap hook simulation failed"), "{msg}");
+            }
+            other => panic!("expected the {failure:?} failure, got {other:?}"),
+        }
     }
 
     /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
@@ -2854,6 +2993,234 @@ mod tests {
             .expect_err("a rate of one or more is not a price");
 
         assert!(matches!(error, SimulationError::FatalError(_)), "{error:?}");
+    }
+
+    /// A hook that states its spot fees is priced as the pool's buy price at the LP fee the hook
+    /// sets, marked up by the hook's own rate, and is never asked for a price of its own.
+    #[rstest]
+    #[case::base_is_currency0(true)]
+    #[case::base_is_currency1(false)]
+    fn test_spot_price_marks_up_the_hooks_lp_fee_and_hook_fee(#[case] base_is_currency0: bool) {
+        let (base, quote) = basic_v4_test_pool_tokens(base_is_currency0);
+        let mut hooked = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        hooked.set_hook_handler(Box::new(ExtensionTestHook {
+            spot_fees: SpotFeesAnswer::Fees(HookSpotFees {
+                lp_fee_override: Some(10_000),
+                hook_fee_pips: 20_000,
+            }),
+            ..Default::default()
+        }));
+
+        let core = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .spot_price(&base, &quote)
+            .expect("a hookless pool always prices");
+        let price = hooked
+            .spot_price(&base, &quote)
+            .expect("the hook states its fees");
+
+        let ratio = price / core;
+        assert!(
+            (ratio * 0.99 * 0.98 - 1.0).abs() < 1e-9,
+            "hooked/hookless is {ratio}, not 1/(0.99 * 0.98)"
+        );
+    }
+
+    /// Without an LP fee override the pool's own LP fee stays in the price.
+    #[test]
+    fn test_spot_price_keeps_the_pool_lp_fee_without_an_override() {
+        let mut hooked = create_basic_v4_test_pool();
+        hooked.set_hook_handler(Box::new(ExtensionTestHook {
+            spot_fees: SpotFeesAnswer::Fees(HookSpotFees {
+                lp_fee_override: None,
+                hook_fee_pips: 0,
+            }),
+            ..Default::default()
+        }));
+        let (base, quote) = basic_v4_test_pool_tokens(true);
+
+        let price = hooked
+            .spot_price(&base, &quote)
+            .expect("the hook states its fees");
+
+        assert_eq!(
+            price,
+            create_basic_v4_test_pool()
+                .spot_price(&base, &quote)
+                .expect("a hookless pool always prices")
+        );
+    }
+
+    #[test]
+    fn test_spot_price_rejects_hook_fees_that_take_the_whole_swap() {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            spot_fees: SpotFeesAnswer::Fees(HookSpotFees {
+                lp_fee_override: None,
+                hook_fee_pips: 1_000_000,
+            }),
+            ..Default::default()
+        }));
+
+        let error = pool
+            .spot_price(&token_x(), &token_y())
+            .expect_err("a rate of one is not a price");
+
+        assert!(matches!(error, SimulationError::FatalError(_)), "{error:?}");
+    }
+
+    /// An error from `spot_fees` stops the pool from pricing, and keeps its kind.
+    #[rstest]
+    #[case::refusal(SpotFeesAnswer::Refuses, true)]
+    #[case::failure(SpotFeesAnswer::Fails, false)]
+    fn test_spot_price_reports_the_error_of_spot_fees(
+        #[case] answer: SpotFeesAnswer,
+        #[case] is_invalid_input: bool,
+    ) {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            spot_fees: answer,
+            ..Default::default()
+        }));
+
+        let error = pool
+            .spot_price(&token_x(), &token_y())
+            .expect_err("the hook's error stops the pricing");
+
+        assert_eq!(
+            matches!(error, SimulationError::InvalidInput(..)),
+            is_invalid_input,
+            "{error:?}"
+        );
+    }
+
+    /// `get_limits` reports the input a hook bounds and the output a swap of that input returns.
+    #[test]
+    fn test_get_limits_reports_the_hooks_max_amount_in() {
+        let max_in = U256::from(1_000_000_000_000_000u64);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            max_amount_in: Some(max_in),
+            ..Default::default()
+        }));
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+
+        let limits = pool
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .expect("the hook bounds the limits");
+
+        let quote = pool
+            .get_amount_out(u256_to_biguint(max_in), &token_in, &token_out)
+            .expect("the bounded input swaps");
+        assert_eq!(limits, (u256_to_biguint(max_in), quote.amount));
+    }
+
+    #[test]
+    fn test_get_limits_reports_zero_when_the_hook_allows_no_input() {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            max_amount_in: Some(U256::ZERO),
+            ..Default::default()
+        }));
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+
+        let limits = pool
+            .get_limits(token_in.address, token_out.address)
+            .expect("a zero bound is a limit");
+
+        assert_eq!(limits, (BigUint::zero(), BigUint::zero()));
+    }
+
+    /// `check_swap_outcome` sees the price the swap ended at, and its error refuses the swap.
+    #[rstest]
+    #[case::ends_below_the_floor(U256::MAX, true)]
+    #[case::ends_above_the_floor(U256::ZERO, false)]
+    fn test_get_amount_out_refuses_a_swap_outcome_the_hook_rejects(
+        #[case] floor: U256,
+        #[case] refused: bool,
+    ) {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            refuse_outcome_below: Some(floor),
+            ..Default::default()
+        }));
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if refused => {
+                assert_eq!(msg, "the swap ends below the floor");
+            }
+            Ok(_) if !refused => {}
+            other => panic!("expected refused = {refused}, got {other:?}"),
+        }
+    }
+
+    /// A `check_swap_outcome` error other than `InvalidInput` means the hook cannot be simulated,
+    /// so `get_amount_out` reports it as `FatalError`, as it does for `before_swap` and
+    /// `after_swap`.
+    #[test]
+    fn test_get_amount_out_reports_a_failing_outcome_check_as_fatal() {
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            fail_outcome_check: true,
+            ..Default::default()
+        }));
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        assert!(
+            matches!(&result, Err(SimulationError::FatalError(msg))
+                if msg.starts_with("CheckSwapOutcome hook simulation failed")),
+            "{result:?}"
+        );
+    }
+
+    fn pool_target_price_params() -> QueryPoolSwapParams {
+        QueryPoolSwapParams::new(
+            token_x(),
+            token_y(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(BigUint::from(2_000_000u64), BigUint::from(1_010_000u64)),
+                tolerance: 0f64,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        )
+    }
+
+    /// `query_pool_swap` runs the pool's swap math without the hook, so it refuses a direction
+    /// whose fees the hook sets, and fails as `spot_fees` does.
+    #[rstest]
+    #[case::no_fees(SpotFeesAnswer::NoFees, "ok")]
+    #[case::fees(
+        SpotFeesAnswer::Fees(HookSpotFees { lp_fee_override: Some(500), hook_fee_pips: 100 }),
+        "invalid_input"
+    )]
+    #[case::refusal(SpotFeesAnswer::Refuses, "invalid_input")]
+    #[case::failure(SpotFeesAnswer::Fails, "fatal")]
+    fn test_query_pool_swap_declines_a_direction_whose_fees_the_hook_sets(
+        #[case] answer: SpotFeesAnswer,
+        #[case] expected: &str,
+    ) {
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            spot_fees: answer,
+            ..Default::default()
+        }));
+
+        let result = pool.query_pool_swap(&pool_target_price_params());
+
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(SimulationError::InvalidInput(..)) => "invalid_input",
+            Err(SimulationError::FatalError(_)) => "fatal",
+            Err(_) => "other",
+        };
+        assert_eq!(outcome, expected, "{result:?}");
     }
 
     #[test]
@@ -3323,6 +3690,167 @@ mod tests {
         assert_ne!(result.sqrt_price, get_sqrt_ratio_at_tick(-120).unwrap());
         assert_ne!(expected_tick, pool.tick.value());
         assert_eq!(result.tick.value(), expected_tick);
+    }
+
+    /// A pool priced at the upper edge of its only position: liquidity 0, tick 0, position
+    /// [-600, 0) of L = 1e18.
+    fn empty_range_pool() -> UniswapV4State {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        UniswapV4State::new(
+            0,
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            0,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// Without a hook that opts in, a pool with no active liquidity refuses to swap and reports
+    /// no limits, even with liquidity ahead: quotes and limits give the same answer.
+    #[test]
+    fn test_a_pool_without_active_liquidity_refuses_and_reports_no_limits() {
+        let pool = empty_range_pool();
+
+        let quote =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y());
+        assert!(
+            matches!(&quote, Err(SimulationError::RecoverableError(msg)) if msg == "No liquidity"),
+            "{quote:?}"
+        );
+        let limits = pool
+            .get_limits(token_x().address, token_y().address)
+            .expect("limits");
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    /// The state v4 leaves after crossing tick 0 downwards (tick -1, the position active) swaps
+    /// into the position. Expected by hand at sqrtP = 2^96, L = 1e18, fee 0.3%:
+    /// `less = 997e12`, `sqrtP' = ceil(L * 2^96 / (L + less))`,
+    /// `out = floor(L * (2^96 - sqrtP') / 2^96)`.
+    #[test]
+    fn test_swap_from_the_upper_edge_inside_the_position() {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+
+        let out = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y())
+            .expect("the swap reaches the position");
+
+        assert_eq!(out.amount, BigUint::from(996_006_981_039_903u64));
+        let new_state = out
+            .new_state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        assert_eq!(new_state.liquidity, 1_000_000_000_000_000_000u128);
+        assert_eq!(new_state.sqrt_price, U256::from_str("79149250711305166342700278159").unwrap());
+    }
+
+    /// A hook that opts into swaps from an empty range but states no `max_amount_in` leaves
+    /// `get_limits` with nothing but liquidity-derived limits, which are zero there: it refuses.
+    #[test]
+    fn test_get_limits_refuses_empty_range_swaps_without_max_amount_in() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            ..Default::default()
+        }));
+
+        let limits = pool.get_limits(token_in.address, token_out.address);
+
+        assert!(
+            matches!(&limits, Err(SimulationError::FatalError(m)) if m.contains("no max_amount_in")),
+            "{limits:?}"
+        );
+    }
+
+    /// A hook that opts in lets a swap start with no active liquidity: it crosses the tick at the
+    /// price and fills in the position behind it, as the state after crossing it would.
+    #[test]
+    fn test_swap_from_an_empty_range_fills_in_the_liquidity_ahead_for_an_opted_in_hook() {
+        let mut pool = empty_range_pool();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            ..Default::default()
+        }));
+
+        let out = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_x(), &token_y())
+            .expect("the opted-in hook swaps from the empty range");
+
+        assert_eq!(out.amount, BigUint::from(996_006_981_039_903u64));
+    }
+
+    /// An opted-in hook also lets a swap run past the last initialized tick to the price limit.
+    /// The input left over reaches `check_swap_outcome` as unfilled, and the hook decides.
+    #[rstest]
+    #[case::hook_accepts_the_leftover(false)]
+    #[case::hook_refuses_the_leftover(true)]
+    fn test_swap_past_the_last_tick_reports_the_unfilled_input(#[case] refuse_unfilled: bool) {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let mut pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            swaps_from_empty_range: true,
+            refuse_unfilled_input: refuse_unfilled,
+            ..Default::default()
+        }));
+        // The position holds about 0.03 of token Y, so this input cannot fill.
+        let amount_in = BigUint::from(1_000_000_000_000_000_000u64);
+
+        let result = pool.get_amount_out(amount_in, &token_x(), &token_y());
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if refuse_unfilled => {
+                assert_eq!(msg, "part of the input is unfilled");
+            }
+            Ok(out) if !refuse_unfilled => assert!(out.amount > BigUint::zero()),
+            other => panic!("expected refuse_unfilled = {refuse_unfilled}, got {other:?}"),
+        }
+    }
+
+    /// Without the opt-in, a swap that runs past the last initialized tick is refused, as before.
+    #[test]
+    fn test_swap_past_the_last_tick_without_the_opt_in_is_refused() {
+        let liquidity = 1_000_000_000_000_000_000i128;
+        let pool = UniswapV4State::new(
+            liquidity.cast_unsigned(),
+            U256::from(1u64) << 96,
+            UniswapV4Fees::new(0, 0, 3_000),
+            -1,
+            60,
+            vec![TickInfo::new(-600, liquidity).unwrap(), TickInfo::new(0, -liquidity).unwrap()],
+        )
+        .unwrap();
+
+        let result = pool.get_amount_out(
+            BigUint::from(1_000_000_000_000_000_000u64),
+            &token_x(),
+            &token_y(),
+        );
+
+        assert!(
+            matches!(&result, Err(SimulationError::InvalidInput(m, _)) if m == "Ticks exceeded"),
+            "{result:?}"
+        );
     }
 
     #[test]
