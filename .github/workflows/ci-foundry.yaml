@@ -93,11 +93,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow, project-scoped)
-        run: |
-          git config --file .gitmodules --get-regexp path \
-            | awk '{print $2}' \
-            | grep "^${{ matrix.project.path }}/" \
-            | xargs -r git submodule update --init --depth 1 --recursive --
+        run: git -c submodule.fetchJobs=0 submodule update --init --depth 1 --recursive -- .
 
       - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
@@ -112,8 +108,53 @@ jobs:
         if: matrix.project.path == 'crates/tycho-execution/contracts'
         run: forge lint --report-unused-suppressions --deny notes
 
+      # Forge recompiles whatever differs from the restored entry, whichever
+      # commit or forge version saved it.
+      - name: Restore build cache
+        id: build-cache-restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ matrix.project.path }}/out
+            ${{ matrix.project.path }}/cache
+          key: forge-build-${{ matrix.project.path }}-${{ github.sha }}
+          restore-keys: forge-build-${{ matrix.project.path }}-
+
+      - name: Build
+        run: forge build --no-lint
+
+      # Only pushes to main save, so PR code cannot plant entries. Saved before
+      # the tests, so a failing test keeps the artifacts.
+      - name: Save build cache
+        if: github.event_name == 'push' && steps.build-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ matrix.project.path }}/out
+            ${{ matrix.project.path }}/cache
+          key: ${{ steps.build-cache-restore.outputs.cache-primary-key }}
+
+      # Fork state at a pinned block never changes, so no entry goes stale.
+      - name: Restore RPC cache
+        id: rpc-cache-restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.foundry/cache/rpc
+          key: foundry-rpc-${{ matrix.project.path }}-${{ github.sha }}
+          restore-keys: foundry-rpc-${{ matrix.project.path }}-
+
       - name: Run tests
         run: forge test -vvv
+
+      # Failed tests still fetched valid state.
+      - name: Save RPC cache
+        if: >-
+          ${{ !cancelled() && github.event_name == 'push' &&
+          steps.rpc-cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.foundry/cache/rpc
+          key: ${{ steps.rpc-cache-restore.outputs.cache-primary-key }}
 
       - name: Gas snapshot
         run: NO_COLOR=1 forge snapshot >> "$GITHUB_STEP_SUMMARY"
@@ -161,11 +202,7 @@ jobs:
           fetch-depth: 1
           submodules: false
       - name: Checkout submodules (shallow)
-        run: |
-          git config --file .gitmodules --get-regexp path \
-            | awk '{print $2}' \
-            | grep "^crates/tycho-execution/contracts/" \
-            | xargs -r git submodule update --init --depth 1 --recursive --
+        run: git -c submodule.fetchJobs=0 submodule update --init --depth 1 --recursive -- crates/tycho-execution/contracts
 
       - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
         with:
