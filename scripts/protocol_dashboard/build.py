@@ -61,8 +61,12 @@ EXECUTOR_FAMILIES = {
 }
 BIN_POOL_MANAGER_CHAINS = {"base", "bsc"}  # SwapEncoderRegistry::has_bin_pool_manager
 # RFQ venues and pAMM book feeds quote off-chain, so no indexer serves them: an executor for the
-# chain on main means they are live in dev and prod.
+# chain on main means they are live in dev and prod, once the venue's code is on main. pAMM
+# venues on main don't share a prefix (`baibai`), so MainRepo.load collects every PROTOCOL_SYSTEM
+# under the simulation's pamm/ and rfq/ protocol directories: the venues whose code is on main.
 OFFCHAIN_PREFIXES = ("rfq:", "pamm:", "propamm:")
+OFFCHAIN_SYSTEMS: set[str] = set()
+VENUE_DIRS = ("crates/tycho-simulation/src/pamm/protocols", "crates/tycho-simulation/src/rfq/protocols")
 # Other executor entries that no indexer serves: fallbacks and helpers. The indexers can't say
 # whether these are live, so they get no untracked card and tracked ones show "can't tell".
 NOT_INDEXED_PREFIXES = ("fallback", "pricelevelstream")
@@ -246,6 +250,10 @@ class MainRepo:
                 chain = manifest_chain(m.group(1))
                 repo.tests.append((chain, text))
                 repo.test_systems.setdefault(chain, set()).update(declared.findall(text))
+        constant = re.compile(r'^pub const PROTOCOL_SYSTEM: &str = "([^"]+)";', re.M)
+        for venue_dir in VENUE_DIRS:
+            for path in (root / venue_dir).rglob("*.rs"):
+                OFFCHAIN_SYSTEMS.update(constant.findall(path.read_text(errors="replace")))
         return repo
 
     def executor_key(self, chain: str, system: str) -> str:
@@ -391,7 +399,7 @@ class Indexers:
 
 
 def is_offchain(system: str) -> bool:
-    return system.startswith(OFFCHAIN_PREFIXES)
+    return system.startswith(OFFCHAIN_PREFIXES) or system in OFFCHAIN_SYSTEMS
 
 
 def is_indexed(system: str) -> bool:
@@ -466,9 +474,10 @@ def build_cards(items: list[dict], repo: MainRepo, indexers: Indexers | None) ->
         }
         for env, name in (("dev", "In Dev"), ("prod", "In Prod")):
             if is_offchain(system):
-                # Live once its code is merged and the chain has its executor. Some off-chain
+                # Live once its code is on main and the chain has its executor. Some off-chain
                 # venues reuse an existing executor (rfq:aqua0), so the executor alone isn't enough.
-                checks[name] = executor is not None and checks["Merged"]
+                on_main = checks["Merged"] or system in OFFCHAIN_SYSTEMS
+                checks[name] = executor is not None and on_main
             elif indexers is None or not is_indexed(system):
                 checks[name] = None  # not checked, or not something an indexer serves
             elif hook:

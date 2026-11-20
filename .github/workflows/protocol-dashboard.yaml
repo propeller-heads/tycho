@@ -38,6 +38,8 @@ jobs:
           path: main
           sparse-checkout: |
             crates/tycho-execution/config
+            crates/tycho-simulation/src/pamm/protocols
+            crates/tycho-simulation/src/rfq/protocols
             protocols/substreams
 
       # The default GITHUB_TOKEN can't read organization projects.
