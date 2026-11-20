@@ -18,12 +18,14 @@ contract RuntimeBytecodeFixturesExecutionTest is Test {
         _assertSelfCallReachesPoolManager("UniswapV4", false);
         _assertSelfCallReachesPoolManager("UniswapV4Angstrom", false);
         _assertSelfCallReachesPoolManager("UniswapV4Robinhood", false);
+        _assertSelfCallReachesPoolManager("UniswapV4Elysium", false);
     }
 
     function testUniswapV4FixturesExecuteWithoutUnlock() public {
         _assertSelfCallReachesPoolManager("UniswapV4", true);
         _assertSelfCallReachesPoolManager("UniswapV4Angstrom", true);
         _assertSelfCallReachesPoolManager("UniswapV4Robinhood", true);
+        _assertSelfCallReachesPoolManager("UniswapV4Elysium", true);
     }
 
     function _assertSelfCallReachesPoolManager(

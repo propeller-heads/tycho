@@ -1,0 +1,160 @@
+specVersion: v0.1.0
+package:
+  name: "elysium_uniswap_v4_with_hooks"
+  version: v0.9.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-uniswap-v4/with-hooks"
+
+protobuf:
+  files:
+    - tycho/evm/v1/entity.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - uniswap.proto
+  importPaths:
+    - ../../../../proto
+    - ../shared/proto
+  excludePaths:
+    - sf/substreams
+    - google
+    - tycho
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v4_with_hooks.wasm
+
+# The shared Uniswap V4 module graph with pool creation limited to the Montra hooks in
+# `montra_hooks` (map_montra_pools_created), a store that maps each watched hook slot to its pool
+# (store_montra_slots), and a terminal module that decodes the hook's per-pool state
+# (map_montra_enriched_block_changes). See Readme.md, "Montra on Elysium".
+# initialBlock 588510 is the block the Montra LaunchHook 0x6b1216a4... was deployed in. The
+# PoolManager is older (256083), but this manifest creates only pools of the listed hook, and no
+# such pool can be initialized before the hook has code, so the blocks before 588510 hold none.
+modules:
+  - name: map_montra_pools_created
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockEntityChanges
+
+  - name: store_pools
+    kind: store
+    initialBlock: 588510
+    updatePolicy: set_if_not_exists
+    valueType: proto:uniswap.v4.Pool
+    inputs:
+      - map: map_montra_pools_created
+
+  - name: store_montra_slots
+    kind: store
+    initialBlock: 588510
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_montra_pools_created
+
+  - name: map_events
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_pools
+    output:
+      type: proto:uniswap.v4.Events
+
+  - name: store_pool_current_tick
+    kind: store
+    initialBlock: 588510
+    updatePolicy: set
+    valueType: int64
+    inputs:
+      - map: map_events
+
+  - name: store_pool_current_sqrt_price
+    kind: store
+    initialBlock: 588510
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - map: map_events
+
+  - name: map_balance_changes
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - map: map_events
+      - store: store_pool_current_sqrt_price
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_pools_balances
+    kind: store
+    initialBlock: 588510
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_changes
+
+  - name: map_ticks_changes
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - map: map_events
+    output:
+      type: proto:uniswap.v4.TickDeltas
+
+  - name: store_ticks_liquidity
+    kind: store
+    initialBlock: 588510
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_ticks_changes
+
+  - name: map_liquidity_changes
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - map: map_events
+      - store: store_pool_current_tick
+    output:
+      type: proto:uniswap.v4.LiquidityChanges
+
+  - name: store_liquidity
+    kind: store
+    initialBlock: 588510
+    updatePolicy: set_sum
+    valueType: bigint
+    inputs:
+      - map: map_liquidity_changes
+
+  - name: map_montra_enriched_block_changes
+    kind: map
+    initialBlock: 588510
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_montra_pools_created
+      - map: map_events
+      - map: map_balance_changes
+      - store: store_pools_balances
+        mode: deltas
+      - map: map_ticks_changes
+      - store: store_ticks_liquidity
+        mode: deltas
+      - map: map_liquidity_changes
+      - store: store_liquidity
+        mode: deltas
+      - store: store_montra_slots
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  # The Elysium Uniswap V4 PoolManager, and the Montra LaunchHook: the only hook the
+  # LaunchpadRegistry lists (hooks() at block 6002000). map_montra_pools_created creates no pool
+  # of a hook this list omits. Readme.md ("Upgrade boundary") says what to check before adding one.
+  map_montra_pools_created: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+  map_montra_enriched_block_changes: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec"

@@ -21,6 +21,9 @@ use crate::{
                     angstrom::hook_handler_creator::AngstromHookCreator,
                     generic_vm_hook_handler::GenericVMHookHandler,
                     hook_handler::HookHandler,
+                    montra::{
+                        hook_handler::MONTRA_HOOK_ELYSIUM, hook_handler_creator::MontraHookCreator,
+                    },
                     pancakeswap_clalpha::{
                         hook_handler::CLALPHA_HOOKS_BSC,
                         hook_handler_creator::PancakeswapClAlphaHookCreator,
@@ -222,6 +225,10 @@ pub fn initialize_hook_handlers() -> Result<(), SimulationError> {
         register_hook_handler(Chain::Bsc, hook, Box::new(PancakeswapClAlphaHookCreator))?;
     }
 
+    // Montra's LaunchHook is deployed on Elysium alone, and only the Elysium manifest of the
+    // with-hooks package emits the `montra_*` attributes its creator reads.
+    register_hook_handler(Chain::Elysium, MONTRA_HOOK_ELYSIUM, Box::new(MontraHookCreator))?;
+
     Ok(())
 }
 
@@ -275,19 +282,16 @@ pub fn instantiate_hook_handler(
     )))
 }
 
+/// Test fixtures shared by the hook creators' tests.
 #[cfg(test)]
-mod tests {
-    use alloy::primitives::address;
-    use rstest::rstest;
-
+pub(super) mod test_fixtures {
     use super::*;
     use crate::evm::protocol::uniswap_v4::state::UniswapV4Fees;
 
     /// Owns the collections a [`HookCreationParams`] borrows, so a test can build params for an
-    /// arbitrary hook address with no attributes set. Every creator then fails on the first
-    /// attribute it needs, which identifies the creator that ran.
+    /// arbitrary hook address with only the attributes it sets, on a bare pool state.
     #[derive(Default)]
-    struct BareSnapshot {
+    pub struct BareSnapshot {
         account_balances: HashMap<Bytes, HashMap<Bytes, Bytes>>,
         all_tokens: HashMap<Bytes, Token>,
         attributes: HashMap<String, Bytes>,
@@ -295,7 +299,14 @@ mod tests {
     }
 
     impl BareSnapshot {
-        fn params(&self, hook: Address) -> HookCreationParams<'_> {
+        /// A snapshot carrying `attributes` and nothing else.
+        pub fn with_attributes(attributes: HashMap<String, Bytes>) -> Self {
+            Self { attributes, ..Default::default() }
+        }
+
+        /// Creation params for `hook` over this snapshot, on a pool state with no liquidity and
+        /// no block timestamp.
+        pub fn params(&self, hook: Address) -> HookCreationParams<'_> {
             let state = UniswapV4State::new(
                 0,
                 U256::from(1),
@@ -316,8 +327,17 @@ mod tests {
             )
         }
     }
+}
 
-    /// A creator whose only job is to be recognisable in the error it returns.
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::address;
+    use rstest::rstest;
+
+    use super::{test_fixtures::BareSnapshot, *};
+
+    /// A creator that always fails with `ValueError("test creator")`, so the error names it as
+    /// the creator that ran.
     struct TestHookCreator;
 
     impl HookHandlerCreator for TestHookCreator {
