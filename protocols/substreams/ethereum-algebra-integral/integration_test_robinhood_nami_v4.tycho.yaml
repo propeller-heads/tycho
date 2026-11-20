@@ -1,0 +1,36 @@
+substreams_yaml_path: ./robinhood-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
+  # 0x8788deCB…ba97. Both still hold at the stop block: simulation does not quote an adaptive
+  # fee, so the component is indexed and checked but not simulated.
+  - name: test_weth_usdg_pool_with_adaptive_fee
+    start_block: 86166359
+    stop_block: 87922688
+    expected_components:
+      - id: "0xa730c5d09dd9926f798530d52e572d7594b952f3"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes: {}
+        creation_tx: "0x624ca7d5a1f20e9be93425489b09139d9359bf68e8e3be8476e725a75595f2ea"
+        skip_simulation: true
+        skip_execution: true
+  # The last pool created before the beacon is upgraded to implementation 0x1a2898f7…6874 at
+  # block 100790474. Its fee is made flat before that, so it is quoted at the stop block.
+  - name: test_usdg_crcl_pool_after_flat_fee_and_beacon_upgrade
+    start_block: 97919351
+    stop_block: 100790600
+    expected_components:
+      - id: "0x449cb99b17cc8747887d85fff6fce60e39166fb6"
+        tokens:
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+          - "0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5" # CRCL
+        static_attributes: {}
+        creation_tx: "0x96918a0c01822cf423875d80a23e8094aae94c3cfff8cf83d1213a5cb7ba6e62"
+        skip_simulation: false

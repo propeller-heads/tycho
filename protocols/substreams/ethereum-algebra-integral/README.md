@@ -3,9 +3,21 @@
 Shared indexing for DEXs built on Algebra Integral. One package serves every such DEX: each gets a
 manifest per chain and keeps its own protocol system (`nami_v4`, ...).
 
-This package currently holds the plugin part only: the functions under `src/plugin/` and their
-tests. The pool modules and the manifests arrive with the first DEX that moves onto it, and the
-sections below say what those modules have to do with these functions.
+Deployments:
+
+| DEX | Protocol system | Manifests |
+|---|---|---|
+| Nami V4 | `nami_v4` | `ethereum-nami-v4.yaml`, `base-nami-v4.yaml`, `robinhood-nami-v4.yaml` |
+
+A manifest sets two params. `map_pools_created` takes `factory` (the DEX's Algebra factory) and
+`protocol_type_name` (the pools' protocol type, such as `nami_v4_pool`). `map_protocol_changes`
+takes `modules` (see below) and `dci`, which is `true` only on a chain whose indexer runs the
+Dynamic Contract Indexer: the package then registers each plugin's `beforeSwap` as an entrypoint
+and emits the block's storage changes, so a plugin with no native handler can be simulated in the
+VM.
+
+Only pools the factory's `Pool` event names are indexed. An Algebra factory announces the pools
+of custom deployers with `CustomPool`, which the package does not read: Nami creates none.
 
 ## How a pool's fee is found
 
@@ -147,6 +159,13 @@ The pool modules resolve `modules` once and then, per transaction:
    (`setBeacon` on Nami's plugins). `plugin_beacon` on that transaction gives the new beacon and
    implementation; move the pool to that beacon and update `plugin_impl`.
 
+`map_protocol_changes` (`src/modules/6_map_protocol_changes.rs`) implements these five cases.
+Two stores carry the beacon links (`src/modules/5_store_plugin_beacons.rs`):
+`store_plugin_beacons` holds the beacon each plugin is bound to, and `store_beacon_pools` lists
+the pools per beacon, spread over 256 keys because a store value is bounded. A pool stays listed
+after its plugin moves to another beacon, so an upgrade is applied only to pools whose plugin is
+still bound to the upgraded beacon.
+
 ## What simulation does with the attributes
 
 | Situation | Chains with the VM fallback (Ethereum) | Other chains |
@@ -234,9 +253,10 @@ Tests an adopter ships:
 
 | Dependency | Followed how | What breaks |
 |---|---|---|
-| Plugin implementation behind a beacon | `beacon_upgrades` reports `Upgraded` logs; the pool modules have to update `plugin_impl` on every pool under that beacon | simulation rejects an implementation it has no registry entry for, so the pools stop being quoted until one is added |
+| Plugin implementation behind a beacon | the beacon's `Upgraded` logs update `plugin_impl` on every pool whose plugin is bound to it | simulation rejects an implementation it has no registry entry for, so the pools stop being quoted until one is added |
 | Module storage layout | fixed in `src/plugin/modules/` | a new implementation that moves a module's slots or repacks a word needs a new table entry, a new spkg and a resync; until then the old attributes go stale |
 | The beacon a plugin is bound to | the plugin's later `BeaconUpgraded` logs, read with `plugin_beacon` | as for a beacon upgrade |
 | A pool's plugin address | the pool's `Plugin` event | a plugin created before the transaction that names it pauses the pool |
+| Nami's fee source contracts | not indexed: simulation ports them and looks them up by the address in `fee_override/source` | a new source contract needs a simulation entry before a pool is pointed at it |
 
 A DEX opens the registry PR for a new implementation before it upgrades its beacon.

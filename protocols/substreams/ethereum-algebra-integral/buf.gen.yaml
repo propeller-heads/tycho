@@ -1,0 +1,14 @@
+
+version: v1
+plugins:
+- plugin: buf.build/community/neoeinstein-prost:v0.5.0
+  out: src/pb
+  opt:
+    - file_descriptor_set=false
+    # Reuse the tycho_substreams crate's generated types instead of emitting our own copy.
+    - extern_path=.tycho.evm.v1=::tycho_substreams::prelude
+
+- plugin: buf.build/community/neoeinstein-prost-crate:v0.5.0
+  out: src/pb
+  opt:
+    - no_features

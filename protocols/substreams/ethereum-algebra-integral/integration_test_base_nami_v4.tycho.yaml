@@ -1,0 +1,36 @@
+substreams_yaml_path: ./base-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
+  # 0x0c534dD0…05D1. Both still hold at the stop block: simulation does not quote an adaptive
+  # fee, so the component is indexed and checked but not simulated.
+  - name: test_weth_usdc_pool_with_adaptive_fee
+    start_block: 52483471
+    stop_block: 52573274
+    expected_components:
+      - id: "0x0e8af367dba0c9cb4674d38539ef3465a25a7237"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+        static_attributes: {}
+        creation_tx: "0xea2187c16033f3119597c4d3c9b7e26220013b2884b62b9d1f2504c33f234d9d"
+        skip_simulation: true
+        skip_execution: true
+  # The same pool past two changes: its fee is made flat at block 52987571 and its beacon is
+  # upgraded to implementation 0xd1dfA0…a642 at block 53237911, after which it is quoted.
+  - name: test_weth_usdc_pool_after_flat_fee_and_beacon_upgrade
+    start_block: 52483471
+    stop_block: 53238000
+    expected_components:
+      - id: "0x0e8af367dba0c9cb4674d38539ef3465a25a7237"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+        static_attributes: {}
+        creation_tx: "0xea2187c16033f3119597c4d3c9b7e26220013b2884b62b9d1f2504c33f234d9d"
+        skip_simulation: false

@@ -1,0 +1,24 @@
+[
+  {
+    "type": "event",
+    "name": "Pool",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "token0",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "token1",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "pool",
+        "type": "address",
+        "indexed": false
+      }
+    ]
+  }
+]

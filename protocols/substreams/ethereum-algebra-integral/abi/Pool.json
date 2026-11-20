@@ -1,0 +1,272 @@
+[
+  {
+    "type": "event",
+    "name": "Initialize",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "price",
+        "type": "uint160",
+        "indexed": false
+      },
+      {
+        "name": "tick",
+        "type": "int24",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Mint",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "bottomTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "topTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "liquidityAmount",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "amount0",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Burn",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "bottomTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "topTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "liquidityAmount",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "amount0",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Collect",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "bottomTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "topTick",
+        "type": "int24",
+        "indexed": true
+      },
+      {
+        "name": "amount0",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "uint128",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Swap",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "amount0",
+        "type": "int256",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "int256",
+        "indexed": false
+      },
+      {
+        "name": "price",
+        "type": "uint160",
+        "indexed": false
+      },
+      {
+        "name": "liquidity",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "tick",
+        "type": "int24",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Flash",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "amount0",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "paid0",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "paid1",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Skim",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "amount0",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "amount1",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Fee",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "fee",
+        "type": "uint16",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Plugin",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "newPluginAddress",
+        "type": "address",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PluginConfig",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "newPluginConfig",
+        "type": "uint8",
+        "indexed": false
+      }
+    ]
+  }
+]

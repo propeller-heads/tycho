@@ -24,6 +24,7 @@ use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::{
     evm::{
         protocol::{
+            algebra_integral::plugin::deployments::initialize_plugin_handlers,
             u256_num::bytes_to_u256,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
@@ -96,6 +97,9 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
+        ("ethereum-nami-v4", "ethereum-algebra-integral"),
+        ("base-nami-v4", "ethereum-algebra-integral"),
+        ("robinhood-nami-v4", "ethereum-algebra-integral"),
     ])
 });
 
@@ -1135,6 +1139,7 @@ impl TestRunner {
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;
+        initialize_plugin_handlers().into_diagnostic()?;
 
         let state_msgs: HashMap<String, StateSyncMessage<BlockHeader>> = HashMap::from([(
             String::from(protocol_system),
