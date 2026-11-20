@@ -53,8 +53,10 @@ for any protocol indexed by Tycho.
     `initialize_plugin_handlers` registers them when a stream is built. A native handler is a
     `ComposedPlugin` of fee, gate and gas modules. `plugin/modules/<vendor>/<module>.rs` decodes
     the `<module>/<field>` attributes that the file of the same path in
-    `protocols/substreams/ethereum-algebra-integral` emits; an attribute a plugin never wrote is
-    absent, and Nami's modules read it as zero. The state keeps the plugin's implementation and
+    `protocols/substreams/ethereum-algebra-integral` emits; every field is emitted
+    when a pool names its plugin, so modules read with `field_bytes` and never default a missing
+    one. `quote` takes the storage overrides the pool state keeps (earlier swaps' writes,
+    pending-block state), which only a VM handler uses. The state keeps the plugin's implementation and
     module attributes and rebuilds the handler when a delta changes them: a plugin it cannot
     reproduce fails a snapshot decode, and after a delta stops the pool's quotes without failing
     the delta. Its serialized form holds those attributes, so deserializing needs the handlers

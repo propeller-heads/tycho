@@ -19,7 +19,7 @@ use tycho_common::{
 use crate::{
     evm::protocol::algebra_integral::plugin::{
         composed::{FeeModule, GasModule},
-        modules::{algebra::dynamic_fee::DynamicFee, field_or_zero, nami::fee_source::FeeSource},
+        modules::{algebra::dynamic_fee::DynamicFee, field_bytes, nami::fee_source::FeeSource},
         PluginFees,
     },
     protocol::errors::InvalidSnapshotError,
@@ -96,28 +96,31 @@ pub struct FeeOverride {
 impl FeeOverride {
     /// Reads the `dynamic_fee/*` and `fee_override/*` attributes.
     ///
-    /// A `fee_override/*` attribute that is absent reads as zero, because none is emitted for
-    /// storage the plugin never wrote. `sources` names the fee source contracts of the plugin's
-    /// chain that can be reproduced.
+    /// `sources` names the fee source contracts of the plugin's chain that can be reproduced.
     ///
-    /// Fails when the dynamic fee does not decode, when an attribute has the wrong width, and
-    /// when a source is enabled that is not in `sources`.
+    /// Fails when the dynamic fee does not decode, when an attribute is missing or has the wrong
+    /// width, and when a source is enabled that is not in `sources`.
     pub fn from_attributes(
         attributes: &HashMap<String, Bytes>,
         sources: &[(Address, FeeSource)],
     ) -> Result<Self, InvalidSnapshotError> {
         let base = DynamicFee::from_attributes(attributes)?;
         let u16_field = |name: &str| -> Result<u16, InvalidSnapshotError> {
-            Ok(u16::from_be_bytes(field_or_zero(attributes, name)?))
+            Ok(u16::from_be_bytes(field_bytes(attributes, name)?))
         };
 
         let mut expires_at = [0u8; 8];
-        expires_at[3..]
-            .copy_from_slice(&field_or_zero::<5>(attributes, "fee_override/expires_at")?);
+        expires_at[3..].copy_from_slice(&field_bytes::<5>(attributes, "fee_override/expires_at")?);
 
-        let source_enabled = field_or_zero::<1>(attributes, "fee_override/source_enabled")? != [0];
+        // Every field is read, whether or not the source is enabled: each is emitted when the
+        // pool names its plugin, so a missing one means the pool is not fully indexed.
+        let source_enabled = field_bytes::<1>(attributes, "fee_override/source_enabled")? != [0];
+        let address = Address::from(field_bytes::<20>(attributes, "fee_override/source")?);
+        let mut fees = [0u16; MAX_SEGMENTS];
+        for (id, fee) in fees.iter_mut().enumerate() {
+            *fee = u16_field(&format!("fee_override/segment_fee/{id}"))?;
+        }
         let segments = if source_enabled {
-            let address = Address::from(field_or_zero::<20>(attributes, "fee_override/source")?);
             let mut known = None;
             for (candidate, source) in sources {
                 if *candidate == address {
@@ -129,10 +132,6 @@ impl FeeOverride {
                     "unsupported fee source {address}: its segments cannot be reproduced"
                 )));
             };
-            let mut fees = [0u16; MAX_SEGMENTS];
-            for (id, fee) in fees.iter_mut().enumerate() {
-                *fee = u16_field(&format!("fee_override/segment_fee/{id}"))?;
-            }
             Some(SegmentFees { source, fees })
         } else {
             None
@@ -144,10 +143,7 @@ impl FeeOverride {
             cap: u16_field("fee_override/cap")?,
             premium_zero_for_one: u16_field("fee_override/premium_zero_for_one")?,
             premium_one_for_zero: u16_field("fee_override/premium_one_for_zero")?,
-            decay_window: u32::from_be_bytes(field_or_zero(
-                attributes,
-                "fee_override/decay_window",
-            )?),
+            decay_window: u32::from_be_bytes(field_bytes(attributes, "fee_override/decay_window")?),
             fee_zero_for_one: u16_field("fee_override/fee_zero_for_one")?,
             fee_one_for_zero: u16_field("fee_override/fee_one_for_zero")?,
             expires_at: u64::from_be_bytes(expires_at),
@@ -312,9 +308,12 @@ mod tests {
             set("fee_override/expires_at", &self.expires_at.to_be_bytes()[3..]);
             set("fee_override/max_discount_bps", &self.max_discount_bps.to_be_bytes());
             set("fee_override/source_enabled", &[u8::from(self.source.is_some())]);
-            if let Some(source) = self.source {
-                set("fee_override/source", source.as_slice());
-            }
+            set(
+                "fee_override/source",
+                self.source
+                    .unwrap_or_default()
+                    .as_slice(),
+            );
             for (id, fee) in self.segment_fees.iter().enumerate() {
                 set(&format!("fee_override/segment_fee/{id}"), &fee.to_be_bytes());
             }
@@ -400,12 +399,11 @@ mod tests {
     }
 
     #[test]
-    fn plugin_that_never_wrote_its_storage_charges_the_base_fee() {
-        let mut attributes = Config { base: 500, ..Default::default() }.attributes();
-        attributes.retain(|name, _| name.starts_with("dynamic_fee/"));
+    fn plugin_with_untouched_storage_charges_the_base_fee() {
+        let attributes = Config { base: 500, ..Default::default() }.attributes();
 
         let module = FeeOverride::from_attributes(&attributes, &SOURCES)
-            .expect("absent fee override attributes should decode");
+            .expect("an all-zero fee override should decode");
 
         assert_eq!(
             module
@@ -418,6 +416,20 @@ mod tests {
                 .fee(false, SESSION)
                 .expect("a fee"),
             500
+        );
+    }
+
+    #[test]
+    fn missing_field_is_rejected() {
+        let mut attributes = Config { base: 500, ..Default::default() }.attributes();
+        attributes.remove("fee_override/segment_fee/15");
+
+        let error = FeeOverride::from_attributes(&attributes, &SOURCES)
+            .expect_err("every field should be required");
+
+        assert!(
+            matches!(&error, InvalidSnapshotError::MissingAttribute(name) if name == "fee_override/segment_fee/15"),
+            "{error:?}"
         );
     }
 

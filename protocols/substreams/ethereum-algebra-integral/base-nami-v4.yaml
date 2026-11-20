@@ -150,4 +150,4 @@ modules:
 params:
   map_pools_created: "factory=0xf4502A98A15e82D66d28D2381E2F3A407ea45b83&protocol_type_name=nami_v4_pool"
   # The Dynamic Contract Indexer runs on Ethereum only.
-  map_protocol_changes: "dci=false"
+  map_protocol_changes: "dci=false&modules=dynamic_fee,farming,fee_override,mevx,anti_sniper"

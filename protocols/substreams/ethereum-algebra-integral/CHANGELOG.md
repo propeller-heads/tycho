@@ -10,4 +10,6 @@
   was named is paused.
 - Modules `fee_override`, `anti_sniper` and `mevx` (Nami) and `farming` (Algebra).
 - Manifests for Nami V4 on Ethereum, Base and Robinhood, with the `factory`,
-  `protocol_type_name` and `dci` params.
+  `protocol_type_name`, `modules` and `dci` params.
+- A pool that names a plugin gets every field of the deployment's modules, zero for untouched
+  slots. The manifest's `modules` param names those modules.

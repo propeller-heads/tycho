@@ -32,7 +32,8 @@ pub fn map_pools_created(params: String, block: eth::Block) -> BlockEntityChange
     BlockEntityChanges { block: None, changes: new_pools }
 }
 
-// Extract new pools from the factory's `Pool` event, which it also emits for custom pools.
+// Extract new pools from the factory's `Pool` event. Pools of custom deployers, announced with
+// `CustomPool`, are not indexed.
 //
 // An Algebra pool has no fee tier: its fee, tick spacing and plugin are set by pool events
 // (`Fee`, `Plugin`, `PluginConfig`) emitted in the creation and initialization transactions, so

@@ -5,8 +5,12 @@
 //! slots as constants and exports a `MODULE`; adding that to [`MODULES`] is what makes the
 //! package emit it. Nothing else in the package names a module.
 //!
-//! The table is not keyed by DEX or by plugin implementation: it is applied to every plugin. A
-//! module's slots are hashes of its namespace, so a plugin without the module never writes them.
+//! The table is not keyed by DEX or by plugin implementation. A manifest names the modules its
+//! deployment's plugins are built from in its `modules` param ([`modules_named`]), and those are
+//! applied to every plugin of the deployment: a module's slots are hashes of its namespace, so a
+//! plugin without the module never writes them and carries its fields as zero.
+
+use std::fmt;
 
 use crate::plugin::storage::StorageField;
 
@@ -31,24 +35,116 @@ pub const MODULES: &[&PluginModule] = &[
     &nami::mevx::MODULE,
 ];
 
-/// The indexed fields stored at `slot`, across all modules.
-pub(crate) fn fields_at(slot: &[u8; 32]) -> impl Iterator<Item = &'static StorageField> + '_ {
-    MODULES
-        .iter()
-        .flat_map(|module| module.fields.iter())
-        .filter(move |field| field.slot() == slot)
+/// A manifest's `modules` param that cannot be resolved.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModuleListError {
+    /// The package has no module of this name.
+    Unknown(String),
+    /// The name is listed twice, which would emit the module's attributes twice.
+    Duplicate(String),
 }
 
-/// Whether some module indexes a field stored at `slot`.
-pub fn is_module_slot(slot: &[u8]) -> bool {
-    <&[u8; 32]>::try_from(slot).is_ok_and(|slot| fields_at(slot).next().is_some())
+impl fmt::Display for ModuleListError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(name) => {
+                let known: Vec<&str> = MODULES
+                    .iter()
+                    .map(|module| module.name)
+                    .collect();
+                write!(
+                    f,
+                    "the modules param names plugin module `{name}`, which this package does not \
+                     index; it indexes {}",
+                    known.join(", ")
+                )
+            }
+            Self::Duplicate(name) => {
+                write!(f, "the modules param names plugin module `{name}` twice")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModuleListError {}
+
+/// The modules a manifest's `modules` param names: module names separated by commas, in the
+/// order their attributes are emitted. An empty param names none.
+///
+/// A manifest that names a module the package lacks must not run: every pool would be created
+/// without that module's attributes.
+pub fn modules_named(names: &str) -> Result<Vec<&'static PluginModule>, ModuleListError> {
+    let mut modules: Vec<&'static PluginModule> = Vec::new();
+    if names.is_empty() {
+        return Ok(modules);
+    }
+    for name in names.split(',') {
+        let Some(module) = MODULES
+            .iter()
+            .find(|module| module.name == name)
+        else {
+            return Err(ModuleListError::Unknown(name.to_string()));
+        };
+        if modules
+            .iter()
+            .any(|listed| listed.name == name)
+        {
+            return Err(ModuleListError::Duplicate(name.to_string()));
+        }
+        modules.push(module);
+    }
+    Ok(modules)
+}
+
+/// Whether one of `modules` indexes a field stored at `slot`.
+pub fn lists_slot(modules: &[&PluginModule], slot: &[u8]) -> bool {
+    modules
+        .iter()
+        .flat_map(|module| module.fields.iter())
+        .any(|field| field.slot().as_slice() == slot)
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
 
+    use rstest::rstest;
+
     use super::*;
+
+    #[test]
+    fn modules_named_resolves_names_in_the_order_given() {
+        let modules = modules_named("dynamic_fee").expect("dynamic_fee is indexed");
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "dynamic_fee");
+    }
+
+    #[test]
+    fn modules_named_takes_an_empty_param_as_no_modules() {
+        assert!(modules_named("")
+            .expect("an empty param is valid")
+            .is_empty());
+    }
+
+    #[rstest]
+    #[case::unknown("dynamic_fee,nope", ModuleListError::Unknown("nope".to_string()))]
+    #[case::padded("dynamic_fee, dynamic_fee", ModuleListError::Unknown(" dynamic_fee".to_string()))]
+    #[case::trailing_comma("dynamic_fee,", ModuleListError::Unknown(String::new()))]
+    #[case::duplicate("dynamic_fee,dynamic_fee", ModuleListError::Duplicate("dynamic_fee".to_string()))]
+    fn modules_named_rejects(#[case] names: &str, #[case] expected: ModuleListError) {
+        let error = modules_named(names).expect_err("the param should not resolve");
+
+        assert_eq!(error, expected);
+    }
+
+    #[test]
+    fn unknown_module_error_lists_what_is_indexed() {
+        let message = ModuleListError::Unknown("nope".to_string()).to_string();
+
+        assert!(message.contains("`nope`"), "{message}");
+        assert!(message.contains("dynamic_fee"), "{message}");
+    }
 
     #[test]
     fn module_names_are_unique() {

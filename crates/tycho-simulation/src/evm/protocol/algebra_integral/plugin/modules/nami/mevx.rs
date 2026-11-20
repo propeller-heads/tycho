@@ -9,7 +9,7 @@ use alloy::primitives::Address;
 use tycho_common::Bytes;
 
 use crate::{
-    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_or_zero},
+    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_bytes},
     protocol::errors::InvalidSnapshotError,
 };
 
@@ -31,14 +31,13 @@ pub struct Mevx {
 }
 
 impl Mevx {
-    /// Reads `mevx/router`, absent as unset: no attribute is emitted for storage the plugin
-    /// never wrote.
+    /// Reads `mevx/router`, which is zero while no router is set.
     ///
     /// Fails when the attribute is not an address.
     pub fn from_attributes(
         attributes: &HashMap<String, Bytes>,
     ) -> Result<Self, InvalidSnapshotError> {
-        let router = Address::from(field_or_zero::<20>(attributes, "mevx/router")?);
+        let router = Address::from(field_bytes::<20>(attributes, "mevx/router")?);
         Ok(Self { router_set: !router.is_zero() })
     }
 }
@@ -71,7 +70,6 @@ mod tests {
     // Plugin 0xb0918bddea10fcc127bbe816725b2be536cebb8a on Robinhood at block 118127446.
     #[case::router_set(attributes(&alloy::hex!("011242bf9f5c4832f152be5a5838daae40e0405c")), 66_000)]
     #[case::router_cleared(attributes(&[0; 20]), 9_000)]
-    #[case::never_written(HashMap::new(), 9_000)]
     fn after_swap_gas_depends_on_the_router(
         #[case] attributes: HashMap<String, Bytes>,
         #[case] gas: u64,

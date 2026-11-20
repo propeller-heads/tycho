@@ -14,7 +14,7 @@ use tycho_common::{simulation::protocol_sim::BlockContext, Bytes};
 use crate::{
     evm::protocol::algebra_integral::plugin::{
         composed::{GasModule, GateModule},
-        modules::field_or_zero,
+        modules::field_bytes,
     },
     protocol::errors::InvalidSnapshotError,
 };
@@ -38,8 +38,7 @@ pub struct AntiSniper {
 }
 
 impl AntiSniper {
-    /// Reads the `anti_sniper/*` attributes, an absent one as zero: none is emitted for storage
-    /// the plugin never wrote.
+    /// Reads the `anti_sniper/*` attributes.
     ///
     /// Fails when an attribute has the wrong width.
     pub fn from_attributes(
@@ -47,11 +46,11 @@ impl AntiSniper {
     ) -> Result<Self, InvalidSnapshotError> {
         let mut starting_fee = [0u8; 4];
         starting_fee[1..]
-            .copy_from_slice(&field_or_zero::<3>(attributes, "anti_sniper/starting_fee")?);
+            .copy_from_slice(&field_bytes::<3>(attributes, "anti_sniper/starting_fee")?);
         Ok(Self {
             starting_fee: u32::from_be_bytes(starting_fee),
-            period: u32::from_be_bytes(field_or_zero(attributes, "anti_sniper/period")?),
-            start_timestamp: u64::from_be_bytes(field_or_zero(
+            period: u32::from_be_bytes(field_bytes(attributes, "anti_sniper/period")?),
+            start_timestamp: u64::from_be_bytes(field_bytes(
                 attributes,
                 "anti_sniper/start_timestamp",
             )?),
@@ -130,10 +129,24 @@ mod tests {
     }
 
     #[rstest]
-    #[case::no_starting_fee(&attributes(0, PERIOD, START))]
-    #[case::never_configured(&HashMap::new())]
-    fn module_without_a_starting_fee_never_gates(#[case] attributes: &HashMap<String, Bytes>) {
-        assert!(enabled_at(attributes, START));
+    #[case::started(START)]
+    #[case::never_started(0)]
+    fn module_without_a_starting_fee_never_gates(#[case] start: u64) {
+        assert!(enabled_at(&attributes(0, PERIOD, start), START));
+    }
+
+    #[test]
+    fn missing_field_is_rejected() {
+        let mut attributes = attributes(832_986, PERIOD, START);
+        attributes.remove("anti_sniper/start_timestamp");
+
+        let error =
+            AntiSniper::from_attributes(&attributes).expect_err("every field should be required");
+
+        assert!(
+            matches!(&error, InvalidSnapshotError::MissingAttribute(name) if name == "anti_sniper/start_timestamp"),
+            "{error:?}"
+        );
     }
 
     #[test]

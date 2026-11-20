@@ -61,7 +61,7 @@ mod tests {
     use substreams_ethereum::pb::eth::v2::StorageChange;
 
     use super::*;
-    use crate::plugin::attributes::{plugin_attributes, Emission};
+    use crate::plugin::attributes::creation_attributes;
 
     fn write(slot: [u8; 32], word: [u8; 32]) -> StorageChange {
         StorageChange { key: slot.to_vec(), new_value: word.to_vec(), ..Default::default() }
@@ -87,7 +87,7 @@ mod tests {
             ),
         ];
 
-        let attributes = plugin_attributes(&writes, Emission::Creation);
+        let attributes = creation_attributes(&writes, &[&MODULE]);
 
         let decoded: HashMap<&str, &[u8]> = attributes
             .iter()

@@ -11,7 +11,7 @@ use substreams::{
     scalar::BigInt,
     store::{StoreGet, StoreGetArray, StoreGetBigInt, StoreGetString},
 };
-use substreams_ethereum::pb::eth::v2::{self as eth, CallType};
+use substreams_ethereum::pb::eth::v2::{self as eth};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::{
     balances::aggregate_balances_changes,
@@ -33,7 +33,7 @@ use crate::{
     plugin::{
         beacon::{beacon_upgrades, plugin_beacon},
         changes::{implementation_attribute, named_plugin_attributes, updated_plugin_attributes},
-        modules::{is_module_slot, MODULES},
+        modules::{lists_slot, modules_named, PluginModule},
     },
 };
 
@@ -51,6 +51,10 @@ struct Params {
     /// `beforeSwap` is registered as an entrypoint and the block's storage changes are emitted,
     /// so a plugin with no native handler can be simulated in the VM.
     dci: bool,
+    /// The plugin modules the deployment's plugins are built from, separated by commas: see
+    /// [`modules_named`].
+    #[serde(default)]
+    modules: String,
 }
 
 #[substreams::handlers::map]
@@ -71,6 +75,8 @@ pub fn map_protocol_changes(
     beacon_pools_store: StoreGetArray<String>,
 ) -> BlockChanges {
     let params: Params = serde_qs::from_str(&params).expect("invalid map_protocol_changes params");
+    // A manifest naming a module the package lacks must not run: see `modules_named`.
+    let modules = modules_named(&params.modules).unwrap_or_else(|error| panic!("{error}"));
     let mut transaction_changes: HashMap<_, TransactionChangesBuilder> = HashMap::new();
 
     // Add created pools to the tx changes map
@@ -238,7 +244,7 @@ pub fn map_protocol_changes(
                 .is_some_and(|previous| previous != &named.plugin);
             let mut attributes = Vec::new();
             if switched {
-                attributes.extend(detached_plugin_attributes());
+                attributes.extend(detached_plugin_attributes(&modules));
             }
             let plugin_set = named
                 .plugin
@@ -247,13 +253,14 @@ pub fn map_protocol_changes(
             let mut paused = false;
             if plugin_set {
                 if let Some(trace) = trace_of(tx.index) {
-                    // Deployment assumption: a plugin writes its initial configuration in the
-                    // transaction that names it to its pool, as a plugin factory does when it
-                    // creates both. A plugin created earlier wrote it where this package was
-                    // not looking, so its pool's attributes would be incomplete: the pool is
+                    // Deployment assumption: a plugin is created in the transaction that names
+                    // it to its pool, as a plugin factory does when it creates both. The
+                    // configuration of a plugin created earlier is not known, so its pool is
                     // paused until it names a plugin created in the naming transaction.
-                    paused = !is_created_in(trace, &named.plugin);
-                    attributes.extend(named_plugin_attributes(trace, &named.plugin));
+                    match named_plugin_attributes(trace, &named.plugin, &modules) {
+                        Some(named_attributes) => attributes.extend(named_attributes),
+                        None => paused = true,
+                    }
                     namings.insert((trace.index, named.plugin.clone()));
                 }
             }
@@ -285,14 +292,14 @@ pub fn map_protocol_changes(
     // first: a swap writes only the plugin's volatility oracle, which no module lists, so it
     // costs no store read.
     for trace in block.transactions() {
-        for (plugin, ordinal) in module_slot_writers(trace) {
+        for (plugin, ordinal) in module_slot_writers(trace, &modules) {
             if namings.contains(&(trace.index, plugin.clone())) {
                 continue;
             }
             let Some(pool) = current_pool_of(&pool_plugins_store, &plugin, ordinal) else {
                 continue;
             };
-            let attributes = updated_plugin_attributes(trace, &plugin);
+            let attributes = updated_plugin_attributes(trace, &plugin, &modules);
             if attributes.is_empty() {
                 continue;
             }
@@ -387,23 +394,19 @@ pub fn map_protocol_changes(
     }
 }
 
-/// Whether `address` was created by a call of `trace` that was not reverted.
-fn is_created_in(trace: &eth::TransactionTrace, address: &[u8]) -> bool {
-    trace.calls.iter().any(|call| {
-        !call.state_reverted && call.call_type() == CallType::Create && call.address == address
-    })
-}
-
-/// The contracts that wrote a slot some plugin module lists in `trace`, outside reverted calls,
+/// The contracts that wrote a slot one of `modules` lists in `trace`, outside reverted calls,
 /// each with the ordinal of its first such write.
-fn module_slot_writers(trace: &eth::TransactionTrace) -> Vec<(Vec<u8>, u64)> {
+fn module_slot_writers(
+    trace: &eth::TransactionTrace,
+    modules: &[&PluginModule],
+) -> Vec<(Vec<u8>, u64)> {
     let mut writers: Vec<(Vec<u8>, u64)> = Vec::new();
     for call in &trace.calls {
         if call.state_reverted {
             continue;
         }
         for change in &call.storage_changes {
-            if !is_module_slot(&change.key) {
+            if !lists_slot(modules, &change.key) {
                 continue;
             }
             match writers
@@ -432,11 +435,11 @@ fn current_pool_of(
 }
 
 /// Deletions of everything a pool carries about a plugin it no longer names: the implementation
-/// and every module attribute. Which of them the pool held is not tracked, so all are deleted;
-/// attributes the new plugin sets in the same transaction are added after and replace these.
-fn detached_plugin_attributes() -> Vec<Attribute> {
+/// and every attribute of the deployment's `modules`. Attributes the new plugin sets in the same
+/// transaction are added after and replace these.
+fn detached_plugin_attributes(modules: &[&PluginModule]) -> Vec<Attribute> {
     let mut attributes = vec![implementation_attribute(&[], ChangeType::Deletion)];
-    for module in MODULES {
+    for module in modules {
         for field in module.fields {
             attributes.push(Attribute {
                 name: field.name().to_string(),
@@ -521,6 +524,8 @@ fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
 
 #[cfg(test)]
 mod tests {
+    use substreams_ethereum::pb::eth::v2::CallType;
+
     use super::*;
 
     #[test]
@@ -534,11 +539,22 @@ mod tests {
     }
 
     #[test]
-    fn params_say_whether_the_chain_runs_dci() {
-        let params: Params = serde_qs::from_str("dci=true").expect("the params should parse");
+    fn params_say_whether_the_chain_runs_dci_and_name_the_modules() {
+        let params: Params = serde_qs::from_str("dci=true&modules=dynamic_fee,fee_override")
+            .expect("the params should parse");
 
-        assert_eq!(params, Params { dci: true });
+        assert_eq!(params, Params { dci: true, modules: "dynamic_fee,fee_override".to_string() });
         assert!(serde_qs::from_str::<Params>("dci=true&factory=0x00").is_err());
+    }
+
+    #[test]
+    fn manifest_modules_resolve() {
+        for names in [
+            "dynamic_fee,farming,fee_override,mevx",
+            "dynamic_fee,farming,fee_override,mevx,anti_sniper",
+        ] {
+            modules_named(names).expect("the manifests' modules should resolve");
+        }
     }
 
     const PLUGIN: [u8; 20] = [0xb0; 20];
@@ -564,28 +580,9 @@ mod tests {
     }
 
     #[test]
-    fn contract_is_created_in_a_transaction_by_a_live_create_call() {
-        let created = eth::TransactionTrace {
-            calls: vec![call(CallType::Call, OTHER, false), call(CallType::Create, PLUGIN, false)],
-            ..Default::default()
-        };
-        let reverted = eth::TransactionTrace {
-            calls: vec![call(CallType::Create, PLUGIN, true)],
-            ..Default::default()
-        };
-        let called = eth::TransactionTrace {
-            calls: vec![call(CallType::Call, PLUGIN, false)],
-            ..Default::default()
-        };
-
-        assert!(is_created_in(&created, &PLUGIN));
-        assert!(!is_created_in(&reverted, &PLUGIN));
-        assert!(!is_created_in(&called, &PLUGIN));
-    }
-
-    #[test]
     fn only_writes_to_module_slots_outside_reverted_calls_name_a_writer() {
-        let module_slot = MODULES[0].fields[0].slot();
+        let modules = modules_named("dynamic_fee").expect("dynamic_fee is indexed");
+        let module_slot = modules[0].fields[0].slot();
         // The volatility oracle's header slot, which no module lists.
         let oracle_slot = [0x4c; 32];
         let mut live = call(CallType::Call, PLUGIN, false);
@@ -599,14 +596,16 @@ mod tests {
         reverted.storage_changes = vec![write(OTHER, module_slot, 3)];
         let trace = eth::TransactionTrace { calls: vec![live, reverted], ..Default::default() };
 
-        assert_eq!(module_slot_writers(&trace), vec![(PLUGIN.to_vec(), 7)]);
+        assert_eq!(module_slot_writers(&trace, &modules), vec![(PLUGIN.to_vec(), 7)]);
+        assert!(module_slot_writers(&trace, &[]).is_empty());
     }
 
     #[test]
     fn detached_plugin_loses_its_implementation_and_every_module_attribute() {
-        let attributes = detached_plugin_attributes();
+        let modules = modules_named("dynamic_fee,fee_override").expect("both are indexed");
+        let attributes = detached_plugin_attributes(&modules);
 
-        let fields: usize = MODULES
+        let fields: usize = modules
             .iter()
             .map(|module| module.fields.len())
             .sum();

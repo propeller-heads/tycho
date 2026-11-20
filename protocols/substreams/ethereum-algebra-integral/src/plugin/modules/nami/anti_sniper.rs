@@ -33,7 +33,7 @@ mod tests {
     use substreams_ethereum::pb::eth::v2::StorageChange;
 
     use super::*;
-    use crate::plugin::attributes::{plugin_attributes, Emission};
+    use crate::plugin::attributes::creation_attributes;
 
     /// The two words of plugin 0x53ce1d109b8ffe35010baaac91a3d839f4b05fea on Base at block
     /// 59132137: a 30 minute period from 12 November 2026 16:00 UTC, starting at 83.2986%.
@@ -54,7 +54,7 @@ mod tests {
             },
         ];
 
-        let attributes = plugin_attributes(&writes, Emission::Creation);
+        let attributes = creation_attributes(&writes, &[&MODULE]);
 
         let decoded: Vec<(&str, &[u8])> = attributes
             .iter()

@@ -97,7 +97,11 @@ impl Clone for ComposedPlugin {
 }
 
 impl PluginHandler for ComposedPlugin {
-    fn quote(&self, swap: &PluginSwap) -> Result<PluginQuote, SimulationError> {
+    fn quote(
+        &self,
+        swap: &PluginSwap,
+        _overrides: &StorageOverrides,
+    ) -> Result<PluginQuote, SimulationError> {
         if !self.swaps_enabled() {
             return Err(SimulationError::RecoverableError(format!(
                 "the plugin does not let the pool swap in block {}",
@@ -246,7 +250,7 @@ mod tests {
         );
 
         let quote = plugin
-            .quote(&swap(zero_for_one))
+            .quote(&swap(zero_for_one), &StorageOverrides::new())
             .expect("an open plugin should quote");
 
         assert_eq!(
@@ -265,7 +269,7 @@ mod tests {
         let plugin = ComposedPlugin::new(flat_fee(500), Vec::new(), Vec::new(), at(100));
 
         let quote = plugin
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect("an open plugin should quote");
 
         assert_eq!(quote.gas, 0);
@@ -281,7 +285,7 @@ mod tests {
         );
 
         let error = plugin
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect_err("summed gas above u64::MAX should not wrap");
 
         let SimulationError::FatalError(message) = error else {
@@ -307,7 +311,7 @@ mod tests {
 
         assert!(!plugin.swaps_enabled());
         let error = plugin
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect_err("a gated plugin should not quote");
         let SimulationError::RecoverableError(message) = error else {
             panic!("expected a recoverable error, got {error:?}");
@@ -320,7 +324,7 @@ mod tests {
         let plugin = ComposedPlugin::new(Box::new(FailingFee), Vec::new(), Vec::new(), at(100));
 
         let error = plugin
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect_err("the fee module's error should propagate");
 
         let SimulationError::RecoverableError(message) = error else {
@@ -362,7 +366,7 @@ mod tests {
 
         assert!(plugin.swaps_enabled());
         let quote = plugin
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect("the plugin opened at 150");
         assert_eq!(quote.override_fee, Some(800));
     }
@@ -380,7 +384,7 @@ mod tests {
         plugin.apply_block(&at(200));
 
         let quote = clone
-            .quote(&swap(true))
+            .quote(&swap(true), &StorageOverrides::new())
             .expect("the clone should quote");
         assert_eq!(quote.override_fee, Some(500));
         assert_eq!(quote.gas, 10);

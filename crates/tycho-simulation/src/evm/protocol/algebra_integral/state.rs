@@ -26,7 +26,7 @@ use crate::{
         algebra_integral::{
             plugin::{
                 registry::{instantiate_plugin_handler, PluginCreationParams},
-                PluginHandler, PluginSwap, BEFORE_SWAP_FLAG, DYNAMIC_FEE_FLAG,
+                PluginHandler, PluginSwap, StorageOverrides, BEFORE_SWAP_FLAG, DYNAMIC_FEE_FLAG,
                 PLUGIN_CONFIG_ATTRIBUTE,
             },
             swap_math::{
@@ -136,6 +136,11 @@ pub struct AlgebraIntegralState {
     execution_block_timestamp: u64,
     /// Derived from `plugin`, `chain` and the execution block.
     plugin_slot: PluginSlot,
+    /// Storage the plugin's hooks would find changed from the indexed state: what the swaps that
+    /// led to this state wrote, as their quotes reported. Passed to every plugin quote, which
+    /// only a handler that runs the hooks in the VM reads. Emptied by a delta, and neither
+    /// serialized nor part of equality.
+    plugin_overrides: Arc<StorageOverrides>,
 }
 
 /// Everything an [`AlgebraIntegralState`] is rebuilt from: its serialized form.
@@ -191,7 +196,8 @@ impl TryFrom<StateData> for AlgebraIntegralState {
 }
 
 impl PartialEq for AlgebraIntegralState {
-    /// The plugin handler is derived from the other fields, so it does not count.
+    /// The plugin handler is derived from the other fields, so it does not count. Neither do
+    /// the plugin overrides, which are no part of the indexed state.
     fn eq(&self, other: &Self) -> bool {
         self.pool == other.pool &&
             self.chain == other.chain &&
@@ -280,6 +286,7 @@ impl AlgebraIntegralState {
             execution_block_number: block.number(),
             execution_block_timestamp: block.timestamp(),
             plugin_slot: PluginSlot::NotCalled,
+            plugin_overrides: Arc::default(),
         };
         state.plugin_slot = state.build_plugin_slot()?;
         Ok(state)
@@ -337,24 +344,28 @@ impl AlgebraIntegralState {
 
     /// The fee a swap in the given direction would pay now, as a ratio.
     fn fee_ratio(&self, zero_for_one: bool) -> Result<f64, SimulationError> {
-        let fee = self
-            .resolve_fee(&self.fee_probe(zero_for_one)?)?
-            .fee;
-        Ok(f64::from(fee) / f64::from(FEE_DENOMINATOR))
+        let (resolved_fee, _) = self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
+        Ok(f64::from(resolved_fee.fee) / f64::from(FEE_DENOMINATOR))
     }
 
     /// Resolves the fee the pool would charge for `swap` and the gas of the plugin's hooks,
-    /// asking the plugin when the pool calls it before swaps.
-    fn resolve_fee(&self, swap: &PluginSwap) -> Result<ResolvedFee, SimulationError> {
+    /// asking the plugin when the pool calls it before swaps. Also returns the storage the hooks
+    /// would write, which the state after the swap carries to its own quotes.
+    fn resolve_fee(
+        &self,
+        swap: &PluginSwap,
+    ) -> Result<(ResolvedFee, StorageOverrides), SimulationError> {
         match &self.plugin_slot {
-            PluginSlot::NotCalled => Ok(ResolvedFee { fee: self.last_fee, gas: 0 }),
+            PluginSlot::NotCalled => {
+                Ok((ResolvedFee { fee: self.last_fee, gas: 0 }, StorageOverrides::new()))
+            }
             PluginSlot::Unsupported(reason) => Err(SimulationError::RecoverableError(format!(
                 "algebra pool {} is not quoted: {reason}",
                 self.pool
             ))),
             PluginSlot::Handler(handler) => {
-                let quote = handler.quote(swap)?;
-                Ok(ResolvedFee {
+                let quote = handler.quote(swap, &self.plugin_overrides)?;
+                let resolved_fee = ResolvedFee {
                     fee: effective_fee(
                         self.last_fee,
                         self.plugin.config,
@@ -362,7 +373,8 @@ impl AlgebraIntegralState {
                         quote.plugin_fee,
                     )?,
                     gas: quote.gas,
-                })
+                };
+                Ok((resolved_fee, quote.storage_writes))
             }
         }
     }
@@ -397,17 +409,19 @@ impl AlgebraIntegralState {
         zero_for_one: bool,
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
-    ) -> Result<SwapResults, SimulationError> {
+    ) -> Result<(SwapResults, StorageOverrides), SimulationError> {
         let price_limit =
             self.swap_price_limit(zero_for_one, amount_specified, sqrt_price_limit)?;
-        let resolved_fee = self.resolve_fee(&PluginSwap {
+        let (resolved_fee, storage_writes) = self.resolve_fee(&PluginSwap {
             zero_for_one,
             amount_specified,
             sqrt_price_limit: price_limit,
             sqrt_price: self.sqrt_price,
             tick: self.tick,
         })?;
-        self.swap_with_fee(zero_for_one, amount_specified, price_limit, resolved_fee)
+        let result =
+            self.swap_with_fee(zero_for_one, amount_specified, price_limit, resolved_fee)?;
+        Ok((result, storage_writes))
     }
 
     /// Checks the pool can run this swap and returns its price limit, the loosest one when none
@@ -542,8 +556,19 @@ impl AlgebraIntegralState {
         })
     }
 
-    fn with_swap_result(&self, result: &SwapResults) -> Self {
+    /// The state after a swap, carrying what the plugin's hooks wrote during it on top of what
+    /// earlier swaps wrote.
+    fn with_swap_result(&self, result: &SwapResults, storage_writes: StorageOverrides) -> Self {
         let mut new_state = self.clone();
+        if !storage_writes.is_empty() {
+            let overrides = Arc::make_mut(&mut new_state.plugin_overrides);
+            for (address, slots) in storage_writes {
+                overrides
+                    .entry(address)
+                    .or_default()
+                    .extend(slots);
+            }
+        }
         new_state.liquidity = result.liquidity;
         new_state.tick = result.tick.value();
         new_state.sqrt_price = result.sqrt_price;
@@ -621,7 +646,7 @@ impl ProtocolSim for AlgebraIntegralState {
                 SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
             })?;
 
-        let result = self.swap(zero_for_one, amount_specified, None)?;
+        let (result, storage_writes) = self.swap(zero_for_one, amount_specified, None)?;
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "ALGEBRA INTEGRAL SWAP");
 
         let amount_out = u256_to_biguint(
@@ -631,7 +656,7 @@ impl ProtocolSim for AlgebraIntegralState {
                 .into_raw(),
         );
         let gas = u256_to_biguint(result.gas_used);
-        let new_state = Box::new(self.with_swap_result(&result));
+        let new_state = Box::new(self.with_swap_result(&result, storage_writes));
         if !result.amount_remaining.is_zero() {
             return Err(SimulationError::InvalidInput(
                 "Price limit reached before the full amount was swapped".into(),
@@ -654,9 +679,7 @@ impl ProtocolSim for AlgebraIntegralState {
             }
         }
         // The fee comes out of the input.
-        let fee = self
-            .resolve_fee(&self.fee_probe(zero_for_one)?)?
-            .fee;
+        let (ResolvedFee { fee, .. }, _) = self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
         let mut current_tick = self.tick;
         let mut current_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
@@ -818,6 +841,8 @@ impl ProtocolSim for AlgebraIntegralState {
                 _ => {}
             }
         }
+        // The delta is the indexed state of a new block, which already holds what its swaps wrote.
+        self.plugin_overrides = Arc::default();
         if plugin_changed {
             // A plugin the simulation cannot reproduce stops the pool's quotes; it does not fail
             // the delta, which would end the stream for every pool.
@@ -847,7 +872,8 @@ impl ProtocolSim for AlgebraIntegralState {
             } => {
                 let zero_for_one = params.token_in().address < params.token_out().address;
                 // The plugin's fee does not depend on the amount, so one probe prices the swap.
-                let resolved_fee = self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
+                let (resolved_fee, storage_writes) =
+                    self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
                 let (amount_in, amount_out, swap_result) = clmm_swap_to_price(
                     self.sqrt_price,
                     &params.token_in().address,
@@ -881,7 +907,7 @@ impl ProtocolSim for AlgebraIntegralState {
                 Ok(PoolSwap::new(
                     amount_in,
                     amount_out,
-                    Box::new(self.with_swap_result(&swap_result)),
+                    Box::new(self.with_swap_result(&swap_result, storage_writes)),
                     None,
                 ))
             }
@@ -973,7 +999,7 @@ pub(super) mod test_support {
     /// block 118127446: base fee 500, floor 1000, cap 20000, the NYSE source with a fee per
     /// segment, a MEVX router and a farming incentive.
     pub fn robinhood_module_attributes() -> HashMap<String, Bytes> {
-        let fields: [(&str, &str); 26] = [
+        let fields: [(&str, &str); 34] = [
             ("dynamic_fee/alpha1", "0000"),
             ("dynamic_fee/alpha2", "0000"),
             ("dynamic_fee/base_fee", "01f4"),
@@ -996,6 +1022,14 @@ pub(super) mod test_support {
             ("fee_override/segment_fee/5", "0640"),
             ("fee_override/segment_fee/6", "04b0"),
             ("fee_override/segment_fee/7", "0bb8"),
+            ("fee_override/segment_fee/8", "0000"),
+            ("fee_override/segment_fee/9", "0000"),
+            ("fee_override/segment_fee/10", "0000"),
+            ("fee_override/segment_fee/11", "0000"),
+            ("fee_override/segment_fee/12", "0000"),
+            ("fee_override/segment_fee/13", "0000"),
+            ("fee_override/segment_fee/14", "0000"),
+            ("fee_override/segment_fee/15", "0000"),
             ("mevx/router", "011242bf9f5c4832f152be5a5838daae40e0405c"),
             ("farming/incentive", "d877d4a9ffddd1b03fdfe709b9b0770a4d5dd3fe"),
             // The AntiSniper module of Base plugin 0x53ce1d109b8ffe35010baaac91a3d839f4b05fea:
@@ -1279,18 +1313,15 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_module_attributes_leaves_the_base_fee() {
+    fn pool_that_loses_a_module_attribute_is_not_quoted() {
         let mut pool = robinhood_pool(SESSION);
-        let attributes = robinhood_module_attributes();
-        let deleted: Vec<&str> = attributes
-            .keys()
-            .filter(|name| !name.starts_with("dynamic_fee/"))
-            .map(String::as_str)
-            .collect();
 
-        apply(&mut pool, delta(&[], &deleted));
+        apply(&mut pool, delta(&[], &["fee_override/cap"]));
 
-        assert_eq!(pool.fee(), 0.0005);
+        let error = pool
+            .get_amount_out(one_token(), &token0(), &token1())
+            .expect_err("a module with a missing field should not quote");
+        assert!(matches!(error, SimulationError::RecoverableError(_)), "{error:?}");
     }
 
     #[rstest]

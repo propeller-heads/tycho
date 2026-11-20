@@ -2,20 +2,22 @@
 //!
 //! The module that builds a pool's changes calls [`named_plugin_attributes`] in the transaction
 //! whose `Plugin` event names the pool's plugin, and [`updated_plugin_attributes`] in every later
-//! transaction, for the plugin the pool store resolves the pool to.
+//! transaction, for the plugin the pool store resolves the pool to. Both take the deployment's
+//! modules, which the caller resolves once from its `modules` param with
+//! [`crate::plugin::modules::modules_named`].
 //!
-//! Deployment assumption: a plugin's initial configuration is written in the transaction that
-//! names it to its pool, as the plugin factory does when it creates both. A pool that is pointed
-//! at a plugin configured in an earlier transaction gets only what that plugin writes from then
-//! on; the caller pauses such a pool, which it recognises by the plugin not being created in the
-//! naming transaction.
+//! Deployment assumption: a plugin is created in the transaction that names it to its pool, as
+//! the plugin factory does when it creates both. Only then is its whole configuration known:
+//! what it wrote in that transaction, and zero everywhere else. For a plugin created earlier
+//! [`named_plugin_attributes`] returns `None` and the caller pauses the pool.
 
-use substreams_ethereum::pb::eth::v2::{StorageChange, TransactionTrace};
+use substreams_ethereum::pb::eth::v2::{CallType, StorageChange, TransactionTrace};
 use tycho_substreams::prelude::{Attribute, ChangeType};
 
 use crate::plugin::{
-    attributes::{plugin_attributes, Emission},
+    attributes::{creation_attributes, update_attributes},
     beacon::plugin_beacon,
+    modules::PluginModule,
 };
 
 /// Attribute holding the implementation address a pool's plugin runs.
@@ -38,6 +40,13 @@ fn plugin_writes(trx: &TransactionTrace, plugin: &[u8]) -> Vec<StorageChange> {
     writes
 }
 
+/// Whether `trx` created the contract at `plugin`.
+fn created_in(trx: &TransactionTrace, plugin: &[u8]) -> bool {
+    trx.calls.iter().any(|call| {
+        !call.state_reverted && call.call_type() == CallType::Create && call.address == plugin
+    })
+}
+
 /// The `plugin_impl` attribute for `implementation`.
 pub fn implementation_attribute(implementation: &[u8], change: ChangeType) -> Attribute {
     Attribute {
@@ -48,20 +57,35 @@ pub fn implementation_attribute(implementation: &[u8], change: ChangeType) -> At
 }
 
 /// The attributes a pool gains in the transaction that names `plugin` as its plugin: the
-/// implementation the plugin runs, when it is a beacon proxy constructed in `trx`, and the
-/// configuration the plugin's modules wrote in `trx`.
-pub fn named_plugin_attributes(trx: &TransactionTrace, plugin: &[u8]) -> Vec<Attribute> {
+/// implementation the plugin runs, when it is a beacon proxy, and every field of `modules`, with
+/// the value the plugin wrote in `trx` or zero.
+///
+/// `None` when `trx` did not create `plugin`. Its storage then holds values written before
+/// `trx`, which this transaction does not show, so no attribute can be given for it.
+pub fn named_plugin_attributes(
+    trx: &TransactionTrace,
+    plugin: &[u8],
+    modules: &[&PluginModule],
+) -> Option<Vec<Attribute>> {
+    if !created_in(trx, plugin) {
+        return None;
+    }
     let mut attributes = Vec::new();
     if let Some(bound) = plugin_beacon(trx, plugin) {
         attributes.push(implementation_attribute(&bound.implementation, ChangeType::Creation));
     }
-    attributes.extend(plugin_attributes(&plugin_writes(trx, plugin), Emission::Creation));
-    attributes
+    attributes.extend(creation_attributes(&plugin_writes(trx, plugin), modules));
+    Some(attributes)
 }
 
-/// The module attributes `plugin`'s writes in `trx` change on the pool that already runs it.
-pub fn updated_plugin_attributes(trx: &TransactionTrace, plugin: &[u8]) -> Vec<Attribute> {
-    plugin_attributes(&plugin_writes(trx, plugin), Emission::Update)
+/// The attributes of `modules` that `plugin`'s writes in `trx` change on the pool that already
+/// runs it.
+pub fn updated_plugin_attributes(
+    trx: &TransactionTrace,
+    plugin: &[u8],
+    modules: &[&PluginModule],
+) -> Vec<Attribute> {
+    update_attributes(&plugin_writes(trx, plugin), modules)
 }
 
 #[cfg(test)]
@@ -70,6 +94,9 @@ mod tests {
     use substreams_ethereum::pb::eth::v2::{Call, Log};
 
     use super::*;
+    use crate::plugin::modules::algebra::dynamic_fee;
+
+    const MODULES: &[&PluginModule] = &[&dynamic_fee::MODULE];
 
     const PLUGIN: [u8; 20] = hex!("2f643a734d8e090b82762bd982f1428ea482752e");
     const OTHER_PLUGIN: [u8; 20] = hex!("b0918bddea10fcc127bbe816725b2be536cebb8a");
@@ -103,6 +130,7 @@ mod tests {
         TransactionTrace {
             calls: vec![
                 Call {
+                    call_type: CallType::Create.into(),
                     address: PLUGIN.to_vec(),
                     logs: vec![Log {
                         address: PLUGIN.to_vec(),
@@ -143,7 +171,8 @@ mod tests {
 
     #[test]
     fn naming_emits_the_implementation_and_the_initial_configuration() {
-        let attributes = named_plugin_attributes(&creation_trx(), &PLUGIN);
+        let attributes = named_plugin_attributes(&creation_trx(), &PLUGIN, MODULES)
+            .expect("the transaction creates the plugin");
 
         assert_eq!(
             decoded(&attributes),
@@ -157,17 +186,44 @@ mod tests {
     }
 
     #[test]
-    fn naming_a_plugin_created_elsewhere_emits_nothing() {
-        assert!(named_plugin_attributes(&creation_trx(), &OTHER_PLUGIN).is_empty());
+    fn naming_a_plugin_created_in_an_earlier_transaction_gives_no_attributes() {
+        assert_eq!(named_plugin_attributes(&creation_trx(), &OTHER_PLUGIN, MODULES), None);
+    }
+
+    #[test]
+    fn naming_a_plugin_whose_creation_reverted_gives_no_attributes() {
+        let mut trx = creation_trx();
+        trx.calls[0].state_reverted = true;
+
+        assert_eq!(named_plugin_attributes(&trx, &PLUGIN, MODULES), None);
+    }
+
+    #[test]
+    fn naming_a_plugin_that_wrote_nothing_emits_its_fields_as_zero() {
+        let mut trx = creation_trx();
+        trx.calls.truncate(2);
+
+        let attributes = named_plugin_attributes(&trx, &PLUGIN, MODULES)
+            .expect("the transaction creates the plugin");
+
+        assert_eq!(
+            decoded(&attributes),
+            [
+                ("plugin_impl", IMPLEMENTATION.as_slice(), ChangeType::Creation),
+                ("dynamic_fee/alpha1", hex!("0000").as_slice(), ChangeType::Creation),
+                ("dynamic_fee/alpha2", hex!("0000").as_slice(), ChangeType::Creation),
+                ("dynamic_fee/base_fee", hex!("0000").as_slice(), ChangeType::Creation),
+            ]
+        );
     }
 
     #[test]
     fn naming_a_plugin_that_is_not_a_beacon_proxy_emits_only_its_configuration() {
         let mut trx = creation_trx();
-        trx.calls.truncate(3);
-        trx.calls.remove(0);
+        trx.calls[0].logs.clear();
 
-        let attributes = named_plugin_attributes(&trx, &PLUGIN);
+        let attributes = named_plugin_attributes(&trx, &PLUGIN, MODULES)
+            .expect("the transaction creates the plugin");
 
         assert_eq!(attributes.len(), 3);
         assert!(attributes
@@ -201,7 +257,7 @@ mod tests {
             ..Default::default()
         };
 
-        let attributes = updated_plugin_attributes(&trx, &PLUGIN);
+        let attributes = updated_plugin_attributes(&trx, &PLUGIN, MODULES);
 
         assert_eq!(
             decoded(&attributes),
@@ -220,7 +276,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(updated_plugin_attributes(&trx, &PLUGIN).is_empty());
+        assert!(updated_plugin_attributes(&trx, &PLUGIN, MODULES).is_empty());
     }
 
     #[test]
@@ -250,6 +306,6 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(updated_plugin_attributes(&trx, &PLUGIN).is_empty());
+        assert!(updated_plugin_attributes(&trx, &PLUGIN, MODULES).is_empty());
     }
 }

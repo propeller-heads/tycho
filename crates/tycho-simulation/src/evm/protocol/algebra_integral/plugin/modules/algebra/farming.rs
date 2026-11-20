@@ -8,7 +8,7 @@ use alloy::primitives::Address;
 use tycho_common::Bytes;
 
 use crate::{
-    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_or_zero},
+    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_bytes},
     protocol::errors::InvalidSnapshotError,
 };
 
@@ -25,14 +25,13 @@ pub struct Farming {
 }
 
 impl Farming {
-    /// Reads `farming/incentive`, absent as unset: no attribute is emitted for storage the
-    /// plugin never wrote.
+    /// Reads `farming/incentive`, which is zero while no incentive is set.
     ///
     /// Fails when the attribute is not an address.
     pub fn from_attributes(
         attributes: &HashMap<String, Bytes>,
     ) -> Result<Self, InvalidSnapshotError> {
-        let incentive = Address::from(field_or_zero::<20>(attributes, "farming/incentive")?);
+        let incentive = Address::from(field_bytes::<20>(attributes, "farming/incentive")?);
         Ok(Self { incentive_set: !incentive.is_zero() })
     }
 }
@@ -65,7 +64,6 @@ mod tests {
     // Plugin 0xb0918bddea10fcc127bbe816725b2be536cebb8a on Robinhood at block 118127446.
     #[case::incentive_set(attributes(&alloy::hex!("d877d4a9ffddd1b03fdfe709b9b0770a4d5dd3fe")), 60_000)]
     #[case::incentive_cleared(attributes(&[0; 20]), 0)]
-    #[case::never_written(HashMap::new(), 0)]
     fn incentive_adds_gas(#[case] attributes: HashMap<String, Bytes>, #[case] gas: u64) {
         let module = Farming::from_attributes(&attributes).expect("the incentive should decode");
 
