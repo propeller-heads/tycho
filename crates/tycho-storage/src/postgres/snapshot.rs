@@ -192,6 +192,23 @@ impl PostgresGateway {
         let chain_id = self.get_chain_id(chain)?;
         let native_token_id = self.get_native_token_id(chain)?;
 
+        // Postgres cannot estimate the `xmin` filter of `account_ids`. As a subquery, it expects
+        // thousands of accounts and scans every live storage slot to keep a few. As a list, it
+        // reads the few accounts through the `account_id` indexes.
+        let written_ids = match since {
+            Some(since) => {
+                let ids = account_ids(chain_id, Some(since))
+                    .get_results::<i64>(conn)
+                    .await
+                    .map_err(PostgresError::from)?;
+                if ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+
         let mut accounts_query = schema::contract_code::table
             .inner_join(schema::account::table)
             .inner_join(schema::transaction::table)
@@ -218,9 +235,8 @@ impl PostgresGateway {
                 schema::transaction::hash,
             ))
             .into_boxed();
-        if since.is_some() {
-            accounts_query =
-                accounts_query.filter(schema::account::id.eq_any(account_ids(chain_id, since)));
+        if let Some(ids) = &written_ids {
+            accounts_query = accounts_query.filter(schema::account::id.eq_any(ids.clone()));
         }
         let accounts = accounts_query
             .get_results::<(i64, Address, String, Bytes, Bytes, NaiveDateTime, Bytes)>(conn)
@@ -229,9 +245,8 @@ impl PostgresGateway {
 
         let mut balances_by_account: HashMap<i64, Vec<(i64, Address, Bytes, WriteTimestamp)>> =
             HashMap::new();
-        for (account_id, token_id, token, balance, valid_from) in schema::account_balance::table
+        let mut balances_query = schema::account_balance::table
             .inner_join(schema::token::table.inner_join(schema::account::table))
-            .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id, since)))
             .filter(
                 schema::account_balance::valid_to
                     .is_null()
@@ -250,6 +265,15 @@ impl PostgresGateway {
                 schema::account_balance::balance,
                 schema::account_balance::valid_from,
             ))
+            .into_boxed();
+        balances_query = match &written_ids {
+            Some(ids) => {
+                balances_query.filter(schema::account_balance::account_id.eq_any(ids.clone()))
+            }
+            None => balances_query
+                .filter(schema::account_balance::account_id.eq_any(account_ids(chain_id, None))),
+        };
+        for (account_id, token_id, token, balance, valid_from) in balances_query
             .get_results::<(i64, i64, Address, Bytes, NaiveDateTime)>(conn)
             .await
             .map_err(PostgresError::from)?
@@ -262,8 +286,7 @@ impl PostgresGateway {
 
         let mut slots_by_account: HashMap<i64, Vec<(Bytes, Option<Bytes>, WriteTimestamp)>> =
             HashMap::new();
-        for (account_id, slot, value, valid_from) in schema::contract_storage::table
-            .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id, since)))
+        let mut slots_query = schema::contract_storage::table
             .filter(schema::contract_storage::valid_to.eq(MAX_TS))
             .select((
                 schema::contract_storage::account_id,
@@ -271,6 +294,15 @@ impl PostgresGateway {
                 schema::contract_storage::value,
                 schema::contract_storage::valid_from,
             ))
+            .into_boxed();
+        slots_query = match &written_ids {
+            Some(ids) => {
+                slots_query.filter(schema::contract_storage::account_id.eq_any(ids.clone()))
+            }
+            None => slots_query
+                .filter(schema::contract_storage::account_id.eq_any(account_ids(chain_id, None))),
+        };
+        for (account_id, slot, value, valid_from) in slots_query
             .get_results::<(i64, Bytes, Option<Bytes>, NaiveDateTime)>(conn)
             .await
             .map_err(PostgresError::from)?
@@ -1174,6 +1206,8 @@ mod test_serial_db {
             db_fixtures::insert_contract_code(&mut conn, c3, f.txn[3], Bytes::from("C3C3C3")).await;
             db_fixtures::insert_account_balance(&mut conn, 7, f.native_token, f.txn[3], None, c3)
                 .await;
+            db_fixtures::insert_slots(&mut conn, c3, f.txn[3], &written, None, &[(5, 5, None)])
+                .await;
             drop(conn);
 
             let delta = gateway
@@ -1210,6 +1244,10 @@ mod test_serial_db {
                     .collect::<Vec<_>>(),
                 vec![c3],
                 "the new contract comes with its full state"
+            );
+            assert_eq!(
+                delta.accounts[0].account.slots,
+                HashMap::from([(Bytes::from(5u64).lpad(32, 0), Bytes::from(5u64).lpad(32, 0))])
             );
             assert!(!delta.components.is_empty());
             assert!(delta
