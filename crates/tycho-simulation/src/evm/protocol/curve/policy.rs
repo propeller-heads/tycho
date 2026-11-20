@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_attributes_zero_values_are_unset() {
+    fn test_from_attributes_zero_values() {
         let policy = CurvePolicy::from_attributes(&attributes(&[
             (POLICY_ATTRIBUTE, vec![0; 20]),
             (POLICY_VERSION_ATTRIBUTE, vec![0]),
@@ -172,7 +172,7 @@ mod tests {
     #[case::short_address(POLICY_ATTRIBUTE, vec![7; 19])]
     #[case::empty_address(POLICY_CONTROLLER_ATTRIBUTE, vec![])]
     #[case::wide_uint(POLICY_MIN_FEE_ATTRIBUTE, vec![1; 33])]
-    fn test_update_rejects_malformed_value(#[case] name: &str, #[case] value: Vec<u8>) {
+    fn test_update_malformed_value(#[case] name: &str, #[case] value: Vec<u8>) {
         let mut policy = CurvePolicy::default();
 
         assert!(policy

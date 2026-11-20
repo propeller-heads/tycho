@@ -678,7 +678,7 @@ mod tests {
     #[case::cleared(Some(vec![0; 20]), false, None)]
     #[case::deleted(None, true, None)]
     #[case::absent(None, false, Some(vec![9; 20]))]
-    fn test_delta_transition_follows_policy(
+    fn test_delta_transition_policy_attribute(
         #[case] updated: Option<Vec<u8>>,
         #[case] deleted: bool,
         #[case] expected: Option<Vec<u8>>,

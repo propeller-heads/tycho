@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn test_created_policies_needs_constructor_log() {
+    fn test_created_policies() {
         let created = Call {
             call_type: CallType::Create.into(),
             address: POLICY.to_vec(),
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_entity_changes_attaches_grant_policy() {
+    fn test_policy_entity_changes_set_grant_policy() {
         let tx = tx(vec![set_policy_log(POOL, POLICY, 1)]);
         let state = grant_terms();
 
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_entity_changes_zeroes_grant_terms_of_other_policies() {
+    fn test_policy_entity_changes_set_other_policy() {
         // `OTHER_POOL` sets the grant policy of `POOL`, then a policy without grants.
         for (pool, policy) in [(OTHER_POOL, POLICY), (POOL, OTHER_POLICY)] {
             let tx = tx(vec![set_policy_log(pool, policy, 1)]);
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_entity_changes_follows_grant_terms_of_attached_policy() {
+    fn test_policy_entity_changes_grant_term_change() {
         let tx = tx(vec![set_min_fee_log(POLICY, &[0x02], 1), set_min_fee_log(POLICY, &[0x03], 2)]);
         let attached = vec![(0, pool_policy_key(&POOL), POLICY.to_vec())];
         let detached = vec![(0, pool_policy_key(&POOL), OTHER_POLICY.to_vec())];
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_entity_changes_attach_reads_terms_at_its_ordinal() {
+    fn test_policy_entity_changes_grant_terms_around_set_policy() {
         let tx = tx(vec![set_policy_log(POOL, POLICY, 2)]);
         let mut state = grant_terms();
         state.push((1, grant_term_key(&POLICY, POLICY_MIN_FEE_ATTRIBUTE), vec![0x02]));
