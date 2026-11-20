@@ -102,7 +102,7 @@ impl MetricState {
     ) -> Result<Option<&MetricFill>, SimulationError> {
         match &self.fill {
             Some(fill) if fill.direction == direction => Ok(Some(fill)),
-            Some(_) => Err(SimulationError::RecoverableError(ALREADY_QUOTED.to_string())),
+            Some(_) => Err(SimulationError::InvalidInput(ALREADY_QUOTED.to_string(), None)),
             None => Ok(None),
         }
     }
@@ -155,9 +155,9 @@ impl MetricState {
 
     /// The price of the next input unit after `fill`, in quote tokens per base token, as the
     /// depth walk prices it: the average price of the bin the fill stopped in. Without depth bins
-    /// it is the flat top-of-book price. A recoverable error once the fill used up the side.
+    /// it is the flat top-of-book price. An invalid-input error once the fill used up the side.
     fn price_after_fill(&self, fill: &MetricFill) -> Result<f64, SimulationError> {
-        let no_liquidity = || SimulationError::RecoverableError(NO_LIQUIDITY.into());
+        let no_liquidity = || SimulationError::InvalidInput(NO_LIQUIDITY.into(), None);
         let (bins, in_decimals, out_decimals) = match fill.direction {
             MetricDirection::ZeroForOne => {
                 (&self.bid_ask.depth.bids, self.base_token.decimals, self.quote_token.decimals)
@@ -199,7 +199,7 @@ impl MetricState {
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let Some(price) = self.quoted_price(direction)? else {
             // Nothing on this side is no swap at any size, so there is no limit to report.
-            return Err(SimulationError::RecoverableError(NO_LIQUIDITY.into()));
+            return Err(SimulationError::InvalidInput(NO_LIQUIDITY.into(), None));
         };
         // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap, depth
         // side, and token decimals.
@@ -416,7 +416,9 @@ impl ProtocolSim for MetricState {
                 (Some(bid), Some(ask)) => (bid + ask) / 2.0,
                 (Some(bid), None) => bid,
                 (None, Some(ask)) => ask,
-                (None, None) => return Err(SimulationError::RecoverableError(NO_LIQUIDITY.into())),
+                (None, None) => {
+                    return Err(SimulationError::InvalidInput(NO_LIQUIDITY.into(), None))
+                }
             }
         };
         Ok(match direction {
@@ -757,7 +759,7 @@ mod tests {
         );
         assert!(matches!(
             state.get_limits(weth().address, usdc().address),
-            Err(SimulationError::RecoverableError(_))
+            Err(SimulationError::InvalidInput(_, None))
         ));
         let Err(SimulationError::InvalidInput(msg, None)) =
             state.get_amount_out(big("100000000000000000"), &weth(), &usdc())
@@ -791,7 +793,7 @@ mod tests {
         );
         assert!(matches!(
             state.get_limits(usdc().address, weth().address),
-            Err(SimulationError::RecoverableError(_))
+            Err(SimulationError::InvalidInput(_, None))
         ));
         let Err(SimulationError::InvalidInput(msg, None)) =
             state.get_amount_out(big("300000000"), &usdc(), &weth())
@@ -813,7 +815,8 @@ mod tests {
         state.bid_ask.bid_adj = BigUint::zero();
         state.bid_ask.ask_adj = BigUint::from(u128::MAX);
 
-        let Err(SimulationError::RecoverableError(msg)) = state.spot_price(&weth(), &usdc()) else {
+        let Err(SimulationError::InvalidInput(msg, None)) = state.spot_price(&weth(), &usdc())
+        else {
             panic!("a book without quotes has no spot price");
         };
         assert_eq!(msg, "No liquidity");
@@ -1336,13 +1339,14 @@ mod tests {
         let after = metric_state(&first);
 
         assert!(buy_weth(&state, 1_000_000_000).is_ok());
-        let Err(SimulationError::RecoverableError(message)) = buy_weth(after, 1_000_000_000) else {
+        let Err(SimulationError::InvalidInput(message, None)) = buy_weth(after, 1_000_000_000)
+        else {
             panic!("the other direction is refused after a fill");
         };
         assert_eq!(message, "Metric pool already quoted in this route");
         assert!(matches!(
             after.get_limits(usdc().address, weth().address),
-            Err(SimulationError::RecoverableError(_))
+            Err(SimulationError::InvalidInput(_, None))
         ));
         assert_eq!(after.directions(), vec![(weth().address, usdc().address)]);
     }
@@ -1402,7 +1406,7 @@ mod tests {
         assert!(after
             .spot_price(&weth(), &usdc())
             .is_ok());
-        let Err(SimulationError::RecoverableError(message)) = after.spot_price(&usdc(), &weth())
+        let Err(SimulationError::InvalidInput(message, None)) = after.spot_price(&usdc(), &weth())
         else {
             panic!("the other direction has no spot price after a fill");
         };
@@ -1420,13 +1424,13 @@ mod tests {
 
         assert_eq!(price(&inside_bin_1).unwrap(), 3000.0);
         assert_eq!(price(&into_bin_2).unwrap(), 2000.0);
-        let Err(SimulationError::RecoverableError(message)) =
+        let Err(SimulationError::InvalidInput(message, None)) =
             metric_state(&into_bin_2).spot_price(&usdc(), &weth())
         else {
             panic!("the other direction has no spot price after a fill");
         };
         assert_eq!(message, "Metric pool already quoted in this route");
-        assert!(matches!(price(&all), Err(SimulationError::RecoverableError(_))));
+        assert!(matches!(price(&all), Err(SimulationError::InvalidInput(_, None))));
     }
 
     #[test]
