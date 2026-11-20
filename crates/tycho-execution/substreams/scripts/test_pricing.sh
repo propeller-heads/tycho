@@ -51,9 +51,14 @@ load_source_token() {
 	local decimals="$4"
 	local price="$5"
 	local age="$6"
+	local quality="${7:-100}"
+	# price "none" loads the token without a token_price row.
+	local price_arg=(-v price="$price")
+	[ "$price" = none ] && price_arg=()
 	docker exec -i "$container" psql -v ON_ERROR_STOP=1 -U tycho -d tycho \
 		-v id="$id" -v token_hex="$token_hex" -v decimals="$decimals" \
-		-v price="$price" -v age="$age" <"$workspace_dir/pricing/test_source.sql"
+		"${price_arg[@]}" -v age="$age" -v quality="$quality" \
+		<"$workspace_dir/pricing/test_source.sql"
 }
 
 docker network create "$test_network" >/dev/null
@@ -71,6 +76,12 @@ load_source_token "$base_db" 3 fff1111111111111111111111111111111111111 6 100000
 load_source_token "$base_db" 4 eee1111111111111111111111111111111111111 6 500000 "0 minutes"
 # pinned but priced far below its band, so it must be ignored rather than trusted.
 load_source_token "$base_db" 5 deadbeef00000000000000000000000000000000 18 10000000000000000000 "0 minutes"
+# failed analysis with the 18 Tycho stores when decimals() fails, and no fresh price.
+load_source_token "$base_db" 6 1818181818181818181818181818181818181818 18 1000000 "4 hours" 10
+# known to Tycho (6 decimals) but with no token_price row at all.
+load_source_token "$base_db" 7 7777777777777777777777777777777777777777 6 none "0 minutes"
+# failed analysis with an 18, but a fresh price of 2 USD (10^18 / 5x10^20 x 1000): its decimals are kept.
+load_source_token "$base_db" 8 1919191919191919191919191919191919191919 18 500000000000000000000 "0 minutes" 10
 
 docker exec -i "$main_db" psql -v ON_ERROR_STOP=1 -U tycho -d router_trades \
 	<"$workspace_dir/schema.sql"
