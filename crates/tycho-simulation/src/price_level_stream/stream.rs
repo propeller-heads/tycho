@@ -497,9 +497,9 @@ mod tests {
             },
             test_support::{
                 address, captured_message_text, captured_quote_stream_text, captured_tokens,
-                fermiswap, matching_message_text, message_text, message_then_repeat, token,
-                token_map, tokens, wall_nanos_now, FakeConnection, FakeTitan, KIPSELI,
-                KIPSELI_STREAMED, PAMM, USDC, WBTC, WETH,
+                fermiswap, matching_message_text, message_text, message_then_repeat,
+                recorded_fermiswap, token, token_map, tokens, wall_nanos_now, FakeConnection,
+                FakeTitan, FERMISWAP_ROUTER, KIPSELI, KIPSELI_STREAMED, PAMM, USDC, WBTC, WETH,
             },
         },
         *,
@@ -966,8 +966,7 @@ mod tests {
 
     #[test]
     fn with_known_pamms_registers_known_venues() {
-        // PAMM is the FermiSwap router, one of the default venues.
-        let fermiswap_router = Bytes::from_str(PAMM).unwrap();
+        let fermiswap_router = Bytes::from_str(FERMISWAP_ROUTER).unwrap();
 
         let builder = PriceLevelStreamBuilder::new();
         assert!(builder.registry.is_empty());
@@ -1058,7 +1057,7 @@ mod tests {
         // The other default venues are unaffected.
         assert!(builder
             .registry
-            .contains_key(&address(PAMM)));
+            .contains_key(&address(FERMISWAP_ROUTER)));
     }
 
     /// Mixed calls naming different addresses of one venue land on one canonical key, so the
@@ -1200,6 +1199,7 @@ mod tests {
     fn capture_builder(prices: &FakeTitan, overrides: &FakeTitan) -> PriceLevelStreamBuilder {
         two_socket_timings(prices, overrides)
             .with_known_pamms()
+            .add_pamm(recorded_fermiswap())
             .with_tokens(captured_tokens())
     }
 
@@ -1350,6 +1350,7 @@ mod tests {
         };
         let stream = builder
             .with_known_pamms()
+            .add_pamm(recorded_fermiswap())
             .with_tokens(captured_tokens())
             .read_idle_timeout(Duration::from_secs(5))
             .build();

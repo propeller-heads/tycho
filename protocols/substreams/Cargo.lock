@@ -3265,7 +3265,6 @@ dependencies = [
 name = "substreams-helper"
 version = "0.0.2"
 dependencies = [
- "anyhow",
  "ethabi 18.0.0",
  "hex",
  "prost 0.11.9",

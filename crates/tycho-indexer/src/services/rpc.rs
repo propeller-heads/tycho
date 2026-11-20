@@ -9,6 +9,7 @@ use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
 use thiserror::Error;
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -102,6 +103,21 @@ impl ResponseError for RpcError {
             RpcError::Unknown(e) => HttpResponse::InternalServerError().body(e.to_string()),
             RpcError::PlanRestrictionViolation(e) => HttpResponse::BadRequest().body(e.to_owned()),
         }
+    }
+}
+
+/// Clears `handler`'s pause-dependent response caches each time `changes` is notified, until its
+/// sender is dropped. Several changes that arrive during one clear trigger a single further clear.
+pub async fn clear_caches_on_pause_change<G, T>(
+    handler: web::Data<RpcHandler<G, T>>,
+    mut changes: watch::Receiver<()>,
+) where
+    G: Gateway,
+    T: EntryPointTracer + Sync,
+{
+    while changes.changed().await.is_ok() {
+        debug!("Admin pauses changed; clearing the pause-dependent response caches");
+        handler.clear_pause_dependent_caches();
     }
 }
 
@@ -208,6 +224,12 @@ where
             }
         }
         self
+    }
+
+    /// Drops the cached `/protocol_components` and `/protocol_state` responses.
+    pub(crate) fn clear_pause_dependent_caches(&self) {
+        self.component_cache.clear();
+        self.protocol_state_cache.clear();
     }
 
     /// Sets which path answers the state endpoints.
@@ -2656,6 +2678,131 @@ mod tests {
                 .contains(&request),
             !from_cache
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_pause_dependent_caches() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                let component = ProtocolComponent::new(
+                    "c1",
+                    "ex",
+                    "pool",
+                    Chain::Ethereum,
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    ChangeType::Creation,
+                    Bytes::default(),
+                    NaiveDateTime::default(),
+                );
+                Box::pin(async move { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        // Block 1 is below the window, so the state request takes the database path and is cached.
+        let handler = state_routing_handler(gw, CacheMode::Serve);
+        let components_request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ex".to_string(),
+            component_ids: Some(vec!["c1".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+        let state_request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "ex".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+        handler
+            .get_protocol_components(&components_request)
+            .await
+            .unwrap();
+        handler
+            .get_protocol_state(&state_request)
+            .await
+            .unwrap();
+        assert!(handler
+            .component_cache
+            .contains(&components_request));
+        assert!(handler
+            .protocol_state_cache
+            .contains(&state_request));
+
+        handler.clear_pause_dependent_caches();
+
+        assert!(!handler
+            .component_cache
+            .contains(&components_request));
+        assert!(!handler
+            .protocol_state_cache
+            .contains(&state_request));
+    }
+
+    #[tokio::test]
+    async fn test_clear_caches_on_pause_change() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                let component = ProtocolComponent::new(
+                    "c1",
+                    "ex",
+                    "pool",
+                    Chain::Ethereum,
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    ChangeType::Creation,
+                    Bytes::default(),
+                    NaiveDateTime::default(),
+                );
+                Box::pin(async move { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+            });
+        let handler = web::Data::new(RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        ));
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ex".to_string(),
+            component_ids: Some(vec!["c1".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+        let (changes, receiver) = watch::channel(());
+        let task = tokio::spawn(clear_caches_on_pause_change(handler.clone(), receiver));
+
+        // Each change clears the cache; the yield lets the task run on this single-threaded
+        // runtime.
+        let mut cleared = Vec::new();
+        for _ in 0..2 {
+            handler
+                .get_protocol_components(&request)
+                .await
+                .unwrap();
+            changes.send_replace(());
+            tokio::task::yield_now().await;
+            cleared.push(
+                !handler
+                    .component_cache
+                    .contains(&request),
+            );
+        }
+        drop(changes);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+
+        assert_eq!(cleared, vec![true, true]);
+        assert!(ended.is_ok(), "the task outlived its sender");
     }
 
     /// The `db_path_requests` counters that moved since the last snapshot, as

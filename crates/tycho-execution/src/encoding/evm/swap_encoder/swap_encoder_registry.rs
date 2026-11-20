@@ -399,7 +399,7 @@ mod tests {
         for protocol in [
             FALLBACK_KEY,
             "fallback:fermiswap",
-            "fallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
+            "fallback:0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
         ] {
             let resolved = registry
                 .get_encoder(protocol)
@@ -549,10 +549,9 @@ mod tests {
 
     #[test]
     fn test_registry_configured_with_subsidizing_executor_without_payer() {
-        let executors =
-            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+        let executors = r#"{"polygon": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
 
-        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+        let result = SwapEncoderRegistry::new(Chain::Polygon)
             .add_default_encoders(Some(executors.to_string()));
 
         assert!(

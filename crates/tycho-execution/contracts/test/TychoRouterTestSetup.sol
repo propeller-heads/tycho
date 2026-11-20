@@ -185,12 +185,23 @@ contract TychoRouterTestSetup is
         return 22082754;
     }
 
+    /// @dev A test whose venue only quotes in the block its oracle was refreshed in forks to the
+    /// state just before a real transaction of that block, by returning its hash. The default,
+    /// zero, forks at the end of `getForkBlock()`.
+    function getForkTx() public view virtual returns (bytes32) {
+        return bytes32(0);
+    }
+
     uint256 internal forkTimestamp;
 
     function setUp() public virtual {
         string memory chain = getChain();
-        uint256 forkBlock = getForkBlock();
-        vm.createSelectFork(vm.rpcUrl(chain), forkBlock);
+        bytes32 forkTx = getForkTx();
+        if (forkTx == bytes32(0)) {
+            vm.createSelectFork(vm.rpcUrl(chain), getForkBlock());
+        } else {
+            vm.createSelectFork(vm.rpcUrl(chain), forkTx);
+        }
 
         forkTimestamp = vm.getBlockTimestamp();
         uint256 setupTime = forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR;
