@@ -12,10 +12,11 @@ use crate::{
     evm::protocol::algebra_integral::plugin::{
         composed::{ComposedPlugin, GasModule, GateModule},
         modules::{
+            algebra::farming::Farming,
             field_bytes,
             nami::{
-                anti_sniper::AntiSniper, farming::Farming, fee_override::FeeOverride,
-                fee_source::FeeSource, mevx::Mevx,
+                anti_sniper::AntiSniper, fee_override::FeeOverride, fee_source::FeeSource,
+                mevx::Mevx,
             },
         },
         registry::{register_plugin_handler, PluginCreationParams, PluginHandlerCreator},

@@ -14,7 +14,7 @@ use tycho_common::{simulation::protocol_sim::BlockContext, Bytes};
 use crate::{
     evm::protocol::algebra_integral::plugin::{
         composed::{GasModule, GateModule},
-        modules::nami::field_or_zero,
+        modules::field_or_zero,
     },
     protocol::errors::InvalidSnapshotError,
 };

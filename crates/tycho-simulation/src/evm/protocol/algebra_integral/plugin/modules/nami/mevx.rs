@@ -9,7 +9,7 @@ use alloy::primitives::Address;
 use tycho_common::Bytes;
 
 use crate::{
-    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::nami::field_or_zero},
+    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_or_zero},
     protocol::errors::InvalidSnapshotError,
 };
 

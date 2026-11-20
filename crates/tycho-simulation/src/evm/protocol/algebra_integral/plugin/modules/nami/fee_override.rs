@@ -19,10 +19,7 @@ use tycho_common::{
 use crate::{
     evm::protocol::algebra_integral::plugin::{
         composed::{FeeModule, GasModule},
-        modules::{
-            algebra::dynamic_fee::DynamicFee,
-            nami::{fee_source::FeeSource, field_or_zero},
-        },
+        modules::{algebra::dynamic_fee::DynamicFee, field_or_zero, nami::fee_source::FeeSource},
         PluginFees,
     },
     protocol::errors::InvalidSnapshotError,

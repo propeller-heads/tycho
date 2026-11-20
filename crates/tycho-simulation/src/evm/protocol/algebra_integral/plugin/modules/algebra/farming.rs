@@ -1,4 +1,4 @@
-//! The farming proxy module of Nami's plugins: the gas it adds to `afterSwap`.
+//! Algebra's farming proxy module: the gas it adds to `afterSwap`.
 //!
 //! With an incentive set, `afterSwap` moves the incentive's virtual pool to the pool's new tick.
 
@@ -8,7 +8,7 @@ use alloy::primitives::Address;
 use tycho_common::Bytes;
 
 use crate::{
-    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::nami::field_or_zero},
+    evm::protocol::algebra_integral::plugin::{composed::GasModule, modules::field_or_zero},
     protocol::errors::InvalidSnapshotError,
 };
 
