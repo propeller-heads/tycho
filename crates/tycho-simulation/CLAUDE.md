@@ -49,7 +49,10 @@ for any protocol indexed by Tycho.
     `(Chain, plugin implementation)` in `registry.rs`, with a generic VM fallback on Ethereum
     only that the first DEX registers. A native handler is a `ComposedPlugin` of fee, gate and
     gas modules. `modules/<vendor>/<module>.rs` decodes the `<module>/<field>` attributes that
-    the file of the same path in `protocols/substreams/ethereum-algebra-integral` emits
+    the file of the same path in `protocols/substreams/ethereum-algebra-integral` emits; every
+    field is emitted when a pool names its plugin, so modules read with `field_bytes` and never
+    default a missing one. `quote` takes the storage overrides the pool state keeps (earlier
+    swaps' writes, pending-block state), which only a VM handler uses
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for

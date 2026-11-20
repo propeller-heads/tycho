@@ -66,7 +66,16 @@ pub struct PluginQuote {
 /// One pool's plugin, rebuilt whenever the attributes it is decoded from change.
 pub trait PluginHandler: Debug + Send + Sync + 'static {
     /// Fees and hook gas for `swap` at the current execution block.
-    fn quote(&self, swap: &PluginSwap) -> Result<PluginQuote, SimulationError>;
+    ///
+    /// `overrides` is storage that differs from the indexed state: what earlier swaps in the
+    /// block wrote, as their quotes' `storage_writes` reported, and pending-block state. The pool
+    /// state keeps it and passes it in. Native handlers ignore it; a handler that runs the hooks
+    /// in the VM runs them against it.
+    fn quote(
+        &self,
+        swap: &PluginSwap,
+        overrides: &StorageOverrides,
+    ) -> Result<PluginQuote, SimulationError>;
 
     /// Whether the plugin lets the pool swap at all at the current execution block. While this is
     /// `false` the pool offers no liquidity.
