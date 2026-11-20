@@ -169,7 +169,6 @@ fn context() -> StateContext {
         tick_spacing: 200,
         sqrt_price_x96: U256::ZERO,
         tick: 0,
-        liquidity: 0,
     }
 }
 

@@ -1,10 +1,9 @@
 //! Tests of the Ascend hook on its own and through `UniswapV4State`.
 //!
-//! Expected values come from outside the code under test: Elysium chain data named by fact id
-//! (`S..`) from the integration spec (V4Quoter quotes, traces and storage reads of the deployed
-//! hook), and values worked out with an independent Python model of the spec's rules
-//! (S14, S16) over the inputs shown in each test. A test that states no source holds a number
-//! worked by hand beside it.
+//! Expected values come from outside the code under test: Elysium chain data (V4Quoter quotes,
+//! traces and storage reads of the deployed hook, and the deployed math library's own outputs
+//! read with `eth_call`), named by block or transaction in each test. A test that states no
+//! source holds a number worked by hand beside it.
 use std::{collections::HashMap, str::FromStr};
 
 use alloy::primitives::{Address, I128, I256, U256};
@@ -21,12 +20,9 @@ use tycho_common::{
 };
 
 use super::{
-    hook_handler::{
-        fee_ceil, fee_floor, max_gross_buy, AscendHookHandler, ASCEND_FILL_BEFORE_SWAP_GAS,
-        ASCEND_HOOK_ELYSIUM,
-    },
+    hook_handler::{fee_ceil, fee_floor, max_gross_buy, AscendHookHandler, ASCEND_HOOK_ELYSIUM},
     hook_handler_creator::AscendHookCreator,
-    math::{amount0_delta, observe, size_fill, Curve, FillRequest, LAUNCH_SUPPLY},
+    math::{amount0_delta_down, observe, size_fill, Curve, FillRequest, LAUNCH_SUPPLY},
     *,
 };
 use crate::{
@@ -38,7 +34,10 @@ use crate::{
                     has_native_hook_handler, initialize_hook_handlers, test_fixtures::BareSnapshot,
                     HookHandlerCreator,
                 },
-                models::{BeforeSwapParameters, StateContext, SwapOutcome, SwapParams},
+                models::{
+                    AfterSwapParameters, BalanceDelta, BeforeSwapParameters, StateContext,
+                    SwapOutcome, SwapParams,
+                },
             },
             state::{UniswapV4Fees, UniswapV4State},
         },
@@ -49,25 +48,27 @@ use crate::{
     protocol::errors::InvalidSnapshotError,
 };
 
-/// The timestamp of block 8660000 on Elysium, at which S32's experiments quote (S32).
+/// The timestamp of block 8660000 on Elysium, at which the edge experiments quoted.
 const TS: u64 = 1_795_168_252;
 
 /// `L` of every launch with start tick -168600, read from the chain: the active liquidity of pool
-/// 0x1aaf... at block 8397596 (S28), equal to S7's formula (S7).
+/// 0x1aaf... at block 8397596, equal to the launch formula's.
 const L_168600: u128 = 218_323_400_825_907_916_615_201;
 
 fn u(decimal: &str) -> U256 {
     U256::from_str(decimal).expect("a decimal U256")
 }
 
-/// `sqrtAt(-168500)`, `sqrtAt(-168600)`, `sqrtAt(-168800)`: TickMath values (the second is S28's
-/// `sqrtP - 2`, the third S32's bound `0xe2a3ff8d70d5dd274e6ba`).
+/// `sqrtAt(-168500)`: the spot of the token0 pools the quote tests start from.
 const SQRT_M168500: &str = "17383271292983671704362294";
+/// `sqrtAt(-168600)`: the token0 curve end (the price of pool 0x1aaf... at block 8397596 less 2).
 const SQRT_M168600: &str = "17296576189565919710191919";
+/// `sqrtAt(-168800)`: the bound the hook's library receives for the token0 fill price,
+/// `0xe2a3ff8d70d5dd274e6ba` scaled.
 const SQRT_M168800: &str = "17124480942577115259528890";
-/// `sqrtAt(168500)`, `sqrtAt(168600)` and `sqrtAt(-31400)`: the mirrored position's spot, upper
-/// and lower edges for start tick -168600.
+/// `sqrtAt(168500)`: the spot of the mirrored pools the quote tests start from.
 const SQRT_168500: &str = "361100142176362277044286757142905";
+/// `sqrtAt(168600)`: the mirrored curve end.
 const SQRT_168600: &str = "362910073449872328385539408603818";
 
 fn observation(ema: U256, updated_at: u64, tick: i32, discount: u64) -> Observation {
@@ -88,14 +89,14 @@ fn pool_state(
     observation: Observation,
     bid: Bid,
 ) -> AscendPoolState {
-    AscendPoolState { fee_pips, token_is_currency0, start_tick: -168_600, observation, bid }
+    AscendPoolState::new(fee_pips, token_is_currency0, -168_600, observation, bid)
+        .expect("a state the hook could have stored")
 }
 
 /// A pool with start tick -168600 and the price at `spot` (tick `tick`), the hook quoting at
-/// `timestamp`. The position is the pool's single one, with S7's liquidity.
+/// `timestamp`. The position is the pool's single one, with the launch liquidity.
 fn pool(state: AscendPoolState, spot: U256, tick: i32, timestamp: u64) -> UniswapV4State {
-    let curve = Curve::new(state.token_is_currency0, state.start_tick).expect("a curve");
-    let liquidity = u128::try_from(curve.liquidity).expect("fits");
+    let liquidity = state.curve.liquidity;
     let net = i128::try_from(liquidity).expect("fits");
     let (lower, upper) = if state.token_is_currency0 {
         (state.start_tick, state.start_tick + 200_000)
@@ -173,11 +174,11 @@ fn big(decimal: &str) -> BigUint {
 fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
     let u64_attr = |v: u64| Bytes::from(v.to_be_bytes().to_vec());
     [
-        (FEE_PIPS_ATTRIBUTE, u64_attr(state.fee_pips.into())),
-        (TOKEN_IS_CURRENCY0_ATTRIBUTE, Bytes::from(vec![u8::from(state.token_is_currency0)])),
-        (START_TICK_ATTRIBUTE, Bytes::from(state.start_tick.to_be_bytes().to_vec())),
+        ("ascend_fee_pips", u64_attr(state.fee_pips.into())),
+        ("ascend_token_is_currency0", Bytes::from(vec![u8::from(state.token_is_currency0)])),
+        ("ascend_start_tick", Bytes::from(state.start_tick.to_be_bytes().to_vec())),
         (
-            EMA_SQRT_PRICE_ATTRIBUTE,
+            "ascend_ema_sqrt_price_x96",
             Bytes::from(
                 state
                     .observation
@@ -186,9 +187,9 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        (EMA_UPDATED_AT_ATTRIBUTE, u64_attr(state.observation.updated_at)),
+        ("ascend_ema_updated_at", u64_attr(state.observation.updated_at)),
         (
-            OBSERVED_TICK_ATTRIBUTE,
+            "ascend_observed_tick",
             Bytes::from(
                 state
                     .observation
@@ -197,9 +198,9 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        (DISCOUNT_ATTRIBUTE, u64_attr(state.observation.discount)),
+        ("ascend_discount", u64_attr(state.observation.discount)),
         (
-            BID_INVENTORY_ATTRIBUTE,
+            "ascend_bid_inventory",
             Bytes::from(
                 state
                     .bid
@@ -209,7 +210,7 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
             ),
         ),
         (
-            BID_FILLED_IN_WINDOW_ATTRIBUTE,
+            "ascend_bid_filled_in_window",
             Bytes::from(
                 state
                     .bid
@@ -218,9 +219,9 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        (BID_WINDOW_START_ATTRIBUTE, u64_attr(state.bid.window_start)),
+        ("ascend_bid_window_start", u64_attr(state.bid.window_start)),
         (
-            BID_MAX_CLIP_ATTRIBUTE,
+            "ascend_bid_max_clip",
             Bytes::from(
                 state
                     .bid
@@ -244,54 +245,70 @@ fn test_launch_supply_is_1e27() {
     assert_eq!(LAUNCH_SUPPLY, U256::from(10u64).pow(U256::from(27)));
 }
 
-/// S7's formula for a pool starting at -168600 gives the liquidity the chain holds (S28), for
-/// both orientations.
+/// The launch formula for a pool starting at -168600 gives the liquidity the chain holds (pool
+/// 0x1aaf... at block 8397596), for both orientations.
 #[rstest]
 #[case::token_is_currency0(true)]
 #[case::mirrored(false)]
 fn test_curve_liquidity_is_what_the_chain_holds(#[case] token_is_currency0: bool) {
-    let curve = Curve::new(token_is_currency0, -168_600).expect("a curve");
+    let curve = Curve::try_new(token_is_currency0, -168_600).expect("a curve");
 
-    assert_eq!(curve.liquidity, U256::from(L_168600));
+    assert_eq!(curve.liquidity, L_168600);
 }
 
-/// S32 (a): at spot `sqrtAt(-168500)` the tokens down to the curve end are
-/// 4987498616072757541375877 (lib 0x15821c64 trace at block 8660000).
+/// At spot `sqrtAt(-168500)` the tokens down to the curve end are 4987498616072757541375877 (the
+/// math library's trace at block 8660000).
 #[test]
 fn test_tokens_to_the_curve_end_match_the_chain() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     assert_eq!(curve.curve_end, u(SQRT_M168600));
 
     let to_end =
-        amount0_delta(curve.curve_end, u(SQRT_M168500), curve.liquidity, false).expect("a delta");
+        amount0_delta_down(curve.curve_end, u(SQRT_M168500), curve.liquidity).expect("a delta");
 
     assert_eq!(to_end, u("4987498616072757541375877"));
 }
 
 #[test]
 fn test_curve_bounds_of_both_orientations() {
-    let token0 = Curve::new(true, -168_600).unwrap();
+    let token0 = Curve::try_new(true, -168_600).unwrap();
     assert_eq!(token0.start_side_bound, u(SQRT_M168800));
     assert_eq!(token0.curve_end, get_sqrt_ratio_at_tick(-168_600).unwrap());
     assert_eq!(token0.far_end, get_sqrt_ratio_at_tick(31_400).unwrap());
 
-    let mirrored = Curve::new(false, -168_600).unwrap();
+    let mirrored = Curve::try_new(false, -168_600).unwrap();
     assert_eq!(mirrored.start_side_bound, get_sqrt_ratio_at_tick(168_800).unwrap());
     assert_eq!(mirrored.curve_end, u(SQRT_168600));
     assert_eq!(mirrored.far_end, get_sqrt_ratio_at_tick(-31_400).unwrap());
 }
 
+/// A start tick far below -660000 floors the token0 liquidity to 0, which would divide the
+/// fill's sizing by 0; one near the top of the tick range makes the mirrored liquidity exceed
+/// `uint128`; a tick past the price range has no curve at all.
+#[rstest]
+#[case::zero_liquidity(true, -880_000)]
+#[case::liquidity_beyond_uint128(false, 687_000)]
+#[case::tick_out_of_range(true, 1_000_000)]
+fn test_a_curve_the_hook_could_not_launch_is_refused(
+    #[case] token_is_currency0: bool,
+    #[case] start_tick: i32,
+) {
+    let result = Curve::try_new(token_is_currency0, start_tick);
+
+    assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+}
+
 // ---------------------------------------------------------------------------------------------
-// The observation (S14)
+// The observation
 // ---------------------------------------------------------------------------------------------
 
-/// Tx 0xd2cce086... (block 8351072, tokenIs0, EMA rising, dt = 969): the hook's trace shows the
+/// Tx 0xd2cce086... (block 8351072, token0, EMA rising, dt = 969): the hook's trace shows the
 /// EMA 0xd9137f51e679b46a57ec68 -> 0xd9160c7dbd65710dd08a3d in steps of 600 s and 369 s, and the
-/// discount 0x2bbf2ed -> ceil 0x2ac97d8 -> 0x2af920e (S14). The spot, 0xd9173164a0a4ad89a19b10,
-/// is one the two steps map to that EMA (found by bisection; the steps' floors admit two).
+/// discount 0x2bbf2ed -> ceil 0x2ac97d8 -> 0x2af920e. The spot, 0xd9173164a0a4ad89a19b10, is one
+/// the two steps map to that EMA (found by bisection; the steps' floors admit two).
 #[test]
 fn test_observation_reproduces_the_traced_ema_and_discount() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(
         U256::from_str_radix("d9137f51e679b46a57ec68", 16).unwrap(),
         1_795_112_640,
@@ -310,7 +327,7 @@ fn test_observation_reproduces_the_traced_ema_and_discount() {
 
 #[test]
 fn test_observation_changes_nothing_in_the_same_second() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS, -100_000, 1_000);
 
     let after = observe(&curve, &before, u("90000000000000000000000000"), -50, TS).unwrap();
@@ -320,7 +337,7 @@ fn test_observation_changes_nothing_in_the_same_second() {
 
 #[test]
 fn test_observation_before_the_last_one_is_refused() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS, 0, 0);
 
     let result = observe(&curve, &before, u("100000000000000000000000000"), 0, TS - 1);
@@ -328,10 +345,10 @@ fn test_observation_before_the_last_one_is_refused() {
     assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
 }
 
-/// Hand-worked, as the spec's rules give them (S14), at dt = 100 s:
+/// Hand-worked, as the hook's rules give them, at dt = 100 s:
 /// - EMA 1e26 falling to a spot of 9e25: one step of 100 s moves `floor(1e25 * 100 / 700)`; d1 =
 ///   ceil(1000 * 43200 / 43300) = 998; x = floor((2^32 - 998) * 1e26 / ema) is about 1.0145
-///   * 2^32, above 2^32, so the stored d is the floor 0, not a negative number (S14, S18).
+///   * 2^32, above 2^32, so the stored d is the floor 0, not a negative number;
 /// - the same with the spot clamped up to `sqrtAt(-168800)` (spot 1e20 is below the range);
 /// - mirrored, EMA 1e30 rising to 1.1e30, which floors too;
 /// - the plain case: d does not floor: 1e6 -> d1 997691 -> 2^32 - x = 61476137.
@@ -376,7 +393,7 @@ fn test_observation_floors_the_discount_at_zero(
     #[case] expected_ema: &str,
     #[case] expected_discount: u64,
 ) {
-    let curve = Curve::new(token_is_currency0, -168_600).unwrap();
+    let curve = Curve::try_new(token_is_currency0, -168_600).unwrap();
     let before = observation(u(ema), TS - 100, 0, discount);
 
     let after = observe(&curve, &before, u(spot), 5, TS).unwrap();
@@ -389,7 +406,7 @@ fn test_observation_floors_the_discount_at_zero(
 /// `1 - 2^-8` of the distance (each step of 600 s halves it), not all of it.
 #[test]
 fn test_observation_takes_at_most_eight_steps() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS - 1_000_000, 0, 1_000_000);
 
     let after = observe(&curve, &before, u("200000000000000000000000000"), 0, TS).unwrap();
@@ -402,7 +419,7 @@ fn test_observation_takes_at_most_eight_steps() {
 /// `ceil(1e6 * 43200 / 45200) = 955753`, and the re-anchor leaves `2^32 - x = d1`.
 #[test]
 fn test_observation_decays_the_discount_with_the_elapsed_time() {
-    let curve = Curve::new(true, -168_600).unwrap();
+    let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS - 2_000, 0, 1_000_000);
 
     let after = observe(&curve, &before, u("100000000000000000000000000"), 0, TS).unwrap();
@@ -412,65 +429,66 @@ fn test_observation_decays_the_discount_with_the_elapsed_time() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Fill sizing (S16)
+// Fill sizing: the outputs of the deployed library's `0x15821c64`
 // ---------------------------------------------------------------------------------------------
 
-/// A curve with the given end price and liquidity, in the orientation of `token_is_currency0`.
-fn curve_of(token_is_currency0: bool, curve_end: U256, liquidity: U256) -> Curve {
-    Curve {
-        token_is_currency0,
-        liquidity,
-        curve_end,
-        far_end: U256::ZERO,
-        start_side_bound: U256::ZERO,
-        clamp: (U256::ZERO, U256::MAX),
-    }
-}
+const HUGE: &str = "10000000000000000000000000000000000000000";
+const INT128_MAX_DECIMAL: &str = "170141183460469231731687303715884105727";
 
-/// The inputs of the Python model's token0 vectors: S28's liquidity, a curve end at
-/// `sqrtAt(-168600)`, the spot 0.2% above it, the EMA at the spot and a fill price 0.05% below
-/// the EMA.
-struct Token0Fixture {
+/// The sizing inputs of a pool at tick -168500 with the EMA a bid's fill price sits 0.05% below
+/// (`d = 2147483`), for either orientation.
+struct SizingFixture {
     curve: Curve,
     spot: U256,
     fill_price: U256,
     ema: U256,
 }
 
-fn token0_fixture() -> Token0Fixture {
-    Token0Fixture {
-        curve: curve_of(true, u(SQRT_M168600), U256::from(L_168600)),
+fn token0_fixture() -> SizingFixture {
+    SizingFixture {
+        curve: Curve::try_new(true, -168_600).unwrap(),
         spot: u("17331169341945051549612302"),
         fill_price: u("17322503759888906322764708"),
         ema: u("17331169341945051549612302"),
     }
 }
 
-fn token0_request(
-    fixture: &Token0Fixture,
-    amount_in: U256,
-    inventory: U256,
-    max_clip: U256,
-    filled: U256,
-) -> FillRequest {
-    FillRequest {
-        spot: fixture.spot,
-        fill_price: fixture.fill_price,
-        ema: fixture.ema,
-        amount_in,
-        inventory,
-        max_clip,
-        filled,
+fn mirrored_fixture() -> SizingFixture {
+    SizingFixture {
+        curve: Curve::try_new(false, -168_600).unwrap(),
+        spot: u(SQRT_168500),
+        // ceil(ema * 2^32 / (2^32 - 2147483))
+        fill_price: u("360558220948084641088334577914306"),
+        ema: u("360377941892009552490198183628619"),
     }
 }
 
-const T0_TO_FILL_PRICE: &str = "499274149441997029379948";
+fn size(
+    fixture: &SizingFixture,
+    amount_in: &str,
+    inventory: &str,
+    max_clip: &str,
+    filled: &str,
+) -> Option<(U256, U256, u64)> {
+    size_fill(
+        &fixture.curve,
+        &FillRequest {
+            spot: fixture.spot,
+            fill_price: fixture.fill_price,
+            ema: fixture.ema,
+            amount_in: u(amount_in),
+            inventory: u(inventory),
+            max_clip: u(max_clip),
+            filled: u(filled),
+        },
+    )
+    .expect("sizes")
+    .map(|fill| (fill.tokens_in, fill.quote_out, fill.discount))
+}
 
-const HUGE: &str = "10000000000000000000000000000000000000000";
-
-/// Each vector: the input, the inventory, the window's clip and filled, and the Python model's
-/// `(tokensIn, quoteOut, newD)` for the token0 fixture. `T` is 499274149441997029379948, so the
-/// first input is `T + 1e21`, the second `T + V / 2` and the third the int128 maximum.
+/// `(tokensIn, quoteOut, newD)` the library returned to `eth_call` at block 8660000 for the same
+/// arguments, on the token0 fixture. The tokens to the fill price are 499274149441997029379948,
+/// so the first input is that plus 1e21.
 #[rstest]
 #[case::uncapped(
     "500274149441997029379948",
@@ -491,7 +509,7 @@ const HUGE: &str = "10000000000000000000000000000000000000000";
     5_362_543
 )]
 #[case::clamped_to_the_curve_end(
-    "170141183460469231731687303715884105727",
+    INT128_MAX_DECIMAL,
     HUGE,
     HUGE,
     "0",
@@ -517,7 +535,7 @@ const HUGE: &str = "10000000000000000000000000000000000000000";
     "29999999999999",
     2_150_181
 )]
-fn test_token0_fill_sizing_matches_the_model(
+fn test_token0_fill_sizing_matches_the_library(
     #[case] amount: &str,
     #[case] inventory: &str,
     #[case] max_clip: &str,
@@ -526,178 +544,164 @@ fn test_token0_fill_sizing_matches_the_model(
     #[case] quote_out: &str,
     #[case] discount: u64,
 ) {
-    let fixture = token0_fixture();
+    let fill = size(&token0_fixture(), amount, inventory, max_clip, filled);
 
-    let fill = size_fill(
-        &fixture.curve,
-        &token0_request(&fixture, u(amount), u(inventory), u(max_clip), u(filled)),
-    )
-    .expect("sizes")
-    .expect("a fill");
-
-    assert_eq!(fill.tokens_in, u(tokens_in));
-    assert_eq!(fill.quote_out, u(quote_out));
-    assert_eq!(fill.discount, discount);
+    assert_eq!(fill, Some((u(tokens_in), u(quote_out), discount)));
 }
 
+/// The same on the mirrored fixture. `V` is 4987498616072757541375872, the tokens to the curve
+/// end: the library's own output for `A = V` is the quote the venue paid at that input on pool
+/// 0x37a9 (238899517702555132), and its output is the same past `V`.
 #[rstest]
-#[case::input_at_the_price_move(T0_TO_FILL_PRICE)]
-#[case::input_below_the_price_move("1")]
-fn test_token0_input_up_to_the_price_move_is_no_fill(#[case] amount: &str) {
-    let fixture = token0_fixture();
-
-    let fill = size_fill(
-        &fixture.curve,
-        &token0_request(
-            &fixture,
-            u(amount),
-            U256::from(10u64).pow(U256::from(40)),
-            U256::from(10u64).pow(U256::from(40)),
-            U256::ZERO,
-        ),
-    )
-    .expect("sizes");
-
-    assert_eq!(fill, None);
-}
-
-#[test]
-fn test_token0_fill_price_at_the_curve_end_is_no_fill() {
-    let fixture = token0_fixture();
-    let mut request = token0_request(
-        &fixture,
-        U256::from(10u64).pow(U256::from(30)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::ZERO,
-    );
-    request.fill_price = fixture.curve.curve_end;
-
-    assert_eq!(size_fill(&fixture.curve, &request).expect("sizes"), None);
-}
-
-#[test]
-fn test_token0_spot_outside_the_band_is_no_fill() {
-    let fixture = token0_fixture();
-    let mut request = token0_request(
-        &fixture,
-        U256::from(10u64).pow(U256::from(30)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::ZERO,
-    );
-    // The band is `floor(ema * 500 / 20000)`, 2.5% each way: an EMA twice the spot is outside it.
-    request.ema = fixture.ema * U256::from(2);
-
-    assert_eq!(size_fill(&fixture.curve, &request).expect("sizes"), None);
-}
-
-#[test]
-fn test_a_filled_window_is_no_fill() {
-    let fixture = token0_fixture();
-    let request = token0_request(
-        &fixture,
-        U256::from(10u64).pow(U256::from(30)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::from(50_000_000_000_000u64),
-        U256::from(50_000_000_000_000u64),
-    );
-
-    assert_eq!(size_fill(&fixture.curve, &request).expect("sizes"), None);
-}
-
-/// A spot below the curve end with X above it is the one state the spec does not settle; it is
-/// refused, not quoted.
-#[test]
-fn test_token0_spot_below_the_curve_end_is_refused() {
-    let fixture = token0_fixture();
-    let mut request = token0_request(
-        &fixture,
-        U256::from(10u64).pow(U256::from(30)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::from(10u64).pow(U256::from(40)),
-        U256::ZERO,
-    );
-    request.spot = fixture.curve.curve_end - U256::from(1);
-    request.ema = request.spot;
-
-    let result = size_fill(&fixture.curve, &request);
-
-    assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
-}
-
-/// The mirrored vectors of the Python model: liquidity 1e23, curve end 1e28, spot 0.2% below it,
-/// EMA at the spot and a fill price 0.05% above the EMA. `T` is 6301414272978079463.
-fn mirrored_fixture() -> (Curve, FillRequest) {
-    let curve = curve_of(false, u("10000000000000000000000000000"), u("100000000000000000000000"));
-    let request = FillRequest {
-        spot: u("9980000000000000000000000000"),
-        fill_price: u("9984992494740892121390327734"),
-        ema: u("9980000000000000000000000000"),
-        amount_in: U256::ZERO,
-        inventory: U256::from(10u64).pow(U256::from(40)),
-        max_clip: U256::from(10u64).pow(U256::from(40)),
-        filled: U256::ZERO,
-    };
-    (curve, request)
-}
-
-#[rstest]
-#[case::uncapped(
-    "5000000000000000000",
-    "10000000000000000000000000000000000000000",
-    "5000000000000000000",
-    "314674405303738053758",
-    3_849_925
+#[case::at_the_curve_end(
+    "4987498616072757541375872",
+    HUGE,
+    HUGE,
+    "0",
+    "4987498616072757541375872",
+    "238899517702555132",
+    29_967_265
 )]
-#[case::clamped_to_the_curve_end(
-    "100000000000000000000",
-    "10000000000000000000000000000000000000000",
-    "18942134694094298311",
-    "1190804165580026714939",
-    8_589_935
+#[case::just_past_the_curve_end(
+    "4987498616072757541375877",
+    HUGE,
+    HUGE,
+    "0",
+    "4987498616072757541375872",
+    "238899517702555132",
+    29_967_265
+)]
+#[case::far_past_the_curve_end(
+    "7481247924109136312063808",
+    HUGE,
+    HUGE,
+    "0",
+    "4987498616072757541375872",
+    "238899517702555132",
+    29_967_265
+)]
+#[case::small_input(
+    "1000000000000000000",
+    HUGE,
+    HUGE,
+    "0",
+    "1000000000000000000",
+    "48139751956",
+    8_589_939
 )]
 #[case::capped_by_the_inventory(
-    "100000000000000000000",
-    "100000000",
-    "1588313",
-    "99999948",
-    2_147_484
+    "4987498616072757541375872",
+    "1000000000",
+    HUGE,
+    "0",
+    "20772853135848501",
+    "999999999",
+    8_589_935
 )]
-fn test_mirrored_fill_sizing_matches_the_model(
-    #[case] extra_input: &str,
+#[case::capped_by_a_smaller_inventory(
+    "4987498616072757541375872",
+    "100000000",
+    HUGE,
+    "0",
+    "2077285282784893",
+    "99999999",
+    8_589_935
+)]
+#[case::capped_by_the_window(
+    "4987498616072757541375872",
+    HUGE,
+    "50000000000000",
+    "20000000000000",
+    "623185985377143558092",
+    "29999999999999",
+    8_592_620
+)]
+fn test_mirrored_fill_sizing_matches_the_library(
+    #[case] amount: &str,
     #[case] inventory: &str,
+    #[case] max_clip: &str,
+    #[case] filled: &str,
     #[case] tokens_in: &str,
     #[case] quote_out: &str,
     #[case] discount: u64,
 ) {
-    let (curve, mut request) = mirrored_fixture();
-    request.amount_in = u("6301414272978079463") + u(extra_input);
-    request.inventory = u(inventory);
+    let fill = size(&mirrored_fixture(), amount, inventory, max_clip, filled);
 
-    let fill = size_fill(&curve, &request)
-        .expect("sizes")
-        .expect("a fill");
+    assert_eq!(fill, Some((u(tokens_in), u(quote_out), discount)));
+}
 
-    assert_eq!(fill.tokens_in, u(tokens_in));
-    assert_eq!(fill.quote_out, u(quote_out));
-    assert_eq!(fill.discount, discount);
+/// Inputs for which the library returns `(0, 0, 0)` at block 8660000, as `eth_call` shows.
+#[rstest]
+#[case::input_at_the_price_move("499274149441997029379948", HUGE, HUGE, "0")]
+#[case::input_below_the_price_move("1", HUGE, HUGE, "0")]
+#[case::a_filled_window(
+    "1000000000000000000000000000000",
+    HUGE,
+    "50000000000000",
+    "50000000000000"
+)]
+#[case::a_bid_of_1("1000000000000000000000000000000", "1", HUGE, "0")]
+#[case::a_bid_of_2("1000000000000000000000000000000", "2", HUGE, "0")]
+fn test_token0_sizing_the_library_declines_is_no_fill(
+    #[case] amount: &str,
+    #[case] inventory: &str,
+    #[case] max_clip: &str,
+    #[case] filled: &str,
+) {
+    assert_eq!(size(&token0_fixture(), amount, inventory, max_clip, filled), None);
+}
+
+#[test]
+fn test_token0_fill_price_at_the_curve_end_is_no_fill() {
+    let mut fixture = token0_fixture();
+    fixture.fill_price = fixture.curve.curve_end;
+
+    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
+}
+
+/// An EMA twice the spot puts the spot outside the band of 2.5% each way.
+#[test]
+fn test_token0_spot_outside_the_band_is_no_fill() {
+    let mut fixture = token0_fixture();
+    fixture.ema *= U256::from(2);
+
+    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
+}
+
+/// A spot below the curve end with the fill price above it: the library returns no fill.
+#[test]
+fn test_token0_spot_beyond_the_curve_end_is_no_fill() {
+    let mut fixture = token0_fixture();
+    fixture.spot = u("17279279613376353790481728");
+    fixture.ema = fixture.spot;
+    fixture.fill_price = u("17313872765755485629902110");
+
+    assert_eq!(size(&fixture, "1000000000000000000000000", HUGE, HUGE, "0"), None);
 }
 
 #[test]
 fn test_mirrored_fill_price_at_the_curve_end_is_no_fill() {
-    let (curve, mut request) = mirrored_fixture();
-    request.amount_in = U256::from(10u64).pow(U256::from(30));
-    request.fill_price = curve.curve_end;
+    let mut fixture = mirrored_fixture();
+    fixture.fill_price = fixture.curve.curve_end;
 
-    assert_eq!(size_fill(&curve, &request).expect("sizes"), None);
+    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
+}
+
+/// The mirrored spot above the curve end, the EMA there too: the library returns no fill.
+#[test]
+fn test_mirrored_spot_beyond_the_curve_end_is_no_fill() {
+    let mut fixture = mirrored_fixture();
+    fixture.spot = u("363272983523322200713924948012421");
+    fixture.ema = fixture.spot;
+
+    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Fees (S11, S13)
+// Fees
 // ---------------------------------------------------------------------------------------------
 
-/// Tx 0xe607911e... (S11): total in 0xeff84958f86b75, the specified delta 0x026652a74a2a09 is
+/// Tx 0xe607911e...: total in 0xeff84958f86b75, the specified delta 0x026652a74a2a09 is
 /// `ceil(1%)`.
 #[test]
 fn test_a_buys_fee_is_the_ceiling_of_the_input_share() {
@@ -709,7 +713,7 @@ fn test_a_buys_fee_is_the_ceiling_of_the_input_share() {
     );
 }
 
-/// Tx 0xd2cce086... (S13): the fill fee 0x2171adf6b561a is `floor(1%)` of the fill's quote
+/// Tx 0xd2cce086...: the fill fee 0x2171adf6b561a is `floor(1%)` of the fill's quote
 /// 0xd1067f45eda23a, the afterSwap fee 0x7b5521ee20e9f95 is `ceil(1%)` of the AMM output
 /// 0x302d414104db655dd, and the user got `(quote - fill fee) + out - afterSwap fee` =
 /// 0x2fbedb155d22a0268.
@@ -746,7 +750,7 @@ fn test_max_gross_buy_is_the_largest_fitting_input(
 // Quotes through the state
 // ---------------------------------------------------------------------------------------------
 
-/// S32 (a): V4Quoter at block 8660000 (time 1795168252) on pool 0xc0be (token0, fee 1%) with the
+/// V4Quoter at block 8660000 (time 1795168252) on pool 0xc0be (token0, fee 1%) with the
 /// price at tick -168500 and a discount so deep that X is clamped (no fill) quotes a sell of 1e21
 /// as the AMM alone does: 47658306588964.
 #[test]
@@ -779,8 +783,8 @@ fn test_a_sell_with_a_clamped_fill_price_quotes_the_amm_alone_on_a_mirrored_pool
 }
 
 /// A funded pool whose price is at tick -168500, the EMA 0.2% above it and `d = 2147483`: the fill
-/// price is above the spot, so `T = 0` and a small sell fills entirely at the spot (the Python
-/// model: 1e18 tokens -> quote 48139751956, newD 8572794).
+/// price is above the spot, so `T = 0` and a small sell fills entirely at the spot (the library
+/// at block 8660000: 1e18 tokens -> quote 48139751956, newD 8572794).
 fn funded_token0_pool(inventory: &str, timestamp: u64) -> UniswapV4State {
     let state = pool_state(
         true,
@@ -793,8 +797,8 @@ fn funded_token0_pool(inventory: &str, timestamp: u64) -> UniswapV4State {
 
 const PLENTY: &str = "1000000000000000000000000000000";
 
-/// Fills as the model sizes them (S16 at the S32 anchor: the quote at `A = V` is the venue's
-/// 238899517702555132), with the swapper's share `quote - floor(quote * 1%)`.
+/// Fills as the library sizes them (at `A = V` its quote is the venue's 238899517702555132, read
+/// at block 8660000), with the swapper's share `quote - floor(quote * 1%)`.
 #[rstest]
 #[case::the_fill_takes_all_of_the_input("1000000000000000000", "47658354437")]
 #[case::the_fill_runs_to_the_curve_end_and_the_amm_takes_the_rest(
@@ -807,8 +811,9 @@ fn test_a_sell_fills_from_the_bid_on_a_token0_pool(#[case] amount: &str, #[case]
     assert_eq!(sell(&pool, true, amount).unwrap(), big(expected));
 }
 
-/// A sell that fills nothing is the AMM's: the same pool without inventory quotes the S32
-/// anchor's AMM-only 47658306588964 for 1e21, below what the fill gives at the spot.
+/// A sell that fills nothing is the AMM's: the same pool without inventory quotes the
+/// AMM-only 47658306588964 for 1e21 that V4Quoter gives at block 8660000, below what the fill gives
+/// at the spot.
 #[test]
 fn test_a_sell_without_inventory_is_the_amms() {
     let pool = funded_token0_pool("0", TS);
@@ -816,7 +821,7 @@ fn test_a_sell_without_inventory_is_the_amms() {
     assert_eq!(sell(&pool, true, "1000000000000000000000").unwrap(), big("47658306588964"));
 }
 
-/// Mirrored fill at `A = V + 5` (S17: the quote at `A = V` is 238899517702555132 on both pools),
+/// Mirrored fill at `A = V + 5` (the quote at `A = V` is 238899517702555132 on both pools),
 /// fee 2%: the swapper gets `238899517702555132 - floor(2%)`, and the pool takes the 5 left over
 /// at no output.
 #[test]
@@ -847,7 +852,6 @@ fn before_swap_delta(
             tick_spacing: 200,
             sqrt_price_x96: spot,
             tick,
-            liquidity: 0,
         },
         sender: Address::ZERO,
         swap_params: SwapParams {
@@ -874,10 +878,11 @@ fn before_swap_delta(
 }
 
 /// The delta of a capped fill: with 1e9 of quote in the bid, the cap `min(per - filled, inventory)
-/// - 1` binds and the model gives tokensIn 20772853149254418 for quoteOut 999999999; the swapper's
-///   share is 990000000 after the 1% fill fee.
+/// - 1` binds and the library gives tokensIn 20772853149254418 for quoteOut 999999999 (block
+///   8660000); the swapper's share is 990000000 after the 1% fill fee. The gas is the one measured
+///   for a fill.
 #[test]
-fn test_a_capped_fill_takes_tokens_and_pays_the_quote_net_of_its_fee() {
+fn test_a_capped_fill_delta_is_the_tokens_for_the_quote_net_of_its_fee() {
     let pool = funded_token0_pool("1000000000", TS);
 
     let (specified, unspecified, gas) =
@@ -885,10 +890,10 @@ fn test_a_capped_fill_takes_tokens_and_pays_the_quote_net_of_its_fee() {
 
     assert_eq!(specified, I128::try_from(20_772_853_149_254_418i128).unwrap());
     assert_eq!(unspecified, I128::try_from(-990_000_000i128).unwrap());
-    assert_eq!(gas, ASCEND_FILL_BEFORE_SWAP_GAS);
+    assert_eq!(gas, 171_820);
 }
 
-/// A buy's beforeSwap takes `ceil(A * f / 1e6)` of the input as a positive specified delta (S11).
+/// A buy's beforeSwap takes `ceil(A * f / 1e6)` of the input as a positive specified delta.
 #[test]
 fn test_a_buy_takes_its_fee_in_before_swap() {
     let pool = funded_token0_pool("0", TS);
@@ -923,38 +928,63 @@ fn test_a_buy_quotes_the_amm_on_the_net_input() {
     // 1010101010101010102 - ceil(1010101010101010102 * 0.01) = 1e18 exactly, by hand:
     // the fee is 10101010101010102 (the share 10101010101010101.02 rounded up).
     assert_eq!(with_fee, without_fee);
-    assert!(with_fee > BigUint::from(0u32));
 }
 
 // ---------------------------------------------------------------------------------------------
-// Refusals (S28, D12)
+// Refusals
 // ---------------------------------------------------------------------------------------------
 
 fn assert_refused(result: &Result<BigUint, SimulationError>, label: &str) {
     assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{label}: {result:?}");
 }
 
-/// Pool 0x1aaf... at block 8397596 (S28): sqrtP = sqrtAt(-168600) + 2, tick -168600, active
+/// Pool 0x1aaf... at block 8397596: sqrtP = sqrtAt(-168600) + 2, tick -168600, active
 /// liquidity L, so the in-range step yields 0 and the swap crosses into the empty range. V4Quoter
 /// reverts NotEnoughLiquidity on a sell of 1e6 or 1e18; a buy of 1e15 quotes nonzero.
-#[test]
-fn test_a_pool_sold_back_to_its_lower_edge_refuses_sells_and_quotes_buys() {
+fn pool_at_its_lower_edge() -> UniswapV4State {
     let spot = u("17296576189565919710191921");
     let state = pool_state(true, 10_000, observation(spot, TS, -168_600, 0), no_bid());
     // The tick -168600 is the position's lower tick, so `pool` gives it the full liquidity, as
     // the chain stores it.
-    let edge = pool(state, spot, -168_600, TS);
+    pool(state, spot, -168_600, TS)
+}
+
+#[test]
+fn test_a_pool_sold_back_to_its_lower_edge_refuses_sells() {
+    let edge = pool_at_its_lower_edge();
 
     assert_refused(&sell(&edge, true, "1000000"), "sell 1e6");
     assert_refused(&sell(&edge, true, "1000000000000000000"), "sell 1e18");
+}
+
+#[test]
+fn test_a_pool_sold_back_to_its_lower_edge_quotes_buys() {
+    let edge = pool_at_its_lower_edge();
+
     assert!(buy(&edge, true, "1000000000000000").unwrap() > BigUint::from(0u32));
 }
 
-/// A pool at its start price has no liquidity on the sell side: S28's `0x057fcb64 (L=0)`.
+/// A pool at its start price has no liquidity on the sell side: V4Quoter reverts with
+/// `0x057fcb64` (zero liquidity) on a sell there.
 #[rstest]
 #[case::token0(true, SQRT_M168800, -168_800)]
 #[case::mirrored(false, "366557197058144561653914105585283", 168_800)]
-fn test_a_pool_at_its_start_price_refuses_sells_and_has_a_zero_sell_limit(
+fn test_a_pool_at_its_start_price_refuses_sells(
+    #[case] token_is_currency0: bool,
+    #[case] spot: &str,
+    #[case] tick: i32,
+) {
+    let state = pool_state(token_is_currency0, 10_000, observation(u(spot), TS, tick, 0), no_bid());
+    let pool = pool(state, u(spot), tick, TS);
+
+    assert_refused(&sell(&pool, token_is_currency0, "1000000000000000000"), "sell");
+}
+
+/// The same pool: its sell limit is 0, and its buys quote.
+#[rstest]
+#[case::token0(true, SQRT_M168800, -168_800)]
+#[case::mirrored(false, "366557197058144561653914105585283", 168_800)]
+fn test_a_pool_at_its_start_price_has_a_zero_sell_limit_and_quotes_buys(
     #[case] token_is_currency0: bool,
     #[case] spot: &str,
     #[case] tick: i32,
@@ -963,7 +993,6 @@ fn test_a_pool_at_its_start_price_refuses_sells_and_has_a_zero_sell_limit(
     let pool = pool(state, u(spot), tick, TS);
     let (launched, quote) = tokens(token_is_currency0);
 
-    assert_refused(&sell(&pool, token_is_currency0, "1000000000000000000"), "sell");
     assert_eq!(
         pool.get_limits(launched.address, quote.address)
             .unwrap()
@@ -987,7 +1016,6 @@ fn test_before_swap_refuses_what_the_pool_reverts(#[case] amount: I256) {
             tick_spacing: 200,
             sqrt_price_x96: u(SQRT_M168500),
             tick: -168_500,
-            liquidity: L_168600,
         },
         sender: Address::ZERO,
         swap_params: SwapParams {
@@ -1003,45 +1031,163 @@ fn test_before_swap_refuses_what_the_pool_reverts(#[case] amount: I256) {
     assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
 }
 
-#[test]
-fn test_an_unfilled_swap_is_refused_and_a_filled_one_is_not() {
-    let pool = funded_token0_pool("0", TS);
-    let hook = hook_of(&pool);
-    let outcome = |unfilled: u64| SwapOutcome {
-        sqrt_price_x96: U256::ZERO,
-        amount_unfilled: U256::from(unfilled),
-    };
+fn outcome(unfilled: u64) -> SwapOutcome {
+    SwapOutcome { sqrt_price_x96: U256::ZERO, amount_unfilled: U256::from(unfilled) }
+}
 
-    assert!(hook
-        .check_swap_outcome(true, &outcome(0))
-        .is_ok());
+#[test]
+fn test_an_unfilled_swap_is_refused() {
+    let pool = funded_token0_pool("0", TS);
+
     assert!(matches!(
-        hook.check_swap_outcome(true, &outcome(1)),
+        hook_of(&pool).check_swap_outcome(true, &outcome(1)),
         Err(SimulationError::InvalidInput(..))
     ));
 }
 
+#[test]
+fn test_a_swap_filled_in_full_is_accepted() {
+    let pool = funded_token0_pool("0", TS);
+
+    assert!(hook_of(&pool)
+        .check_swap_outcome(true, &outcome(0))
+        .is_ok());
+}
+
 // ---------------------------------------------------------------------------------------------
-// Limits (D13): the limit settles and one unit more is refused
+// Limits: the limit settles and one unit more is refused
 // ---------------------------------------------------------------------------------------------
 
-fn assert_limit_is_exact(pool: &UniswapV4State, token_is_currency0: bool, quote_in: bool) {
+/// Checks one direction of `pool`: its limit settles for exactly the limit's output and one unit
+/// more is refused. Returns whether the limit is above 0 (a limit of 0 has nothing to settle).
+fn check_limit(
+    pool: &UniswapV4State,
+    token_is_currency0: bool,
+    quote_in: bool,
+    label: &str,
+) -> bool {
     let (launched, quote) = tokens(token_is_currency0);
     let (token_in, token_out) = if quote_in { (quote, launched) } else { (launched, quote) };
     let (max_in, max_out) = pool
         .get_limits(token_in.address.clone(), token_out.address.clone())
-        .expect("limits");
-    assert!(max_in > BigUint::from(0u32), "a zero limit");
+        .unwrap_or_else(|e| panic!("{label}: limits: {e}"));
+    if max_in == BigUint::from(0u32) {
+        return false;
+    }
     let at = pool
         .get_amount_out(max_in.clone(), &token_in, &token_out)
-        .expect("the limit settles");
-    assert_eq!(at.amount, max_out);
+        .unwrap_or_else(|e| panic!("{label}: the limit {max_in} does not settle: {e}"));
+    assert_eq!(at.amount, max_out, "{label}: output at the limit {max_in}");
     let past = pool.get_amount_out(&max_in + 1u32, &token_in, &token_out);
     assert!(
         matches!(past, Err(SimulationError::InvalidInput(..))),
-        "one past the limit: {:?}",
+        "{label}: one past the limit {max_in}: {:?}",
         past.map(|r| r.amount)
     );
+    true
+}
+
+fn assert_limit_is_exact(pool: &UniswapV4State, token_is_currency0: bool, quote_in: bool) {
+    assert!(check_limit(pool, token_is_currency0, quote_in, "the pool"), "a zero limit");
+}
+
+/// A deterministic generator (splitmix64), so that a failing case replays from its number.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    fn below_i32(&mut self, n: u64) -> i32 {
+        i32::try_from(self.below(n)).unwrap()
+    }
+
+    fn pick<T: Copy>(&mut self, options: &[T]) -> T {
+        let index = self.below(u64::try_from(options.len()).unwrap());
+        options[usize::try_from(index).unwrap()]
+    }
+}
+
+/// A random pool and its orientation, quoting at `TS`: any start tick the launches use, the price
+/// from the empty range outside the position to deep inside it, an EMA within 3% of the price, an
+/// observation from the same second to long ago at the pool's tick or one below, any discount, a
+/// bid with no inventory, a bid of 1, or a bid of any size, with a window that has or has not
+/// run out and a clip that does or does not bind.
+fn random_pool(rng: &mut Rng) -> (UniswapV4State, bool) {
+    let token_is_currency0 = rng.below(2) == 0;
+    // Launch ticks are multiples of the tick spacing, 200.
+    let start_tick = -200 * (500 + rng.below_i32(1_250));
+    let offset = match rng.below(3) {
+        0 => rng.below_i32(500) - 200,
+        1 => rng.below_i32(30_000),
+        _ => rng.below_i32(199_000),
+    };
+    let tick = if token_is_currency0 { start_tick + offset } else { -start_tick - offset };
+    let spot = get_sqrt_ratio_at_tick(tick).unwrap();
+    let ema = spot * U256::from(9_700 + rng.below(600)) / U256::from(10_000);
+    let discount = match rng.below(3) {
+        0 => rng.pick(&[0, 1, 2_147_483, (1 << 32) - 1]),
+        _ => rng.below(1 << 27),
+    };
+    let inventory = match rng.below(5) {
+        0 => U256::ZERO,
+        1 => U256::from(1),
+        2 => U256::from(rng.below(1_000_000_000_000)),
+        3 => U256::from(rng.below(1_000_000_000_000_000)) * U256::from(1_000_000_000u64),
+        _ => U256::from(10u64).pow(U256::from(30)),
+    };
+    let max_clip = 10u128.pow(8 + u32::try_from(rng.below(24)).unwrap());
+    let filled =
+        if rng.below(3) == 0 { U256::from(max_clip) } else { U256::from(rng.below(1_000_000_000)) };
+    let state = AscendPoolState::new(
+        rng.pick(&[0, 1, 10_000, 20_000, 99_999, 500_000]),
+        token_is_currency0,
+        start_tick,
+        observation(
+            ema,
+            TS - rng.pick(&[0, 1, 7, 600, 5_000, 100_000]),
+            if rng.below(4) == 0 { tick - 1 } else { tick },
+            discount,
+        ),
+        Bid {
+            inventory,
+            filled,
+            window_start: TS - rng.pick(&[0, 100, 599, 600, 1_000]),
+            max_clip,
+        },
+    )
+    .expect("a state the hook could have stored");
+    (pool(state, spot, tick, TS), token_is_currency0)
+}
+
+/// Over random states (every orientation, price, observation, timestamp, window and inventory
+/// above) the limit of each direction settles and one unit more is refused, so `get_limits` is
+/// exactly the boundary of `get_amount_out`.
+#[test]
+fn test_limits_of_random_states_settle_and_one_more_unit_is_refused() {
+    let mut rng = Rng(0x00a5_ce2d);
+    let mut checked = 0;
+    for case in 0..500 {
+        let (pool, token_is_currency0) = random_pool(&mut rng);
+        for quote_in in [false, true] {
+            let label = format!("case {case}, quote in: {quote_in}");
+            checked += usize::from(check_limit(&pool, token_is_currency0, quote_in, &label));
+        }
+    }
+
+    // Most states have a limit to test: a pool inside the empty range sells nothing.
+    assert!(checked > 600, "only {checked} limits were above 0");
 }
 
 #[rstest]
@@ -1093,11 +1239,11 @@ fn test_the_buy_limit_of_a_pool_at_its_start_price_settles(
 }
 
 // ---------------------------------------------------------------------------------------------
-// State carried by a quote (D11) and time (D10, D15)
+// State carried by a quote, and time
 // ---------------------------------------------------------------------------------------------
 
 /// A fill consumes the inventory, fills the window, opens it at the block's time and moves the
-/// discount to the model's `newD`; the pool's price is the AMM's alone.
+/// discount to the library's `newD`; the pool's price is the AMM's alone.
 #[test]
 fn test_a_fill_updates_the_hook_in_the_returned_state() {
     let pool = funded_token0_pool(PLENTY, TS);
@@ -1127,38 +1273,52 @@ fn test_a_fill_updates_the_hook_in_the_returned_state() {
     );
 }
 
-/// A swap observes the price even without a fill, so the next quote of a route reads `dt = 0`
-/// and the new tick: after a buy the stored observed tick is the one the buy started from, not
-/// the one it ended at, and a sell in the same block does not fill (S15).
+/// A swap observes the price even without a fill, and the quote's state carries that
+/// observation: after a buy at second `TS` the stored observed tick is the one the buy started
+/// from, not the one it ended at, and `updated_at` is `TS`, so a sell in the same block reads
+/// `dt = 0` and does not fill. The same sell on a state that kept the hook as it was before the
+/// buy re-observes (`dt = 100`) and fills, which is what a missing carry would do.
 #[test]
 fn test_a_sell_after_a_buy_in_the_same_block_does_not_fill() {
-    let funded = funded_token0_pool(PLENTY, TS);
-    let empty = funded_token0_pool("0", TS);
+    let at = |inventory: &str| {
+        let state = pool_state(
+            true,
+            10_000,
+            observation(u("17418037835569639047771018"), TS - 100, -168_500, 2_147_483),
+            bid(u(inventory)),
+        );
+        pool(state, u(SQRT_M168500), -168_500, TS)
+    };
+    let (funded, empty) = (at(PLENTY), at("0"));
     let (launched, quote) = tokens(true);
-    let after_buy = |pool: &UniswapV4State| -> Box<dyn ProtocolSim> {
-        pool.get_amount_out(big("1000000000000000000000"), &quote, &launched)
+    let after_buy = |pool: &UniswapV4State| -> UniswapV4State {
+        // 3e16 of quote moves the price a few tick up: the pool's liquidity is 2e23.
+        pool.get_amount_out(big("30000000000000000"), &quote, &launched)
             .unwrap()
             .new_state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap()
+            .clone()
     };
     let (funded_after, empty_after) = (after_buy(&funded), after_buy(&empty));
+    assert_ne!(funded_after.price_and_tick().1, -168_500, "the buy must move the tick");
+    let one = "1000000000000000000";
 
-    let with_bid = funded_after
-        .get_amount_out(big("1000000000000000000"), &launched, &quote)
-        .unwrap()
-        .amount;
-    let without_bid = empty_after
-        .get_amount_out(big("1000000000000000000"), &launched, &quote)
-        .unwrap()
-        .amount;
+    let with_bid = sell(&funded_after, true, one).unwrap();
+    let without_bid = sell(&empty_after, true, one).unwrap();
 
     assert_eq!(with_bid, without_bid);
-    // The same sell with no buy before it fills.
-    assert_ne!(sell(&funded, true, "1000000000000000000").unwrap(), without_bid);
+    // The same pool without a carried observation fills, and so does the sell with no buy first.
+    let mut stale = funded_after;
+    stale.set_hook_handler(Box::new(hook_of(&funded).clone()));
+    assert_ne!(sell(&stale, true, one).unwrap(), without_bid);
+    assert_ne!(sell(&funded, true, one).unwrap(), sell(&empty, true, one).unwrap());
 }
 
 /// With the stored observed tick one off the pool's, a quote at the same second rejects the fill
-/// (S15), and a quote one second later re-observes and fills (S15, D15): the same state quotes
-/// differently when the block moves, which is why `apply_block` reports a change.
+/// and a quote one second later re-observes and fills: the same state quotes differently when
+/// the block moves, which is why `apply_block` reports a change.
 #[test]
 fn test_a_funded_pool_quotes_differently_one_second_later() {
     let state = pool_state(
@@ -1173,9 +1333,9 @@ fn test_a_funded_pool_quotes_differently_one_second_later() {
     assert!(ProtocolSim::apply_block(&mut pool, &BlockContext::new(1, TS + 1)));
     let later = sell(&pool, true, "1000000000000000000").unwrap();
 
-    // The Python model: the AMM alone gives 47658354435 for 1e18; at +1 s the observation
-    // (EMA step 1 s, d decay, re-anchor floor 2133177) lets the fill take the whole input for
-    // quote 48139751956, which pays 47658354437 after the 1% fee.
+    // The AMM alone gives 47658354435 for 1e18; at +1 s the observation (EMA step 1 s, d decay,
+    // re-anchor floor 2133177) lets the fill take the whole input for the library's quote
+    // 48139751956 at block 8660000 (newD 8558558), which pays 47658354437 after the 1% fee.
     assert_eq!(now, big("47658354435"));
     assert_eq!(later, big("47658354437"));
 }
@@ -1193,7 +1353,7 @@ fn test_apply_block_reports_a_change_only_for_a_pool_with_inventory() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Attributes, deltas, decoding and registration (D12, agreements)
+// Attributes, deltas, decoding and registration
 // ---------------------------------------------------------------------------------------------
 
 fn sample_state() -> AscendPoolState {
@@ -1262,6 +1422,10 @@ fn test_every_ascend_attribute_is_required() {
 #[case::short_ema(EMA_SQRT_PRICE_ATTRIBUTE, vec![1; 19])]
 #[case::short_inventory(BID_INVENTORY_ATTRIBUTE, vec![1; 31])]
 #[case::short_clip(BID_MAX_CLIP_ATTRIBUTE, vec![1; 15])]
+#[case::ema_of_0(EMA_SQRT_PRICE_ATTRIBUTE, vec![0; 20])]
+#[case::start_tick_without_a_curve(START_TICK_ATTRIBUTE, 0x007f_ffffi32.to_be_bytes().to_vec())]
+#[case::start_tick_below_int24(START_TICK_ATTRIBUTE, 0xff7f_ffffu32.to_be_bytes().to_vec())]
+#[case::observed_tick_below_int24(OBSERVED_TICK_ATTRIBUTE, 0xff7f_ffffu32.to_be_bytes().to_vec())]
 fn test_values_the_hook_could_not_have_stored_are_rejected_at_decode(
     #[case] name: &str,
     #[case] value: Vec<u8>,
@@ -1379,8 +1543,8 @@ fn test_the_hook_is_registered_on_elysium_only() {
     assert!(!has_native_hook_handler(Chain::Ethereum, &ASCEND_HOOK_ELYSIUM));
 }
 
-/// The address bits of the hook grant `beforeSwap`, `afterSwap` and both return deltas (S2:
-/// 0x28ec), which the generic permission check reads.
+/// The address bits of the hook grant `beforeSwap`, `afterSwap` and both return deltas
+/// (0x28ec), which the generic permission check reads.
 #[test]
 fn test_the_hook_address_grants_the_swap_callbacks() {
     use crate::evm::protocol::uniswap_v4::hooks::utils::HookOptions;
@@ -1394,4 +1558,222 @@ fn test_the_hook_address_grants_the_swap_callbacks() {
     ] {
         assert!(handler.has_permission(option));
     }
+}
+
+#[test]
+fn test_the_attribute_names_are_the_ones_the_indexer_writes() {
+    assert_eq!(
+        POOL_ATTRIBUTES,
+        [
+            "ascend_fee_pips",
+            "ascend_token_is_currency0",
+            "ascend_start_tick",
+            "ascend_ema_sqrt_price_x96",
+            "ascend_ema_updated_at",
+            "ascend_observed_tick",
+            "ascend_discount",
+            "ascend_bid_inventory",
+            "ascend_bid_filled_in_window",
+            "ascend_bid_window_start",
+            "ascend_bid_max_clip",
+        ]
+    );
+    let names: Vec<String> = attributes(&sample_state())
+        .into_keys()
+        .collect();
+    assert_eq!(names.len(), POOL_ATTRIBUTES.len());
+    assert!(POOL_ATTRIBUTES
+        .iter()
+        .all(|name| names.contains(&name.to_string())));
+}
+
+/// An `int24` takes its extremes, which a `uint32` or a wider integer would not tell apart.
+#[rstest]
+#[case::int24_min(-(1 << 23))]
+#[case::int24_max((1 << 23) - 1)]
+fn test_an_observed_tick_at_the_int24_extremes_decodes(#[case] observed: i32) {
+    let mut attrs = attributes(&sample_state());
+    attrs.insert(OBSERVED_TICK_ATTRIBUTE.into(), Bytes::from(observed.to_be_bytes().to_vec()));
+
+    let decoded = AscendPoolState::from_attributes(&attrs).unwrap();
+
+    assert_eq!(decoded.observation.tick, observed);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fees, refusals and gas of each path
+// ---------------------------------------------------------------------------------------------
+
+/// A funded pool of either orientation, 100 ticks from its curve end (tick -168500 for token0,
+/// 168500 mirrored), with the given fee.
+fn funded_pool(token_is_currency0: bool, fee_pips: u32, inventory: &str) -> UniswapV4State {
+    if token_is_currency0 {
+        let state = pool_state(
+            true,
+            fee_pips,
+            observation(u("17418037835569639047771018"), TS, -168_500, 2_147_483),
+            bid(u(inventory)),
+        );
+        pool(state, u(SQRT_M168500), -168_500, TS)
+    } else {
+        let state = pool_state(
+            false,
+            fee_pips,
+            observation(u("360377941892009552490198183628619"), TS, 168_500, 2_147_483),
+            bid(u(inventory)),
+        );
+        pool(state, u(SQRT_168500), 168_500, TS)
+    }
+}
+
+/// In each orientation and direction, with and without bid inventory, the pool's fee lowers what
+/// the swapper receives for the same input: the quote with a 1% fee is below the fee-free one.
+#[rstest]
+fn test_the_fee_moves_the_quote_against_the_trader(
+    #[values(true, false)] token_is_currency0: bool,
+    #[values(true, false)] is_buy: bool,
+    #[values("0", PLENTY)] inventory: &str,
+) {
+    let with_fee = funded_pool(token_is_currency0, 10_000, inventory);
+    let free = funded_pool(token_is_currency0, 0, inventory);
+    let quote_of = |pool: &UniswapV4State| {
+        if is_buy {
+            buy(pool, token_is_currency0, "1000000000000000000").unwrap()
+        } else {
+            sell(pool, token_is_currency0, "1000000000000000000").unwrap()
+        }
+    };
+
+    let (charged, uncharged) = (quote_of(&with_fee), quote_of(&free));
+
+    assert!(charged < uncharged, "{charged} is not below {uncharged}");
+}
+
+/// A buy of 1 raw unit pays a fee of 1 (the ceiling) and leaves the pool nothing to swap, so the
+/// swapper's output is 0 and the swap is refused.
+#[test]
+fn test_a_buy_that_leaves_the_swapper_nothing_is_refused() {
+    let pool = funded_token0_pool("0", TS);
+
+    assert_refused(&buy(&pool, true, "1"), "buy of 1");
+}
+
+/// A window whose 600 s have run out resets in the quote: with the clip spent and the window
+/// opened 599 s ago the sell is the AMM's alone, and with it opened 600 s ago the sell fills and
+/// the returned state opens a new window at the block with only that fill in it.
+#[test]
+fn test_a_window_that_ran_out_resets_when_a_fill_uses_it() {
+    let clip = 50_000_000_000_000u64;
+    let at = |window_start: u64| {
+        let spent = Bid {
+            inventory: u(PLENTY),
+            filled: U256::from(clip),
+            window_start,
+            max_clip: u128::from(clip),
+        };
+        let state = pool_state(
+            true,
+            10_000,
+            observation(u("17418037835569639047771018"), TS, -168_500, 2_147_483),
+            spent,
+        );
+        pool(state, u(SQRT_M168500), -168_500, TS)
+    };
+    let (still_open, ran_out) = (at(TS - 599), at(TS - 600));
+
+    // The AMM alone gives 47658354435 for 1e18; the fill pays 47658354437 after its fee.
+    assert_eq!(sell(&still_open, true, "1000000000000000000").unwrap(), big("47658354435"));
+    assert_eq!(sell(&ran_out, true, "1000000000000000000").unwrap(), big("47658354437"));
+
+    let (launched, quote) = tokens(true);
+    let next = ran_out
+        .get_amount_out(big("1000000000000000000"), &launched, &quote)
+        .unwrap()
+        .new_state;
+    let hook = hook_of(
+        next.as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap(),
+    )
+    .pool_state();
+    assert_eq!(hook.bid.window_start, TS);
+    assert_eq!(hook.bid.filled, U256::from(48_139_751_956u64));
+}
+
+#[test]
+fn test_the_hook_states_its_fee_in_both_directions() {
+    let pool = funded_token0_pool("0", TS);
+    let hook = hook_of(&pool);
+
+    for zero_for_one in [true, false] {
+        let fees = hook
+            .spot_fees(zero_for_one)
+            .unwrap()
+            .expect("the hook states its fee");
+        assert_eq!(fees.hook_fee_pips, 10_000);
+        assert!(fees.lp_fee_override.is_none());
+    }
+    let params = SwapParams {
+        zero_for_one: true,
+        amount_specified: I256::try_from(-1).unwrap(),
+        sqrt_price_limit: U256::ZERO,
+    };
+    assert_eq!(hook.fee(&pool, params).unwrap(), 0.01);
+}
+
+fn after_swap_gas(pool: &UniswapV4State, zero_for_one: bool, amount: i128, amm_out: i128) -> u64 {
+    let (spot, tick) = pool.price_and_tick();
+    let (amount0, amount1) = if zero_for_one { (-amount, amm_out) } else { (amm_out, -amount) };
+    let params = AfterSwapParameters {
+        context: StateContext {
+            currency_0: Address::repeat_byte(1),
+            currency_1: Address::repeat_byte(2),
+            fees: UniswapV4Fees::new(0, 0, DYNAMIC_FEE_FLAG),
+            tick_spacing: 200,
+            sqrt_price_x96: spot,
+            tick,
+        },
+        sender: Address::ZERO,
+        swap_params: SwapParams {
+            zero_for_one,
+            amount_specified: I256::try_from(-amount).unwrap(),
+            sqrt_price_limit: U256::ZERO,
+        },
+        delta: BalanceDelta::new(
+            I128::try_from(amount0).unwrap(),
+            I128::try_from(amount1).unwrap(),
+        ),
+        hook_data: Bytes::new(),
+    };
+    hook_of(pool)
+        .after_swap(params, None, None)
+        .expect("a hook output")
+        .gas_estimate
+}
+
+/// The gas of each path as `debug_traceCall` measured it on Elysium (see the constants in
+/// `hook_handler.rs` for the transactions and blocks): the hook's `beforeSwap` and `afterSwap`
+/// frames of a buy, of a sell the hook does not consider filling, of one it considers and the
+/// library leaves unfilled (a bid of 1), and of one it fills.
+#[rstest]
+#[case::buy("0", false, 50_203, 5_402)]
+#[case::sell_without_inventory("0", true, 17_388, 20_319)]
+#[case::sell_with_a_bid_of_1("1", true, 47_094, 20_319)]
+#[case::sell_with_a_fill(PLENTY, true, 171_820, 10_475)]
+fn test_each_path_costs_the_gas_measured_on_chain(
+    #[case] inventory: &str,
+    #[case] zero_for_one: bool,
+    #[case] before: u64,
+    #[case] after: u64,
+) {
+    let pool = funded_token0_pool(inventory, TS);
+    let amount = 1_000_000_000_000_000_000i128;
+
+    let (_, _, before_gas) =
+        before_swap_delta(&pool, zero_for_one, -amount, u(SQRT_M168500), -168_500);
+    let after_gas = after_swap_gas(&pool, zero_for_one, amount, 1_000_000);
+
+    assert_eq!((before_gas, after_gas), (before, after));
+    // 1,689 is the lower median of the four transactions' own PoolManager overhead.
+    assert_eq!(hook_of(&pool).pool_manager_call_overhead(), 1_689);
 }

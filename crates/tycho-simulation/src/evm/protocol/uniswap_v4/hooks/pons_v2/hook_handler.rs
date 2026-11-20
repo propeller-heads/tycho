@@ -289,7 +289,6 @@ mod tests {
                 tick_spacing: 200,
                 sqrt_price_x96: U256::ZERO,
                 tick: 0,
-                liquidity: 0,
             },
             sender: SENDER,
             swap_params: SwapParams {
@@ -471,7 +470,6 @@ mod tests {
                         tick_spacing: 200,
                         sqrt_price_x96: U256::ZERO,
                         tick: 0,
-                        liquidity: 0,
                     },
                     sender: SENDER,
                     swap_params: SwapParams {

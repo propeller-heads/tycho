@@ -492,7 +492,6 @@ mod tests {
                 tick_spacing: 60,
                 sqrt_price_x96: U256::ZERO,
                 tick: 0,
-                liquidity: 0,
             },
             sender: Address::from_str("0x66a9893cc07d91d95644aedd05d03f95e1dba8af").unwrap(),
             swap_params: SwapParams {
@@ -628,7 +627,6 @@ mod tests {
             tick_spacing: 60,
             sqrt_price_x96: U256::ZERO,
             tick: 0,
-            liquidity: 0,
         };
         let swap_params = SwapParams {
             zero_for_one: true,
@@ -702,7 +700,6 @@ mod tests {
             tick_spacing: 1,
             sqrt_price_x96: U256::ZERO,
             tick: 0,
-            liquidity: 0,
         };
         let swap_params = SwapParams {
             zero_for_one: true,

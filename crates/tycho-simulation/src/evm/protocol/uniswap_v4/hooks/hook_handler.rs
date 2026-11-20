@@ -85,6 +85,10 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// An `InvalidInput` refuses this one swap, as a revert of the hook on this input would, and
     /// `get_amount_out` returns it to the caller unchanged; any other error means the hook
     /// cannot be simulated, and `get_amount_out` reports it as `FatalError`.
+    ///
+    /// The handler is not changed here. A hook whose swap writes its own storage must also
+    /// implement [`HookHandler::handler_after_swap`], or the next swap of a route reads the old
+    /// storage.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,
@@ -95,7 +99,9 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// Simulates the afterSwap Solidity behaviour.
     ///
     /// Errors are classified as for [`HookHandler::before_swap`]: an `InvalidInput` refuses this
-    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`.
+    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`. Like
+    /// `before_swap`, it leaves the handler as it is; storage the swap writes belongs in
+    /// [`HookHandler::handler_after_swap`].
     fn after_swap(
         &self,
         params: AfterSwapParameters,
@@ -216,9 +222,10 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// storage changes with the swap (an observation, a consumed inventory), so that the state the
     /// quote returns prices the next swap of a route correctly.
     ///
-    /// `context` and `swap_params` are the ones `before_swap` saw, so the pool's price, tick and
-    /// liquidity are those from before the swap. It runs after the swap passed every check, so a
-    /// refused swap leaves no handler behind. `None` keeps the hook as it is, which is the default.
+    /// `context` and `swap_params` are the ones `before_swap` saw, so the pool's price and tick
+    /// are those from before the swap. It runs once the pool swapped and `check_swap_outcome`
+    /// accepted the result, before `after_swap`; a swap refused later returns its error and drops
+    /// the handler. `None` keeps the hook as it is, which is the default.
     fn handler_after_swap(
         &self,
         _context: &StateContext,

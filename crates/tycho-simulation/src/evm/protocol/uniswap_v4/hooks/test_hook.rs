@@ -174,3 +174,36 @@ impl HookHandlerCreator for ExtensionTestHookCreator {
 
 /// The chain the decoder tests register their test hook on.
 pub const TEST_HOOK_CHAIN: Chain = Chain::Ethereum;
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::I256;
+
+    use super::*;
+    use crate::evm::protocol::uniswap_v4::{hooks::models::StateContext, state::UniswapV4Fees};
+
+    /// A hook that does not override `handler_after_swap` leaves its handler as it is.
+    #[test]
+    fn test_handler_after_swap_defaults_to_keeping_the_hook() {
+        let hook = ExtensionTestHook::default();
+        let context = StateContext {
+            currency_0: Address::repeat_byte(1),
+            currency_1: Address::repeat_byte(2),
+            fees: UniswapV4Fees::new(0, 0, 3000),
+            tick_spacing: 60,
+            sqrt_price_x96: U256::from(1u64) << 96,
+            tick: 0,
+        };
+        let swap_params = SwapParams {
+            zero_for_one: true,
+            amount_specified: I256::try_from(-1_000).unwrap(),
+            sqrt_price_limit: U256::ZERO,
+        };
+
+        let next = hook
+            .handler_after_swap(&context, &swap_params)
+            .unwrap();
+
+        assert!(next.is_none());
+    }
+}

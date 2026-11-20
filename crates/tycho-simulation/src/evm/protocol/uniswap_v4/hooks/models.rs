@@ -21,8 +21,6 @@ pub struct StateContext {
     pub sqrt_price_x96: U256,
     /// The pool's current tick before the swap.
     pub tick: i32,
-    /// The pool's active liquidity before the swap.
-    pub liquidity: u128,
 }
 
 #[derive(Debug, Clone)]

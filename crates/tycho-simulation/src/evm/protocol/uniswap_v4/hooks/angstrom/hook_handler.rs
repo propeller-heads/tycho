@@ -240,7 +240,6 @@ mod tests {
                 tick_spacing: 10,
                 sqrt_price_x96: U256::ZERO,
                 tick: 0,
-                liquidity: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Swap params and hook data taken from tenderly simulation: input to innermost
@@ -302,7 +301,6 @@ mod tests {
                 tick_spacing: 10,
                 sqrt_price_x96: U256::ZERO,
                 tick: 0,
-                liquidity: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Taken from tenderly simulation: input to innermost afterSwap call (directly to hook,

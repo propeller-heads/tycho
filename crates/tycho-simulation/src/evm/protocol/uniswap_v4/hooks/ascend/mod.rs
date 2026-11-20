@@ -6,8 +6,8 @@
 //! Ascend pools are `uniswap_v4_hooks` components. The Elysium manifest of the with-hooks
 //! Substreams package (`elysium-uniswap-v4-with-hooks.yaml`) decodes the hook's `PoolData` and
 //! `Bid` storage writes into the `ascend_*` state attributes [`AscendPoolState`] reads. The hook
-//! has no verified source: the model follows the bytecode and the traces recorded in the
-//! integration spec, and `math.rs` documents each rule next to the spec fact it ports.
+//! has no verified source: the model follows its bytecode and traces recorded on Elysium, and
+//! `math.rs` ports the hook's arithmetic and its math library's.
 pub mod hook_handler;
 pub mod hook_handler_creator;
 mod math;
@@ -15,9 +15,12 @@ mod math;
 use std::collections::HashMap;
 
 use alloy::primitives::U256;
+use math::Curve;
 use tycho_common::Bytes;
 
-use crate::protocol::errors::InvalidSnapshotError;
+use crate::{
+    evm::protocol::utils::uniswap::FEE_PIPS_DENOMINATOR, protocol::errors::InvalidSnapshotError,
+};
 
 /// `PoolData.fee`: the swap fee in pips (1e6 = 100%), constant for the life of the pool.
 pub const FEE_PIPS_ATTRIBUTE: &str = "ascend_fee_pips";
@@ -44,7 +47,7 @@ pub const BID_MAX_CLIP_ATTRIBUTE: &str = "ascend_bid_max_clip";
 
 /// Every `ascend_*` attribute, all of which [`AscendPoolState::from_attributes`] requires and
 /// none of which the indexer deletes.
-pub(super) const POOL_ATTRIBUTES: [&str; 11] = [
+const POOL_ATTRIBUTES: [&str; 11] = [
     FEE_PIPS_ATTRIBUTE,
     TOKEN_IS_CURRENCY0_ATTRIBUTE,
     START_TICK_ATTRIBUTE,
@@ -61,55 +64,90 @@ pub(super) const POOL_ATTRIBUTES: [&str; 11] = [
 /// The smallest and largest `int24`: a stored tick is one.
 const INT24_MIN: i32 = -(1 << 23);
 const INT24_MAX: i32 = (1 << 23) - 1;
-/// 2^32, one past the largest `uint32` the hook stores `d` in.
+/// 2^32, one past the largest `uint32` the hook stores `d` in. The discount's fixed point is
+/// built on it too.
 const UINT32_LIMIT: u64 = 1 << 32;
-/// 1e6 pips, 100%.
-const PIPS: u32 = 1_000_000;
+
+/// `value` as a `uint32`, if it fits one.
+fn to_uint32(value: U256) -> Option<u64> {
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value < UINT32_LIMIT)
+}
 
 /// What the hook keeps for one pool's price observation (`PoolData` word 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Observation {
+struct Observation {
     /// `emaSqrtPriceX96`.
-    pub(super) ema: U256,
+    ema: U256,
     /// `emaUpdatedAt`, unix seconds.
-    pub(super) updated_at: u64,
+    updated_at: u64,
     /// `observedTick`.
-    pub(super) tick: i32,
+    tick: i32,
     /// `discount`, a `uint32`.
-    pub(super) discount: u64,
+    discount: u64,
 }
 
 /// What the hook keeps for one pool's bid (`Bid` words 0 to 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Bid {
+struct Bid {
     /// `inventory`, quote raw units.
-    pub(super) inventory: U256,
+    inventory: U256,
     /// `filledInWindow`, quote raw units.
-    pub(super) filled: U256,
+    filled: U256,
     /// `windowStart`, unix seconds.
-    pub(super) window_start: u64,
+    window_start: u64,
     /// `maxClip`.
-    pub(super) max_clip: u128,
+    max_clip: u128,
 }
 
 /// Everything a quote of one Ascend pool depends on, as the indexer publishes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AscendPoolState {
     /// The swap fee in pips, below 1e6.
-    pub(super) fee_pips: u32,
-    pub(super) token_is_currency0: bool,
-    pub(super) start_tick: i32,
-    pub(super) observation: Observation,
-    pub(super) bid: Bid,
+    fee_pips: u32,
+    token_is_currency0: bool,
+    start_tick: i32,
+    observation: Observation,
+    bid: Bid,
+    /// The launch curve of `start_tick` and the orientation, built once with the state.
+    curve: Curve,
 }
 
 impl AscendPoolState {
+    /// A state whose parts the hook could have stored: the fee below 100%, an EMA above 0 and a
+    /// start tick whose launch curve exists.
+    fn new(
+        fee_pips: u32,
+        token_is_currency0: bool,
+        start_tick: i32,
+        observation: Observation,
+        bid: Bid,
+    ) -> Result<Self, InvalidSnapshotError> {
+        if fee_pips >= FEE_PIPS_DENOMINATOR {
+            return Err(InvalidSnapshotError::ValueError(format!(
+                "{FEE_PIPS_ATTRIBUTE} = {fee_pips} is not a fee below 1e6 pips"
+            )));
+        }
+        if observation.ema.is_zero() {
+            return Err(InvalidSnapshotError::ValueError(format!(
+                "{EMA_SQRT_PRICE_ATTRIBUTE} is 0, which no observation leaves"
+            )));
+        }
+        let curve = Curve::try_new(token_is_currency0, start_tick).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!(
+                "{START_TICK_ATTRIBUTE} = {start_tick} has no launch curve: {e}"
+            ))
+        })?;
+        Ok(Self { fee_pips, token_is_currency0, start_tick, observation, bid, curve })
+    }
+
     /// Reads every `ascend_*` attribute out of `attributes`.
     ///
     /// Fails with `MissingAttribute` naming the first absent attribute, and with `ValueError` for
     /// a value of the wrong width or one the hook could not have stored: a fee of 1e6 pips or
-    /// more, an orientation other than 0 or 1, a tick outside `int24`, a discount outside
-    /// `uint32`.
+    /// more, an orientation other than 0 or 1, a tick outside `int24` or one with no launch
+    /// curve, a discount outside `uint32`, an EMA of 0.
     pub fn from_attributes(
         attributes: &HashMap<String, Bytes>,
     ) -> Result<Self, InvalidSnapshotError> {
@@ -147,16 +185,16 @@ impl AscendPoolState {
         }
         let obs = base.map(|b| b.observation);
         let bid = base.map(|b| b.bid);
-        Ok(Self {
-            fee_pips: field(attributes, FEE_PIPS_ATTRIBUTE, pips, base.map(|b| b.fee_pips))?,
-            token_is_currency0: field(
+        Self::new(
+            field(attributes, FEE_PIPS_ATTRIBUTE, pips, base.map(|b| b.fee_pips))?,
+            field(
                 attributes,
                 TOKEN_IS_CURRENCY0_ATTRIBUTE,
                 flag,
                 base.map(|b| b.token_is_currency0),
             )?,
-            start_tick: field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.start_tick))?,
-            observation: Observation {
+            field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.start_tick))?,
+            Observation {
                 ema: field(attributes, EMA_SQRT_PRICE_ATTRIBUTE, uint160, obs.map(|o| o.ema))?,
                 updated_at: field(
                     attributes,
@@ -167,7 +205,7 @@ impl AscendPoolState {
                 tick: field(attributes, OBSERVED_TICK_ATTRIBUTE, tick, obs.map(|o| o.tick))?,
                 discount: field(attributes, DISCOUNT_ATTRIBUTE, discount, obs.map(|o| o.discount))?,
             },
-            bid: Bid {
+            Bid {
                 inventory: field(
                     attributes,
                     BID_INVENTORY_ATTRIBUTE,
@@ -193,7 +231,7 @@ impl AscendPoolState {
                     bid.map(|b| b.max_clip),
                 )?,
             },
-        })
+        )
     }
 }
 
@@ -211,27 +249,22 @@ fn u64_be(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
     Ok(u64::from_be_bytes(bytes))
 }
 
-/// An 8-byte big-endian fee in pips, which the hook stores as a `uint24` and never sets to 100%
-/// or more.
+/// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`. [`AscendPoolState::new`]
+/// checks that it is below 100%.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
     let pips = u64_be(name, value)?;
-    u32::try_from(pips)
-        .ok()
-        .filter(|pips| *pips < PIPS)
-        .ok_or_else(|| {
-            InvalidSnapshotError::ValueError(format!("{name} = {pips} is not a fee below 1e6 pips"))
-        })
+    u32::try_from(pips).map_err(|_overflow| {
+        InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a fee in pips"))
+    })
 }
 
-/// An 8-byte big-endian `uint32` the hook stores `d` in.
+/// The discount `d`: 8 big-endian bytes of a value below 2^32, which the hook stores as a
+/// `uint32`.
 fn discount(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
     let discount = u64_be(name, value)?;
-    if discount >= UINT32_LIMIT {
-        return Err(InvalidSnapshotError::ValueError(format!(
-            "{name} = {discount} does not fit a uint32"
-        )));
-    }
-    Ok(discount)
+    to_uint32(U256::from(discount)).ok_or_else(|| {
+        InvalidSnapshotError::ValueError(format!("{name} = {discount} does not fit a uint32"))
+    })
 }
 
 /// A one-byte boolean, `0` or `1`.

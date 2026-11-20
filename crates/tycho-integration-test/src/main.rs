@@ -2329,8 +2329,9 @@ const NEXT_BLOCK_PROTOCOLS: [&str; 5] =
 
 /// Protocol systems that execute in the next block on one chain only. `uniswap_v4_hooks` on
 /// Elysium is in, which holds while two facts of `tycho-simulation` do: Elysium is not in its
-/// `GENERIC_VM_HOOK_CHAINS`, and Montra's hook, whose fees move with the block timestamp, is the
-/// only native handler registered on Elysium. Revisit the entry when either changes.
+/// `GENERIC_VM_HOOK_CHAINS`, and the native handlers registered on Elysium (Montra's hook, whose
+/// fees move with the block timestamp, and Ascend's, whose fills depend on it) are the only
+/// hooks there. Revisit the entry when either changes.
 const NEXT_BLOCK_CHAIN_PROTOCOLS: [(Chain, &str); 1] = [(Chain::Elysium, "uniswap_v4_hooks")];
 
 /// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's

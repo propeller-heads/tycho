@@ -318,10 +318,10 @@ impl UniswapV4State {
         })
     }
 
-    /// The pool's square-root price, current tick and active liquidity, which a hook that
-    /// bounds limits reads in [`HookHandler::max_amount_in`].
-    pub(crate) fn price_tick_liquidity(&self) -> (U256, i32, u128) {
-        (self.sqrt_price, self.tick.value(), self.liquidity)
+    /// The pool's square-root price and current tick, which a hook that bounds limits reads in
+    /// [`HookHandler::max_amount_in`].
+    pub(crate) fn price_and_tick(&self) -> (U256, i32) {
+        (self.sqrt_price, self.tick.value())
     }
 
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
@@ -955,7 +955,6 @@ impl ProtocolSim for UniswapV4State {
             tick_spacing: self.tick_spacing,
             sqrt_price_x96: self.sqrt_price,
             tick: self.tick.value(),
-            liquidity: self.liquidity,
         };
 
         // The hooks must see the limit an executed swap sends: the full price range, like the
@@ -1038,6 +1037,17 @@ impl ProtocolSim for UniswapV4State {
             .map_err(|e| hook_call_error("CheckSwapOutcome", e))?;
         }
 
+        // A hook whose own storage the swap changed (an observation, a consumed inventory) prices
+        // the next swap of a route from the state it leaves. It is taken here, while the context
+        // and the swap's parameters are still ours, and a refusal further on drops it with the
+        // swap.
+        let next_hook = match &self.hook {
+            Some(hook) => hook
+                .handler_after_swap(&state_context, &swap_params)
+                .map_err(|e| hook_call_error("HandlerAfterSwap", e))?,
+            None => None,
+        };
+
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
 
@@ -1049,9 +1059,9 @@ impl ProtocolSim for UniswapV4State {
         if let Some(ref hook) = self.hook {
             if hook.has_permission(HookOptions::AfterSwap) {
                 let after_swap_params = AfterSwapParameters {
-                    context: state_context.clone(),
+                    context: state_context,
                     sender: *EXTERNAL_ACCOUNT,
-                    swap_params: swap_params.clone(),
+                    swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
                 };
@@ -1090,15 +1100,8 @@ impl ProtocolSim for UniswapV4State {
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
         let mut new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
-        // A hook whose own storage the swap changed (an observation, a consumed inventory) prices
-        // the next swap of a route from the state it leaves.
-        if let Some(hook) = &self.hook {
-            if let Some(next_hook) = hook
-                .handler_after_swap(&state_context, &swap_params)
-                .map_err(|e| hook_call_error("HandlerAfterSwap", e))?
-            {
-                new_state.hook = Some(next_hook);
-            }
+        if let Some(next_hook) = next_hook {
+            new_state.hook = Some(next_hook);
         }
 
         // Add hook gas costs to baseline swap cost.

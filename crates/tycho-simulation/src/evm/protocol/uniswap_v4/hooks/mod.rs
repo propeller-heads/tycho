@@ -7,7 +7,8 @@
 //! Unichain only, and fails to decode everywhere else. [`angstrom`] is the native handler for
 //! Angstrom's hook on Ethereum; [`pons_v2`] is the native handler for the Pons V2 MemeHook on
 //! Robinhood; [`pancakeswap_clalpha`] is the native handler for PancakeSwap Infinity's
-//! `CLAlphaHook` on BSC; [`montra`] is the native handler for Montra's `LaunchHook` on Elysium.
+//! `CLAlphaHook` on BSC; [`montra`] is the native handler for Montra's `LaunchHook` on Elysium,
+//! and [`ascend`] the one for the Ascend launchpad's hook on Elysium.
 //!
 //! [`UniswapV4State`]: crate::evm::protocol::uniswap_v4::state::UniswapV4State
 

@@ -255,7 +255,6 @@ mod tests {
                 tick_spacing: 10,
                 sqrt_price_x96: U256::ZERO,
                 tick: 0,
-                liquidity: 0,
             },
             sender: Address::ZERO,
             swap_params: SwapParams {
