@@ -199,7 +199,13 @@
           "0xe4b8583ccb95b25737c016ac88e539d0605949e8": 2380.7884670846697,
           "0x844a5ccdc91e604f55085adfc02e4d52c8227099": 142.37775247232412,
           "0xbf16540c857b4e32ce6c37d2f7725c8eec869b8b": 463.8180954026142
-        }
+        },
+        "paused_components": [
+          "0xbf16540c857b4e32ce6c37d2f7725c8eec869b8b"
+        ],
+        "unpaused_components": [
+          "0x844a5ccdc91e604f55085adfc02e4d52c8227099"
+        ]
       },
       "removed_components": {}
     }

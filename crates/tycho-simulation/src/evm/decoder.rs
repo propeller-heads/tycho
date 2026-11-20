@@ -213,6 +213,11 @@ where
         guard.tokens = tokens;
     }
 
+    /// Returns read access to the decoder's token metadata, keyed by token address.
+    pub(crate) async fn tokens(&self) -> RwLockReadGuard<'_, HashMap<Bytes, Token>> {
+        RwLockReadGuard::map(self.state.read().await, |state| &state.tokens)
+    }
+
     pub fn skip_state_decode_failures(&mut self, skip: bool) {
         self.skip_state_decode_failures = skip;
     }
@@ -539,7 +544,7 @@ where
                         let impl_update = ResponseAccount {
                             address: impl_addr,
                             slots: HashMap::new(),
-                            ..account.clone()
+                            ..account
                         };
                         storage_by_address.insert(impl_addr, impl_update);
                     } else {
@@ -868,7 +873,7 @@ where
                             let impl_update = AccountUpdate {
                                 address: impl_addr,
                                 slots: HashMap::new(),
-                                ..update.clone()
+                                ..update
                             };
                             account_update_by_address.insert(impl_addr, impl_update);
                         }
@@ -1899,9 +1904,8 @@ mod tests {
             Ok(res) => {
                 if !skip_failures {
                     panic!("Expected failures to be raised")
-                } else {
-                    assert_eq!(res.states.len(), 0);
                 }
+                assert_eq!(res.states.len(), 0);
             }
         }
     }

@@ -10,7 +10,12 @@ import {
 } from "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@src/TransferManager.sol";
 import "./TychoRouterTestSetup.sol";
-import {Vault} from "@src/Vault.sol";
+import {Vault, Vault__Paused} from "@src/Vault.sol";
+import {
+    Dispatcher__ExecutorAlreadyExists,
+    Dispatcher__ExecutorIsTimelocked,
+    Dispatcher__NonContractExecutor
+} from "@src/Dispatcher.sol";
 
 contract TychoRouterTest is TychoRouterTestSetup {
     bytes32 public constant EXECUTOR_SETTER_ROLE =
@@ -220,7 +225,8 @@ contract TychoRouterTest is TychoRouterTestSetup {
         new TychoRouterExposed(
             PERMIT2_ADDRESS,
             nonContract,
-            PAUSER,
+            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -240,17 +246,76 @@ contract TychoRouterTest is TychoRouterTestSetup {
         new TychoRouterExposed(
             nonContract,
             address(newFeeCalculator),
-            PAUSER,
+            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
         );
     }
 
-    function testRoleHolderCanTransferOwnRole() public {
+    function testConstructorPausesVault() public {
+        TychoRouterExposed router = new TychoRouterExposed(
+            PERMIT2_ADDRESS,
+            address(feeCalculator),
+            new address[](0),
+            listTestPausers(),
+            UNPAUSER,
+            EXECUTOR_SETTER,
+            FEE_SETTER
+        );
+        assertTrue(router.vaultPaused());
+
+        vm.deal(ALICE, 1 ether);
+        vm.prank(ALICE);
+        vm.expectRevert(Vault__Paused.selector);
+        router.deposit{value: 1 ether}(ETH_ADDR, 1 ether);
+
+        vm.prank(UNPAUSER);
+        router.unpauseVault();
+        assertFalse(router.vaultPaused());
+    }
+
+    function testConstructorPausersCanPause() public {
+        address[] memory pausers = new address[](2);
+        pausers[0] = makeAddr("pauserA");
+        pausers[1] = makeAddr("pauserB");
+        TychoRouterExposed router = new TychoRouterExposed(
+            PERMIT2_ADDRESS,
+            address(feeCalculator),
+            new address[](0),
+            pausers,
+            UNPAUSER,
+            EXECUTOR_SETTER,
+            FEE_SETTER
+        );
+
+        assertFalse(router.hasRole(PAUSER_ROLE, UNPAUSER));
+        assertTrue(router.hasRole(PAUSER_ROLE, pausers[0]));
+        assertTrue(router.hasRole(PAUSER_ROLE, pausers[1]));
+
+        vm.prank(pausers[1]);
+        router.pause();
+        assertTrue(router.paused());
+    }
+
+    function testPauserCannotGrantPauserRole() public {
+        address newPauser = makeAddr("newPauser");
+        vm.prank(PAUSER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector,
+                PAUSER,
+                keccak256("UNPAUSER_ROLE")
+            )
+        );
+        tychoRouter.grantRole(PAUSER_ROLE, newPauser);
+    }
+
+    function testUnpauserManagesPauserRole() public {
         address newPauser = makeAddr("newPauser");
 
-        vm.startPrank(PAUSER);
+        vm.startPrank(UNPAUSER);
         tychoRouter.grantRole(PAUSER_ROLE, newPauser);
         tychoRouter.revokeRole(PAUSER_ROLE, PAUSER);
         vm.stopPrank();
@@ -290,5 +355,94 @@ contract TychoRouterTest is TychoRouterTestSetup {
             tychoRouter.getRoleAdmin(keccak256("ROUTER_FEE_SETTER_ROLE")),
             DEFAULT_ADMIN_ROLE
         );
+    }
+
+    // ==================== Deployment executors ====================
+    function _deployRouterWithExecutors(address[] memory executors)
+        internal
+        returns (TychoRouterExposed)
+    {
+        return new TychoRouterExposed(
+            PERMIT2_ADDRESS,
+            address(feeCalculator),
+            executors,
+            listTestPausers(),
+            UNPAUSER,
+            EXECUTOR_SETTER,
+            FEE_SETTER
+        );
+    }
+
+    function _swapWethForDai(TychoRouterExposed router)
+        internal
+        returns (uint256)
+    {
+        uint256 amountIn = 1 ether;
+        deal(WETH_ADDR, ALICE, amountIn);
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+        vm.startPrank(ALICE);
+        IERC20(WETH_ADDR).approve(address(router), amountIn);
+        uint256 amountOut = router.singleSwap(
+            amountIn, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+        vm.stopPrank();
+        return amountOut;
+    }
+
+    function testDeploymentExecutorsAndFeeCalculatorActive() public {
+        address[] memory executors = new address[](1);
+        executors[0] = address(usv2Executor);
+        TychoRouterExposed router = _deployRouterWithExecutors(executors);
+
+        // No warp: the executor and the fee calculator work at deployment
+        assertEq(router.getFeeCalculator(), address(feeCalculator));
+        assertGt(_swapWethForDai(router), 0);
+    }
+
+    function testExecutorAddedAfterDeploymentIsTimelocked() public {
+        TychoRouterExposed router = _deployRouterWithExecutors(new address[](0));
+        address[] memory executors = new address[](1);
+        executors[0] = address(usv2Executor);
+        vm.prank(EXECUTOR_SETTER);
+        router.setExecutors(executors);
+
+        bytes memory swap = encodeSingleSwap(
+            address(usv2Executor),
+            encodeUniswapV2Swap(DAI_WETH_UNIV2_POOL, WETH_ADDR, DAI_ADDR)
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Dispatcher__ExecutorIsTimelocked.selector, address(usv2Executor)
+            )
+        );
+        router.singleSwap(
+            1 ether, WETH_ADDR, DAI_ADDR, 1, 1, ALICE, noClientFee(), swap
+        );
+
+        vm.warp(vm.getBlockTimestamp() + router.DELAY_EXECUTOR_ACTIVATION());
+        assertGt(_swapWethForDai(router), 0);
+    }
+
+    function testConstructorNonContractExecutor() public {
+        address[] memory executors = new address[](1);
+        executors[0] = address(0x999);
+        vm.expectRevert(Dispatcher__NonContractExecutor.selector);
+        _deployRouterWithExecutors(executors);
+    }
+
+    function testConstructorDuplicateExecutor() public {
+        address[] memory executors = new address[](2);
+        executors[0] = address(usv2Executor);
+        executors[1] = address(usv2Executor);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Dispatcher__ExecutorAlreadyExists.selector,
+                address(usv2Executor)
+            )
+        );
+        _deployRouterWithExecutors(executors);
     }
 }

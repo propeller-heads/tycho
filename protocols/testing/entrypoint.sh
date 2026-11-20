@@ -87,13 +87,23 @@ for test in "${args[@]}"; do
 	cmd=(tycho-protocol-sdk "$MODE" --package "$protocol" --chain "$chain" \
 		--rpc-url "$rpc_url" --db-url "$DATABASE_URL" --prebuilt-wasm)
 	# The "=" suffix in PROTOCOLS means different things per mode:
-	#   range → --match-test (run one named test case)
+	#   range → --match-test (run the test cases whose name contains it)
 	#   full  → --initial-block (start syncing from this block)
 	if [[ "$test" == *"="* ]]; then
 		if [ "$MODE" = "full" ]; then
 			cmd+=(--initial-block "$suffix")
 		else
 			cmd+=(--match-test "$suffix")
+		fi
+	fi
+	# REPORT_DIR: write each package's test report there, as <package>.json for range and
+	# <package>.jsonl for full (one line per failed update, strict packages only).
+	if [ -n "${REPORT_DIR:-}" ]; then
+		mkdir -p "$REPORT_DIR"
+		if [ "$MODE" = "full" ]; then
+			cmd+=(--report "$REPORT_DIR/$protocol.jsonl")
+		else
+			cmd+=(--report "$REPORT_DIR/$protocol.json")
 		fi
 	fi
 	"${cmd[@]}"

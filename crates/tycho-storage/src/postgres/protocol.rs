@@ -1688,7 +1688,7 @@ impl PostgresGateway {
                 }
             }
 
-            balances.insert(component_id.clone(), new_balance_map);
+            balances.insert(component_id, new_balance_map);
         }
 
         Ok(balances)

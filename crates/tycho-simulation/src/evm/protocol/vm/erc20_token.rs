@@ -286,7 +286,8 @@ mod tests {
         let mut expected_bytes = [0u8; 32];
         let name_bytes = name.as_bytes();
         expected_bytes[..name_bytes.len()].copy_from_slice(name_bytes);
-        expected_bytes[31] = u8::try_from(name_bytes.len() * 2).unwrap(); // Length * 2 for short strings
+        // Length * 2 for short strings
+        expected_bytes[31] = u8::try_from(name_bytes.len() * 2).unwrap();
         let expected_value = U256::from_be_bytes(expected_bytes);
         assert_eq!(factory.overwrites[&*CUSTOM_NAME_POSITION], expected_value);
 
@@ -306,7 +307,8 @@ mod tests {
         let mut expected_bytes = [0u8; 32];
         let symbol_bytes = symbol.as_bytes();
         expected_bytes[..symbol_bytes.len()].copy_from_slice(symbol_bytes);
-        expected_bytes[31] = u8::try_from(symbol_bytes.len() * 2).unwrap(); // Length * 2 for short strings
+        // Length * 2 for short strings
+        expected_bytes[31] = u8::try_from(symbol_bytes.len() * 2).unwrap();
         let expected_value = U256::from_be_bytes(expected_bytes);
         assert_eq!(factory.overwrites[&*CUSTOM_SYMBOL_POSITION], expected_value);
 

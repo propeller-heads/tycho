@@ -1,6 +1,7 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery, dead_code)]
 
 pub mod fee_calculator;
+pub mod fee_calculator_cap_and_pair_fee;
 pub mod fee_calculator_exemption;
 pub mod fee_calculator_router_positive_slippage;
 pub mod fee_calculator_v3_0;

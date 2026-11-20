@@ -784,7 +784,6 @@ mod tests {
                             code_hash: KECCAK_EMPTY,
                             code: account
                                 .code
-                                .clone()
                                 .map(|arg0: Vec<u8>| Bytecode::new_raw(arg0.into())),
                         },
                         None,

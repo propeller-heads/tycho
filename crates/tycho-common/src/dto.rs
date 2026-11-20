@@ -362,6 +362,12 @@ pub struct BlockAggregatedChanges {
     /// The index of the partial block. None if it's a full block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_block_index: Option<u32>,
+    /// Components paused in this block. Clients should stop tracking them.
+    #[serde(default)]
+    pub paused_components: HashSet<ComponentId>,
+    /// Components unpaused in this block. Clients may track them again.
+    #[serde(default)]
+    pub unpaused_components: HashSet<ComponentId>,
 }
 
 impl BlockAggregatedChanges {
@@ -402,6 +408,8 @@ impl BlockAggregatedChanges {
             component_tvl: HashMap::new(),
             dci_update,
             partial_block_index: None,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         }
     }
 
@@ -456,6 +464,15 @@ impl BlockAggregatedChanges {
             .extend(other.new_protocol_components);
         self.deleted_protocol_components
             .extend(other.deleted_protocol_components);
+        // A later pause or unpause of the same component overrides the earlier one.
+        for id in other.paused_components {
+            self.unpaused_components.remove(&id);
+            self.paused_components.insert(id);
+        }
+        for id in other.unpaused_components {
+            self.paused_components.remove(&id);
+            self.unpaused_components.insert(id);
+        }
         self.revert = other.revert;
         self.block = other.block;
 
@@ -507,6 +524,8 @@ impl BlockAggregatedChanges {
             component_tvl: self.component_tvl.clone(),
             dci_update: self.dci_update.clone(),
             partial_block_index: self.partial_block_index,
+            paused_components: self.paused_components.clone(),
+            unpaused_components: self.unpaused_components.clone(),
         }
     }
 
@@ -609,6 +628,8 @@ impl From<models::blockchain::BlockAggregatedChanges> for BlockAggregatedChanges
                 .collect(),
             component_tvl: value.component_tvl,
             partial_block_index: value.partial_block_index,
+            paused_components: value.paused_components,
+            unpaused_components: value.unpaused_components,
         }
     }
 }
@@ -1452,6 +1473,11 @@ impl ProtocolComponentRequestParameters {
 pub struct ProtocolComponentRequestResponse {
     pub protocol_components: Vec<ProtocolComponent>,
     pub pagination: PaginationResponse,
+    /// Ids of the components in `protocol_components` that are paused. Clients should not track
+    /// them.
+    #[serde(default)]
+    #[schema(value_type = Vec<String>)]
+    pub paused_component_ids: Vec<ComponentId>,
 }
 
 impl ProtocolComponentRequestResponse {
@@ -1459,7 +1485,7 @@ impl ProtocolComponentRequestResponse {
         protocol_components: Vec<ProtocolComponent>,
         pagination: PaginationResponse,
     ) -> Self {
-        Self { protocol_components, pagination }
+        Self { protocol_components, pagination, paused_component_ids: Vec::new() }
     }
 }
 
@@ -2723,6 +2749,101 @@ mod test {
 
         // Deserialize the JSON back into a dto::BlockAggregatedChanges struct
         serde_json::from_str::<BlockAggregatedChanges>(&json_data).expect("parsing failed");
+    }
+
+    fn ids(ids: &[&str]) -> HashSet<ComponentId> {
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
+    fn pause_changes(paused: &[&str], unpaused: &[&str]) -> BlockAggregatedChanges {
+        BlockAggregatedChanges {
+            paused_components: ids(paused),
+            unpaused_components: ids(unpaused),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_block_changes_pause_events_round_trip() {
+        let mut model = create_models_block_changes();
+        model.paused_components = ids(&["a"]);
+        model.unpaused_components = ids(&["b"]);
+        let json = serde_json::to_string(&model).expect("serialize model");
+
+        let dto: BlockAggregatedChanges = serde_json::from_str(&json).expect("deserialize dto");
+        let back = models::blockchain::BlockAggregatedChanges::from(dto.clone());
+        let dto_json = serde_json::to_string(&dto).expect("serialize dto");
+        let dto_again: BlockAggregatedChanges =
+            serde_json::from_str(&dto_json).expect("deserialize dto again");
+
+        assert_eq!(dto.paused_components, ids(&["a"]));
+        assert_eq!(dto.unpaused_components, ids(&["b"]));
+        assert_eq!(BlockAggregatedChanges::from(model), dto);
+        assert_eq!(back.paused_components, ids(&["a"]));
+        assert_eq!(back.unpaused_components, ids(&["b"]));
+        assert_eq!(dto_again, dto);
+    }
+
+    #[test]
+    fn test_block_changes_without_pause_events() {
+        let mut json = serde_json::to_value(create_models_block_changes()).expect("serialize");
+        let fields = json
+            .as_object_mut()
+            .expect("json object");
+        fields.remove("paused_components");
+        fields.remove("unpaused_components");
+
+        let dto: BlockAggregatedChanges = serde_json::from_value(json.clone()).expect("dto");
+        let model: models::blockchain::BlockAggregatedChanges =
+            serde_json::from_value(json).expect("model");
+
+        assert!(dto.paused_components.is_empty());
+        assert!(dto.unpaused_components.is_empty());
+        assert!(model.paused_components.is_empty());
+        assert!(model.unpaused_components.is_empty());
+    }
+
+    #[rstest]
+    #[case::pause_then_unpause(pause_changes(&["a"], &[]), pause_changes(&[], &["a"]), &[], &["a"])]
+    #[case::unpause_then_pause(pause_changes(&[], &["a"]), pause_changes(&["a"], &[]), &["a"], &[])]
+    #[case::disjoint_ids(pause_changes(&["a"], &["b"]), pause_changes(&["c"], &["d"]), &["a", "c"], &["b", "d"])]
+    fn test_block_changes_merge_pause_events(
+        #[case] earlier: BlockAggregatedChanges,
+        #[case] later: BlockAggregatedChanges,
+        #[case] expected_paused: &[&str],
+        #[case] expected_unpaused: &[&str],
+    ) {
+        let merged = earlier.merge(later);
+
+        assert_eq!(merged.paused_components, ids(expected_paused));
+        assert_eq!(merged.unpaused_components, ids(expected_unpaused));
+    }
+
+    #[test]
+    fn test_block_changes_drop_state_keeps_pause_events() {
+        let dropped = pause_changes(&["a"], &["b"]).drop_state();
+
+        assert_eq!(dropped.paused_components, ids(&["a"]));
+        assert_eq!(dropped.unpaused_components, ids(&["b"]));
+    }
+
+    #[rstest]
+    #[case::with_paused_ids(r#","paused_component_ids":["a"]"#, vec!["a".to_string()])]
+    #[case::without_paused_ids("", vec![])]
+    fn test_protocol_components_response_paused_ids(
+        #[case] paused_field: &str,
+        #[case] expected: Vec<ComponentId>,
+    ) {
+        let json = format!(
+            r#"{{"protocol_components":[],"pagination":{{"page":0,"page_size":20,"total":0}}{paused_field}}}"#
+        );
+
+        let response: ProtocolComponentRequestResponse =
+            serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(response.paused_component_ids, expected);
     }
 
     #[test]

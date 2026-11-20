@@ -133,6 +133,12 @@ impl HookHandler for PonsV2HookHandler {
         self.address
     }
 
+    /// [`PONS_V2_AFTER_SWAP_GAS`] is a whole-transaction difference and already includes the
+    /// dispatch.
+    fn pool_manager_call_overhead(&self) -> u64 {
+        0
+    }
+
     /// Always fails: bit 7 of the hook address is clear, so v4-core never calls `beforeSwap`.
     fn before_swap(
         &self,
@@ -352,12 +358,14 @@ mod tests {
     ) {
         let params = after_swap_params(zero_for_one, amount_specified, amount0, amount1);
 
-        let delta = handler(50, 50)
+        let handler = handler(50, 50);
+        let delta = handler
             .after_swap(params, None, None)
             .expect("a well formed delta is always chargeable");
 
         assert_eq!(delta.result, I128::try_from(expected).expect("fits I128"));
         assert_eq!(delta.gas_estimate, PONS_V2_AFTER_SWAP_GAS);
+        assert_eq!(handler.pool_manager_call_overhead(), 0, "the estimate covers the dispatch");
     }
 
     /// The contract negates a negative unspecified leg before charging, so the sign of the leg

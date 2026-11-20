@@ -50,14 +50,16 @@ const MAX_CONCURRENT_BATCHES: usize = 4;
 /// `router_overwrites_data` decides which contracts are simulated as deployed and which are
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
 ///
-/// Each input's own [`account_overwrites`](TychoExecutionInput::account_overwrites) are merged in
-/// last, after every other overwrite, to that simulation only.
+/// The balance, allowance, router and FermiSwap/BopAMM overwrites apply first; an Angstrom hook's
+/// overwrites come after them and replace that account's entry whole. Each input's own
+/// [`account_overwrites`](TychoExecutionInput::account_overwrites) are merged in last, to that
+/// simulation only. An empty `execution_info` returns no results.
 ///
 /// # Errors
 /// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`; an input whose
 /// `account_overwrites` set an unsupported field is `Failed` without being simulated. An `Err`
-/// signals that the whole batch could not be simulated, and carries the state overwrites and
-/// metadata of the batch when they were already built, for Tenderly link generation.
+/// signals that the whole batch could not be simulated; its overwrites and metadata are always
+/// `None`.
 pub async fn simulate_swap_transaction(
     rpc_tools: &RPCTools,
     execution_info: HashMap<String, TychoExecutionInput>,
@@ -119,7 +121,8 @@ pub async fn simulate_swap_transaction_next_block(
 }
 
 /// What [`simulate_swap_transaction`] returns: one result per simulation id, or the error that
-/// failed the whole batch with the overwrites and metadata built for it so far.
+/// failed the whole batch. The error's overwrites and metadata are slots for a Tenderly link;
+/// every path that returns an error leaves them `None`.
 pub type SwapSimulationResult = Result<
     HashMap<String, TychoExecutionResult>,
     (miette::Error, Option<AddressHashMap<AccountOverride>>, Option<tenderly::OverwriteMetadata>),
@@ -136,11 +139,13 @@ async fn simulate_swap_transaction_on(
     let mut tycho_execution_results: HashMap<String, TychoExecutionResult> = HashMap::new();
 
     // Get to_address from the first transaction (same for all transactions - tycho router)
-    let to_address = execution_info
+    let Some(to_address) = execution_info
         .values()
         .next()
         .map(|info| info.transaction.to().clone())
-        .expect("To address must be set");
+    else {
+        return Ok(HashMap::new());
+    };
 
     // Gather all unique token addresses for batch slot detection
     let token_addresses: Vec<_> = execution_info
@@ -333,6 +338,10 @@ async fn simulate_swap_transaction_on(
                     simulation_id,
                     TychoExecutionResult::Revert { reason, state_overwrites, overwrite_metadata },
                 );
+            }
+            SimulationResult::Failed { error_msg } => {
+                tycho_execution_results
+                    .insert(simulation_id, TychoExecutionResult::Failed { error_msg });
             }
         }
     }

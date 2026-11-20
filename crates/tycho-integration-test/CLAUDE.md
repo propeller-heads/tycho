@@ -92,15 +92,66 @@ shows up as a failure.
 - **`fee_fetcher.rs`**: One-shot start-up read of the router fee on output from the deployed
   FeeCalculator, so the test backs the current fee out of the simulated amount instead of
   hard-coding it
+- **`packages.rs`**: `StrictPackages`, the strict-mode packages of the chain, read at start-up from
+  the `protocols/substreams/**/integration_test*.tycho.yaml` files `build.rs` embeds: every one
+  but those under a `target` directory or a `-template-` package. The build
+  fails when it finds none (`.dockerignore` lets those yamls into the image build), and the binary
+  fails at start-up when any of them is invalid, whatever its chain
+- **`limit_probes.rs`**: limit probes for strict protocols (see "Strict packages" below)
+- **`grafana/integration-test.json`**: the Integration test dashboard (uid `ceztze8otfk00c`,
+  folder `tycho`), including the "Strict checks" row. Import it by hand after editing
 - **`grafana/pamm-simulation-quality.json`**: Grafana dashboard (VictoriaMetrics datasource) for
   the price level swaps this service checks and the stream's own `price_level_stream_*` series.
   Its `job` variable also lists Fynd's jobs, which fill the stream rows. Import it by hand
 
 ## What it validates
 
-For each block update, for a random sample of components (up to `--max-simulations`):
-1. `ProtocolSim::get_amount_out` — checks the simulation returns a non-zero output
-2. `ProtocolSim::get_limits` — checks token limits are non-zero
+For each tested update (every `--test-every-n-updates`-th, never the first), for the first
+`--max-simulations` updated states, the `--always-test-components`, and up to
+`--max-simulations-stale` random stale components of each ready protocol, in every direction
+between the component's tokens (a component with a swap-directions attribute: at most
+`--max-simulations` of its listed directions, sampled):
+1. `ProtocolSim::get_limits`: a failure is counted and the direction is skipped
+2. `ProtocolSim::get_amount_out` at the max input, capped at 5 ETH worth of the token (a token
+   missing from the price snapshot is not capped by value) and at 2^96 - 1, and raised to
+   Hashflow's minimum quote size for Hashflow: a failure is counted; a zero amount in or out skips
+   the direction
 3. Encodes a swap via `tycho-execution` and simulates it via RPC (`debug_traceCall` with balance
-   and allowance overrides) — checks it doesn't revert and that on-chain output is within
-   slippage tolerance of simulated output
+   and allowance overrides): a revert or failure is counted by error category, and a success
+   records the slippage against the fee-deducted quote, in percent, logging an error outside
+   ±0.2%. There is no pass or fail for this swap; the limit probes below have one
+
+## Strict packages
+
+A protocol whose package sets `harness: strict` (protocols/testing/README.md, "Strict mode")
+gets limit probes on top of the swap above; every other protocol gets only that swap.
+For each direction the swap above tests, the probe swaps one size relative to the limit, in
+turn: 0.1%, 1%, 10%, then the limit (`ProbeSize::ALL`: the ladder's rungs, `ProbeSize::LADDER`,
+then the limit), and one unit past a hard or under-cap limit, in the same batch
+(`checks::limits`). A soft limit's claim, that twice the limit quotes, is checked in simulation.
+
+| Check | Passes when |
+|---|---|
+| `sim.ladder` | a fraction quotes |
+| `exec.ladder` | a fraction executes for its quote, less the router fee, within the tolerance the component declares, else the package's (exact without either) |
+| `limits.at_limit` | the limit quotes, and executes as the fractions must |
+| `limits.past_limit` | past the limit, the venue behaves as the declared kind claims: one unit past a hard limit the quote errors and, once the limit executed, the swap reverts (fails `past_limit_executed` otherwise); one unit past an under-cap limit the quote and the swap succeed (fails `past_limit_reverted` otherwise); twice a soft limit quotes |
+| `limits.max_output` | the quote at the limit pays no more than `get_limits`' max output |
+
+The limit comes from the component's `limits` when a test lists it, or else the package's. The
+probes size from `get_limits` as `range` does, capped at `int128::MAX` (`executable_max_input`);
+past a capped limit nothing is probed (`execution_cap`).
+
+Each turn plans the checks of its size (`sim.ladder` and `exec.ladder` for a fraction, the three
+`limits.*` for the limit) and records each exactly once (`limit_probes::Turn`). A check that
+cannot run is `not_run`, with a reason from `limit_probes::NotRun`; a failure has a reason from
+`limit_probes::Fail`; their docs say what each means. A revert the router raises itself, before
+the swap reaches the venue (`EnforcedPause()` while it is paused), is `not_run` with `router`, not
+the venue's revert. A check still unsettled when the turn's
+swaps are dropped is recorded as not run: `batch_failed` when its batch failed or did not run
+because an earlier batch of the update failed (the probes of the batches that ran are judged),
+`execution_disabled` under `--disable-execution`, and `unrecorded` otherwise, which is a bug in
+the probes and is logged with the component and the checks. Outcomes go to
+`tycho_integration_check_total{protocol, check, outcome, reason, size}` and executed drift to
+`tycho_integration_probe_drift_bps{protocol, size}`, never to the realistic swap's metrics; a
+failure is also logged with `event_type="check_failure"` and the component.
