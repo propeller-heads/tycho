@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -10,10 +9,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel_async::{
-    pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncConnection,
-    AsyncPgConnection,
+    pooled_connection::deadpool::Pool, scoped_futures::ScopedFutureExt, AsyncPgConnection,
 };
-use lru::LruCache;
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
     task::JoinHandle,
@@ -46,9 +43,8 @@ use tycho_common::{
 use super::{
     instance::{gateway::PostgresGatewayNew, origins::BatchOrigins},
     is_transaction_conflict,
-    pool::{self, PooledConnection, EXTRACTION_POOL},
-    snapshot::{bound_snapshot_reads, snapshot_transaction},
-    InstanceId, PostgresError, PostgresGateway,
+    pool::{self, EXTRACTION_POOL},
+    InstanceId, PostgresError,
 };
 
 /// Represents different types of database write operations.
@@ -321,9 +317,7 @@ pub enum DBCacheMessage {
 /// cached changes while reading. Any reads are direct pass through to the database.
 pub(crate) struct DBCacheWriteExecutor {
     name: String,
-    chain: Chain,
     pool: Pool<AsyncPgConnection>,
-    state_gateway: PostgresGateway,
     /// Writes the batches of a gateway bound to an instance.
     instance_gateway: PostgresGatewayNew,
     persisted_block: Option<models::blockchain::Block>,
@@ -334,42 +328,11 @@ pub(crate) struct DBCacheWriteExecutor {
 impl DBCacheWriteExecutor {
     pub(crate) async fn new(
         name: String,
-        chain: Chain,
         pool: Pool<AsyncPgConnection>,
-        state_gateway: PostgresGateway,
+        instance_gateway: PostgresGatewayNew,
         msg_receiver: mpsc::Receiver<DBCacheMessage>,
     ) -> Self {
-        let mut conn = pool
-            .get()
-            .await
-            .expect("pool should be connected");
-
-        let persisted_block = state_gateway
-            .get_block(&BlockIdentifier::Latest(chain), &mut conn)
-            .await
-            .ok();
-
-        debug!("Persisted block: {:?}", persisted_block);
-
-        // Shares the name caches, so both gateways know the same chains and protocols, and the
-        // retention horizon, so both drop the same old versions.
-        let instance_gateway = PostgresGatewayNew::with_caches(
-            state_gateway.chain_id_cache.clone(),
-            state_gateway
-                .protocol_system_id_cache
-                .clone(),
-            state_gateway.retention_horizon,
-        );
-        Self {
-            name,
-            chain,
-            pool,
-            state_gateway,
-            instance_gateway,
-            persisted_block,
-            msg_receiver,
-            max_retries: 3,
-        }
+        Self { name, pool, instance_gateway, persisted_block: None, msg_receiver, max_retries: 3 }
     }
 
     /// Spawns a task to process incoming database messages (write requests or flush commands).
@@ -410,32 +373,18 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
-                        if let Some(instance) = new_db_tx.instance {
-                            // Read before any write, so a batch whose transactions don't resolve
-                            // writes nothing.
-                            let origins = BatchOrigins::from_ops(&new_db_tx.operations)?;
-                            for op in new_db_tx.operations.iter() {
-                                self.execute_instance_write_op(instance, &origins, op, conn)
-                                    .await?;
-                            }
-                            return Ok(());
-                        }
+                        // The old gateway is off: a batch must write the tables of an instance.
+                        let Some(instance) = new_db_tx.instance else {
+                            return Err(PostgresError(StorageError::Unsupported(
+                                "a batch without an instance".to_owned(),
+                            )));
+                        };
+                        // Read before any write, so a batch whose transactions don't resolve
+                        // writes nothing.
+                        let origins = BatchOrigins::from_ops(&new_db_tx.operations)?;
                         for op in new_db_tx.operations.iter() {
-                            match self.execute_write_op(op, conn).await {
-                                Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
-                                    // As this db transaction is old. It can contain
-                                    // already stored txs, we log the duplicate entry
-                                    // error and continue
-                                    debug!(
-                                        "Ignoring duplicate entry for {} with id {}",
-                                        entity, id
-                                    );
-                                }
-                                Err(e) => {
-                                    return Err(e);
-                                }
-                                _ => {}
-                            }
+                            self.execute_instance_write_op(instance, &origins, op, conn)
+                                .await?;
                         }
                         Result::<(), PostgresError>::Ok(())
                     }
@@ -493,6 +442,7 @@ impl DBCacheWriteExecutor {
             .send(res.map_err(Into::into));
     }
 
+    #[cfg(old_gateway)]
     /// Executes an operation.
     ///
     /// This function handles different types of write operations such as
@@ -647,12 +597,14 @@ impl DBCacheWriteExecutor {
     }
 }
 
+#[cfg(old_gateway)]
 #[derive(Hash, Eq, PartialEq, Debug)]
 struct RevertParameters {
     start_version: Option<BlockOrTimestamp>,
     end_version: BlockOrTimestamp,
 }
 
+#[cfg(old_gateway)]
 type DeltasCache = LruCache<
     RevertParameters,
     (
@@ -663,6 +615,12 @@ type DeltasCache = LruCache<
 >;
 
 type OpenTx = (DBTransaction, oneshot::Receiver<Result<(), StorageError>>);
+
+/// The error of a method that only the old gateway serves. The old gateway is off until the
+/// gateway on the instance tables serves the method.
+fn old_gateway_off(method: &str) -> StorageError {
+    StorageError::Unsupported(format!("{method}: the old gateway is off"))
+}
 
 pub struct CachedGateway {
     // Can we batch multiple block in here without breaking things?
@@ -678,8 +636,6 @@ pub struct CachedGateway {
     tx: mpsc::Sender<DBCacheMessage>,
     pool: Pool<AsyncPgConnection>,
     pool_label: &'static str,
-    state_gateway: PostgresGateway,
-    lru_cache: Arc<Mutex<DeltasCache>>,
 }
 
 impl Clone for CachedGateway {
@@ -693,8 +649,6 @@ impl Clone for CachedGateway {
             tx: self.tx.clone(),
             pool: self.pool.clone(),
             pool_label: self.pool_label,
-            state_gateway: self.state_gateway.clone(),
-            lru_cache: self.lru_cache.clone(),
         }
     }
 }
@@ -796,11 +750,7 @@ impl CachedGateway {
         }
     }
 
-    pub(crate) fn new(
-        tx: mpsc::Sender<DBCacheMessage>,
-        pool: Pool<AsyncPgConnection>,
-        state_gateway: PostgresGateway,
-    ) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<DBCacheMessage>, pool: Pool<AsyncPgConnection>) -> Self {
         CachedGateway {
             tx,
             open_tx: Arc::new(Mutex::new(None)),
@@ -808,13 +758,11 @@ impl CachedGateway {
             flushed_block_height: AtomicU64::new(0),
             pool,
             pool_label: EXTRACTION_POOL,
-            state_gateway,
-            lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
     }
 
     /// Creates a fresh gateway instance sharing the same write channel and connection pool,
-    /// but with its own `open_tx`, `flushed_block_height` and `lru_cache`.
+    /// but with its own `open_tx` and `flushed_block_height`.
     ///
     /// Use this instead of `clone()` when the intent is to create an independent writer
     /// (e.g. for a restarted extractor) rather than sharing cache state.
@@ -830,8 +778,6 @@ impl CachedGateway {
             flushed_block_height: AtomicU64::new(0),
             pool: self.pool.clone(),
             pool_label: self.pool_label,
-            state_gateway: self.state_gateway.clone(),
-            lru_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(5).unwrap()))),
         }
     }
 
@@ -841,8 +787,7 @@ impl CachedGateway {
     /// A batch of this gateway fails when it holds an operation that the instance tables don't
     /// support yet, and nothing of that batch is written. `upsert_tx` stores nothing: the write
     /// executor reads the transactions of a batch only for the block and order of each versioned
-    /// change. Reads still go to the shared tables, so it does not read back the extraction state
-    /// that it writes.
+    /// change. A gateway with no instance writes nothing: the old gateway is off.
     pub fn for_instance(&self, instance: InstanceId) -> Self {
         CachedGateway { instance: Some(instance), ..self.new_instance() }
     }
@@ -853,6 +798,7 @@ impl CachedGateway {
         CachedGateway { pool, pool_label: label, ..self.new_instance() }
     }
 
+    #[cfg(old_gateway)]
     async fn checkout(&self) -> Result<PooledConnection, StorageError> {
         pool::checkout(&self.pool, self.pool_label).await
     }
@@ -862,6 +808,7 @@ impl CachedGateway {
         &self.pool
     }
 
+    #[expect(unused_variables, reason = "the old gateway that served this method is off")]
     pub async fn get_delta(
         &self,
         chain: &Chain,
@@ -875,57 +822,16 @@ impl CachedGateway {
         ),
         StorageError,
     > {
-        let mut lru_cache = self.lru_cache.lock().await;
-
-        if start_version.is_none() {
-            tracing::warn!("Get delta called with start_version = None, this might be a bug in one of the extractors")
-        }
-
-        // Construct a key for the LRU cache
-        let key = RevertParameters {
-            start_version: start_version.cloned(),
-            end_version: end_version.clone(),
-        };
-
-        // Check if the delta is already in the LRU cache
-        if let Some(delta) = lru_cache.get(&key) {
-            tracing::debug!("Cached delta hit for {:?}", key);
-            return Ok(delta.clone());
-        }
-
-        tracing::debug!("Cache didn't hit delta. Getting delta for {:?}", key);
-
-        // Fetch the delta from the database
-        let mut db = self.checkout().await.unwrap();
-        let accounts_delta = self
-            .state_gateway
-            .get_accounts_delta(chain, start_version, end_version, &mut db)
-            .await?;
-        let protocol_delta = self
-            .state_gateway
-            .get_protocol_states_delta(chain, start_version, end_version, &mut db)
-            .await?;
-        let balance_deltas = self
-            .state_gateway
-            .get_balance_deltas(chain, start_version, end_version, &mut db)
-            .await?;
-
-        // Insert the new delta into the LRU cache
-        lru_cache
-            .put(key, (accounts_delta.clone(), protocol_delta.clone(), balance_deltas.clone()));
-
-        Ok((accounts_delta, protocol_delta, balance_deltas))
+        Err(old_gateway_off("get_delta"))
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl ExtractionStateGateway for CachedGateway {
     #[instrument(skip_all)]
     async fn get_state(&self, name: &str, chain: &Chain) -> Result<ExtractionState, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_state(name, chain, &mut conn)
-            .await
+        Err(old_gateway_off("get_state"))
     }
     #[instrument(skip_all)]
     async fn save_state(&self, new: &ExtractionState) -> Result<(), StorageError> {
@@ -935,6 +841,7 @@ impl ExtractionStateGateway for CachedGateway {
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl ChainGateway for CachedGateway {
     #[instrument(skip_all)]
@@ -946,10 +853,7 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_block(&self, id: &BlockIdentifier) -> Result<Block, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_block(id, &mut conn)
-            .await
+        Err(old_gateway_off("get_block"))
     }
 
     async fn upsert_tx(&self, new: &[Transaction]) -> Result<(), StorageError> {
@@ -960,21 +864,16 @@ impl ChainGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn get_tx(&self, hash: &TxHash) -> Result<Transaction, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_tx(hash, &mut conn)
-            .await
+        Err(old_gateway_off("get_tx"))
     }
 
     #[instrument(skip_all)]
     async fn revert_state(&self, to: &BlockIdentifier) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .revert_state(to, &mut conn)
-            .await
+        Err(old_gateway_off("revert_state"))
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl ContractStateGateway for CachedGateway {
     #[instrument(skip_all)]
@@ -985,10 +884,7 @@ impl ContractStateGateway for CachedGateway {
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_contract(id, protocol_system, version, include_slots, &mut conn)
-            .await
+        Err(old_gateway_off("get_contract"))
     }
 
     #[instrument(skip_all)]
@@ -1001,18 +897,7 @@ impl ContractStateGateway for CachedGateway {
         include_slots: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_contracts(
-                chain,
-                protocol_system,
-                addresses,
-                version,
-                include_slots,
-                pagination_params,
-                &mut conn,
-            )
-            .await
+        Err(old_gateway_off("get_contracts"))
     }
 
     #[instrument(skip_all)]
@@ -1031,10 +916,7 @@ impl ContractStateGateway for CachedGateway {
 
     #[instrument(skip_all)]
     async fn delete_contract(&self, id: &ContractId, at_tx: &TxHash) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .delete_contract(id, at_tx, &mut conn)
-            .await
+        Err(old_gateway_off("delete_contract"))
     }
 
     #[instrument(skip_all)]
@@ -1044,10 +926,7 @@ impl ContractStateGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<AccountDelta>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_accounts_delta(chain, start_version, end_version, &mut conn)
-            .await
+        Err(old_gateway_off("get_accounts_delta"))
     }
 
     #[instrument(skip_all)]
@@ -1068,13 +947,11 @@ impl ContractStateGateway for CachedGateway {
         addresses: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_account_balances(chain, protocol_system, addresses, version, false, &mut conn)
-            .await
+        Err(old_gateway_off("get_account_balances"))
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl ProtocolGateway for CachedGateway {
     #[instrument(skip_all)]
@@ -1086,10 +963,7 @@ impl ProtocolGateway for CachedGateway {
         min_tvl: Option<f64>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_protocol_components(chain, system, ids, min_tvl, pagination_params, &mut conn)
-            .await
+        Err(old_gateway_off("get_protocol_components"))
     }
 
     #[instrument(skip_all)]
@@ -1099,10 +973,7 @@ impl ProtocolGateway for CachedGateway {
         tokens: &[Address],
         min_balance: Option<f64>,
     ) -> Result<HashMap<Address, TokenOwner>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_token_owners(chain, tokens, min_balance, &mut conn)
-            .await
+        Err(old_gateway_off("get_token_owners"))
     }
 
     #[instrument(skip_all)]
@@ -1118,10 +989,7 @@ impl ProtocolGateway for CachedGateway {
         to_delete: &[ProtocolComponent],
         block_ts: NaiveDateTime,
     ) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .delete_protocol_components(to_delete, block_ts, &mut conn)
-            .await
+        Err(old_gateway_off("delete_protocol_components"))
     }
 
     #[instrument(skip_all)]
@@ -1129,10 +997,7 @@ impl ProtocolGateway for CachedGateway {
         &self,
         new_protocol_types: &[ProtocolType],
     ) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .add_protocol_types(new_protocol_types, &mut conn)
-            .await
+        Err(old_gateway_off("add_protocol_types"))
     }
 
     #[instrument(skip_all)]
@@ -1145,18 +1010,7 @@ impl ProtocolGateway for CachedGateway {
         retrieve_balances: bool,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_protocol_states(
-                chain,
-                at,
-                system,
-                ids,
-                retrieve_balances,
-                pagination_params,
-                &mut conn,
-            )
-            .await
+        Err(old_gateway_off("get_protocol_states"))
     }
 
     #[instrument(skip_all)]
@@ -1178,10 +1032,7 @@ impl ProtocolGateway for CachedGateway {
         traded_n_days_ago: Option<NaiveDateTime>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<Token>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_tokens(chain, address, quality, traded_n_days_ago, pagination_params, &mut conn)
-            .await
+        Err(old_gateway_off("get_tokens"))
     }
 
     #[instrument(skip_all)]
@@ -1212,19 +1063,7 @@ impl ProtocolGateway for CachedGateway {
     /// for these use cases that creates a single transactions and emits them immediately.
     #[instrument(skip_all)]
     async fn update_tokens(&self, tokens: &[Token]) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-
-        conn.transaction(|conn| {
-            async {
-                self.state_gateway
-                    .update_tokens(tokens, conn)
-                    .await?;
-                Result::<(), PostgresError>::Ok(())
-            }
-            .scope_boxed()
-        })
-        .await
-        .map_err(|e| StorageError::Unexpected(format!("Failed to update tokens: {}", e.0)))
+        Err(old_gateway_off("update_tokens"))
     }
 
     #[instrument(skip_all)]
@@ -1234,10 +1073,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         end_version: &BlockOrTimestamp,
     ) -> Result<Vec<ProtocolComponentStateDelta>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_protocol_states_delta(chain, start_version, end_version, &mut conn)
-            .await
+        Err(old_gateway_off("get_protocol_states_delta"))
     }
 
     #[instrument(skip_all)]
@@ -1247,10 +1083,7 @@ impl ProtocolGateway for CachedGateway {
         start_version: Option<&BlockOrTimestamp>,
         target_version: &BlockOrTimestamp,
     ) -> Result<Vec<ComponentBalance>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_balance_deltas(chain, start_version, target_version, &mut conn)
-            .await
+        Err(old_gateway_off("get_balance_deltas"))
     }
 
     #[instrument(skip_all)]
@@ -1261,18 +1094,12 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_component_balances(chain, Some(system), ids, version, &mut conn)
-            .await
+        Err(old_gateway_off("get_component_balances"))
     }
 
     #[instrument(skip_all)]
     async fn get_token_prices(&self, chain: &Chain) -> Result<HashMap<Bytes, f64>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_token_prices(chain, &mut conn)
-            .await
+        Err(old_gateway_off("get_token_prices"))
     }
 
     /// TODO: add to transaction instead
@@ -1282,10 +1109,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         tvl_values: &HashMap<String, f64>,
     ) -> Result<(), StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .upsert_component_tvl(chain, tvl_values, &mut conn)
-            .await
+        Err(old_gateway_off("upsert_component_tvl"))
     }
 
     #[instrument(skip_all)]
@@ -1294,9 +1118,7 @@ impl ProtocolGateway for CachedGateway {
         chain: &Chain,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<String>>, StorageError> {
-        self.state_gateway
-            .get_protocol_systems(chain, pagination_params)
-            .await
+        Err(old_gateway_off("get_protocol_systems"))
     }
 
     #[instrument(skip_all)]
@@ -1307,13 +1129,11 @@ impl ProtocolGateway for CachedGateway {
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
-            .await
+        Err(old_gateway_off("get_component_tvls"))
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl ComponentPauseGateway for CachedGateway {
     // Pause writes skip `DBCacheWriteExecutor` and use their own connection, because they are
@@ -1325,10 +1145,7 @@ impl ComponentPauseGateway for CachedGateway {
         system: &str,
         pauses: &[PauseRecord],
     ) -> Result<Vec<ComponentId>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .pause_components(chain, system, pauses, &mut conn)
-            .await
+        Err(old_gateway_off("pause_components"))
     }
 
     #[instrument(skip_all)]
@@ -1338,10 +1155,7 @@ impl ComponentPauseGateway for CachedGateway {
         component_ids: &[&str],
         unpause: &UnpauseRecord,
     ) -> Result<Vec<ComponentId>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .unpause_components(chain, component_ids, unpause, &mut conn)
-            .await
+        Err(old_gateway_off("unpause_components"))
     }
 
     #[instrument(skip_all)]
@@ -1349,13 +1163,11 @@ impl ComponentPauseGateway for CachedGateway {
         &self,
         chain: &Chain,
     ) -> Result<Vec<ComponentPause>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_component_pauses(chain, &mut conn)
-            .await
+        Err(old_gateway_off("get_component_pauses"))
     }
 }
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl EntryPointGateway for CachedGateway {
     #[instrument(skip_all)]
@@ -1384,10 +1196,7 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPoint>>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_entry_points(filter, pagination_params, &mut conn)
-            .await
+        Err(old_gateway_off("get_entry_points"))
     }
 
     #[instrument(skip_all)]
@@ -1397,10 +1206,7 @@ impl EntryPointGateway for CachedGateway {
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<ComponentId, HashSet<EntryPointWithTracingParams>>>, StorageError>
     {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_entry_points_tracing_params(filter, pagination_params, &mut conn)
-            .await
+        Err(old_gateway_off("get_entry_points_tracing_params"))
     }
 
     #[instrument(skip_all)]
@@ -1418,10 +1224,7 @@ impl EntryPointGateway for CachedGateway {
         &self,
         entry_points: &HashSet<EntryPointId>,
     ) -> Result<HashMap<EntryPointId, HashMap<TracingParams, TracingResult>>, StorageError> {
-        let mut conn = self.checkout().await?;
-        self.state_gateway
-            .get_tracing_results(entry_points, &mut conn)
-            .await
+        Err(old_gateway_off("get_traced_entry_points"))
     }
 
     #[instrument(skip_all)]
@@ -1430,61 +1233,42 @@ impl EntryPointGateway for CachedGateway {
         filter: EntryPointFilter,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<TracedEntryPoints>, StorageError> {
-        let rows = {
-            let mut conn = self.checkout().await?;
-            self.state_gateway
-                .load_traced_entry_point_rows(filter, pagination_params, &mut conn)
-                .await?
-        };
-        PostgresGateway::decode_traced_entry_points(rows)
+        Err(old_gateway_off("get_traced_entry_points_by_component"))
     }
 }
 
 impl Gateway for CachedGateway {}
 
+#[expect(unused_variables, reason = "the old gateway that served these methods is off")]
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
-    /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
-    /// result comes from the same database snapshot. The reads are bounded by
-    /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
-    /// by Postgres.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
-        let mut conn = self.checkout().await?;
-        snapshot_transaction(&mut conn)
-            .run(|conn| {
-                async move {
-                    bound_snapshot_reads(conn).await?;
-                    let accounts = self
-                        .state_gateway
-                        .account_snapshots(chain, conn)
-                        .await?;
-                    let components = self
-                        .state_gateway
-                        .component_snapshots(chain, conn)
-                        .await?;
-                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
-                }
-                .scope_boxed()
-            })
-            .await
-            .map_err(StorageError::from)
+        Err(old_gateway_off("state_snapshot"))
     }
 }
 
 #[cfg(test)]
 mod test_serial_db {
-    use std::{collections::HashSet, slice, str::FromStr, time::Duration};
+    #[cfg(old_gateway)]
+    use std::collections::HashSet;
+    use std::{slice, str::FromStr, time::Duration};
 
-    use diesel::{prelude::*, sql_query, QueryableByName};
+    use diesel::prelude::*;
+    #[cfg(old_gateway)]
+    use diesel::{sql_query, QueryableByName};
     use diesel_async::RunQueryDsl;
+    #[cfg(old_gateway)]
     use tycho_common::models::ChangeType;
 
     use super::*;
+    #[cfg(old_gateway)]
+    use crate::postgres::orm;
     use crate::postgres::{
         db_fixtures, db_fixtures::yesterday_one_am, instance::schema::tycho as instance_schema,
-        orm, testing::run_against_db,
+        schema, testing::run_against_db,
     };
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_and_flush() {
         run_against_db(|connection_pool| async move {
@@ -1541,6 +1325,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_retries_serialization_failure() {
         run_against_db(|connection_pool| async move {
@@ -1624,6 +1409,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_write_fails_after_exhausted_conflict_retries() {
         run_against_db(|connection_pool| async move {
@@ -1700,6 +1486,7 @@ mod test_serial_db {
         .await;
     }
 
+    #[cfg(old_gateway)]
     #[tokio::test]
     async fn test_writes_and_new_blocks() {
         run_against_db(|connection_pool| async move {
@@ -1865,6 +1652,7 @@ mod test_serial_db {
         .await
     }
 
+    #[cfg(old_gateway)]
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway() {
         // Setup
@@ -2003,19 +1791,13 @@ mod test_serial_db {
         let protocol_system_id =
             db_fixtures::insert_protocol_system(&mut connection, "vm:test".to_owned()).await;
         let instance = db_fixtures::insert_instance(&mut connection, protocol_system_id, "1").await;
-        let gateway = PostgresGateway::from_connection(&mut connection).await;
+        let gateway = PostgresGatewayNew::from_connection(&mut connection).await;
         let (tx, rx) = mpsc::channel(10);
-        let write_executor = DBCacheWriteExecutor::new(
-            "ethereum".to_owned(),
-            Chain::Ethereum,
-            connection_pool.clone(),
-            gateway.clone(),
-            rx,
-        )
-        .await;
+        let write_executor =
+            DBCacheWriteExecutor::new("ethereum".to_owned(), connection_pool.clone(), gateway, rx)
+                .await;
         let handle = write_executor.run();
-        let cached_gw =
-            CachedGateway::new(tx, connection_pool.clone(), gateway).for_instance(instance);
+        let cached_gw = CachedGateway::new(tx, connection_pool.clone()).for_instance(instance);
         (cached_gw, instance, handle)
     }
 
@@ -2048,21 +1830,23 @@ mod test_serial_db {
                 .expect("committing tx failed");
             handle.abort();
 
-            let fetched_block = cached_gw
-                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
-                .await
-                .expect("Failed to fetch block");
-            assert_eq!(fetched_block, block_1);
-            let fetched_tx = cached_gw.get_tx(&tx_1.hash).await;
-            assert!(matches!(fetched_tx, Err(StorageError::NotFound(_, _))), "{fetched_tx:?}");
-            let old_state = cached_gw
-                .get_state(&state.name, &Chain::Ethereum)
-                .await;
-            assert!(matches!(old_state, Err(StorageError::NotFound(_, _))), "{old_state:?}");
             let mut connection = connection_pool
                 .get()
                 .await
                 .expect("Failed to get a connection from the pool");
+            assert_eq!(stored_block_hashes(&mut connection).await, vec![block_1.hash.clone()]);
+            let stored_txs: i64 = schema::transaction::table
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the transactions failed");
+            assert_eq!(stored_txs, 0);
+            let old_states: i64 = schema::extraction_state::table
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the old extraction states failed");
+            assert_eq!(old_states, 0);
             let (cursor, block_number): (Option<Bytes>, i64) =
                 instance_schema::extraction_state::table
                     .filter(instance_schema::extraction_state::instance_id.eq(instance))
@@ -2111,17 +1895,56 @@ mod test_serial_db {
             handle.abort();
 
             assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
-            let fetched_block = cached_gw
-                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)))
-                .await;
-            assert!(
-                matches!(fetched_block, Err(StorageError::NotFound(_, _))),
-                "{fetched_block:?}"
-            );
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            assert!(stored_block_hashes(&mut connection)
+                .await
+                .is_empty());
         })
         .await;
     }
 
+    #[test_log::test(tokio::test)]
+    async fn test_batch_without_instance_writes_nothing() {
+        run_against_db(|connection_pool| async move {
+            let (instance_gw, _instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let cached_gw = CachedGateway { instance: None, ..instance_gw.new_instance() };
+            let block_1 = get_sample_block(1);
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            let res = cached_gw.commit_transaction(0).await;
+            handle.abort();
+
+            assert!(matches!(res, Err(StorageError::Unsupported(_))), "{res:?}");
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            assert!(stored_block_hashes(&mut connection)
+                .await
+                .is_empty());
+        })
+        .await;
+    }
+
+    /// Hashes of the stored blocks.
+    async fn stored_block_hashes(conn: &mut AsyncPgConnection) -> Vec<Bytes> {
+        schema::block::table
+            .select(schema::block::hash)
+            .load(conn)
+            .await
+            .expect("reading the blocks failed")
+    }
+
+    #[cfg(old_gateway)]
     #[test_log::test(tokio::test)]
     async fn test_cached_gateway_flushed_block_height() {
         run_against_db(|connection_pool| async move {
@@ -2272,6 +2095,7 @@ mod test_serial_db {
         }
     }
 
+    #[cfg(old_gateway)]
     async fn send_write_message(
         tx: &mpsc::Sender<DBCacheMessage>,
         block: models::blockchain::Block,
@@ -2294,12 +2118,14 @@ mod test_serial_db {
         os_rx
     }
 
+    #[cfg(old_gateway)]
     #[derive(QueryableByName)]
     struct BigIntRow {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
         value: i64,
     }
 
+    #[cfg(old_gateway)]
     /// Waits until a backend of this database blocks on another transaction's row lock.
     async fn await_lock_waiter(conn: &mut AsyncPgConnection) {
         const TIMEOUT: Duration = Duration::from_secs(10);
@@ -2324,6 +2150,7 @@ mod test_serial_db {
         }
     }
 
+    #[cfg(old_gateway)]
     /// Opens a transaction that updates the ETH token row and leaves it uncommitted. The caller
     /// releases the row lock with `COMMIT` on the returned connection.
     async fn start_blocking_token_update() -> AsyncPgConnection {

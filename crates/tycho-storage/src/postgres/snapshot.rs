@@ -9,16 +9,24 @@
 //! invariant, and they are much slower on tables this size. Rows are selected by a subquery, never
 //! by an id list: Postgres caps bind parameters at 65,535 and a chain can hold more components
 //! than that.
+//!
+//! While the old gateway is off, only [`snapshot_transaction`] is compiled.
 
+#[cfg(old_gateway)]
 use std::collections::HashMap;
 
+#[cfg(old_gateway)]
 use chrono::NaiveDateTime;
+#[cfg(old_gateway)]
 use diesel::{
     pg::Pg,
     sql_types::{BigInt, Text},
     BoolExpressionMethods, ExpressionMethods, QueryDsl,
 };
-use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
+#[cfg(old_gateway)]
+use diesel_async::RunQueryDsl;
+use diesel_async::{pg::TransactionBuilder, AsyncPgConnection};
+#[cfg(old_gateway)]
 use tycho_common::{
     models::{
         contract::{Account, AccountBalance},
@@ -31,9 +39,14 @@ use tycho_common::{
     Bytes,
 };
 
+#[cfg(old_gateway)]
 use super::{schema, PostgresError, PostgresGateway, MAX_TS};
 
 /// A read-only `REPEATABLE READ` transaction, so every read in it sees the same database snapshot.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "no public gateway reads the instance tables yet")
+)]
 pub fn snapshot_transaction(
     conn: &mut AsyncPgConnection,
 ) -> TransactionBuilder<'_, AsyncPgConnection> {
@@ -42,14 +55,17 @@ pub fn snapshot_transaction(
         .repeatable_read()
 }
 
+#[cfg(old_gateway)]
 /// Longest one snapshot read may run before Postgres cancels it.
 const SNAPSHOT_STATEMENT_TIMEOUT: &str = "10min";
 
+#[cfg(old_gateway)]
 /// How often Postgres checks that the client is still connected while a snapshot read runs. A read
 /// that builds a hash or sorts writes nothing to the socket, so without this check it keeps running
 /// after the client is gone.
 const SNAPSHOT_CONNECTION_CHECK_INTERVAL: &str = "10s";
 
+#[cfg(old_gateway)]
 /// Bounds every later read of the current transaction: a statement is cancelled after
 /// [`SNAPSHOT_STATEMENT_TIMEOUT`], and stops within [`SNAPSHOT_CONNECTION_CHECK_INTERVAL`] of the
 /// client disconnecting. The settings end with the transaction, so the pooled connection keeps its
@@ -69,6 +85,7 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
     Ok(())
 }
 
+#[cfg(old_gateway)]
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
 fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt> {
     schema::account::table
@@ -93,6 +110,7 @@ fn account_ids(chain_id: i64) -> schema::account::BoxedQuery<'static, Pg, BigInt
         .into_boxed()
 }
 
+#[cfg(old_gateway)]
 /// Subquery for the ids of the components of a chain that are not deleted.
 fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'static, Pg, BigInt> {
     schema::protocol_component::table
@@ -106,6 +124,7 @@ fn component_ids(chain_id: i64) -> schema::protocol_component::BoxedQuery<'stati
         .into_boxed()
 }
 
+#[cfg(old_gateway)]
 impl PostgresGateway {
     /// Every live account of `chain` (one with a live code row) with its code, balances and
     /// slots, each value timestamped with its row's `valid_from`. Order is
@@ -367,6 +386,7 @@ impl PostgresGateway {
     }
 }
 
+#[cfg(old_gateway)]
 #[cfg(test)]
 mod test_serial_db {
     use std::str::FromStr;
