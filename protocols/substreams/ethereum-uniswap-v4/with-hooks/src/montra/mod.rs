@@ -1,12 +1,13 @@
 //! Montra launchpad pools on Elysium: Uniswap V4 pools of the Elysium `PoolManager` whose
 //! `PoolKey.hooks` is a Montra `LaunchHook`, indexed by the Elysium manifest
-//! (`elysium-uniswap-v4-with-hooks.yaml`).
+//! (`elysium-uniswap-v4-with-hooks.yaml`). The same modules index the Ascend launchpad's pools
+//! ([`crate::ascend`]), with the parameters and word layout of their own hook.
 //!
 //! The pool math is stock V4, so the shared V4 pipeline indexes ticks, liquidity, price and
 //! balances. The Montra modules add:
 //!
-//! - pool creation from `PoolManager.Initialize`, limited to the hooks in the `montra_hooks`
-//!   parameter (`map_montra_pools_created`);
+//! - pool creation from `PoolManager.Initialize`, limited to the hooks in the `montra_hooks` and
+//!   `ascend_hooks` parameters (`map_montra_pools_created`);
 //! - the hook's per-pool pricing state (fee terms, stage, LP-line hold, seed range, anti-snipe
 //!   window), decoded from the hook's `PoolConfig` storage writes into `montra_*` state attributes
 //!   (`map_montra_enriched_block_changes`), with a store that maps each watched slot back to its

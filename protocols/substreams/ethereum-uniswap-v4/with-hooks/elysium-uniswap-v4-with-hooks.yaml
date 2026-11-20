@@ -162,5 +162,5 @@ params:
   # pool of a hook these lists omit. Readme.md ("Upgrade boundary") says what to check before
   # adding one.
   map_montra_pools_created: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"
-  store_montra_slots: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"
+  store_montra_slots: "ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"
   map_montra_enriched_block_changes: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"

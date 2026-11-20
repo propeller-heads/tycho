@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 use crate::{
     address_list::Address,
     ascend::AscendWord,
-    storage::{is_uint_window, mapping_slot, read_uint, word_at_offset, Word},
+    storage::{mapping_slot, word_at_offset, Field, SignedField, StateWord, Word},
 };
 
 /// Base slot of the hook's `PoolConfig` mapping.
@@ -23,49 +23,6 @@ const POOL_CONFIG_MAPPING_SLOT: u64 = 2;
 const POOL_KEY_MAPPING_SLOT: u64 = 3;
 /// Words of a `PoolConfig`, the unwatched recipient word 3 included.
 const POOL_CONFIG_WORDS: u8 = 4;
-
-/// A field packed into a storage word: `width` bytes starting `low` bytes from the low end.
-#[derive(Clone, Copy)]
-pub(crate) struct Field {
-    low: usize,
-    width: usize,
-}
-
-impl Field {
-    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
-    /// [`is_uint_window`] holds for the window, the check `read_uint` makes. Every field is a
-    /// constant, so the panic fails the build.
-    pub(crate) const fn new(low: usize, width: usize) -> Self {
-        assert!(is_uint_window(low, width), "a field is a window read_uint reads");
-        Self { low, width }
-    }
-
-    /// The field read as an unsigned big-endian integer.
-    pub(crate) fn unsigned(self, word: &Word) -> u64 {
-        read_uint(word, self.low, self.width)
-            .expect("Field::new admits only windows read_uint reads")
-    }
-}
-
-/// A two's-complement field packed into a storage word, at most 4 bytes wide so that it fits an
-/// `i32`.
-#[derive(Clone, Copy)]
-pub(crate) struct SignedField(Field);
-
-impl SignedField {
-    /// The signed field `width` bytes wide starting `low` bytes from the low end of a word. Panics
-    /// unless the field is at most 4 bytes wide and [`Field::new`] accepts it.
-    pub(crate) const fn new(low: usize, width: usize) -> Self {
-        assert!(width <= 4, "a signed field fits an i32");
-        Self(Field::new(low, width))
-    }
-
-    /// The field read as a two's-complement integer of its width, sign-extended.
-    pub(crate) fn read(self, word: &Word) -> i32 {
-        let shift = 64 - 8 * self.0.width as u32;
-        ((self.0.unsigned(word) << shift) as i64 >> shift) as i32
-    }
-}
 
 // PoolConfig word 0.
 const TOTAL_FEE_PIPS: Field = Field::new(0, 3);
@@ -97,40 +54,37 @@ pub(crate) enum ConfigWord {
 
 impl ConfigWord {
     pub(crate) const ALL: [Self; 3] = [Self::Terms, Self::SeedRange, Self::EarlyBuyFee];
+}
 
-    /// The `montra_*` attributes this word holds, as (name, value) pairs. A byte the simulation
-    /// does not read holds none.
-    pub(crate) fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)> {
-        let u64_attribute = |field: Field| {
-            field
-                .unsigned(value)
-                .to_be_bytes()
-                .to_vec()
-        };
-        let i32_attribute = |field: SignedField| field.read(value).to_be_bytes().to_vec();
+impl StateWord for ConfigWord {
+    fn position(self) -> usize {
+        self as usize
+    }
+
+    fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)> {
         match self {
             Self::Terms => vec![
-                ("montra_total_fee_pips", u64_attribute(TOTAL_FEE_PIPS)),
-                ("montra_lp_fee_pips", u64_attribute(LP_FEE_PIPS)),
+                ("montra_total_fee_pips", TOTAL_FEE_PIPS.u64_bytes(value)),
+                ("montra_lp_fee_pips", LP_FEE_PIPS.u64_bytes(value)),
                 (
                     "montra_quote_is_currency0",
                     vec![u8::from(QUOTE_IS_CURRENCY0.unsigned(value) != 0)],
                 ),
-                ("montra_early_buy_fee_until", u64_attribute(EARLY_BUY_FEE_UNTIL)),
+                ("montra_early_buy_fee_until", EARLY_BUY_FEE_UNTIL.u64_bytes(value)),
                 // A one-byte field, so the cast keeps every bit.
                 ("montra_stage", vec![STAGE.unsigned(value) as u8]),
-                ("montra_lp_crossed_at", u64_attribute(LP_CROSSED_AT)),
-                ("montra_lp_held_seconds", u64_attribute(LP_HELD_SECONDS)),
+                ("montra_lp_crossed_at", LP_CROSSED_AT.u64_bytes(value)),
+                ("montra_lp_held_seconds", LP_HELD_SECONDS.u64_bytes(value)),
             ],
             Self::SeedRange => vec![
-                ("montra_seed_tick_lower", i32_attribute(SEED_TICK_LOWER)),
-                ("montra_seed_tick_upper", i32_attribute(SEED_TICK_UPPER)),
+                ("montra_seed_tick_lower", SEED_TICK_LOWER.i32_bytes(value)),
+                ("montra_seed_tick_upper", SEED_TICK_UPPER.i32_bytes(value)),
             ],
             Self::EarlyBuyFee => vec![
-                ("montra_early_buy_fee_start_pips", u64_attribute(EARLY_BUY_FEE_START_PIPS)),
+                ("montra_early_buy_fee_start_pips", EARLY_BUY_FEE_START_PIPS.u64_bytes(value)),
                 (
                     "montra_early_buy_fee_window_seconds",
-                    u64_attribute(EARLY_BUY_FEE_WINDOW_SECONDS),
+                    EARLY_BUY_FEE_WINDOW_SECONDS.u64_bytes(value),
                 ),
             ],
         }
@@ -147,6 +101,10 @@ pub(crate) enum KeyWord {
     FeeTickSpacingHooks = 2,
 }
 
+impl KeyWord {
+    const ALL: [Self; 3] = [Self::Currency0, Self::Currency1, Self::FeeTickSpacingHooks];
+}
+
 /// A word of a pool's hook storage this package watches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum HookWord {
@@ -156,56 +114,44 @@ pub(crate) enum HookWord {
     Ascend(AscendWord),
 }
 
-impl HookWord {
-    const ALL: [Self; 6] = [
-        Self::Config(ConfigWord::Terms),
-        Self::Config(ConfigWord::SeedRange),
-        Self::Config(ConfigWord::EarlyBuyFee),
-        Self::Key(KeyWord::Currency0),
-        Self::Key(KeyWord::Currency1),
-        Self::Key(KeyWord::FeeTickSpacingHooks),
-    ];
+/// The index of the first Ascend word in the store value, after `PoolConfig` words 0 to 3 and the
+/// `PoolKey` words.
+const ASCEND_WORD_BASE: u8 = POOL_CONFIG_WORDS + KeyWord::ALL.len() as u8;
 
-    /// The word's index in the store value, counting the hook's words of a pool across both
-    /// structs: `PoolConfig` words 0 to 3, then `PoolKey` words at 4 to 6.
+impl HookWord {
+    /// The word's index in the store value, counting the hook's words of a pool across its
+    /// structs: `PoolConfig` words 0 to 3, then `PoolKey` words at 4 to 6, then an Ascend pool's
+    /// words at 7 to 11.
     fn index(self) -> u8 {
         match self {
             Self::Config(word) => word as u8,
             Self::Key(word) => POOL_CONFIG_WORDS + word as u8,
-            Self::Ascend(word) => word.index(),
+            Self::Ascend(word) => ASCEND_WORD_BASE + word as u8,
         }
     }
 
     fn from_index(index: u8) -> Option<Self> {
-        Self::ALL
+        ConfigWord::ALL
             .into_iter()
+            .map(Self::Config)
+            .chain(KeyWord::ALL.map(Self::Key))
             .chain(AscendWord::ALL.map(Self::Ascend))
             .find(|word| word.index() == index)
     }
-
-    /// The word's slot for the pool whose `PoolConfig` and `PoolKey` start at `config` and `key`;
-    /// `None` for an Ascend word, whose slots [`crate::ascend::pool_slots`] derives.
-    fn slot(self, config: &Word, key: &Word) -> Option<Word> {
-        match self {
-            Self::Config(word) => Some(word_at_offset(config, u64::from(word as u8))),
-            Self::Key(word) => Some(word_at_offset(key, u64::from(word as u8))),
-            Self::Ascend(_) => None,
-        }
-    }
 }
 
-/// Every watched slot of the hook's storage: `pool_id`'s `PoolConfig` words 0 to 2 and its
+/// Every watched slot of a Montra hook's storage: `pool_id`'s `PoolConfig` words 0 to 2 and its
 /// `PoolKey` words 0 to 2.
 pub(crate) fn pool_slots(pool_id: &Word) -> Vec<(HookWord, Word)> {
     let config = mapping_slot(pool_id, POOL_CONFIG_MAPPING_SLOT);
     let key = mapping_slot(pool_id, POOL_KEY_MAPPING_SLOT);
-    HookWord::ALL
+    let config_words = ConfigWord::ALL
         .into_iter()
-        .filter_map(|word| {
-            word.slot(&config, &key)
-                .map(|slot| (word, slot))
-        })
-        .collect()
+        .map(|word| (HookWord::Config(word), word_at_offset(&config, word as u64)));
+    let key_words = KeyWord::ALL
+        .into_iter()
+        .map(|word| (HookWord::Key(word), word_at_offset(&key, word as u64)));
+    config_words.chain(key_words).collect()
 }
 
 /// The `store_montra_slots` key of slot `slot` of hook `hook`. The key names the hook, so a write

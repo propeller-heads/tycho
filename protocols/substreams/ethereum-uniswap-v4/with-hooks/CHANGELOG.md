@@ -8,15 +8,16 @@
   required, refuses the zero address, and may not share a hook with `montra_hooks`.
 - `map_montra_pools_created` creates a pool for each `Initialize` of a listed Montra or Ascend
   hook.
-- `store_montra_slots` takes the params and keeps five keys per Ascend pool (`PoolData` words 2
-  and 3, `Bid` words 0 to 2), valued with word indexes 7 to 11.
+- `store_montra_slots` takes one param, `ascend_hooks`, and keeps five keys per Ascend pool
+  (`PoolData` words 2 and 3, `Bid` words 0 to 2), valued with word indexes 7 to 11.
 - `map_montra_enriched_block_changes` decodes those words into the `ascend_*` state attributes
   (fee, orientation, start tick, EMA, observation time, observed tick, discount, bid inventory,
   filled in window, window start, max clip), created with the pool and updated by every write to
   them. Ascend pools are never paused: `setPaused` stops launches only.
 - The Elysium manifest's `initialBlock` moves from 588510 to 423647, the Ascend hook's deployment
-  block, on every module. Its output for the Montra pools is unchanged, but the manifest has not
-  been released, so nothing resyncs.
+  block, on every module. Its output for the Montra pools is unchanged. The manifest is added by
+  the `v0.9.0` entry below, which is not on `main`, so no released spkg of it exists and nothing
+  resyncs; `v0.10.0` is the first release of the Elysium manifest.
 - Move the Ethereum, Unichain, Robinhood and Elysium manifests to `v0.10.0`, the version of the
   single binary. Their other module graphs, parameters and output are unchanged; the binary is
   new, so their module hashes change.

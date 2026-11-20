@@ -9,10 +9,13 @@
 //! (`map_montra_pools_created`, `store_montra_slots`, `map_montra_enriched_block_changes`).
 //!
 //! The hook's source is not verified on Blockscout. Its layout was established from its bytecode
-//! and traces (spec facts S8, S9 and S21): `mapping(bytes32 poolId => PoolData)` at base slot 4,
-//! four words, and `mapping(bytes32 poolId => Bid)` at base slot 2, three words. The hook is not
-//! upgradeable (spec S3), so the layout cannot move. Byte offsets count from the low end of a word,
-//! the order Solidity packs struct members in.
+//! (all 30 `SSTORE` sites, mapped to traced functions, at block 8365800) and from `cast storage`
+//! reads of pool 0xa138ea3b... and traces of launches, swaps and fills: `mapping(bytes32 poolId =>
+//! PoolData)` at base slot 4, four words, and `mapping(bytes32 poolId => Bid)` at base slot 2,
+//! three words. The hook is not upgradeable (one code hash at its deployment block 423647 and at
+//! block 8365800, no proxy slot, no `DELEGATECALL`, `CREATE` or `SELFDESTRUCT`), so the layout
+//! cannot move. Byte offsets count from the low end of a word, the order Solidity packs struct
+//! members in.
 //!
 //! The package watches five slots per pool, the ones that price a swap:
 //!
@@ -27,9 +30,8 @@
 //! `PoolData+0` (token, builder fee) and `PoolData+1` (quote) are not watched: the swap does not
 //! charge the builder fee, and the tokens come from the `PoolKey`.
 
-use crate::{
-    montra::pool_config::{Field, HookWord, SignedField},
-    storage::{mapping_slot, word_at_offset, Word},
+use crate::storage::{
+    mapping_slot, word_at_offset, BytesField, Field, SignedField, StateWord, Word,
 };
 
 /// Base slot of the hook's `mapping(bytes32 => PoolData)`.
@@ -53,79 +55,52 @@ const EMA_SQRT_PRICE: BytesField = BytesField::new(0, 20);
 /// `maxClip`, a `uint128` right above `windowStart` in `Bid` word 2.
 const MAX_CLIP: BytesField = BytesField::new(5, 16);
 
-/// A field wider than 8 bytes, kept as its big-endian bytes.
-struct BytesField {
-    low: usize,
-    width: usize,
-}
-
-impl BytesField {
-    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
-    /// it ends within the word; every field is a constant, so the panic fails the build.
-    const fn new(low: usize, width: usize) -> Self {
-        assert!(width >= 1 && low + width <= 32, "a field lies within a word");
-        Self { low, width }
-    }
-
-    fn bytes(&self, word: &Word) -> Vec<u8> {
-        word[32 - self.low - self.width..32 - self.low].to_vec()
-    }
-}
-
-/// A watched word of an Ascend pool's hook storage.
+/// A watched word of an Ascend pool's hook storage; the discriminant is the word's position among
+/// the five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub(crate) enum AscendWord {
     /// `PoolData` word 2: orientation, start tick and fee.
-    Terms,
+    Terms = 0,
     /// `PoolData` word 3: the observation.
-    Observation,
+    Observation = 1,
     /// `Bid` word 0: the bid inventory.
-    Inventory,
+    Inventory = 2,
     /// `Bid` word 1: the quote filled in the current window.
-    Filled,
+    Filled = 3,
     /// `Bid` word 2: the window start and the clip size.
-    Window,
+    Window = 4,
 }
 
 impl AscendWord {
     pub(crate) const ALL: [Self; 5] =
         [Self::Terms, Self::Observation, Self::Inventory, Self::Filled, Self::Window];
+}
 
-    /// The word's index in the `store_montra_slots` value. Montra's words use 0 to 6, so these
-    /// follow at 7 to 11.
-    pub(crate) fn index(self) -> u8 {
-        7 + self as u8
+impl StateWord for AscendWord {
+    fn position(self) -> usize {
+        self as usize
     }
 
-    /// The `ascend_*` attributes this word holds, as (name, value) pairs, in the formats the
-    /// simulation decoder reads.
-    pub(crate) fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)> {
-        let u64_attribute = |field: Field| {
-            field
-                .unsigned(value)
-                .to_be_bytes()
-                .to_vec()
-        };
-        let i32_attribute = |field: SignedField| field.read(value).to_be_bytes().to_vec();
+    fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)> {
         match self {
             Self::Terms => vec![
-                ("ascend_fee_pips", u64_attribute(FEE_PIPS)),
-                (
-                    "ascend_token_is_currency0",
-                    vec![u8::from(TOKEN_IS_CURRENCY0.unsigned(value) != 0)],
-                ),
-                ("ascend_start_tick", i32_attribute(START_TICK)),
+                ("ascend_fee_pips", FEE_PIPS.u64_bytes(value)),
+                // The raw byte: the contract stores a bool, so any other value is a layout the
+                // simulation must reject at decode, not one to normalise here.
+                ("ascend_token_is_currency0", vec![TOKEN_IS_CURRENCY0.unsigned(value) as u8]),
+                ("ascend_start_tick", START_TICK.i32_bytes(value)),
             ],
             Self::Observation => vec![
                 ("ascend_ema_sqrt_price_x96", EMA_SQRT_PRICE.bytes(value)),
-                ("ascend_ema_updated_at", u64_attribute(EMA_UPDATED_AT)),
-                ("ascend_observed_tick", i32_attribute(OBSERVED_TICK)),
-                ("ascend_discount", u64_attribute(DISCOUNT)),
+                ("ascend_ema_updated_at", EMA_UPDATED_AT.u64_bytes(value)),
+                ("ascend_observed_tick", OBSERVED_TICK.i32_bytes(value)),
+                ("ascend_discount", DISCOUNT.u64_bytes(value)),
             ],
             Self::Inventory => vec![("ascend_bid_inventory", value.to_vec())],
             Self::Filled => vec![("ascend_bid_filled_in_window", value.to_vec())],
             Self::Window => vec![
-                ("ascend_bid_window_start", u64_attribute(WINDOW_START)),
+                ("ascend_bid_window_start", WINDOW_START.u64_bytes(value)),
                 ("ascend_bid_max_clip", MAX_CLIP.bytes(value)),
             ],
         }
@@ -133,15 +108,15 @@ impl AscendWord {
 }
 
 /// The five watched slots of the hook's storage for `pool_id`, each with the word it holds.
-pub(crate) fn pool_slots(pool_id: &Word) -> Vec<(HookWord, Word)> {
+pub(crate) fn pool_slots(pool_id: &Word) -> Vec<(AscendWord, Word)> {
     let pool_data = mapping_slot(pool_id, POOL_DATA_MAPPING_SLOT);
     let bid = mapping_slot(pool_id, BID_MAPPING_SLOT);
     vec![
-        (HookWord::Ascend(AscendWord::Terms), word_at_offset(&pool_data, 2)),
-        (HookWord::Ascend(AscendWord::Observation), word_at_offset(&pool_data, 3)),
-        (HookWord::Ascend(AscendWord::Inventory), word_at_offset(&bid, 0)),
-        (HookWord::Ascend(AscendWord::Filled), word_at_offset(&bid, 1)),
-        (HookWord::Ascend(AscendWord::Window), word_at_offset(&bid, 2)),
+        (AscendWord::Terms, word_at_offset(&pool_data, 2)),
+        (AscendWord::Observation, word_at_offset(&pool_data, 3)),
+        (AscendWord::Inventory, word_at_offset(&bid, 0)),
+        (AscendWord::Filled, word_at_offset(&bid, 1)),
+        (AscendWord::Window, word_at_offset(&bid, 2)),
     ]
 }
 
@@ -155,15 +130,15 @@ mod tests {
         value.to_be_bytes().to_vec()
     }
 
-    /// Pool 0xa138ea3b...'s `PoolData` word 2 at block 8365800 (spec S8): fee 10000 (0x002710),
-    /// startTick -168600 (0xfd6d68), launchedAt 1794307976 (0x6af2f788), tokenIs0 0, then the
-    /// creator, whose bytes here are arbitrary.
+    /// Pool 0xa138ea3b...'s `PoolData` word 2 at block 8365800 (`cast storage`): fee 10000
+    /// (0x002710), startTick -168600 (0xfd6d68), launchedAt 1794307976 (0x6af2f788), tokenIs0 0,
+    /// then the creator, whose bytes here are arbitrary.
     const POOL_A138_WORD_2: Word =
         hex!("002710fd6d68006af2f78800aabbccddeeff00112233445566778899aabbccdd");
 
-    /// A `PoolData` word 3 as launch writes it (spec S20): d = 0, observedTick = start - 200 =
-    /// -400800 (0xf9e260) for a pool starting at -400600, emaUpdatedAt = 1794362659
-    /// (0x6afecd23), and an arbitrary 20-byte EMA.
+    /// A `PoolData` word 3 as a launch writes it: d = 0, observedTick = start - 200 = -400800
+    /// (0xf9e260) for a pool starting at -400600, emaUpdatedAt = 1794362659 (0x6afecd23), and an
+    /// arbitrary 20-byte EMA.
     const LAUNCH_WORD_3: Word =
         hex!("00000000f9e260006afecd2300000000000000000883956ab34ccb0338ab12cd");
 
@@ -218,12 +193,13 @@ mod tests {
         );
     }
 
+    /// A byte other than 0 or 1 reaches the attribute as it is, so the decoder can refuse it.
     #[test]
-    fn test_word_2_reads_token_is_currency0_from_byte_20() {
+    fn test_word_2_passes_a_token_is_currency0_byte_other_than_0_or_1_through() {
         let mut word = POOL_A138_WORD_2;
-        word[11] = 1;
+        word[11] = 2;
 
-        assert_eq!(AscendWord::Terms.attributes(&word)[1], ("ascend_token_is_currency0", vec![1]));
+        assert_eq!(AscendWord::Terms.attributes(&word)[1], ("ascend_token_is_currency0", vec![2]));
     }
 
     #[test]
@@ -244,7 +220,6 @@ mod tests {
 
     #[test]
     fn test_word_3_decodes_a_discount_in_the_top_four_bytes() {
-        // d = 0xf0000000 as in the spec's S32 (a) quotes.
         let mut word = LAUNCH_WORD_3;
         word[..4].copy_from_slice(&hex!("f0000000"));
 
@@ -254,11 +229,11 @@ mod tests {
         );
     }
 
-    /// Pool 0xa138ea3b... `Bid+2` at block 8365800 (spec S9): `...a49e728e240f3a9d006aff186a`
-    /// holds maxClip 11862044423356365469 (0xa49e728e240f3a9d) above windowStart 0x006aff186a.
+    /// Pool 0xa138ea3b... `Bid+2` at block 8365800: `...a49e728e240f3a9d006aff186a` holds maxClip
+    /// 0xa49e728e240f3a9d (11862044423356365469) above windowStart 0x006aff186a.
     #[test]
     fn test_bid_word_2_decodes_window_start_and_max_clip() {
-        // The spec prints the word without its leading zeros: right-align it.
+        // The word as `cast storage` prints it, without its leading zeros: right-align it.
         let printed = hex!("a49e728e240f3a9d006aff186a");
         let mut word = [0u8; 32];
         word[32 - printed.len()..].copy_from_slice(&printed);
@@ -270,7 +245,6 @@ mod tests {
                 ("ascend_bid_max_clip", hex!("0000000000000000a49e728e240f3a9d").to_vec()),
             ]
         );
-        assert_eq!(0xa49e728e240f3a9du64, 11862044423356365469);
     }
 
     #[test]
@@ -287,8 +261,8 @@ mod tests {
         );
     }
 
-    /// `cast index bytes32 0xa138ea3b...01a5 4` and `... 2` plus the word offsets, the slots spec
-    /// S8 and S9 read with `cast storage`.
+    /// `cast index bytes32 0xa138ea3b...01a5 4` and `... 2` plus the word offsets, the slots that
+    /// `cast storage` reads for the pool.
     #[test]
     fn test_pool_slots_are_the_pool_data_and_bid_words() {
         let pool_id = hex!("a138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5");
@@ -304,11 +278,11 @@ mod tests {
         assert_eq!(
             pool_slots(&pool_id),
             vec![
-                (HookWord::Ascend(AscendWord::Terms), slot(pool_data, 0xe1)),
-                (HookWord::Ascend(AscendWord::Observation), slot(pool_data, 0xe2)),
-                (HookWord::Ascend(AscendWord::Inventory), slot(bid, 0xfd)),
-                (HookWord::Ascend(AscendWord::Filled), slot(bid, 0xfe)),
-                (HookWord::Ascend(AscendWord::Window), slot(bid, 0xff)),
+                (AscendWord::Terms, slot(pool_data, 0xe1)),
+                (AscendWord::Observation, slot(pool_data, 0xe2)),
+                (AscendWord::Inventory, slot(bid, 0xfd)),
+                (AscendWord::Filled, slot(bid, 0xfe)),
+                (AscendWord::Window, slot(bid, 0xff)),
             ]
         );
     }

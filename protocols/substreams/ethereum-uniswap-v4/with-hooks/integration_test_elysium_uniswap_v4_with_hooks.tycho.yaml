@@ -16,7 +16,11 @@ module_name: "map_montra_enriched_block_changes"
 # The Ascend pools (the last two tests) are hard too, with no rounding: the launchpad's one position
 # per pool is never removed, so no tick has zero net liquidity. A buy past the curve end or a sell
 # past the position's start edge leaves input unconsumed, and the PoolManager reverts
-# CurrencyNotSettled on it (decision D13).
+# CurrencyNotSettled on it: the Elysium PoolManager's runtime code at block 8365800 equals v4-core's
+# PoolManager's but for the 20-byte self-address immutable, and its unlock reverts
+# CurrencyNotSettled (0x5212cba1) on any nonzero delta at the end of the callback, a credit
+# included; an unlock whose callback settles 1 wei of native it does not owe reverts so on Elysium
+# at 8365800 and 8660000.
 limits:
   kind: hard
 # The PoolManager holds every pool's tokens in one balance and accounts no per-pool amount; the
@@ -581,8 +585,11 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x54927397bb63df048da4b39e7bb4fda890d3697afec41354b2b5c4bc2b44db5f"
-  # The only fill on history: pool 0x21e12450... launched at 3437284, its bid funded at 3527638
-  # and filled at 3527702, so the range covers the bid words and the fill path.
+  # The one fill whose pool launches inside a bounded range: pool 0x21e12450... launched at 3437284,
+  # its bid funded at 3527638 and filled at 3527702, so the range covers the bid words and the fill
+  # path. The hook emitted 777 Filled events on 43 pools to block 8365800; this is the only pool of
+  # them that launches inside a range this short. No fill of a mirrored pool (tokenIs0 false) has a
+  # range test: the mirrored fill path is not covered by this file.
   - name: test_ascend_bid_funded_and_filled
     start_block: 3437200
     stop_block: 3528400

@@ -43,11 +43,11 @@ these pools natively from the attributes.
 Run the Elysium `uniswap_v4_hooks` extractor with no `dci_plugin`, or with type `rpc`, never with
 type `uniswap_v4_hooks`. tycho-indexer attaches that plugin by extractor config, not by manifest.
 Nobody has run it on Elysium; what follows is read from tycho-indexer's hooks DCI code, not
-observed. The plugin would hand every Montra pool (its hook has swap permissions) to its default
-orchestrator, which traces through `debug_storageRangeAt` (unavailable on Elysium, above), and
-after failures writes a pool `paused` with value 2 or 3. The simulation reads any `paused` value
-other than empty or 0 as paused, so the stream would keep decoding, but every Montra pool would
-then stay paused and unquotable. No package code guards this, and the integration test cannot
+observed. The plugin would hand every Montra and Ascend pool (their hooks have swap permissions)
+to its default orchestrator, which traces through `debug_storageRangeAt` (unavailable on Elysium,
+above), and after failures writes a pool `paused` with value 2 or 3. The simulation reads any
+`paused` value other than empty or 0 as paused, so the stream would keep decoding, but every
+Montra and Ascend pool would then stay paused and unquotable. No package code guards this, and the integration test cannot
 catch it, since the harness always runs with `--dci-plugin rpc`.
 
 ### Balances
@@ -103,7 +103,8 @@ with its LP fee on one second early. Outside those windows the estimate changes 
 
 An Ascend pool is a Uniswap V4 pool of the same `PoolManager` whose `PoolKey.hooks` is the Ascend
 launchpad hook (`0xe0def4221b9840a610d4e7d55812a79a6431a8ec`, `AscendLaunchpadV5`). Only the
-launchpad creates its pools and its liquidity: one position per pool, never removed. The hook
+launchpad creates its pools and its liquidity: one position per pool, never removed (checked on
+every pool to block 8365800). The hook
 takes a fee in `beforeSwap`/`afterSwap`, observes the price into an EMA and a discount, and fills
 sells from a per-pool bid inventory of the quote token. Those values live in hook storage and no
 V4 event carries them. 4962 pools exist up to block 8365800, all with the dynamic-fee flag and tick
@@ -138,8 +139,18 @@ decoded anyway.
 
 Deployment assumption: the launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the same
 transaction as `Initialize` (every one of the 4962 launches to block 8365800). A pool initialised
-without them would get zero for every attribute, and the simulation refuses such a pool. K+0 and
-K+1 (`Bid` words 0 and 1) are not written at launch and start at zero.
+without them would get zero for every attribute, and the simulation refuses such a pool. `Bid`
+words 0 and 1 (the inventory and the filled quote, at `keccak(poolId . 2)` and the next slot) are
+not written at launch and start at zero.
+
+A second deployment assumption concerns `fundBid`, which is permissionless: a call on a pool id
+before its launch would write `Bid` word 0 before the package watches the slot (the store lists
+a pool's slots when it is created, and a write before the creation transaction is skipped), so the
+pool would be created with `ascend_bid_inventory` 0 while the hook holds more. The simulation
+would then under-quote fills until the next write to that word, and never revert on it. No such
+call is known: the 6080 `BidFunded` events to block 8364931 (on 45 pools) were not checked against
+their pools' launch blocks, and whether the hook rejects a `fundBid` on an unlaunched pool id is
+not established, since its source is unverified.
 
 ### Balances of Ascend pools
 
@@ -163,8 +174,8 @@ The hook and the library it calls are not upgradeable: one code hash at blocks 4
 
 ### Store cost of Ascend
 
-`store_montra_slots` keeps five keys per Ascend pool, about 24,800 keys at 4962 pools, each value
-about 70 bytes.
+`store_montra_slots` keeps five keys per Ascend pool, about 24,800 keys at 4962 pools (block
+8365800), each value about 70 bytes.
 
 ### Quotes in the next block
 
@@ -173,4 +184,4 @@ A sell on a pool with bid inventory depends on the block timestamp through the o
 stamps whole seconds about every 100 ms, so a swap often lands in a block that carries the latest
 timestamp, where a pool whose price moved since its last observation rejects the fill, while the
 quote at plus one second re-observes and may include it. The difference reaches only sells on the
-45 pools ever funded, and the route's minimum output bounds it.
+45 pools funded to block 8364931, and the route's minimum output bounds it.

@@ -80,6 +80,91 @@ pub fn read_uint(word: &Word, low_byte_offset: usize, width: usize) -> Option<u6
     Some(value)
 }
 
+/// A field packed into a storage word: `width` bytes starting `low` bytes from the low end.
+#[derive(Clone, Copy)]
+pub(crate) struct Field {
+    low: usize,
+    width: usize,
+}
+
+impl Field {
+    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
+    /// [`is_uint_window`] holds for the window, the check `read_uint` makes. Every field is a
+    /// constant, so the panic fails the build.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(is_uint_window(low, width), "a field is a window read_uint reads");
+        Self { low, width }
+    }
+
+    /// The field read as an unsigned big-endian integer.
+    pub(crate) fn unsigned(self, word: &Word) -> u64 {
+        read_uint(word, self.low, self.width)
+            .expect("Field::new admits only windows read_uint reads")
+    }
+
+    /// The field as the 8-byte big-endian `u64` the attributes carry.
+    pub(crate) fn u64_bytes(self, word: &Word) -> Vec<u8> {
+        self.unsigned(word)
+            .to_be_bytes()
+            .to_vec()
+    }
+}
+
+/// A two's-complement field packed into a storage word, at most 4 bytes wide so that it fits an
+/// `i32`.
+#[derive(Clone, Copy)]
+pub(crate) struct SignedField(Field);
+
+impl SignedField {
+    /// The signed field `width` bytes wide starting `low` bytes from the low end of a word. Panics
+    /// unless the field is at most 4 bytes wide and [`Field::new`] accepts it.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(width <= 4, "a signed field fits an i32");
+        Self(Field::new(low, width))
+    }
+
+    /// The field read as a two's-complement integer of its width, sign-extended.
+    pub(crate) fn read(self, word: &Word) -> i32 {
+        let shift = 64 - 8 * self.0.width as u32;
+        ((self.0.unsigned(word) << shift) as i64 >> shift) as i32
+    }
+
+    /// The field as the 4-byte big-endian `i32` the attributes carry.
+    pub(crate) fn i32_bytes(self, word: &Word) -> Vec<u8> {
+        self.read(word).to_be_bytes().to_vec()
+    }
+}
+
+/// A field wider than 8 bytes, which no [`Field`] reads, kept as its big-endian bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct BytesField {
+    low: usize,
+    width: usize,
+}
+
+impl BytesField {
+    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
+    /// it ends within the word; every field is a constant, so the panic fails the build.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(width >= 1 && low + width <= 32, "a field lies within a word");
+        Self { low, width }
+    }
+
+    pub(crate) fn bytes(self, word: &Word) -> Vec<u8> {
+        word[32 - self.low - self.width..32 - self.low].to_vec()
+    }
+}
+
+/// A watched word of a pool's hook storage and the state attributes it holds.
+pub(crate) trait StateWord: Copy {
+    /// The word's position among its struct's watched words.
+    fn position(self) -> usize;
+
+    /// The attributes the word holds, as (name, value) pairs, in the formats the simulation
+    /// decoder reads. A byte the simulation does not read holds none.
+    fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)>;
+}
+
 /// The net storage writes one transaction made to one contract, keyed by slot: the value the slot
 /// held before the transaction and the value it held after it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

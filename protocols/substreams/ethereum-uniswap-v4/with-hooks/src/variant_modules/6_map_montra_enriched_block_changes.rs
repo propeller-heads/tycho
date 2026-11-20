@@ -5,10 +5,21 @@
 //! Ascend pools (`ascend_hooks`) take the same path with their own five watched slots
 //! ([`crate::ascend`]). Every write to one of them counts, whatever the transaction, its caller or
 //! the function that made it: swaps (the observation, and on a fill the bid), the launch and
-//! `fundBid` (spec S21 maps all 30 `SSTORE` sites of the hook). A pool is created with all ten
-//! `ascend_*` attributes from the launch transaction's writes, a word it did not write read as
-//! zero (`Bid` words 0 and 1 start at zero). No `paused` is emitted for Ascend pools: the hook's
-//! `setPaused` stops launches only (spec S22) and the Readme says so.
+//! `fundBid` (the hook's 30 `SSTORE` sites, mapped from its bytecode, cover exactly these
+//! writers). A pool is created with all eleven `ascend_*` attributes from the launch
+//! transaction's writes, a word it did not write read as zero (`Bid` words 0 and 1 start at zero).
+//! No `paused` is emitted for Ascend pools: the hook's `setPaused` stops launches only, and the
+//! Readme says so.
+//!
+//! Deployment assumption for Ascend pools: the pool's `Bid` words are first written after its
+//! launch. `fundBid` is permissionless, so a transfer to a pool id before its launch, in an
+//! earlier transaction of the creation block or in an earlier block, would be missed: the slots are
+//! not in `store_montra_slots` until the pool exists, and a write before the creation transaction
+//! is skipped. The pool would then be created with `ascend_bid_inventory` 0 while the hook holds
+//! more, and the simulation would quote no fills the chain accepts (an under-quote, not a revert),
+//! until the next write to `Bid+0`. Whether the hook rejects a `fundBid` on an unlaunched pool id
+//! is not established (its source is unverified), and the 6080 `BidFunded` events the spec records
+//! were not checked against their pools' launch blocks.
 //!
 //! Every write to a pool's watched `PoolConfig` words (0 to 2) or `PoolKey` words counts, whatever
 //! the transaction, its caller or the function that made it: swaps (stage, LP-line hold,
@@ -59,6 +70,7 @@ use crate::{
         pool_config::{sets_seeded_flag, slot_store_key, ConfigWord, HookWord, SlotOwner},
         storage_writes::{storage_writes, SlotWrite},
     },
+    storage::StateWord,
 };
 
 #[substreams::handlers::map]
@@ -133,8 +145,8 @@ struct PoolWrites {
     config: [Option<SlotWrite>; ConfigWord::ALL.len()],
     /// Whether the transaction changed a `PoolKey` word.
     changes_key: bool,
-    /// Whether this is an Ascend pool; its words are in `ascend`, indexed by [`AscendWord`].
-    is_ascend: bool,
+    /// Indexed by [`AscendWord`]. A pool has writes to one of the two layouts only: the store
+    /// lists the words of its hook's layout.
     ascend: [Option<SlotWrite>; AscendWord::ALL.len()],
     /// Whether the transaction placed this pool's seed: it made the seed's writes
     /// ([`PoolWrites::writes_seed_words`]) and the hook added liquidity to this pool on the
@@ -149,47 +161,10 @@ struct PoolWrites {
 impl PoolWrites {
     fn insert(&mut self, word: HookWord, write: SlotWrite) {
         match word {
-            HookWord::Config(word) => self.config[word as usize] = Some(write),
+            HookWord::Config(word) => self.config[word.position()] = Some(write),
             HookWord::Key(_) => self.changes_key |= write.old_value != write.new_value,
-            HookWord::Ascend(word) => {
-                self.is_ascend = true;
-                self.ascend[word as usize] = Some(write);
-            }
+            HookWord::Ascend(word) => self.ascend[word.position()] = Some(write),
         }
-    }
-
-    /// The `ascend_*` attributes of the five watched words as the transaction left them, a word
-    /// it did not write read as zero.
-    fn final_ascend_attributes(&self, change: ChangeType) -> Vec<Attribute> {
-        AscendWord::ALL
-            .into_iter()
-            .flat_map(|word| {
-                let value = self.ascend[word as usize]
-                    .as_ref()
-                    .map_or([0u8; 32], |write| write.new_value);
-                word.attributes(&value)
-            })
-            .map(|(name, value)| attribute(name, value, change))
-            .collect()
-    }
-
-    /// The `ascend_*` attributes whose decoded value the transaction changed.
-    fn changed_ascend_attributes(&self) -> Vec<Attribute> {
-        AscendWord::ALL
-            .into_iter()
-            .filter_map(|word| {
-                self.ascend[word as usize]
-                    .as_ref()
-                    .map(|write| (word, write))
-            })
-            .flat_map(|(word, write)| {
-                word.attributes(&write.old_value)
-                    .into_iter()
-                    .zip(word.attributes(&write.new_value))
-                    .filter(|((_, old), (_, new))| old != new)
-                    .map(|(_, (name, new))| attribute(name, new, ChangeType::Update))
-            })
-            .collect()
     }
 
     /// Whether the transaction made the writes of `seed`: word 0's `seeded` flag went from clear
@@ -204,51 +179,18 @@ impl PoolWrites {
         }
     }
 
-    /// The `montra_*` attributes of `PoolConfig` words 0 to 2 as the transaction left them, a word
-    /// it did not write read as zero.
-    fn final_attributes(&self, change: ChangeType) -> Vec<Attribute> {
-        ConfigWord::ALL
-            .into_iter()
-            .flat_map(|word| {
-                let value = self.config[word as usize]
-                    .as_ref()
-                    .map_or([0u8; 32], |write| write.new_value);
-                word.attributes(&value)
-            })
-            .map(|(name, value)| attribute(name, value, change))
-            .collect()
-    }
-
-    /// The `montra_*` attributes whose decoded value the transaction changed.
-    fn changed_attributes(&self) -> Vec<Attribute> {
-        ConfigWord::ALL
-            .into_iter()
-            .filter_map(|word| {
-                self.config[word as usize]
-                    .as_ref()
-                    .map(|write| (word, write))
-            })
-            .flat_map(|(word, write)| {
-                word.attributes(&write.old_value)
-                    .into_iter()
-                    .zip(word.attributes(&write.new_value))
-                    .filter(|((_, old), (_, new))| old != new)
-                    .map(|(_, (name, new))| attribute(name, new, ChangeType::Update))
-            })
-            .collect()
-    }
-
-    /// The pool's state in its creation transaction: every `montra_*` attribute, created. The pool
-    /// is created paused unless the transaction placed its seed.
-    fn launch_state(&self) -> HookStateChange {
-        if self.is_ascend {
+    /// The pool's state in its creation transaction: every attribute of its hook's layout
+    /// (`montra_*`, or `ascend_*` when `ascend`), created. A Montra pool is created paused unless
+    /// the transaction placed its seed; an Ascend pool is never paused.
+    fn launch_state(&self, ascend: bool) -> HookStateChange {
+        if ascend {
             return HookStateChange {
-                attributes: self.final_ascend_attributes(ChangeType::Creation),
+                attributes: final_attributes(&AscendWord::ALL, &self.ascend, ChangeType::Creation),
                 pause_change: None,
             };
         }
         HookStateChange {
-            attributes: self.final_attributes(ChangeType::Creation),
+            attributes: final_attributes(&ConfigWord::ALL, &self.config, ChangeType::Creation),
             pause_change: (!self.places_seed).then_some(PauseChange::Pause),
         }
     }
@@ -259,18 +201,19 @@ impl PoolWrites {
     /// value changed are updated, so `lockFee`, which writes a byte the simulation does not read,
     /// emits nothing. A changed `PoolKey` word pauses the pool, also when the same transaction
     /// places the seed.
+    ///
+    /// An Ascend pool's writes land in `ascend` only, so its `config` is empty: it takes the
+    /// `else` branch with no `montra_*` change, and never pauses.
     fn update_state(&self) -> HookStateChange {
-        if self.is_ascend {
-            return HookStateChange {
-                attributes: self.changed_ascend_attributes(),
-                pause_change: None,
-            };
-        }
-        let (attributes, mut pause_change) = if self.places_seed {
-            (self.final_attributes(ChangeType::Update), Some(PauseChange::Unpause))
+        let (mut attributes, mut pause_change) = if self.places_seed {
+            (
+                final_attributes(&ConfigWord::ALL, &self.config, ChangeType::Update),
+                Some(PauseChange::Unpause),
+            )
         } else {
-            (self.changed_attributes(), None)
+            (changed_attributes(&ConfigWord::ALL, &self.config), None)
         };
+        attributes.extend(changed_attributes(&AscendWord::ALL, &self.ascend));
         if self.changes_key {
             // On a pool already paused (unseeded, or by an earlier key change) this emits
             // `paused` [1] as a Creation a second time, and a revert of this block would then
@@ -284,6 +227,44 @@ impl PoolWrites {
 
 fn attribute(name: &str, value: Vec<u8>, change: ChangeType) -> Attribute {
     Attribute { name: name.to_string(), value, change: change.into() }
+}
+
+/// The attributes of `words` as the transaction's `writes` (indexed by [`StateWord::position`])
+/// left them, a word it did not write read as zero.
+fn final_attributes<W: StateWord>(
+    words: &[W],
+    writes: &[Option<SlotWrite>],
+    change: ChangeType,
+) -> Vec<Attribute> {
+    words
+        .iter()
+        .flat_map(|&word| {
+            let value = writes[word.position()]
+                .as_ref()
+                .map_or([0u8; 32], |write| write.new_value);
+            word.attributes(&value)
+        })
+        .map(|(name, value)| attribute(name, value, change))
+        .collect()
+}
+
+/// The attributes of `words` whose decoded value the transaction's `writes` changed.
+fn changed_attributes<W: StateWord>(words: &[W], writes: &[Option<SlotWrite>]) -> Vec<Attribute> {
+    words
+        .iter()
+        .filter_map(|&word| {
+            writes[word.position()]
+                .as_ref()
+                .map(|write| (word, write))
+        })
+        .flat_map(|(word, write)| {
+            word.attributes(&write.old_value)
+                .into_iter()
+                .zip(word.attributes(&write.new_value))
+                .filter(|((_, old), (_, new))| old != new)
+                .map(|(_, (name, new))| attribute(name, new, ChangeType::Update))
+        })
+        .collect()
 }
 
 /// The transaction and its writes per pool, by transaction index.
@@ -341,10 +322,7 @@ fn collect_hook_writes(
         for (component_id, pool_writes) in &mut pools {
             // The receipt is read only in the one transaction of a pool's life that sets the
             // `seeded` flag.
-            // An Ascend pool has no seed: its pool data is written at launch and it is never
-            // paused.
-            pool_writes.places_seed = !pool_writes.is_ascend &&
-                pool_writes.writes_seed_words() &&
+            pool_writes.places_seed = pool_writes.writes_seed_words() &&
                 hook_added_liquidity(trace, params, component_id)?;
         }
         hook_writes.insert(tx_index, (Transaction::from(trace), pools));
@@ -355,8 +333,7 @@ fn collect_hook_writes(
             .or_insert_with(|| (launch.tx.clone(), BTreeMap::new()))
             .1
             .entry(component_id.clone())
-            .or_default()
-            .is_ascend |= launch.ascend;
+            .or_default();
     }
     Ok(hook_writes)
 }
@@ -451,7 +428,7 @@ fn with_hook_state(
         };
         for (component_id, pool_writes) in pools {
             let state = match launches.get(&component_id) {
-                Some(launch) if launch.tx.index == index => pool_writes.launch_state(),
+                Some(launch) if launch.tx.index == index => pool_writes.launch_state(launch.ascend),
                 _ => pool_writes.update_state(),
             };
             if !state.attributes.is_empty() {
@@ -1459,8 +1436,13 @@ mod tests {
             .into_iter()
             .find(|(hook_word, _)| *hook_word == HookWord::Config(word))
             .unwrap();
+        hook_write(&HOOK, slot, old, new, ordinal)
+    }
+
+    /// A write by `hook` to `slot`.
+    fn hook_write(hook: &Address, slot: Word, old: Word, new: Word, ordinal: u64) -> StorageChange {
         StorageChange {
-            address: HOOK.to_vec(),
+            address: hook.to_vec(),
             key: slot.to_vec(),
             old_value: old.to_vec(),
             new_value: new.to_vec(),
@@ -1534,21 +1516,22 @@ mod tests {
     const ASCEND_POOL_ID: Word =
         hex!("a138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5");
     // PoolData word 2 at launch: fee 10000, startTick -168600, launchedAt 1794307976, tokenIs0 0,
-    // an arbitrary creator (spec S8).
+    // an arbitrary creator (`cast storage` at block 8365800).
     const ASCEND_WORD_2: Word =
         hex!("002710fd6d68006af2f78800aabbccddeeff00112233445566778899aabbccdd");
-    // PoolData word 3 at launch (spec S20): d 0, observedTick -400800, emaUpdatedAt 0x6afecd23,
+    // PoolData word 3 as a launch writes it: d 0, observedTick -400800, emaUpdatedAt 0x6afecd23,
     // an arbitrary EMA.
     const ASCEND_WORD_3: Word =
         hex!("00000000f9e260006afecd2300000000000000000883956ab34ccb0338ab12cd");
-    // Bid word 2: windowStart 0, maxClip 0xa49e728e240f3a9d (spec S9).
+    // Bid word 2: windowStart 0, maxClip 0xa49e728e240f3a9d.
     const ASCEND_BID_WORD_2: Word =
         hex!("00000000000000000000000000000000000000a49e728e240f3a9d0000000000");
 
     fn ascend_store() -> FakeStore {
         let mut store = FakeStore(HashMap::new());
         for (word, slot) in crate::ascend::pool_slots(&ASCEND_POOL_ID) {
-            let owner = SlotOwner { component_id: ASCEND_POOL.to_string(), word };
+            let owner =
+                SlotOwner { component_id: ASCEND_POOL.to_string(), word: HookWord::Ascend(word) };
             store
                 .0
                 .insert(slot_store_key(&ASCEND_HOOK, &slot), owner.to_store_value());
@@ -1560,15 +1543,9 @@ mod tests {
     fn ascend_write(word: AscendWord, old: Word, new: Word, ordinal: u64) -> StorageChange {
         let (_, slot) = crate::ascend::pool_slots(&ASCEND_POOL_ID)
             .into_iter()
-            .find(|(hook_word, _)| *hook_word == HookWord::Ascend(word))
+            .find(|(pool_word, _)| *pool_word == word)
             .unwrap();
-        StorageChange {
-            address: ASCEND_HOOK.to_vec(),
-            key: slot.to_vec(),
-            old_value: old.to_vec(),
-            new_value: new.to_vec(),
-            ordinal,
-        }
+        hook_write(&ASCEND_HOOK, slot, old, new, ordinal)
     }
 
     fn created_ascend_pool(index: u64) -> BlockEntityChanges {
@@ -1601,7 +1578,7 @@ mod tests {
         attributes_of(change, ASCEND_POOL)
     }
 
-    // The launch writes `PoolData` words 2 and 3 and `Bid` word 2 (spec S20), and not `Bid`
+    // The launch writes `PoolData` words 2 and 3 and `Bid` word 2, and not `Bid`
     // words 0 and 1: every attribute is created, those two as zero, and the pool is not paused.
     #[test]
     fn test_ascend_launch_creates_every_attribute_from_its_final_words() {

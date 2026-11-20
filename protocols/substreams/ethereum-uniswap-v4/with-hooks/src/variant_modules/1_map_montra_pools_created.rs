@@ -25,7 +25,8 @@ pub fn map_montra_pools_created(
 /// `ascend_*` attributes carry its fees.
 ///
 /// Deployment assumption: the Ascend launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the
-/// same transaction as `Initialize` (spec S20, every one of the 4962 launches to block 8365800).
+/// same transaction as `Initialize` (checked on the launch transactions of all 4962 pools to block
+/// 8365800).
 /// `map_montra_enriched_block_changes` reads those writes for the pool's `ascend_*` attributes, so
 /// a pool initialised without them would get zero for every attribute, and the simulation refuses
 /// a pool whose fee or EMA is zero.

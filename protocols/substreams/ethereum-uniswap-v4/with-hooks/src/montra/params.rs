@@ -9,8 +9,8 @@ use serde::Deserialize;
 
 use crate::address_list::{parse_address, parse_address_list, Address};
 
-/// Parameters of `map_montra_pools_created`, `store_montra_slots` and
-/// `map_montra_enriched_block_changes`: the `PoolManager` whose `Initialize` and `ModifyLiquidity`
+/// Parameters of `map_montra_pools_created` and `map_montra_enriched_block_changes`: the
+/// `PoolManager` whose `Initialize` and `ModifyLiquidity`
 /// events the modules read, the Montra hooks and the Ascend hooks whose pools and storage writes
 /// are indexed.
 #[derive(Debug, PartialEq, Eq)]
@@ -26,6 +26,25 @@ struct Query {
     pool_manager: String,
     montra_hooks: String,
     ascend_hooks: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AscendQuery {
+    ascend_hooks: String,
+}
+
+/// Parses `ascend_hooks=<address>[,<address>...]`, the one parameter of `store_montra_slots`,
+/// which only tells an Ascend hook's pools from a Montra hook's.
+///
+/// Fails when `input` is not a query string, misses the key or holds another key, and when the
+/// list fails [`parse_address_list`].
+pub(crate) fn parse_ascend_hooks(input: &str) -> Result<BTreeSet<Address>> {
+    let query: AscendQuery =
+        serde_qs::from_str(input).map_err(|e| anyhow!("failed to parse params `{input}`: {e}"))?;
+    Ok(parse_address_list("ascend_hooks", &query.ascend_hooks)?
+        .into_iter()
+        .collect())
 }
 
 impl Params {
@@ -219,10 +238,28 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("the manifest sets params for {module}"))
         };
-        for module in
-            ["map_montra_pools_created", "store_montra_slots", "map_montra_enriched_block_changes"]
-        {
+        for module in ["map_montra_pools_created", "map_montra_enriched_block_changes"] {
             assert_eq!(Params::parse(&param(module)).unwrap(), params(), "{module}");
         }
+        assert_eq!(
+            parse_ascend_hooks(&param("store_montra_slots")).unwrap(),
+            params().ascend_hooks
+        );
+    }
+
+    #[test]
+    fn test_ascend_hooks_param_reads_the_list_and_refuses_other_keys() {
+        assert_eq!(
+            parse_ascend_hooks("ascend_hooks=0xE0DEF4221B9840A610D4E7D55812A79A6431A8EC").unwrap(),
+            BTreeSet::from([ASCEND_HOOK])
+        );
+        let other_key = parse_ascend_hooks(&format!("pool_manager=e2e1{ASCEND}"))
+            .unwrap_err()
+            .to_string();
+        assert!(other_key.contains("unknown field `pool_manager`"), "{other_key}");
+        let missing = parse_ascend_hooks("")
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("missing field `ascend_hooks`"), "{missing}");
     }
 }

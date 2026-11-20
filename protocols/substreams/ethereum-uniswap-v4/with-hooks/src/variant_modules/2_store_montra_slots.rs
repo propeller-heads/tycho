@@ -5,7 +5,10 @@
 //! hook write belongs to. It holds six keys per pool (`PoolConfig` words 0 to 2, `PoolKey` words 0
 //! to 2), each keyed by the pool's hook and the slot, set when the pool is created and never
 //! changed. An Ascend pool has five (`PoolData` words 2 and 3, `Bid` words 0 to 2): the hook's
-//! membership in `ascend_hooks` or `montra_hooks` picks the layout.
+//! membership in `ascend_hooks`, the module's only parameter, picks the layout; the creation module
+//! creates pools of no other hooks than the Montra and Ascend ones.
+
+use std::collections::BTreeSet;
 
 use substreams::store::{StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsString};
 use tycho_substreams::prelude::*;
@@ -14,8 +17,8 @@ use crate::{
     address_list::Address,
     ascend,
     montra::{
-        params::Params,
-        pool_config::{pool_slots, slot_store_key, SlotOwner},
+        params::parse_ascend_hooks,
+        pool_config::{pool_slots, slot_store_key, HookWord, SlotOwner},
     },
 };
 
@@ -25,14 +28,18 @@ pub fn store_montra_slots(
     pools_created: BlockEntityChanges,
     store: StoreSetIfNotExistsString,
 ) {
-    let params = Params::parse(&params).expect("store_montra_slots params parse");
-    for (key, value) in slot_entries(&params, &pools_created) {
+    let ascend_hooks = parse_ascend_hooks(&params).expect("store_montra_slots params parse");
+    for (key, value) in slot_entries(&ascend_hooks, &pools_created) {
         store.set_if_not_exists(0, key, &value);
     }
 }
 
-/// The store entries of every pool `pools_created` creates.
-fn slot_entries(params: &Params, pools_created: &BlockEntityChanges) -> Vec<(String, String)> {
+/// The store entries of every pool `pools_created` creates; a pool of a hook in `ascend_hooks`
+/// has the Ascend layout, any other the Montra one.
+fn slot_entries(
+    ascend_hooks: &BTreeSet<Address>,
+    pools_created: &BlockEntityChanges,
+) -> Vec<(String, String)> {
     pools_created
         .changes
         .iter()
@@ -48,8 +55,11 @@ fn slot_entries(params: &Params, pools_created: &BlockEntityChanges) -> Vec<(Str
                 .get_attribute_value("hooks")
                 .and_then(|value| Address::try_from(value).ok())
                 .expect("map_montra_pools_created emits a 20-byte hooks");
-            let slots = if params.is_ascend_hook(&hook) {
+            let slots = if ascend_hooks.contains(&hook) {
                 ascend::pool_slots(&pool_id)
+                    .into_iter()
+                    .map(|(word, slot)| (HookWord::Ascend(word), slot))
+                    .collect()
             } else {
                 pool_slots(&pool_id)
             };
@@ -82,7 +92,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(&params(), &pools_created);
+        let entries = slot_entries(&params().ascend_hooks, &pools_created);
 
         let hook = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
         let config = format!(
@@ -122,7 +132,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(&params(), &pools_created);
+        let entries = slot_entries(&params().ascend_hooks, &pools_created);
 
         let hook = "0xe0def4221b9840a610d4e7d55812a79a6431a8ec";
         let pool_data = "0xeed4aedf482dc31cd5db10dafcce24e9cd678d08586286766e5957130525";

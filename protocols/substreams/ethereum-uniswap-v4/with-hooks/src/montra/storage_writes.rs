@@ -1,4 +1,4 @@
-//! The storage writes a transaction made to the Montra hooks, netted per slot.
+//! The storage writes a transaction made to the Montra and Ascend hooks, netted per slot.
 //!
 //! [`storage_writes`] returns every slot a transaction wrote across a set of hooks, with the value
 //! before and after. It orders writes by ordinal and keeps the first old value and the last new
