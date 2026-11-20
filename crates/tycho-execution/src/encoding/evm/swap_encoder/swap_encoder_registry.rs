@@ -6,34 +6,35 @@ use crate::encoding::{
     errors::EncodingError,
     evm::{
         constants::{
-            BAIBAI_PROTOCOL_SYSTEM, BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON,
-            FALLBACK_KEY, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-            NATIVE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_WRAPPER_PROTOCOL_SYSTEM,
-            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, SUBSIDY_KEY,
-            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
+            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
+            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, baibai::BaibaiSwapEncoder,
-            balancer_v2::BalancerV2SwapEncoder, balancer_v3::BalancerV3SwapEncoder,
-            bebop::BebopSwapEncoder, bebop_fallback::BebopFallbackSwapEncoder,
-            bopamm::BopAMMSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
-            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
-            etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder, fallback::FallbackSwapEncoder,
-            fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
-            hashflow::HashflowSwapEncoder, hashflow_fallback::HashflowFallbackSwapEncoder,
-            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
-            liquorice::LiquoriceSwapEncoder, liquorice_fallback::LiquoriceFallbackSwapEncoder,
-            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
-            native::NativeSwapEncoder, native_fallback::NativeFallbackSwapEncoder,
-            native_wrap::WrapSwapEncoder, pancakeswap_infinity::PancakeswapInfinitySwapEncoder,
-            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
-            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            baibai_fallback::BaibaiFallbackSwapEncoder, balancer_v2::BalancerV2SwapEncoder,
+            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
+            bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
+            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
+            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
+            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
+            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
+            hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
+            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
+            liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
+            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
+            native_fallback::NativeFallbackSwapEncoder, native_wrap::WrapSwapEncoder,
+            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
+            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -169,6 +170,7 @@ impl SwapEncoderRegistry {
             _ if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) => PRICE_LEVEL_STREAM_KEY,
             _ if protocol_system.starts_with(FALLBACK_PREFIX) &&
                 protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+                protocol_system != BAIBAI_FALLBACK_PROTOCOL_SYSTEM &&
                 !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) =>
             {
                 FALLBACK_KEY
@@ -324,6 +326,9 @@ impl SwapEncoderRegistry {
             METRIC_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(MetricFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(BaibaiFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             BEBOP_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(BebopFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -443,6 +448,9 @@ mod tests {
             .is_none());
         assert!(registry
             .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(registry
+            .get_encoder(BAIBAI_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
     }
 
