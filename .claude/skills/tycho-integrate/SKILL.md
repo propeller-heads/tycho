@@ -186,6 +186,9 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    answers are reported and stay open; they are never dropped. `facts_learned` go to the spec as
    amendments (below).
 3. **Guards.** `S/state.py P check-guards --worktree <worktree> --from $BASE --layer L --round N --record`.
+   It covers the round's commits and the worktree's uncommitted changes. When the person answers
+   the guard escalation by accepting the change, record it with `decide --accept-guard`; the final
+   `guards` gate fails on any guarded change on the branch nobody accepted.
 4. **Check and record.** `S/layer_checks.py --protocol P --layer L --round N`, then
    `S/state.py P round --layer L --head $(git -C <worktree> rev-parse HEAD) --checks green|red
    --checks-file RUN/rounds/L-N/checks.json`. The protocol-testing step runs `range --report`;

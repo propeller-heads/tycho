@@ -428,8 +428,21 @@ def _fact_refs(doc: dict):
         yield from dep.get("fact_ids", [])
 
 
+# A value from decisions.json that checks.toml formats into a shell command (`layer_checks.py`):
+# names and paths only, so an agent-written value can never be a command of its own.
+SAFE_VALUE = re.compile(r"[A-Za-z0-9_./:-]+")
+
+
+def unsafe_values(doc: dict) -> list:
+    """The decisions' `paths` and `agreements.protocol_system` values that are not SAFE_VALUE."""
+    values = [("agreements.protocol_system", (doc.get("agreements") or {}).get("protocol_system"))]
+    for k, v in (doc.get("paths") or {}).items():
+        values += [(f"paths.{k}.{c}", x) for c, x in v.items()] if isinstance(v, dict) else [(f"paths.{k}", v)]
+    return [f"{where} = {v!r}" for where, v in values if v is not None and not (isinstance(v, str) and SAFE_VALUE.fullmatch(v))]
+
+
 def validate_decisions(doc: dict, spec: dict) -> list:
-    errors = []
+    errors = [f"decisions.{u}: only letters, digits and `_./:-`, since it is formatted into a check's command" for u in unsafe_values(doc)]
     fact_ids = {f.get("id") for f in spec.get("facts", [])}
     for i, d in enumerate(doc.get("decisions", [])):
         where = f"decisions[{i}] ({d.get('id')})"

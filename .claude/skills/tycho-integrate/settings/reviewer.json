@@ -56,7 +56,6 @@
       "Bash(gh run view:*)",
       "Bash(comm:*)",
       "Bash(sort:*)",
-      "Bash(git commit:*)",
       "Bash(sed:*)",
       "Bash(awk:*)",
       "Bash(cut:*)",
@@ -74,7 +73,6 @@
       "Bash(realpath:*)",
       "Bash(xxd:*)",
       "Bash(which:*)",
-      "Bash(env:*)",
       "Bash(test:*)",
       "Bash(git branch:*)",
       "Bash(git tag:*)",
@@ -89,7 +87,9 @@
       "Bash(gh pr comment:*)",
       "Bash(gh pr review:*)",
       "Bash(gh pr create:*)",
-      "Bash(gh pr merge:*)"
+      "Bash(gh pr merge:*)",
+      "Bash(git commit:*)",
+      "Bash(env:*)"
     ]
   },
   "hooks": {

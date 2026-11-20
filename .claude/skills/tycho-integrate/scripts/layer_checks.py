@@ -30,6 +30,10 @@ def placeholders(run: Path, tree: Path) -> dict:
     dec_path, spec_path = run / "decisions.json", run / "spec.json"
     if dec_path.exists():
         dec = schema.load_json(dec_path)
+        # Checked again here: decisions.json may change after it was validated.
+        unsafe = schema.unsafe_values(dec)
+        if unsafe:
+            raise SystemExit(f"decisions.json has values that cannot go into a command: {unsafe}")
         values.update({k: v for k, v in (dec.get("paths") or {}).items() if isinstance(v, str)})
         values.setdefault("protocol_system", (dec.get("agreements") or {}).get("protocol_system", ""))
     values.setdefault("test_package", values.get("package", ""))

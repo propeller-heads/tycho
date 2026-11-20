@@ -14,8 +14,10 @@ Exit codes: 0 done, 2 the agent ended with an error, 3 no budget left (nothing w
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,7 +60,9 @@ def render_settings(role: str, run: Path) -> Path:
     """The role's settings with the guard hook's absolute path filled in."""
     template = (schema.skill_dir() / "settings" / f"{role}.json").read_text()
     guard = schema.skill_dir() / "scripts" / "guard.py"
-    rendered = template.replace("{GUARD}", str(guard))
+    # Quoted, and escaped for the JSON string it lands in: a repo path with a space would otherwise
+    # break the hook command on every call.
+    rendered = template.replace("{GUARD}", json.dumps(shlex.quote(str(guard)))[1:-1])
     path = run / "settings" / f"{role}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(rendered)
@@ -80,10 +84,12 @@ def main() -> None:
 
     run = schema.run_dir(args.protocol)
     st = ledger.State(ledger.read_events(run))
-    budget = ledger.remaining_usd(st, args.layer)
-    if budget <= 0:
+    budget = math.floor(ledger.remaining_usd(st, args.layer) * 100) / 100
+    if budget < ledger.MIN_CALL_USD:
         print(json.dumps({"label": args.label, "error": "no budget left", "remaining": budget}))
         sys.exit(3)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         "claude", "-p",
@@ -91,6 +97,9 @@ def main() -> None:
         "--max-budget-usd", f"{budget:.2f}",
         "--permission-mode", PERMISSION_MODE,
         "--settings", str(render_settings(args.role, run)),
+        # The role's settings are the whole policy: the person's own user, project and local
+        # settings (their allow lists and hooks) would otherwise merge into every agent's.
+        "--setting-sources", "",
         "--add-dir", str(run),
     ]
     if args.agent:
@@ -116,18 +125,21 @@ def main() -> None:
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        Path(args.out).write_text(proc.stdout + "\n" + err_text)
+        result = None
+    spend = {"t": "spend", "label": args.label, "session": (result or {}).get("session_id"), "turns": (result or {}).get("num_turns")}
+    if args.layer:
+        spend["layer"] = args.layer
+    if result is None:
+        # A crashed or killed session reports no cost. Record that it ran, so the ledger shows the
+        # call; its real cost is not known (the caps undercount it).
+        ledger.append(run, {**spend, "usd": 0.0, "error": f"no JSON result (exit {proc.returncode})"})
+        out.write_text(proc.stdout + "\n" + err_text)
         print(json.dumps({"label": args.label, "error": "claude -p did not return JSON", "exit": proc.returncode, "out": args.out}))
         sys.exit(2)
 
     usd = float(result.get("total_cost_usd") or 0.0)
-    spend = {"t": "spend", "label": args.label, "usd": round(usd, 4), "session": result.get("session_id"), "turns": result.get("num_turns")}
-    if args.layer:
-        spend["layer"] = args.layer
-    ledger.append(run, spend)
-
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(result.get("result") or "")
+    ledger.append(run, {**spend, "usd": round(usd, 4)})
+    out.write_text(result.get("result") or "")
     subtype = result.get("subtype", "")
     summary = {"label": args.label, "usd": usd, "subtype": subtype, "is_error": bool(result.get("is_error")), "out": args.out, "session": result.get("session_id")}
     print(json.dumps(summary))

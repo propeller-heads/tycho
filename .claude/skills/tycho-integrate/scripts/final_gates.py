@@ -88,6 +88,22 @@ def gate_layers_clean(run: Path) -> dict:
     return gate("layers-clean", "pass", f"{', '.join(layers)} clean{note}")
 
 
+def gate_guards(run: Path, tree: Path) -> dict:
+    """Every guarded change on the branch, and in the worktree, is one a person accepted. A round's
+    guard check covers that round's commits; this covers the whole branch, so an answer of "revert
+    it" is checked to have happened."""
+    try:
+        base = git(tree, "merge-base", f"origin/{schema.BASE}", "HEAD").strip()
+    except subprocess.CalledProcessError as e:
+        return gate("guards", "fail", f"no merge base with origin/{schema.BASE}: {e}")
+    st = ledger.State(ledger.read_events(run))
+    open_ = [v for v in ledger.check_guards(tree, base, "HEAD") if v["path"] not in st.accepted_guards]
+    if open_:
+        return gate("guards", "fail", "guarded changes no person accepted: " + "; ".join(f"{v['path']} ({v['commit']}): {v['why']}" for v in open_[:10]), violations=open_)
+    accepted = sorted(st.accepted_guards)
+    return gate("guards", "pass", "no guarded change" + (f" beyond those a person accepted: {accepted}" if accepted else ""))
+
+
 def gate_checks(protocol: str, n: int) -> dict:
     proc = subprocess.run([sys.executable, "-I", str(Path(__file__).parent / "layer_checks.py"), "--protocol", protocol, "--layer", "final", "--round", str(n)], capture_output=True, text=True)
     last = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "{}"
@@ -264,6 +280,7 @@ def main() -> None:
 
     gates = [
         gate_layers_clean(run),
+        gate_guards(run, tree),
         gate_checks(args.protocol, args.round),
         gate_mutation_surfaces(spec, yamls, caps),
         gate_proxies(spec),

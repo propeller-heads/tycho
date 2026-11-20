@@ -54,9 +54,15 @@ def read_events(run: Path) -> list:
             if not line:
                 continue
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
             except json.JSONDecodeError as e:
                 raise SystemExit(f"{path}:{n}: not JSON ({e}); the ledger is append-only, fix the line by hand")
+            # Replay trusts nothing it would not have appended: a line written around `append`
+            # (a gate approval, a closed finding) stops the run instead of changing its state.
+            errors = schema.validate_event(event) if isinstance(event, dict) else ["not an object"]
+            if errors:
+                raise SystemExit(f"{path}:{n}: invalid event ({'; '.join(errors)}); the ledger is append-only, fix the line by hand")
+            events.append(event)
     return events
 
 
@@ -93,6 +99,7 @@ class State:
         self.findings = {}
         self.decisions = {}  # D<n> -> {class, question, finding, layer, resolved, choice}
         self.guard_violations = defaultdict(list)
+        self.accepted_guards = set()  # paths whose guarded change a person accepted
         self.stops = {}  # layer or "run" -> reason
         # layer -> the decision id by which a person closed a layer that stopped without converging
         # (an escalation answered without more rounds or dollars, and no round since).
@@ -185,6 +192,8 @@ class State:
             d["resolved"] = True
             d["choice"] = e["choice"]
             d["by"] = e["by"]
+            if e.get("accept_guard") and d.get("layer"):
+                self.accepted_guards.update(v["path"] for g in self.guard_violations[d["layer"]] for v in g["paths"])
             # The implementer applies the decision next round; the next review statuses the finding.
             if d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "open"
@@ -254,11 +263,16 @@ def layer_cap(state: State, layer: str) -> float:
     return load_budgets()["layer"]["usd"] + state.grant_usd[layer]
 
 
+# Below this, no agent call starts (`run_agent.py` exits 3) and the stop rules escalate: one
+# threshold for both, so a run never sits between "no budget" and "continue".
+MIN_CALL_USD = 0.01
+
+
 def remaining_usd(state: State, layer=None) -> float:
     left = integration_cap(state) - state.spend_total
     if layer:
         left = min(left, layer_cap(state, layer) - state.spend_layer[layer])
-    return round(max(left, 0.0), 2)
+    return max(left, 0.0)
 
 
 def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
@@ -293,9 +307,9 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
     if rounds and last_green and reviewed_last and not open_now:
         return {"action": "clean", "reason": "clean"}
 
-    if state.spend_total >= integration_cap(state):
+    if integration_cap(state) - state.spend_total < MIN_CALL_USD:
         return {"action": "escalate", "reason": "integration-usd-cap", "class": "not-converged"}
-    if state.spend_layer[layer] >= layer_cap(state, layer):
+    if layer_cap(state, layer) - state.spend_layer[layer] < MIN_CALL_USD:
         return {"action": "escalate", "reason": "usd-cap", "class": "not-converged"}
     if len(rounds) >= budgets["layer"]["rounds"] + extra_rounds + state.grant_rounds[layer]:
         return {"action": "escalate", "reason": "round-cap", "class": "not-converged"}
@@ -530,9 +544,15 @@ def answers_file(state: State, layer: str) -> str:
 
 
 def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
-    """Paths and yaml lines the implementer's commits changed but may not."""
+    """Paths and yaml lines the implementer's commits changed but may not; with `rev_to` HEAD, the
+    worktree's uncommitted changes too, since the layer checks run on the working tree."""
     def git(*args):
         return subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True, check=True).stdout
+
+    def show(rev, path):
+        """A file at a revision; None where it does not exist there (added or deleted)."""
+        proc = subprocess.run(["git", "-C", str(worktree), "show", f"{rev}:{path}"], capture_output=True, text=True)
+        return proc.stdout if proc.returncode == 0 else None
 
     def changed_lines(sha, path):
         removed, added = [], []
@@ -550,17 +570,31 @@ def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
         for path in git("diff-tree", "--no-commit-id", "--name-only", "-r", sha).split("\n"):
             if not path:
                 continue
-            if schema.guarded_path(path):
-                old = subprocess.run(["git", "-C", str(worktree), "show", f"{sha}^:{path}"], capture_output=True, text=True).stdout
-                bad = schema.disallowed_change(path, old, git("show", f"{sha}:{path}")) if path in schema.GUARDED_PATH_EDITS else None
-                if bad is None:
-                    violations.append({"commit": sha[:10], "path": path, "why": "guarded path"})
-                elif bad:
-                    violations.append({"commit": sha[:10], "path": path, "why": f"changes beyond the integration's wiring: {bad}"})
-            elif schema.INTEGRATION_YAML_RE.search(path):
-                for line in schema.guarded_yaml_changes(*changed_lines(sha, path)):
-                    violations.append({"commit": sha[:10], "path": path, "why": f"changes `{line}`"})
+            violations += guarded_change(sha[:10], path, show(f"{sha}^", path), show(sha, path), lambda: changed_lines(sha, path))
+    if rev_to == "HEAD":
+        for line in git("status", "--porcelain", "--untracked-files=all", "--no-renames").splitlines():
+            path = line[3:].strip().strip('"')
+            if not (schema.guarded_path(path) or schema.INTEGRATION_YAML_RE.search(path)):
+                continue
+            file = worktree / path
+            new = file.read_text(errors="replace") if file.is_file() else None
+            old = show("HEAD", path)
+            violations += guarded_change("uncommitted", path, old, new, lambda: schema.line_diff(old or "", new or ""))
     return violations
+
+
+def guarded_change(where: str, path: str, old, new, yaml_lines) -> list:
+    """The violations of one file's change from `old` to `new` (None: the file does not exist)."""
+    if schema.guarded_path(path):
+        if new is None:
+            return [{"commit": where, "path": path, "why": "deletes a guarded file"}]
+        bad = schema.disallowed_change(path, old or "", new)
+        if bad is None:
+            return [{"commit": where, "path": path, "why": "guarded path"}]
+        return [{"commit": where, "path": path, "why": f"changes beyond the integration's wiring: {bad}"}] if bad else []
+    if schema.INTEGRATION_YAML_RE.search(path):
+        return [{"commit": where, "path": path, "why": f"changes `{line}`"} for line in schema.guarded_yaml_changes(*yaml_lines())]
+    return []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -707,6 +741,7 @@ def main() -> None:
     a.add_argument("--grant-rounds", type=int, default=0)
     a.add_argument("--grant-usd", type=float, default=0.0)
     a.add_argument("--close", action="store_true", help="the answer ends the layer's loop (a cap answered without grants closes it already)")
+    a.add_argument("--accept-guard", action="store_true", help="the answer to a guard escalation accepts the guarded change")
     a = sub.add_parser("amend")
     a.add_argument("--fact", required=True)
     a.add_argument("--evidence", required=True)
@@ -785,6 +820,8 @@ def main() -> None:
             event["grant_usd"] = args.grant_usd
         if args.close:
             event["close"] = True
+        if args.accept_guard:
+            event["accept_guard"] = True
         print(json.dumps(append(run, event)))
     elif args.cmd == "amend":
         print(json.dumps(amend(run, args.fact, args.evidence, args.new, args.source), indent=2))

@@ -243,6 +243,12 @@ class Replay(RunCase):
         self.add(t="stage", stage="build:indexing", status="done")
         self.assertEqual(ledger.resume_point(self.run, self.state())["stage"], "final")
 
+    def test_a_line_written_around_append_stops_the_replay(self):
+        with open(ledger.ledger_path(self.run), "a") as f:
+            f.write(json.dumps({"t": "gate", "gate": "1"}) + "\n")
+        with self.assertRaises(SystemExit):
+            ledger.read_events(self.run)
+
     def test_a_malformed_event_is_refused(self):
         with self.assertRaises(SystemExit):
             ledger.append(self.run, {"t": "round", "layer": "indexing"})
@@ -258,6 +264,12 @@ class Guards(unittest.TestCase):
         self.git("config", "user.name", "t")
         (self.tree / "pkg").mkdir()
         (self.tree / "pkg/integration_test.tycho.yaml").write_text("harness: strict\ntests: []\n")
+        # The executor table as protocols/testing has it, so the hook judges whole files.
+        (self.tree / "protocols/testing/src").mkdir(parents=True)
+        (self.tree / self.EXECUTION_RS).write_text(
+            "static EXECUTOR_MAPPING: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {\n    let mut map = HashMap::new();\n    map\n});\n"
+            "pub const TOLERANCE = 0;\n\n#[cfg(test)]\nmod tests {\n}\n"
+        )
         self.git("add", ".")
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -338,10 +350,16 @@ class Guards(unittest.TestCase):
         self.assertTrue(schema.guarded_yaml_changes([], ["        kind: under_cap"]))
         self.assertEqual(schema.guarded_yaml_changes(["limits: {kind: hard}"], ["limits: {kind: hard}"]), [])
 
-    def hook(self, role, tool, tool_input):
-        env = {**os.environ, "TYCHO_INTEGRATE_GUARD": role, "TYCHO_INTEGRATE_WORKTREE": str(self.tree), "TYCHO_INTEGRATE_RUN": str(Path(self.tmp.name) / "run"), "TYCHO_INTEGRATE_REPO": str(self.tree)}
-        out = subprocess.run([sys.executable, "-I", str(GUARD)], input=json.dumps({"tool_name": tool, "tool_input": tool_input}), capture_output=True, text=True, env=env).stdout
-        return json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out.strip() else "allow"
+    def hook(self, role, tool, tool_input, env_drop=()):
+        # The test tree lives in the temp dir, which a role may write: name another as the temp root.
+        env = {**os.environ, "TYCHO_INTEGRATE_GUARD": role, "TYCHO_INTEGRATE_WORKTREE": str(self.tree), "TYCHO_INTEGRATE_RUN": str(Path(self.tmp.name) / "run"),
+               "TYCHO_INTEGRATE_REPO": str(self.tree), "TYCHO_INTEGRATE_TMP_ROOTS": str(Path(self.tmp.name) / "scratch")}
+        for k in env_drop:
+            env.pop(k)
+        proc = subprocess.run([sys.executable, "-I", str(GUARD)], input=json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": str(self.tree)}), capture_output=True, text=True, env=env)
+        # A crashing guard lets the call through in Claude Code, so a crash is never "allow" here.
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""), "the guard crashed")
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] if proc.stdout.strip() else "allow"
 
     def test_hook_denies_knowledge_edits_and_test_relaxing_lines(self):
         self.assertEqual(self.hook("implementer", "Edit", {"file_path": str(self.tree / ".claude/knowledge/x.md"), "old_string": "a", "new_string": "b"}), "deny")
@@ -351,8 +369,9 @@ class Guards(unittest.TestCase):
 
     def test_hook_allows_only_fixture_lines_in_the_executor_table(self):
         path = str(self.tree / self.EXECUTION_RS)
-        anchor = "static EXECUTOR_MAPPING"
-        self.assertEqual(self.hook("implementer", "Edit", {"file_path": path, "old_string": anchor, "new_string": anchor + "\n" + self.MAPPING}), "allow")
+        anchor = "    let mut map = HashMap::new();"
+        self.assertEqual(self.hook("implementer", "Edit", {"file_path": path, "old_string": anchor, "new_string": anchor + "\n    " + self.MAPPING}), "allow")
+        self.assertEqual(self.hook("implementer", "Edit", {"file_path": path, "old_string": "mod tests {", "new_string": "mod tests {\n    #[test]\n    fn foo_is_mapped() {}"}), "allow")
         self.assertEqual(self.hook("implementer", "Edit", {"file_path": path, "old_string": "TOLERANCE = 0", "new_string": "TOLERANCE = 50"}), "deny")
         self.assertEqual(self.hook("implementer", "Edit", {"file_path": str(self.tree / "protocols/testing/src/config.rs"), "old_string": "a", "new_string": "b"}), "deny")
 
@@ -363,6 +382,61 @@ class Guards(unittest.TestCase):
         self.assertEqual(self.hook("implementer", "Bash", {"command": "cargo test -p pkg"}), "allow")
         self.assertEqual(self.hook("researcher", "Write", {"file_path": str(self.tree / "src/x.rs"), "content": ""}), "deny")
         self.assertEqual(self.hook("researcher", "Write", {"file_path": str(Path(self.tmp.name) / "run/spec.json"), "content": "{}"}), "allow")
+
+
+class GuardHoles(Guards):
+    """The ways past the guard the review of #1852 found."""
+
+    def run_dir(self):
+        return Path(self.tmp.name) / "run"
+
+    def test_a_guard_that_cannot_decide_denies(self):
+        self.assertEqual(self.hook("implementer", "Edit", {"file_path": str(self.tree / "src/a.rs")}, env_drop=("TYCHO_INTEGRATE_WORKTREE",)), "deny")
+        binary = self.tree / ".claude/knowledge/x.md"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\xff\xfe rule")
+        self.assertEqual(self.hook("implementer", "Write", {"file_path": str(binary), "content": "x"}), "deny")
+
+    def test_researcher_and_reviewer_bash_writes_stay_in_their_directories(self):
+        target = str(self.tree / self.EXECUTION_RS)
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"echo x > /etc/foo"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"sed -i s/a/b/ {target}"}), "deny")
+        self.assertEqual(self.hook("researcher", "Bash", {"command": f"python3 -c \"open('{target}','w').write('x')\""}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"python3 -c \"open('{self.tree}/.claude/reviews/r.md','w').write('x')\""}), "allow")
+        self.assertEqual(self.hook("researcher", "Bash", {"command": f"echo '{{}}' > {self.run_dir()}/spec.json"}), "allow")
+
+    def test_the_implementer_cannot_write_guarded_paths_through_bash(self):
+        self.assertEqual(self.hook("implementer", "Bash", {"command": "python3 -c \"open('.claude/knowledge/x.md','w').write('x')\""}), "deny")
+        (self.tree / "pkg/sub").mkdir()
+        self.assertEqual(self.hook("implementer", "Bash", {"command": "cd pkg/sub && echo x >> ../../.claude/knowledge/general.md"}), "deny")
+        self.assertEqual(self.hook("implementer", "Bash", {"command": "cargo test -p pkg 2>&1 | tail -5"}), "allow")
+
+    def test_no_role_writes_the_ledger(self):
+        ledger_file = self.run_dir() / "ledger.jsonl"
+        for role in ("researcher", "reviewer"):
+            self.assertEqual(self.hook(role, "Write", {"file_path": str(ledger_file), "content": ""}), "deny")
+            self.assertEqual(self.hook(role, "Bash", {"command": f"echo '{{}}' >> {ledger_file}"}), "deny")
+
+    def test_no_role_writes_to_github_or_pushes(self):
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "gh api -X POST repos/o/r/pulls/1/comments -f body=x"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "gh api repos/o/r/issues/1/comments -f body=x"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "gh api --paginate repos/o/r/pulls/1/comments"}), "allow")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "env git -C . push origin HEAD"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "git commit -am x"}), "deny")
+
+    def test_uncommitted_and_deleted_guarded_files_are_violations(self):
+        (self.tree / "protocols/testing/src/lib.rs").write_text("weaker harness")
+        self.assertEqual([v["commit"] for v in ledger.check_guards(self.tree, self.base, "HEAD")], ["uncommitted"])
+        (self.tree / "protocols/testing/src/lib.rs").unlink()
+        self.git("rm", "-q", self.EXECUTION_RS)
+        self.git("commit", "-qm", "drop the executor table")
+        self.assertEqual([v["why"] for v in ledger.check_guards(self.tree, self.base, "HEAD")], ["deletes a guarded file"])
+
+    def test_decision_values_cannot_carry_a_command(self):
+        dec = {"agreements": {"protocol_system": "foo", "component_id": "x"}, "paths": {"package": "x; touch /tmp/pwned; echo"}}
+        self.assertTrue(any("paths.package" in e for e in schema.validate_decisions(dec, {})))
+        dec["paths"]["package"] = "ethereum-foo"
+        self.assertEqual(schema.validate_decisions(dec, {}), [])
 
 
 class SpecValidation(unittest.TestCase):
