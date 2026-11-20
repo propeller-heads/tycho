@@ -26,7 +26,7 @@ pub const POLICY_CONTROLLER_ATTRIBUTE: &str = "policy_controller";
 pub const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
 /// Name of the state attribute that is `1` while the policy refuses grants.
 pub const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
-/// Name of the state attribute that holds the lowest fee of a granted swap.
+/// Name of the state attribute that holds the lowest fee of a granted swap, in units of 1e-10.
 pub const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
 
 /// The grant terms that the policy emits after its creation, with their unset values.
