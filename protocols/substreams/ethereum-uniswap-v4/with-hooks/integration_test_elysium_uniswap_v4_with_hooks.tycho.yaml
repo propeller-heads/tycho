@@ -522,7 +522,7 @@ tests:
         tvl_only: &ascend_tvl_only
           bps: 0.01
           wei: 1000
-          reason: "indexed balances are the summed Swap and ModifyLiquidity token flows, and the UniswapV4Balances lens recomputes the amounts from the final price, rounded down, so indexed sits above it by about one Q96 price step per swap, never below. The PoolManager holds that dust: for the single-pool launch tokens its balanceOf equals the indexed balance exactly (ASCENSION, ELYXIR, ETOOLS, KAT, META_CAPTAIN, ELMO, KM at their snapshot blocks; PNTH holds 4 wei more, from a swap settled across transactions). Ascend swaps charge no LP fee (every Swap event carries fee 0), so this is not fee rounding. Measured by a range --report run with tvl_only removed, over the 8 components: at most 0.002 bps (574 of 2,805,774,267 USDC in pool 0xea03c9c4), 310,400,288 wei on PNTH (5e-19 of its balance), and 4 and 12 wei on KNTQ, which the lens reads as 0. The drift grows with a pool's swaps and has no fixed bound. bps 0.01 is the smallest step; wei 1000 covers the KNTQ entries only."
+          reason: "indexed balances are the summed Swap and ModifyLiquidity flows and sit above the UniswapV4Balances lens, which rounds down from the final price, by about one Q96 price step per swap, never below. Ascend swaps charge no LP fee. The measurements and their reproduction are in the package Readme, section Balances of Ascend pools."
       # WHYPE quote as currency1, 2% fee; launched at block 3261205
       - id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
         tokens:

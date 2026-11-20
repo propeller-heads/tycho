@@ -39,8 +39,12 @@ pub(crate) fn params() -> Params {
 
 /// The Elysium manifest's parameters with `montra_hooks` as the Montra hooks.
 pub(crate) fn params_with_montra_hooks(montra_hooks: &[Address]) -> Params {
-    Params::new(POOL_MANAGER, montra_hooks.iter().copied().collect(), BTreeSet::from([ASCEND_HOOK]))
-        .expect("the fixture hooks are disjoint")
+    Params::try_new(
+        POOL_MANAGER,
+        montra_hooks.iter().copied().collect(),
+        BTreeSet::from([ASCEND_HOOK]),
+    )
+    .expect("the fixture hooks are disjoint")
 }
 
 fn word(bytes: &[u8]) -> Word {

@@ -77,7 +77,7 @@ fn slot_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::montra::test_fixtures::{params, ASCEND_HOOK, HOOK};
+    use crate::montra::test_fixtures::{ASCEND_HOOK, HOOK};
 
     #[test]
     fn test_created_pool_maps_its_six_slots_to_its_words() {
@@ -93,7 +93,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(params().ascend_hooks(), &pools_created);
+        let entries = slot_entries(&BTreeSet::from([ASCEND_HOOK]), &pools_created);
 
         let hook = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
         let config = format!(
@@ -133,7 +133,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(params().ascend_hooks(), &pools_created);
+        let entries = slot_entries(&BTreeSet::from([ASCEND_HOOK]), &pools_created);
 
         let hook = "0xe0def4221b9840a610d4e7d55812a79a6431a8ec";
         let pool_data = "0xeed4aedf482dc31cd5db10dafcce24e9cd678d08586286766e5957130525";

@@ -13,8 +13,8 @@ use crate::address_list::{parse_address, parse_address_list, Address};
 /// `PoolManager` whose `Initialize` and `ModifyLiquidity` events the modules read, the Montra hooks
 /// and the Ascend hooks whose pools and storage writes are indexed.
 ///
-/// The fields are private so that every value went through [`Params::new`], which refuses a hook
-/// listed for both layouts.
+/// The fields are private so that every value went through [`Params::try_new`], which refuses a
+/// hook listed for both layouts.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Params {
     pool_manager: Address,
@@ -68,13 +68,17 @@ impl Params {
             parse_address_list("ascend_hooks", &query.ascend_hooks)?
                 .into_iter()
                 .collect();
-        Self::new(parse_address("pool_manager", &query.pool_manager)?, montra_hooks, ascend_hooks)
+        Self::try_new(
+            parse_address("pool_manager", &query.pool_manager)?,
+            montra_hooks,
+            ascend_hooks,
+        )
     }
 
     /// The parameters of `pool_manager` and the two hook lists. Fails when a hook is in both
     /// lists: the two layouts differ, so a hook in both would be decoded as one of them by
     /// accident.
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         pool_manager: Address,
         montra_hooks: BTreeSet<Address>,
         ascend_hooks: BTreeSet<Address>,
@@ -94,12 +98,6 @@ impl Params {
     /// The `PoolManager` whose events the modules read.
     pub(crate) fn pool_manager(&self) -> &Address {
         &self.pool_manager
-    }
-
-    /// The hooks that use the Ascend layout.
-    #[cfg(test)]
-    pub(crate) fn ascend_hooks(&self) -> &BTreeSet<Address> {
-        &self.ascend_hooks
     }
 
     /// Whether `address` is one of the `montra_hooks`. An address that is not 20 bytes is none.
@@ -142,7 +140,7 @@ mod tests {
 
         assert_eq!(
             params,
-            Params::new(
+            Params::try_new(
                 POOL_MANAGER,
                 BTreeSet::from([HOOK, SECOND_HOOK]),
                 BTreeSet::from([ASCEND_HOOK])
@@ -264,7 +262,7 @@ mod tests {
         }
         assert_eq!(
             parse_ascend_hooks(&param("store_montra_slots")).unwrap(),
-            params().ascend_hooks
+            BTreeSet::from([ASCEND_HOOK])
         );
     }
 

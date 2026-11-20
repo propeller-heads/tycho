@@ -138,12 +138,13 @@ decoded; it has no `SSTORE` site of its own, and any write it caused to a watche
 decoded anyway.
 
 Deployment assumption: the launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the same
-transaction as `Initialize`. Observed in the prestate trace of one launch transaction; the other
+transaction as `Initialize`. Observed in the prestate trace (`diffMode`) of one launch transaction,
+`0x088340f49470918c0f99684bcff5deb387e409534688526aa762aca4052ed82e` (block 8195096); the other
 launches are only known to have a `Launched` event (4962 of them to block 8365800), which shows
-that each pool launched, not what each launch wrote. A pool initialised
-without them would get zero for every attribute, and the simulation refuses such a pool. `Bid`
-words 0 and 1 (the inventory and the filled quote, at `keccak(poolId . 2)` and the next slot) are
-not written at launch and start at zero.
+that each pool launched, not what each launch wrote. A pool initialised without them would get
+zero for every attribute, and the simulation refuses such a pool. `Bid` words 0 and 1 (the
+inventory and the filled quote, at `keccak(poolId . 2)` and the next slot) are not written at
+launch and start at zero.
 
 A second deployment assumption concerns `fundBid`, which is permissionless: a call on a pool id
 before its launch would write `Bid` word 0 before the package watches the slot (the store lists
@@ -156,9 +157,10 @@ not established, since its source is unverified.
 
 ### Balances of Ascend pools
 
-As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test and a
-`tvl_only` tolerance (bps 0.01, wei 1000) on the eight Ascend components, declared on the measured
-cause below. The `PoolManager`'s own balance of each single-pool launch token equals the indexed amount
+As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test and
+a `tvl_only` tolerance (bps 0.01, wei 1000) on the eight Ascend components, declared on the
+measured cause below. The wei bound applies to every token of every Ascend component; the 4 and 12
+wei measured on KNTQ, which the lens reads as 0, are the entries it was sized for. The `PoolManager`'s own balance of each single-pool launch token equals the indexed amount
 at 7 of 8 pools (PNTH holds 4 wei more); the lens's rounded-down tick math is the lower figure.
 The Ascend pool's own swaps charge no LP fee (every `Swap` event carries fee 0, and
 `feeGrowthGlobal0/1X128` read 0 at the end of the tests' ranges), the hook's fee is its

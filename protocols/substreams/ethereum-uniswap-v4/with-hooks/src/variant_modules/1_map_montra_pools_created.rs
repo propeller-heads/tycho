@@ -24,10 +24,8 @@ pub fn map_montra_pools_created(
 /// pool of these hooks has `key_lp_fee` 0x800000, the dynamic-fee flag; the `montra_*` and
 /// `ascend_*` attributes carry its fees.
 ///
-/// Deployment assumption: the Ascend launch writes `PoolData` words 0 to 3 and `Bid` word 2 in the
-/// same transaction as `Initialize`. Observed in the prestate trace of one launch transaction; the
-/// other launches are known only by their `Launched` events (4962 pools to block 8365800), which
-/// show that each pool launched, not what each launch wrote.
+/// Deployment assumption: the Ascend launch writes its pool's hook storage in the `Initialize`
+/// transaction; the Readme's "Deployment assumption" paragraph has the evidence and its limits.
 /// `map_montra_enriched_block_changes` reads those writes for the pool's `ascend_*` attributes, so
 /// a pool initialised without them would get zero for every attribute, and the simulation refuses
 /// a pool whose fee or EMA is zero.
