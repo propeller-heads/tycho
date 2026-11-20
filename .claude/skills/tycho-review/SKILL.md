@@ -99,7 +99,11 @@ What runs:
 - the old head is not in the clone (the script reports it);
 - the earlier report was made from different knowledge: `git diff --stat <its knowledge commit>
   <base> -- .claude/knowledge` is not empty (a change to the skill alone does not count);
-- the PR's base branch changed, as when a stack is restacked onto another branch;
+- the PR's base branch was replaced, as when a stack is restacked onto another branch or the base
+  was rewritten (the old report's base commit is not an ancestor of the current base). A base that
+  only advanced is not a change: `git merge-base --is-ancestor <old base> <base>` holds, the
+  per-file PR diff is taken from the merge base, and a stack's shared branch that moved on holds the
+  stack's own base commits, which are not in any PR's diff;
 - the lines that differ between the two PR diffs are more than a third of the PR's diff lines (the
   script reports `fallback`).
 
@@ -157,7 +161,9 @@ Records look like this (`.claude/knowledge/*.md`, below each file's `<!-- pieces
    every conversation comment, resolved and outdated included, paginated:
    `gh api --paginate repos/{owner}/{repo}/pulls/<n>/comments`, `.../pulls/<n>/reviews`,
    `.../issues/<n>/comments`. Add `--existing`, and for a follow-up review the `--since` report's
-   findings, pre-existing list and earlier-findings table. Keep each comment's commit.
+   findings, pre-existing list and earlier-findings table. Keep each comment's commit. Merge the
+   sources into one list: a finding that restates an `--existing` entry (same file and claim) is
+   kept once, as that entry, with its id; one that restates another source's finding is kept once.
 
 4. **Plan the passes** with the planning script, from the repo root:
 
@@ -463,5 +469,24 @@ In order:
    deterministic checks with their source (CI, local, not run);
 6. the integration inventory, when an integration pass ran;
 7. refuted findings with their counter-evidence, in a `<details>` block.
+
+Beside it, the same findings as data for scripts (the `tycho-integrate` ledger reads them):
+`<report>.findings.json`, with the report's path, target, base, head and level, and:
+
+- `findings`: every finding of section 2 and the pre-existing list, each with the Findings format
+  fields as `severity`, `file`, `lines` (`"<start>-<end>"`), `quote`, `claim`, `evidence`,
+  `failure_scenario`, `rule`, `pr`, `pre_existing`, `verification` (`{"method", "result"}`), and
+  `earlier_id`: the `id` of the `earlier` entry it restates (an `--existing` id such as `F12`, or
+  an `E<n>`), `null` when it restates none; a finding that restates an earlier one reports it there
+  rather than as new;
+- `earlier`: every earlier finding of the merged list of step 3, once each, as `{"id", "status",
+  "evidence", "rule", "file", "claim"}`, with the status of section 4 (`fixed`, `open`, `deferred`,
+  `disproven`). A finding that restates an `--existing` entry, from the `--since` report or a PR
+  comment, is reported only under that entry's id. Every entry without an id, from any source, is
+  numbered `E<n>`, counting from 1 in the order `--existing`, `--since` report, PR comments. `rule`,
+  `file` and `claim` are always filled in, so the caller matches an `E<n>` entry to its own ids (the
+  `tycho-integrate` ledger matches by file and claim) instead of by position;
+- `refuted`: the refuted findings, as `{"rule", "file", "claim", "counter_evidence"}`;
+- `not_run`: the parts that did not run, one string each.
 
 Post nothing: which findings become PR comments is the reviewer's call.
