@@ -33,6 +33,7 @@ import os
 import re
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -297,11 +298,22 @@ class Indexers:
         return f"{name}.propellerheads.xyz"
 
     def _post(self, env: str, chain: str, endpoint: str, body: dict) -> dict:
-        return post_json(
-            f"https://{self.host(env, chain)}/v1/{endpoint}",
-            {"chain": chain, **body},
-            {"authorization": self.api_key},
-        )
+        """POST with up to three attempts: the indexers drop the odd TLS connection."""
+        for attempt in range(3):
+            try:
+                return post_json(
+                    f"https://{self.host(env, chain)}/v1/{endpoint}",
+                    {"chain": chain, **body},
+                    {"authorization": self.api_key},
+                )
+            except urllib.error.HTTPError as err:
+                if err.code < 500 or attempt == 2:
+                    raise
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as err:
+                if self._no_host(err) or attempt == 2:
+                    raise
+            time.sleep(2 * (attempt + 1))
+        raise AssertionError("unreachable")
 
     def _failed(self, env: str, chain: str, what: str, err: Exception) -> None:
         if isinstance(err, urllib.error.HTTPError):
@@ -332,7 +344,7 @@ class Indexers:
                     if page * 100 >= resp["pagination"]["total"]:
                         break
                 self._systems[key] = found
-            except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as err:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, KeyError, ValueError) as err:
                 if self._no_host(err):
                     self._systems[key] = set()
                 else:
@@ -369,7 +381,7 @@ class Indexers:
                 if page * 500 >= resp["pagination"]["total"]:
                     break
             self._hooks[key] = found
-        except (urllib.error.URLError, TimeoutError, KeyError, ValueError) as err:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, KeyError, ValueError) as err:
             self._failed(env, chain, f"{system} pools", err)
             self._hooks[key] = None
 
@@ -584,6 +596,18 @@ def untracked_cards(tracked: list[dict], repo: MainRepo, indexers: Indexers | No
 # ── Output ──────────────────────────────────────────────────────────────────
 
 
+def waiting_for(card: dict) -> str | None:
+    """"dev" or "prod" when the card's next step is confirmed missing; None otherwise. A check
+    that couldn't run (an indexer that didn't answer) doesn't put a card on either list."""
+    if card["graveyard"]:
+        return None
+    if card["stage"] == "Executor deployed" and card["checks"].get("In Dev") is False:
+        return "dev"
+    if card["stage"] == "In Dev" and card["checks"].get("In Prod") is False:
+        return "prod"
+    return None
+
+
 def render(data: dict, template: Path) -> str:
     payload = json.dumps(data, default=sorted).replace("</", "<\\/")
     return template.read_text().replace("/*__DATA__*/null", payload)
@@ -617,6 +641,8 @@ def main() -> int:
         warn("TYCHO_API_KEY not set, In Dev / In Prod not checked")
 
     cards, unassigned = build_cards(items, repo, indexers)
+    for card in cards:
+        card["waiting"] = waiting_for(card)
     if indexers is not None:
         if indexers.problems:
             sources["indexers"] = f"partial: {len(indexers.problems)} failed queries"
@@ -658,10 +684,10 @@ def main() -> int:
             f"{sum(bool(c['flags']) for c in live)} cards flagged, {len(unassigned)} items missing Protocol or Chains.",
             "",
             "**Waiting for dev** (executor on main, not in the dev indexer): "
-            + (", ".join(f"{c['chain']}/{c['protocol']}" for c in live if c["stage"] == "Executor deployed") or "none"),
+            + (", ".join(f"{c['chain']}/{c['protocol']}" for c in live if c["waiting"] == "dev") or "none"),
             "",
             "**Waiting for prod** (in dev, not in prod): "
-            + (", ".join(f"{c['chain']}/{c['protocol']}" for c in live if c["stage"] == "In Dev") or "none"),
+            + (", ".join(f"{c['chain']}/{c['protocol']}" for c in live if c["waiting"] == "prod") or "none"),
         ]
         with open(summary, "a") as fh:
             fh.write("\n".join(lines) + "\n")

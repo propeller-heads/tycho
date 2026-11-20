@@ -159,7 +159,7 @@ function chains() {
   for (const c of DATA.cards) {
     if (c.graveyard) continue;
     counts[c.chain] = (counts[c.chain] || 0) + (c.tracked ? 1 : 0);
-    waits[c.chain] = (waits[c.chain] || 0) + (c.stage in HINTS ? 1 : 0);
+    waits[c.chain] = (waits[c.chain] || 0) + (c.waiting ? 1 : 0);
   }
   return Object.keys(counts).sort((a, b) => counts[b] - counts[a] || waits[b] - waits[a] || a.localeCompare(b))
     .map(ch => [ch, counts[ch], waits[ch]]);
@@ -173,8 +173,8 @@ try { showUntracked = localStorage.getItem("show-untracked") !== "0"; } catch (e
 function waiting(cards) {
   const box = document.getElementById("waiting");
   box.replaceChildren();
-  for (const [stage, label] of [["Executor deployed", "Waiting for dev"], ["In Dev", "Waiting for prod"]]) {
-    const names = cards.filter(c => c.stage === stage).map(c => c.protocol).sort();
+  for (const [env, label] of [["dev", "Waiting for dev"], ["prod", "Waiting for prod"]]) {
+    const names = cards.filter(c => c.waiting === env).map(c => c.protocol).sort();
     box.append(el("div", {}, el("b", { text: `${label} (${names.length}): ` }),
       el("span", { class: "names", text: names.length ? names.join(", ") : "nothing" })));
   }
