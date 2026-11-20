@@ -19,7 +19,7 @@ use tycho_common::storage::StorageError;
 
 use super::{schema::writer_epoch, PostgresError};
 
-/// The writer epoch this process holds, shared by the write executor and the gateways feeding it.
+/// The writer epoch this process holds. The write executor and every gateway clone share it.
 ///
 /// The table starts at epoch 0 and every claim by a new writer increments it, so a claimed epoch is
 /// positive and 0 stands for "not claimed yet".

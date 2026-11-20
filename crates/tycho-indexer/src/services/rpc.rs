@@ -142,8 +142,8 @@ pub struct RpcHandler<G, T> {
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
     off_worker: OffWorker,
-    /// Role of this process as database writer, read by the health endpoint. `None` for a
-    /// process that never writes extraction results.
+    /// Role of this process as database writer, read by the health and readiness endpoints.
+    /// `None` for a process that never writes extraction results.
     writer_status: Option<WriterStatus>,
     /// How old the newest block of a streamed extractor may be on a ready follower.
     ready_head_tolerance: chrono::Duration,
@@ -1723,9 +1723,9 @@ pub const DEFAULT_READY_HEAD_TOLERANCE: chrono::Duration = chrono::Duration::sec
 
 /// Health check endpoint
 ///
-/// Tells whether the process must be restarted: it fails with 503 while this process is the
-/// database writer but has not confirmed its leader lock for 30 seconds. A follower that is behind
-/// the leader is healthy; see `/v1/ready` for whether a process can serve clients.
+/// Reports whether the process must be restarted. It fails with 503 while this process is the
+/// database writer and has not confirmed its leader lock for 30 seconds. A follower that is behind
+/// the leader stays healthy. See `/v1/ready` for whether a process can serve clients.
 #[utoipa::path(
     get,
     path = "/v1/health",
@@ -1746,8 +1746,8 @@ pub async fn health<G: Gateway, T: EntryPointTracer>(
     }
 }
 
-/// Returns why this process is unhealthy: it is the database writer and has not confirmed its
-/// leader lock within [`LEAD_CONFIRMATION_LIMIT`].
+/// Returns a reason when this process is the database writer and has not confirmed its leader
+/// lock within [`LEAD_CONFIRMATION_LIMIT`], or `None` otherwise.
 fn lead_unconfirmed(writer_status: Option<&WriterStatus>) -> Option<String> {
     let elapsed = writer_status.and_then(WriterStatus::time_since_lead_confirmed)?;
     (elapsed > LEAD_CONFIRMATION_LIMIT)
@@ -1756,10 +1756,11 @@ fn lead_unconfirmed(writer_status: Option<&WriterStatus>) -> Option<String> {
 
 /// Readiness check endpoint
 ///
-/// Fails with 503 when the health check fails, and while this process follows a leader and is
-/// behind the chain head: an extractor it streams has no block yet, or its newest block is older
-/// than the configured tolerance (60 seconds by default). Extractors whose history the leader
-/// syncs do not count.
+/// Fails with 503 when the health check fails. A follower also fails while it is behind the chain
+/// head, which means an extractor it streams has no block yet, or its newest block is older than
+/// the configured tolerance (60 seconds by default). Extractors that a follower does not stream do
+/// not count. These are the extractors whose history the leader syncs, and those the leader has
+/// not committed a block for yet.
 #[utoipa::path(
     get,
     path = "/v1/ready",

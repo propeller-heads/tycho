@@ -11,12 +11,12 @@ use crate::services::rpc::RpcHandler;
 
 /// Closes the HTTP/1 connection after the response once the process shuts down.
 ///
-/// Once the process stops, its view does not move any more, so a client asking for a newer block
-/// gets an error. Closing the connection makes the next request of the client open a new
-/// connection, which goes to an instance that still runs.
+/// A stopping process receives no new blocks, so a client that asks it for a newer block gets an
+/// error. Closing the connection makes the client's next request open a new connection, which
+/// goes to an instance that still runs.
 ///
-/// Passes every response through unchanged while the process runs, and in an app without a
-/// [`RpcHandler`].
+/// While the process runs, and in an app without an [`RpcHandler`], every response passes through
+/// unchanged.
 pub(in crate::services) async fn close_connection_on_shutdown<G, T, B>(
     req: ServiceRequest,
     next: Next<B>,

@@ -70,7 +70,7 @@ pub struct ServicesBuilder<G> {
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
-    /// Role of this process as database writer, read by the health endpoint.
+    /// Role of this process as database writer, read by the health and readiness endpoints.
     writer_status: Option<WriterStatus>,
     /// `Off` makes the windows fold into a `DiscardSink` and every state request read the
     /// database.
@@ -165,8 +165,9 @@ where
         self
     }
 
-    /// Makes the health endpoint fail while this process is the database writer and has stopped
-    /// confirming its leader lock.
+    /// Sets the role of this process as database writer. With it, the health endpoint fails while
+    /// this process is the leader and has stopped confirming its leader lock, and the readiness
+    /// endpoint fails while this process is a follower behind the chain head.
     pub fn writer_status(mut self, v: WriterStatus) -> Self {
         self.writer_status = Some(v);
         self

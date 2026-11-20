@@ -106,10 +106,11 @@ pub enum ControlMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamState {
     /// The supervisor takes new subscribers. It registers them as soon as it reads their request,
-    /// also while it builds or restarts the extractor.
+    /// even while it builds or restarts the extractor.
     Open,
-    /// The extractor's stream is not open on this process: it follows a leader that syncs the
-    /// extractor's history, and it opens the stream once the leader gets near the chain head.
+    /// The extractor's stream is not open on this process. The process follows a leader that
+    /// syncs the extractor's history, and opens the stream once the leader gets near the chain
+    /// head.
     WaitingForLeader,
 }
 
@@ -167,7 +168,7 @@ impl ExtractorHandle {
             .map_err(|err| ExtractionError::Unknown(err.to_string()))
     }
 
-    /// Resolves once the extractor's supervisor has ended, at once if it ended already.
+    /// Returns once the extractor's supervisor has ended, or at once if it has ended already.
     pub async fn stopped(&self) {
         self.control_tx.closed().await;
     }
@@ -175,11 +176,17 @@ impl ExtractorHandle {
 
 #[async_trait]
 impl MessageSender for ExtractorHandle {
-    /// Queues a subscription to the extractor and returns its receiver at once.
+    /// Queues a subscription to the extractor and returns its receiver.
     ///
-    /// Does not wait for the supervisor to read the request: the supervisor can be busy for a
-    /// long time, for example while it builds the extractor. A request that the supervisor
-    /// reads after it starts to wait for the leader is dropped, which closes the receiver.
+    /// Waits for room in the control channel, at most 5 seconds, but not for the supervisor to
+    /// read the request. The supervisor can be busy for a long time, for example while it builds
+    /// the extractor. A request that the supervisor reads after it starts to wait for the leader
+    /// is dropped, which closes the receiver.
+    ///
+    /// # Errors
+    /// Returns [`SubscribeError::NotStreaming`] while the supervisor waits for the leader,
+    /// [`SubscribeError::Timeout`] when the control channel stays full, and
+    /// [`SubscribeError::ControlChannelClosed`] when the supervisor has ended.
     #[instrument(skip(self))]
     async fn subscribe(
         &self,
@@ -263,8 +270,8 @@ pub(crate) fn slow_client_removals(id: &ExtractorIdentity) -> metrics::Counter {
 
 /// Drops `value` on the blocking thread pool and logs how long that took.
 ///
-/// For extractor state that takes seconds to free, so the freeing neither delays the task that
-/// owned it nor occupies an async worker thread.
+/// Use it for extractor state that takes seconds to free. The freeing then neither delays the
+/// task that owned it nor occupies an async worker thread.
 pub(crate) fn drop_in_background<T: Send + 'static>(
     extractor: ExtractorIdentity,
     owner: &'static str,
@@ -329,8 +336,8 @@ impl ExtractorRunner {
             // Close the substreams connection now, so a restart never holds two of them.
             drop(substreams);
             // The supervisor waits for this task to end before it reports the extractor stopped.
-            // Freeing a large extractor (e.g. the DCI caches) takes seconds and touches no
-            // external state.
+            // Freeing a large extractor, such as one with DCI caches, takes seconds and touches
+            // no external state, so it does not delay that report.
             drop_in_background(extractor.get_id(), "runner", extractor);
             result
         })

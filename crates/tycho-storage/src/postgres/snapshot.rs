@@ -73,10 +73,10 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
     Ok(())
 }
 
-/// Filter that keeps the rows of `table` written at or after `since`: rows whose `xmin`, the
-/// transaction that wrote the row version, is not older than the watermark. `age` counts
-/// transactions back from the current one and handles the 32-bit wraparound of `xmin`. A frozen
-/// row or one older than about two billion transactions counts as old.
+/// Filter that keeps the rows of `table` written at or after `since`. These are the rows whose
+/// `xmin`, the transaction that wrote the row version, is not older than the watermark. `age`
+/// counts transactions back from the current one and handles the 32-bit wraparound of `xmin`. A
+/// frozen row or one older than about two billion transactions counts as old.
 ///
 /// Limits of the Postgres internals this relies on:
 /// - No index covers `xmin`, so the filter scans every row of the table.
@@ -88,8 +88,8 @@ pub async fn bound_snapshot_reads(conn: &mut AsyncPgConnection) -> Result<(), Po
 /// - A long-running transaction holds the watermark back, so each catch-up reads more rows again.
 ///   That costs time, but loses nothing.
 fn written_since(table: &str, since: &CommitWatermark) -> diesel::expression::SqlLiteral<Bool> {
-    // The low 32 bits of a 64-bit transaction id are its `xid`. Ids below 3 are reserved; the
-    // first normal id is the oldest a row can carry.
+    // The low 32 bits of a 64-bit transaction id are its `xid`. Ids below 3 are reserved, so 3,
+    // the first normal id, is the oldest a row can carry.
     let xid = (since.transaction_id() & u64::from(u32::MAX)).max(3);
     sql::<Bool>(&format!("age(\"{table}\".xmin) <= age('{xid}'::xid)"))
 }
@@ -371,9 +371,9 @@ impl PostgresGateway {
         Ok(snapshots)
     }
 
-    /// The live slots, balances and code of the accounts of `chain` whose rows were written at or
-    /// after `since`, by account address. Each value is timestamped with its row's `valid_from`;
-    /// of two live rows for one key, the newer one wins.
+    /// The live slot, balance and code rows of `chain` written at or after `since`, keyed by
+    /// account address. Each value is timestamped with its row's `valid_from`. Of two live rows
+    /// for one key, the one with the newer `valid_from` wins.
     ///
     /// The `xmin` filter alone scans every row of the value tables. When
     /// [`Self::transaction_floor`] finds a bound, the reads also keep only the rows whose

@@ -169,10 +169,10 @@ const MAX_TS: NaiveDateTime = NaiveDateTime::MAX;
 
 /// Server-side TCP timeouts of every database session.
 ///
-/// The keepalives make Postgres drop an idle session about 25 seconds (10 + 3 × 5) after its peer
+/// The keepalives make Postgres drop an idle session about 25 seconds (10 + 3 * 5) after its peer
 /// stops answering. Keepalives do not apply while Postgres waits for the peer to acknowledge data
-/// it sent: without `tcp_user_timeout`, that session stays for the TCP retransmission timeout
-/// (about 15 minutes on Linux), and keeps its locks. `tcp_user_timeout` (milliseconds) drops it
+/// it sent. Without `tcp_user_timeout`, that session and its locks stay for the TCP
+/// retransmission timeout, about 15 minutes on Linux. `tcp_user_timeout` (milliseconds) drops it
 /// after 30 seconds.
 const SESSION_TCP_TIMEOUTS: &str =
     "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; \
@@ -524,7 +524,7 @@ pub(crate) struct PostgresGateway {
     /// be updated once an extractor has crossed it, but has not yet crossed the new
     /// horizon (aka it should never move faster than an extractor).
     retention_horizon: NaiveDateTime,
-    /// Writer epoch claimed by this process; shared by every clone of this gateway.
+    /// Writer epoch claimed by this process. Every clone of this gateway shares it.
     pub(crate) claimed_epoch: writer_epoch::ClaimedEpoch,
 }
 
@@ -720,7 +720,7 @@ async fn connect(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> 
 /// on the writer epoch row until it ends. If the writer's host disappears with a transaction
 /// open, Postgres keeps that session and its lock until it notices that the peer is gone, and no
 /// new writer can increment the epoch until then. With the operating system defaults that can
-/// take hours; with these settings Postgres drops the session within about 30 seconds after the
+/// take hours. With these settings Postgres drops the session within about 30 seconds after the
 /// peer stops answering.
 fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
     let mut manager_config = ManagerConfig::default();
@@ -874,7 +874,7 @@ const MIGRATION_LOCK_KEY: i64 = 0x7479_6368_6f5f_6d67;
 
 /// Applies pending migrations, waiting for any other process that is migrating the same database.
 ///
-/// Several instances can start against one database at the same time, e.g. during a rolling
+/// Several instances can start against one database at the same time, such as during a rolling
 /// deploy. Without the lock both would apply the same migration concurrently.
 fn run_migrations(db_url: &str) {
     info!("Upgrading database...");

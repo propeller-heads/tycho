@@ -196,9 +196,10 @@ pub trait Extractor: Send + Sync {
     /// write and already holds as many as it may.
     async fn wait_for_capacity(&self);
 
-    /// Prepares the extractor to stop: finishes the work that would otherwise be lost or redone
-    /// by the next process. Returns once that work is done. The extractor processes no further
-    /// blocks afterwards.
+    /// Prepares the extractor to stop.
+    ///
+    /// Finishes the work that would otherwise be lost, or redone by the next process, and
+    /// returns once that work is done. The extractor processes no further blocks afterwards.
     ///
     /// # Errors
     /// Returns an [`ExtractionError`] if part of that work fails. The stream cursor in the

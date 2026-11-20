@@ -19,7 +19,7 @@ postgres/
 ├── entry_point.rs      — entry point + tracing param/result persistence
 ├── extraction_state.rs — extractor checkpoint (cursor, block hash) persistence; committed block and cursor per extractor
 ├── leader_lock.rs      — LeaderLock: session advisory lock electing the single database writer
-├── snapshot.rs         — one-transaction reads for the entity cache (StateSnapshotGateway): all live state and each extractor's cursor, or what a catch-up reads: the account rows written since a commit watermark (`xmin`, narrowed through the `modify_tx` index by a bound from the extractors' committed blocks) and every live component of one system
+├── snapshot.rs         — one-transaction reads for the entity cache (StateSnapshotGateway). `state_snapshot` reads all live state; `catch_up_read` reads the account rows written since a commit watermark (`xmin`, narrowed through the `modify_tx` index by `transaction_floor`) and every live component of one system. Both return each extractor's cursor
 ├── versioning.rs       — VersionedRow / StoredVersionedRow + apply_versioning(); PartitionedVersionedRow + apply_partitioned_versioning()
 ├── writer_epoch.rs     — single-writer fencing: increment / verify the `writer_epoch` row
 ├── orm.rs              — Diesel Queryable/Insertable structs for every table
@@ -42,8 +42,8 @@ All public DB operations go through one of two gateway structs:
   the extractor's newest received block is more than 10 minutes old. A `Head` start on an open
   `Backfill` transaction raises it to `Head`. The executor moves everything already sent into a
   `WriteQueue` and always runs the oldest head transaction before any backfill one, so a syncing
-  extractor's large batches delay only itself; a head write waits at most for the one
-  transaction already running. The `DBTransactionCommitted` debug event carries the `priority` it ran with.
+  extractor's large batches delay only itself. A head write waits at most for the one
+  transaction already running. The `DBTransactionCommitted` debug event carries its `priority`.
 - **Writer fencing**: to *fence* a writer is to make the database refuse all its writes from
   the moment a different process becomes the writer. A former leader can still run after it lost
   the lock (a long pause, a network failure), and the lock alone cannot stop it from writing.
@@ -63,8 +63,8 @@ All public DB operations go through one of two gateway structs:
   epoch. The epoch lives on `PostgresGateway` (`ClaimedEpoch`), so the executor and every
   `CachedGateway` clone share it.
 - **Leader election**: `LeaderLock` holds a session advisory lock on a dedicated, non-pooled
-  connection with the same server-side TCP timeouts, so Postgres frees the lock within about 30s after a
-  leader's host disappears. The lock elects the writer; the epoch fences it.
+  connection with the same server-side TCP timeouts, so Postgres frees the lock within about 30s
+  after a leader's host disappears. The lock elects the writer. The epoch fences it.
 - **Non-writer support**: `CachedGateway::get_committed_blocks` returns the number and timestamp
   of the block each extractor's `extraction_state` points to (the newest block committed for it),
   `cache_tokens` adds tokens to the token cache without writing them, and `cache_last_traded`

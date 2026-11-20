@@ -28,16 +28,18 @@ pub struct WriterStatus {
 }
 
 impl WriterStatus {
-    /// A process that is the leader for its whole lifetime.
+    /// Returns the status of a process that is the leader for its whole lifetime.
     pub fn leader() -> Self {
         let (_, role) = watch::channel(Role::Leader);
         let (_, committed_blocks) = watch::channel(HashMap::new());
         Self { role, committed_blocks, lead_confirmed_at: None }
     }
 
-    /// Follows `role`, reads the leader's committed blocks, keyed by extractor name, from
-    /// `committed_blocks`, and reads from `lead_confirmed_at` when this process last confirmed
-    /// that it still holds the leader lock.
+    /// Returns a status that follows `role`.
+    ///
+    /// `committed_blocks` holds the leader's committed blocks, keyed by extractor name.
+    /// `lead_confirmed_at` holds the time this process last confirmed that it still holds the
+    /// leader lock.
     pub fn new(
         role: watch::Receiver<Role>,
         committed_blocks: watch::Receiver<HashMap<String, CommittedBlock>>,
@@ -53,8 +55,8 @@ impl WriterStatus {
 
     /// Returns how long ago this process last confirmed its leader lock.
     ///
-    /// `None` when this process is a follower, or when it does not track confirmations (a process
-    /// that is the leader for its whole lifetime).
+    /// Returns `None` when this process is a follower, or when it is the leader for its whole
+    /// lifetime and so does not track confirmations.
     pub fn time_since_lead_confirmed(&self) -> Option<Duration> {
         if self.role() != Role::Leader {
             return None;
@@ -76,10 +78,10 @@ impl WriterStatus {
     ///
     /// A leader always needs it. A follower needs it only while the leader's newest committed
     /// block for `extractor` is younger than [`FOLLOWER_RETENTION_SPAN`]. An older block means
-    /// that the leader syncs history for the extractor: a follower would pay a second time for the
-    /// same history, it cannot serve history, and its retained blocks could not reach the head.
-    /// Without a committed block, the leader syncs the extractor for the first time, so a follower
-    /// does not need it.
+    /// that the leader syncs history for the extractor. A follower would then pay a second time
+    /// for the same history, it cannot serve history, and its retained blocks could not reach the
+    /// head. Without a committed block, the leader syncs the extractor for the first time, so a
+    /// follower does not need it.
     pub fn needs_stream(&self, extractor: &str, now: NaiveDateTime) -> bool {
         if self.role() == Role::Leader {
             return true;
@@ -94,9 +96,9 @@ impl WriterStatus {
     /// name. `newest_blocks` holds the newest block this process received for each extractor.
     ///
     /// An extractor is behind when it has no block, or when its newest block is older than
-    /// `tolerance`. Only extractors for which [`Self::needs_stream`] is true count: for the
+    /// `tolerance`. Only extractors for which [`Self::needs_stream`] is true count. For the
     /// others the leader syncs history or has committed nothing yet, so this process does not
-    /// stream them and a new leader resumes them from the database cursor. A leader is never
+    /// stream them, and a new leader resumes them from the database cursor. A leader is never
     /// behind.
     pub(crate) fn extractors_behind_head(
         &self,

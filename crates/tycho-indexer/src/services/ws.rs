@@ -51,9 +51,9 @@ impl WsData {
     /// Closes every connection, open or opened later, with close code `Away` once `shutdown`
     /// turns `true`.
     ///
-    /// The server stops to accept connections when it receives the shutdown signal, but it keeps
-    /// the open ones. A client on an open connection then subscribes again on the same
-    /// connection, to extractors that stop, instead of connecting to another instance.
+    /// On the shutdown signal the server stops accepting connections but keeps the open ones.
+    /// Without this, a client on an open connection would subscribe again on that connection to
+    /// extractors that are stopping, instead of connecting to another instance.
     pub fn close_on_shutdown(mut self, shutdown: watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
         self

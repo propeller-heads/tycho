@@ -537,7 +537,7 @@ impl PendingDeltasBuffer for PendingDeltas {
         Ok(guard.commit_status(version))
     }
 
-    /// Reads the tip of each window; see [`DeltaWindow::tip`].
+    /// Reads the tip of each window with [`DeltaWindow::tip`].
     fn newest_blocks(&self) -> Result<HashMap<String, Option<Block>>> {
         let mut newest = HashMap::with_capacity(self.windows.len());
         for (extractor, window) in &self.windows {

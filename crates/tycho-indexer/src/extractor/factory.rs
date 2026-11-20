@@ -325,8 +325,8 @@ impl ExtractorFactory {
             })
             .transpose()?;
 
-        // Build the protocol extractor. It reads its cursor before the DCI plugin loads its
-        // state, so that the stream never starts above the block of that state.
+        // The protocol extractor reads its cursor before the DCI plugin loads its state, so
+        // the stream never starts above the block of that state.
         let mut extractor =
             ProtocolExtractor::<ExtractorPgGateway, EthereumTokenPreProcessor, DCIPlugin<_>>::new(
                 gw,

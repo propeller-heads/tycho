@@ -193,7 +193,7 @@ where
     }
 
     /// Drops every retained block at or below `flushed_block_height` and returns them, oldest
-    /// first: their writes reached the store, so the database covers them from here on.
+    /// first. Their writes reached the store, so the database covers them from here on.
     pub fn release_committed(&mut self, flushed_block_height: u64) -> Vec<Arc<B>> {
         let mut released = Vec::new();
         while let Some(block) = self
@@ -210,9 +210,11 @@ where
         self.committing_blocks.len()
     }
 
-    /// Returns the chain time the retained committing blocks cover: the newest one's timestamp
-    /// minus the oldest one's, or `None` without retained blocks. Blocks outside the committing
-    /// section do not count.
+    /// Returns the chain time the retained committing blocks cover, as the newest one's
+    /// timestamp minus the oldest one's.
+    ///
+    /// Returns `None` without retained committing blocks. Blocks outside the committing section
+    /// do not count.
     pub fn committing_span(&self) -> Option<chrono::Duration> {
         let oldest = self.committing_blocks.front()?;
         let newest = self.committing_blocks.back()?;

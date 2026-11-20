@@ -1,10 +1,10 @@
 //! Election of the process that writes extraction results to the database.
 //!
-//! Every `index` process extracts and serves; only the leader commits. A process that starts
-//! while another holds the leader lock follows: it publishes the leader's committed blocks to
-//! its extractors and retries the lock until it gets it. A leader that loses its lock session
-//! ends with an error, so the process exits instead of writing next to a new leader. A process
-//! that shuts down releases the lock, so a follower can take over before this process exits.
+//! Every `index` process extracts and serves, and only the leader commits. A process that starts
+//! while another holds the leader lock follows. It publishes the leader's committed blocks to its
+//! extractors and retries the lock until it gets it. A leader that loses its lock session ends
+//! with an error, so the process exits instead of writing next to a new leader. A process that
+//! shuts down releases the lock, so a follower can take over before this process exits.
 use std::{collections::HashMap, time::Duration};
 
 use tokio::{
@@ -38,15 +38,22 @@ const LOCK_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// Returns the [`WriterStatus`] for the extractors and the background task. A process that gets
 /// the lock at once increments the writer epoch on `gateway` and is leader from the start.
-/// Otherwise it is a follower: the task polls the committed blocks of `chain` and retries the
-/// lock. When it gets the lock, it increments the writer epoch and only then switches the role, so
-/// no extractor commits before the former leader is fenced. The lock checks start with the epoch
-/// increment.
+/// Otherwise it is a follower. The task then polls the committed blocks of `chain` and retries
+/// the lock. When it gets the lock, it increments the writer epoch and only then switches the
+/// role, so no extractor commits before the former leader is fenced. A leader's lock checks start
+/// after the epoch increment.
 ///
-/// A send on `release` ends the task with `Ok`: a leader closes its lock session, which releases
-/// the lock at once, and a follower stops retrying the lock, so a process that shuts down never
-/// becomes the leader. A dropped `release` releases nothing. Otherwise the task only ends when
-/// the leader's lock session is lost or fails.
+/// A send on `release` ends the task with `Ok`. A leader closes its lock session, which releases
+/// the lock at once. A follower stops retrying the lock, so a process that shuts down never
+/// becomes the leader. A dropped `release` releases nothing. Otherwise the task ends only with an
+/// error: when the leader's lock session is lost or fails, or when a promoted follower cannot
+/// increment the writer epoch.
+///
+/// # Errors
+///
+/// Returns an error when the lock session cannot connect, when the first lock attempt fails, when
+/// a process that gets the lock at once cannot increment the writer epoch, or when a follower
+/// cannot read the committed blocks for the first time.
 pub async fn elect(
     database_url: &str,
     gateway: CachedGateway,
@@ -142,11 +149,13 @@ async fn publish_committed_blocks(
     Ok(())
 }
 
-/// Checks the lock session until it fails, and returns that failure. Returns `Ok` once
-/// `release` resolves, after it closed the lock session, which releases the lock.
+/// Checks the lock session until it fails, and returns that failure.
 ///
-/// Publishes the time of each successful check on `confirmed_tx`. The health endpoint uses it to
-/// report a leader whose checks stopped, for example because its runtime is stuck while it still
+/// Returns `Ok` once `release` resolves. It closes the lock session first, which releases the
+/// lock.
+///
+/// Publishes the time of each successful check on `confirmed_tx`. With it, the health endpoint
+/// reports a leader whose checks stopped, for example because its runtime is stuck while it still
 /// holds the lock.
 ///
 /// Records the duration of each check in `leader_lock_check_duration_seconds`. The check runs on

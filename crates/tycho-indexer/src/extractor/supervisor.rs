@@ -41,8 +41,8 @@ const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// How often a follower that waits for the leader to sync an extractor's history catches the
-/// entity cache up for that extractor's system. The catch-up at the end of the wait then reads at
-/// most this much.
+/// entity cache up for that extractor's system. The catch-up at the end of the wait then reads
+/// at most this interval of leader commits.
 #[cfg(not(test))]
 const WAITING_CATCH_UP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 #[cfg(test)]
@@ -59,9 +59,11 @@ enum StreamNeed {
     Stopped,
 }
 
-/// Whether the entity cache must catch up before a build. The first build resumes from the startup
-/// snapshot the cache was built from, unless it waited for the leader: the snapshot is old by
-/// then. Every later build resumes from a catch-up.
+/// Returns whether the entity cache must catch up before a build.
+///
+/// The first build resumes from the startup snapshot the cache was built from. A first build that
+/// waited for the leader cannot, because the snapshot is old by then. Every later build resumes
+/// from a catch-up.
 fn needs_catch_up(first_build: bool, need: StreamNeed) -> bool {
     !first_build || need == StreamNeed::AfterWait
 }
@@ -76,11 +78,13 @@ enum StreamWait {
 }
 
 /// Waits until `writer` says that this process needs the stream of `extractor`, or until a
-/// `Stop` arrives on `control_rx`. With `cache_catch_up`, catches the cache up for the extractor's
-/// system every [`WAITING_CATCH_UP_INTERVAL`] meanwhile, so the catch-up at the end of the wait is
-/// small. A failed catch-up is logged and tried again at the next interval.
+/// `Stop` arrives on `control_rx`.
 ///
-/// Drops every subscription that arrives meanwhile, which closes its receiver: the stream is
+/// With `cache_catch_up`, catches the entity cache up for the extractor's system every
+/// [`WAITING_CATCH_UP_INTERVAL`] meanwhile, so the catch-up at the end of the wait is small. A
+/// failed catch-up is logged and tried again at the next interval.
+///
+/// Drops every subscription that arrives meanwhile, which closes its receiver. The stream is
 /// closed, so a subscriber would receive nothing until the leader gets near the head. Only a
 /// request queued before the caller published [`StreamState::WaitingForLeader`] gets here.
 async fn wait_for_stream_need(
@@ -177,8 +181,8 @@ fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
 /// Returns whether `result` asks to build the extractor again at once, without a failure.
 ///
 /// An extractor with a DCI plugin stops with [`ExtractionError::RestartToTakeOver`] when this
-/// process becomes the leader. The rebuild reads its state back from the database, so it waits
-/// for no backoff and does not count toward `max_restarts`.
+/// process becomes the leader. The rebuild reads its state back from the database. It is not a
+/// failure, so it waits for no backoff and does not count toward `max_restarts`.
 fn is_restart_to_take_over(result: &Result<Result<(), ExtractionError>, JoinError>) -> bool {
     let Ok(Err(ExtractionError::RestartToTakeOver(_))) = result else {
         return false;
@@ -214,8 +218,8 @@ pub struct ExtractorSupervisor {
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
-    /// Brings the entity cache up to date before each build but the first; `None` without a
-    /// cache.
+    /// Brings the entity cache up to date before the builds that [`needs_catch_up`] selects.
+    /// `None` without an entity cache.
     cache_catch_up: Option<Arc<CacheCatchUp>>,
 }
 
@@ -272,9 +276,11 @@ impl ExtractorSupervisor {
             .insert(subscriber_id, Subscriber { sender, kind });
     }
 
-    /// Drives `work` to its end while it serves control messages: registers each subscription,
-    /// and gives `work` up when a `Stop` arrives. Returns the output of `work`, or `None` after a
-    /// `Stop`. Once the control channel is closed, only `work` is awaited.
+    /// Drives `work` to its end while it serves control messages.
+    ///
+    /// Registers each subscription that arrives, and gives up `work` when a `Stop` arrives.
+    /// Returns the output of `work`, or `None` after a `Stop`. Once the control channel is
+    /// closed, only `work` is awaited.
     async fn serve_control_until<F: Future>(&mut self, work: F) -> Option<F::Output> {
         tokio::pin!(work);
         loop {
@@ -295,7 +301,10 @@ impl ExtractorSupervisor {
     }
 
     /// Waits until this process needs the extractor's stream, and rejects subscriptions
-    /// meanwhile. Says whether it waited, or whether a `Stop` arrived first.
+    /// meanwhile.
+    ///
+    /// Publishes [`StreamState::WaitingForLeader`] for the time of the wait. Returns whether it
+    /// had to wait, or [`StreamNeed::Stopped`] when a `Stop` arrived first.
     async fn wait_until_stream_is_needed(&mut self) -> StreamNeed {
         let now = chrono::Utc::now().naive_utc();
         if self
@@ -338,9 +347,13 @@ impl ExtractorSupervisor {
     }
 
     /// Brings the entity cache up to date for this extractor's system before a build, and makes
-    /// the build resume from the cursor read with it. The writer role is read before the catch-up,
-    /// as before the startup snapshot. Serves control messages meanwhile. Returns `false` when a
-    /// `Stop` arrives first. Does nothing without an entity cache.
+    /// the build resume from the cursor read with it.
+    ///
+    /// Reads the writer role before the catch-up, as for the startup snapshot. A role only
+    /// changes from follower to leader, so a leader role read first means that the cursor is
+    /// final. Serves control messages meanwhile. Does nothing without an entity cache.
+    ///
+    /// Returns `Ok(false)` when a `Stop` arrives first, and an error when the catch-up fails.
     async fn catch_up_entity_cache(&mut self) -> Result<bool, ExtractionError> {
         let Some(cache_catch_up) = self.cache_catch_up.clone() else {
             return Ok(true);
@@ -365,8 +378,8 @@ impl ExtractorSupervisor {
 
     /// Waits `backoff` before a restart. Returns `false` when a `Stop` arrives first.
     ///
-    /// Serves control messages while it waits: a `Stop` must not have to sit out a backoff of up
-    /// to `MAX_RESTART_BACKOFF`, and new subscribers registered now take effect on the next run.
+    /// Serves control messages while it waits. A `Stop` must not have to sit out a backoff of up
+    /// to [`MAX_RESTART_BACKOFF`], and new subscribers registered now take effect on the next run.
     async fn wait_for_restart_backoff(&mut self, backoff: Duration) -> bool {
         let waited = self
             .serve_control_until(tokio::time::sleep(backoff))
@@ -404,8 +417,9 @@ impl ExtractorSupervisor {
     /// thread pool.
     pub async fn run(mut self) -> Result<(), ExtractionError> {
         let result = self.supervise().await;
-        // A shutdown waits for `stopped` before it releases the leader lock. Freeing a large
-        // protocol cache takes seconds, and no write is left to wait for at this point.
+        // A shutdown waits for `stopped` before it releases the leader lock. No write is left at
+        // this point, so the lock need not wait the seconds that freeing a large protocol cache
+        // takes.
         self.control_rx.close();
         drop_in_background(self.id.clone(), "supervisor", self);
         result
@@ -416,8 +430,6 @@ impl ExtractorSupervisor {
         let mut backoff_strategy = restart_backoff();
         let restarts = restart_counter(&self.id);
 
-        // The first build resumes from the startup snapshot, which the cache was built from.
-        // Every later build, and a first build after a wait, resumes from a catch-up.
         let mut first_build = true;
         loop {
             let need = self.wait_until_stream_is_needed().await;

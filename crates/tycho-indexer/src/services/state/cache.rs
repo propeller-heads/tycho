@@ -15,16 +15,16 @@
 //! entry.
 //!
 //! The startup load builds the cache from a [`StateSnapshot`] before the extractors start. After
-//! that, the folds coming out of the block windows write it, and so does a catch-up
-//! ([`EntityCache::apply_catch_up`]): before an extractor is built again, or after it waited for
-//! the leader, [`CacheCatchUp`](super::catch_up::CacheCatchUp) reads from the database what was
-//! committed since its last read. A catch-up replaces the components of the extractor's system and
-//! writes each account value with the rule folds use. The cache never evicts: an entity missing
-//! from the cache does not exist.
+//! that, two kinds of writes change it. Folds come out of the block windows. Catch-ups
+//! ([`EntityCache::apply_catch_up`]) come from [`CacheCatchUp`](super::catch_up::CacheCatchUp),
+//! which reads what the database committed since its last read. A catch-up runs before an
+//! extractor is built again and after a follower waited for the leader. It replaces the
+//! components of the extractor's system and writes each account value with the rule folds use.
+//! The cache never evicts, so an entity missing from the cache does not exist.
 //!
-//! Reads and writes take turns behind one read-write lock: a fold or a catch-up takes the write
-//! side and applies one whole block or catch-up read atomically, reads take the read side. A reader
-//! never observes half a block or half a catch-up.
+//! Reads and writes take turns behind one read-write lock. A fold or a catch-up takes the write
+//! side and applies one whole block or catch-up read at once. Reads take the read side, so a
+//! reader never sees half a block or half a catch-up.
 //!
 //! Accounts and component states are held behind an `Arc`: an account can hold a large storage
 //! map, and a component many attributes. A reader copies only the `Arc` under the read lock, and
@@ -259,8 +259,8 @@ impl CachedAccount {
         }
     }
 
-    /// Applies `changes` with [`apply_account_changes`]. `updated_at` moves to the newest applied
-    /// write.
+    /// Applies `changes` with [`apply_account_changes`] and moves `updated_at` to the newest
+    /// applied write.
     fn apply_changes(&mut self, changes: AccountChanges) -> ValueWrites {
         let writes = apply_account_changes(self, changes);
         if let Some(newest) = writes.newest_applied {
@@ -336,12 +336,13 @@ impl AccountWrites for CachedAccount {
     }
 }
 
-/// Writes one block's changes to `account`. Each value takes `at`; a value already written by that
-/// block or a newer one is left alone, so the rule lives in [`Timestamped::write`] rather than
-/// here: values of one account can have different timestamps, so one timestamp for the whole
-/// account cannot decide for each of them. A deleted slot becomes the zero value, as in
-/// [`Account::apply_delta`]. A delta that carries code replaces the code and its hash together.
-/// [`WriteOutcome::Conflict`]s are logged once per block.
+/// Writes one block's changes to `account`, each value at timestamp `at`.
+///
+/// [`Timestamped::write`] decides for each value, and leaves alone a value already written by that
+/// block or a newer one. The decision is per value because values of one account can carry
+/// different timestamps. A deleted slot becomes the zero value, as in [`Account::apply_delta`]. A
+/// delta that carries code replaces the code and its hash together. [`WriteOutcome::Conflict`]s
+/// are logged once per call.
 fn apply_account_block(
     account: &mut impl AccountWrites,
     delta: Option<&AccountDelta>,
@@ -374,8 +375,8 @@ fn apply_account_block(
     writes
 }
 
-/// Applies `changes` to `account` with the rule of [`apply_account_block`]. The only difference:
-/// each value carries its own timestamp, where a block gives all its values one.
+/// Applies `changes` to `account` with the rule of [`apply_account_block`], except that each value
+/// carries its own timestamp. Conflicts are counted but not logged here.
 fn apply_account_changes(account: &mut impl AccountWrites, changes: AccountChanges) -> ValueWrites {
     let mut writes = ValueWrites::default();
     for (key, (value, at)) in changes.slots {
@@ -547,8 +548,8 @@ impl From<CachedComponentState> for ProtocolComponentState {
 /// The long-lived entity store. See the module doc for the data model and locking.
 pub struct EntityCache {
     state: RwLock<CacheState>,
-    /// Number of folded blocks and applied catch-ups. Bumped under the write lock, so a reader
-    /// that took the read lock after a change also reads the bumped value.
+    /// Number of folded blocks and applied catch-ups. It is incremented under the write lock, so
+    /// a reader that takes the read lock after a change also reads the new count.
     folds: AtomicU64,
 }
 
@@ -582,7 +583,7 @@ impl EntityCache {
         Self { state: RwLock::new(state), folds: AtomicU64::new(0) }
     }
 
-    /// Number of blocks folded into the cache since it was built.
+    /// Number of blocks folded and catch-ups applied since the cache was built.
     pub(crate) fn folds(&self) -> u64 {
         self.folds.load(Ordering::Relaxed)
     }
@@ -621,25 +622,27 @@ impl EntityCache {
             .expect("entity cache lock poisoned")
     }
 
-    /// Writes a catch-up read for `system` into the cache, under one hold of the write lock: a
-    /// reader sees the cache from before or after the whole read, never part of it.
+    /// Writes a catch-up read for `system` into the cache under one hold of the write lock.
     ///
-    /// Components: the cached components of `system` are replaced by `read.components`, which
-    /// holds every live component of `system`. A cached component missing from it was deleted,
-    /// so it leaves the cache. Components of other systems do not change.
+    /// A reader sees the cache from before or after the whole read, never part of it.
     ///
-    /// Accounts:
-    /// - `read.accounts` holds the full state of each account created since the watermark. It is
-    ///   added only when the cache does not hold its address. When a fold added the account during
-    ///   the read, the cached entry stays, and its newer values arrive through `read.changes`.
+    /// `read.components` holds every live component of `system` and replaces the cached
+    /// components of `system`. A cached component missing from it was deleted, so it leaves the
+    /// cache. Components of other systems do not change.
+    ///
+    /// Accounts are written as follows:
+    /// - `read.accounts` holds the full state of each account created since the watermark. An
+    ///   account is added only when the cache does not hold its address. If a fold added the
+    ///   account during the read, the cached entry stays and its newer values arrive through
+    ///   `read.changes`.
     /// - `read.changes` holds the account values written since the watermark, each with the
-    ///   timestamp of its row. Each value is written with the rule folds use: it applies only when
-    ///   it is newer than the cached value, so a newer value from a fold stays.
-    /// - Values in `read.changes` for an address the cache does not hold are skipped. They are only
-    ///   the values written since the watermark, which is not enough to make an entry.
+    ///   timestamp of its row. A value applies only when it is newer than the cached value, the
+    ///   same rule folds use, so a newer value from a fold stays.
+    /// - Changes for an address the cache does not hold are skipped. They carry only the values
+    ///   written since the watermark, which is not enough to build an entry.
     ///
-    /// Call it only while the extractor of `system` is stopped: replacing the components would
-    /// drop a fold of `system` that applied after the read.
+    /// Call it only while the extractor of `system` is stopped. Otherwise replacing the components
+    /// would drop a fold of `system` that applied after the read.
     ///
     /// # Returns
     ///
@@ -693,15 +696,16 @@ impl EntityCache {
 /// What one catch-up wrote into the cache.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CatchUpCounts {
-    /// Components of the caught-up system, all replaced.
+    /// Components in the read. They replace the cached components of the caught-up system.
     pub components: usize,
     /// Accounts the cache did not hold, added with their full state.
     pub accounts_added: usize,
     /// Account values written.
     pub values_applied: usize,
-    /// Account values from a block the cache holds a different value of.
+    /// Account values from the same block as the cached value but with different content.
     pub conflicts: usize,
-    /// Accounts with changes the cache does not hold, such as a token account without code.
+    /// Accounts with changes in the read but no cache entry, such as a token account without
+    /// code.
     pub accounts_skipped: usize,
 }
 

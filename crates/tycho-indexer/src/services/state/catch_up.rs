@@ -1,10 +1,10 @@
 //! Catch-ups of the entity cache from the database.
 //!
 //! The cache gets every block of a system that this process folds. It misses the blocks of a
-//! system whose extractor does not run here: while a follower waits for the leader, and between
-//! two builds of an extractor. A catch-up reads what the database committed since the last read
-//! and writes it into the cache ([`EntityCache::apply_catch_up`]), and returns the cursor of the
-//! system's extractor from the same read, so the extractor resumes right after it.
+//! system whose extractor does not run here, which happens while a follower waits for the leader
+//! and between two builds of an extractor. A catch-up reads what the database committed since the
+//! last read and writes it into the cache ([`EntityCache::apply_catch_up`]). It also returns the
+//! cursor of the system's extractor from the same read, so the extractor resumes right after it.
 
 use std::{
     sync::{Arc, Mutex},
@@ -25,21 +25,21 @@ pub struct CacheCatchUp {
     cache: Arc<EntityCache>,
     gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
     chain: Chain,
-    /// The newest watermark of a read that the cache holds, of the startup snapshot or of a
-    /// catch-up. Every read covers the whole chain, so one watermark serves every system: the next
-    /// read takes the account rows written since it. Components need none, because a read takes
-    /// all of a system's components.
+    /// The watermark of the newest read applied to the cache, either the startup snapshot or a
+    /// catch-up. The next read takes the account rows written since it. Account reads cover the
+    /// whole chain, so one watermark serves every system. Components need no watermark, because
+    /// a read takes all of a system's components.
     ///
-    /// Catch-ups of different systems run in parallel. Each reads from the watermark it finds
-    /// when it starts, and after its apply the watermark is the newer of the two, by transaction
-    /// id, with the committed blocks of the same read. An older read applied after a newer one
-    /// changes nothing: its values have older timestamps.
+    /// Catch-ups of different systems can run in parallel. Each reads from the watermark it finds
+    /// when it starts. After its apply, the watermark moves to the read's watermark only if that
+    /// one has a higher transaction id. An older read applied after a newer one changes nothing
+    /// in the cache, because its values have older timestamps.
     watermark: Mutex<CommitWatermark>,
 }
 
 impl CacheCatchUp {
-    /// Catches `cache` up from `gateway`. `watermark` is the one of the snapshot `cache` was built
-    /// from.
+    /// Creates a catch-up for `cache` that reads from `gateway`. `watermark` is the watermark of
+    /// the snapshot that `cache` was built from.
     pub fn new(
         cache: Arc<EntityCache>,
         gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
@@ -49,18 +49,19 @@ impl CacheCatchUp {
         Self { cache, gateway, chain, watermark: Mutex::new(watermark) }
     }
 
-    /// Brings the components of `system`, and the accounts, up to date with the database, and
-    /// returns the cursor of `system`'s extractor from the same read. The cache then holds every
-    /// block of `system` up to that cursor, so the extractor resumes right after it. The cursor is
-    /// `None` when the extractor has committed nothing.
+    /// Brings the components of `system` and all accounts up to date with the database.
+    ///
+    /// Returns the cursor of `system`'s extractor from the same read. The cache then holds every
+    /// block of `system` up to that cursor, so the extractor can resume right after it. The cursor
+    /// is `None` when the extractor has committed nothing.
     ///
     /// Catch-ups of different systems can run at the same time. Run one only while `system`'s
-    /// extractor is stopped, and never two for the same system: the catch-up replaces the
+    /// extractor is stopped, and never two for the same system, because the catch-up replaces the
     /// system's components.
     ///
     /// Nothing changes until the read is complete. The apply and the move of the watermark then
-    /// happen together, with no await between them. A caller can drop the future at any point,
-    /// and the cache and the watermark stay consistent.
+    /// happen with no await between them. A caller can drop the future at any point, and the
+    /// cache and the watermark stay consistent.
     ///
     /// # Errors
     ///
@@ -98,8 +99,8 @@ impl CacheCatchUp {
         Ok(cursor)
     }
 
-    /// The watermark. A panic while it was held cannot leave it half written, because every write
-    /// is one assignment of a whole watermark, so a poisoned lock is used as it is.
+    /// Locks the watermark. Every write assigns a whole watermark, so a panic while the lock was
+    /// held cannot leave it half written. A poisoned lock is therefore used as it is.
     fn lock_watermark(&self) -> std::sync::MutexGuard<'_, CommitWatermark> {
         self.watermark
             .lock()

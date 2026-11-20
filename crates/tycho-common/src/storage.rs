@@ -897,7 +897,7 @@ pub struct ExtractorCursor {
 ///
 /// "Snapshot" here is the Postgres transaction snapshot, the set of transactions a read can see
 /// (`pg_current_snapshot()`), not a [`StateSnapshot`]. The watermark is the `xmin` of that
-/// transaction snapshot: the oldest transaction that was still running when the read started, as
+/// transaction snapshot, the oldest transaction that was still running when the read started, as
 /// a 64-bit transaction id.
 ///
 /// The watermark also holds the block each extractor had committed in the same read. A later
@@ -926,8 +926,8 @@ impl CommitWatermark {
         self.transaction_id
     }
 
-    /// By extractor name: the number of the block the extractor had committed when the read
-    /// started. An extractor that had committed nothing has no entry.
+    /// The number of the block each extractor had committed when the read started, keyed by
+    /// extractor name. An extractor that had committed nothing has no entry.
     pub fn committed_blocks(&self) -> &HashMap<String, u64> {
         &self.committed_blocks
     }
@@ -939,15 +939,16 @@ impl CommitWatermark {
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
-    /// By extractor name. An extractor that has committed nothing has no entry. The snapshot
-    /// holds every block of an extractor up to the block of its cursor and no later block.
+    /// The cursor of each extractor, keyed by extractor name. An extractor that has committed
+    /// nothing has no entry. The snapshot holds the data of every block of an extractor up to the
+    /// block of its cursor, and of no later block.
     pub cursors: HashMap<String, ExtractorCursor>,
     /// Every row written after the snapshot is at or after this watermark.
     pub watermark: CommitWatermark,
 }
 
 /// The values of one account written after a watermark, each timestamped with the block that
-/// wrote its row. A deleted slot has the zero value.
+/// wrote its row. A deleted slot has an empty value.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AccountChanges {
     pub slots: HashMap<StoreKey, (StoreVal, WriteTimestamp)>,
@@ -956,30 +957,31 @@ pub struct AccountChanges {
     pub code: Option<(Code, CodeHash, WriteTimestamp)>,
 }
 
-/// What a catch-up of the entity cache reads for one protocol system, in one transaction: the
-/// account rows written after a watermark, and the whole current state of the system's
-/// components.
+/// What a catch-up of the entity cache reads in one transaction. It holds the account rows of a
+/// chain written after a watermark, and the full current state of the components of one protocol
+/// system.
 ///
 /// The account part can hold more than was written after the watermark, never less.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchUpRead {
-    /// The full state of each account created after the watermark. Only these accounts: an
-    /// account row is written when its contract is created, and changes later go to its value
-    /// rows. Deleted accounts and accounts without code are left out, as in a [`StateSnapshot`].
+    /// The full state of each account whose own row was written after the watermark, which is
+    /// each contract created since. Later changes to a contract go to its value rows, not to its
+    /// account row. Deleted accounts and accounts without code are left out, as in a
+    /// [`StateSnapshot`].
     pub accounts: Vec<AccountSnapshot>,
-    /// By address: the live values written after the watermark, of any account of the chain,
-    /// including the accounts in `accounts`.
+    /// The live values written after the watermark, keyed by account address. Covers every
+    /// account of the chain, including the accounts in `accounts`.
     pub changes: HashMap<Address, AccountChanges>,
-    /// Every live component of the requested protocol system, changed or not. Unlike the account
-    /// part, this is the full state, not what changed after the watermark.
+    /// Every live component of the requested protocol system with its full state, whether it
+    /// changed after the watermark or not.
     pub components: Vec<ComponentSnapshot>,
-    /// By extractor name, as in [`StateSnapshot::cursors`].
+    /// The cursor of each extractor, as in [`StateSnapshot::cursors`].
     pub cursors: HashMap<String, ExtractorCursor>,
     /// Every row written after this read is at or after this watermark.
     pub watermark: CommitWatermark,
 }
 
-/// Reads all live contracts and components of a chain from one transaction snapshot.
+/// Reads the live contracts and components of a chain, each call from one transaction snapshot.
 #[async_trait]
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block

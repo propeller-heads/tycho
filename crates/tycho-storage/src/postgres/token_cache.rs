@@ -61,13 +61,14 @@
 //!    is why the `token(modified_ts)` index migration exists: without it every poll would scan the
 //!    whole token table.
 //!
-//! Known limit: the delta refresh covers the token table only, so `last_traded`
-//! converges through write-through alone. An indexer that follows a leader does
-//! not write balances: it calls `CachedGateway::cache_last_traded` with the
-//! balance changes of each block once the leader committed it. A process that
-//! neither writes nor follows (the `rpc` command) keeps the timestamps from its
-//! initial load — its "recently traded" filter misses tokens whose first trade
-//! happens after startup, and the gap grows with uptime.
+//! Known limit: the delta refresh covers the token table only, so it never
+//! moves `last_traded`. A process that writes balances moves it through
+//! write-through. An indexer that follows a leader does not write balances. It
+//! calls `CachedGateway::cache_last_traded` with the balance changes of each
+//! block once the leader committed it. A process that neither writes nor
+//! follows (the `rpc` command) keeps the timestamps from its initial load. Its
+//! "recently traded" filter misses tokens whose first trade happens after
+//! startup, and the gap grows with uptime.
 //!
 //! Known limit: write-through runs while the enclosing DB transaction is still
 //! open, so on rollback the cache can run ahead of the database. This is

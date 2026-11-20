@@ -768,8 +768,8 @@ struct LoadedEntityCache {
     setup: EntityCacheSetup<Arc<EntityCache>>,
     /// `None` when the cache is off.
     cursors: Option<SnapshotCursors>,
-    /// Catches the cache up from `gateway`, starting at the watermark of the snapshot. `None` when
-    /// the cache is off.
+    /// Catches the cache up from the database, starting at the watermark of the snapshot. `None`
+    /// when the cache is off.
     catch_up: Option<Arc<CacheCatchUp>>,
 }
 
@@ -778,14 +778,14 @@ struct LoadedEntityCache {
 ///
 /// The snapshot also holds the extractor cursors. Each extractor resumes from its cursor in the
 /// snapshot, so it streams every block the cache does not hold, and none twice. The role is read
-/// before the snapshot: a leader role then means that no other process commits during the read,
-/// so the cursors are final. Run it after the initial accounts are written, so the snapshot holds
-/// them, and before the server and the pump start, so no request or fold reaches a half-built
-/// cache.
+/// before the snapshot. A leader role then means that no other process commits during the read,
+/// so the cursors are final. Call it after the initial accounts are written, so the snapshot
+/// holds them, and before the server and the pump start, so no request or fold reaches a
+/// half-built cache.
 ///
 /// # Errors
 ///
-/// `ExtractionError::Setup` when the snapshot read fails.
+/// Returns [`ExtractionError::Setup`] when the snapshot read fails.
 async fn load_entity_cache(
     mode: EntityCacheMode,
     gateway: Arc<dyn StateSnapshotGateway + Send + Sync>,
@@ -1034,10 +1034,11 @@ async fn get_accounts_data(
 /// How long a shutdown waits for the extractors to stop before it releases the leader lock anyway.
 ///
 /// A stopping extractor commits its final blocks first. With a large
-/// `--database-insert-batch-size` that is a full batch per extractor, and the write executor runs
-/// these one after the other: about 16 s each for the largest extractors on Base. Set the grace
-/// period of the pods above this timeout, so the lock is released before the process is killed.
-/// A commit that is still running at the timeout fails on the writer fence of the new leader.
+/// `--database-insert-batch-size` that is a full batch per extractor. The write executor runs
+/// these commits one after the other, and each takes about 16 s for the largest extractors on
+/// Base. Set the grace period of the pods above this timeout, so the lock is released before the
+/// process is killed. A commit that is still running at the timeout fails on the writer fence of
+/// the new leader.
 const EXTRACTOR_STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A task of the indexer that reports its end to the main thread.
@@ -1046,7 +1047,8 @@ enum IndexerTask {
     /// The extractor supervisors. Ends when every supervisor ended, or at the first one that
     /// failed.
     Extraction,
-    /// The server, the shutdown sequence and the other service tasks. Ends first of them.
+    /// The server, the shutdown sequence, the leader election and the other service tasks. Ends
+    /// when the first of them ends.
     Services,
 }
 
@@ -1054,15 +1056,16 @@ type TaskEnd = (IndexerTask, Result<(), ExtractionError>);
 
 /// How long the main thread waits for the services after the extractors ended cleanly.
 ///
-/// In a shutdown, the extractors end first. The shutdown then still releases the leader lock and
-/// stops the server, which waits up to 30 s (the actix default) for the open requests.
+/// In a shutdown, the extractors end first. The shutdown then releases the leader lock and stops
+/// the server, which waits up to 30 s (the actix default) for the open requests. The services end
+/// with the shutdown task.
 const SERVICES_STOP_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// Sends the end of `task` to the main thread.
 ///
 /// The main thread returns after the first end it receives, unless that is a clean end of the
 /// extraction. A later end then finds the channel closed while the process exits. It is logged
-/// and dropped: there is nothing left to stop.
+/// and dropped, as nothing is left to stop.
 fn report_task_end(
     control_tx: &mpsc::Sender<TaskEnd>,
     task: IndexerTask,
@@ -1083,12 +1086,13 @@ fn report_task_end(
 /// Blocks until the indexer should exit, and returns why.
 ///
 /// - The first error of either task returns at once.
-/// - A clean end of the services returns: in a shutdown they end last.
+/// - A clean end of the services returns at once. In a shutdown they end after the extraction.
 /// - A clean end of the extraction waits up to `services_timeout` for the services, so that a
-///   shutdown releases the leader lock and stops the server before the process exits. It returns
-///   `Ok` when they do not end in time.
+///   shutdown releases the leader lock before the process exits. It returns `Ok` when they do not
+///   end in time.
 ///
 /// # Errors
+///
 /// Returns the error a task ended with, or an error when both tasks dropped their sender
 /// without a result.
 fn wait_for_indexer_end(
@@ -1133,7 +1137,7 @@ impl Shutdown {
     ///
     /// The order makes the handover short, because the follower streams and serves already:
     /// 1. Closes the websocket connections, and each HTTP/1 connection after its next response, so
-    ///    clients connect to another instance at once. The server stops to accept connections on
+    ///    clients connect to another instance at once. The server stops accepting connections on
     ///    the signal itself.
     /// 2. Stops the extractors, and waits up to [`EXTRACTOR_STOP_TIMEOUT`] until they ended. A
     ///    leader's extractors commit their final blocks before they end, so the next leader starts
@@ -1201,8 +1205,9 @@ async fn run_analyze_tokens(
     let rpc_client = global_args.rpc.build_client()?;
 
     create_tracing_subscriber();
-    // No write executor: the analysis writes only through `update_tokens`, which bypasses it, so
-    // it never becomes the database writer and never fences the running indexer.
+    // Built without a write executor. The analysis writes only through `update_tokens`, which
+    // bypasses the executor, so this process never becomes the database writer and never fences
+    // the running indexer.
     let cached_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[analyzer_args.chain])
         .build_gw()

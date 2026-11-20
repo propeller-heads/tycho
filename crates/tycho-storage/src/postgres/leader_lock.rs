@@ -4,9 +4,9 @@
 //! holds it is the leader. The lock lives as long as the session that took it: when the leader
 //! exits or its connection breaks, Postgres releases the lock and another process can take it.
 //!
-//! The lock elects the leader but does not stop a former leader from writing; the writer epoch
-//! (see [`CachedGateway::increment_writer_epoch`](super::cache::CachedGateway::increment_writer_epoch))
-//! does that.
+//! The lock elects the leader. It does not stop a former leader from writing. The writer epoch
+//! does that (see
+//! [`CachedGateway::increment_writer_epoch`](super::cache::CachedGateway::increment_writer_epoch)).
 use diesel::{
     sql_query,
     sql_types::{BigInt, Bool},
@@ -28,9 +28,10 @@ struct LockResult {
 
 /// A dedicated database session competing for the leader lock.
 ///
-/// The session is not taken from a pool: the lock belongs to the session, so it must stay open for
-/// as long as this process is leader. The session sets the server-side TCP timeouts, so Postgres
-/// releases the lock within about 30 seconds after the leader's host disappears, not hours later.
+/// The lock belongs to the session, so the session must stay open for as long as this process is
+/// leader. That is why it does not come from a pool. The session sets the server-side TCP
+/// timeouts, so Postgres releases the lock within about 30 seconds after the leader's host
+/// disappears, not hours later.
 pub struct LeaderLock {
     conn: AsyncPgConnection,
 }

@@ -432,8 +432,8 @@ impl DeltaWindow {
             .map(|m| m.block.clone())
     }
 
-    /// The newest block the window received since it was created or last cleared, `None` before
-    /// the first block. A fold never evicts the newest block.
+    /// Returns the newest block the window received since it was created or last cleared, or
+    /// `None` before the first block. A fold never evicts the newest block.
     pub(crate) fn tip(&self) -> Option<Block> {
         self.buffer
             .newest()

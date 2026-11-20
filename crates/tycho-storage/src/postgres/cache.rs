@@ -284,6 +284,32 @@ pub enum DBCacheMessage {
     Write(DBTransaction),
 }
 
+/// Transactions waiting for the write executor. [`WritePriority::Head`] transactions leave first,
+/// each priority in arrival order.
+///
+/// Unbounded, but each gateway instance waits for the result of its transaction before it sends
+/// the next one, so the queue holds at most one transaction per instance.
+#[derive(Default)]
+struct WriteQueue {
+    head: VecDeque<DBTransaction>,
+    backfill: VecDeque<DBTransaction>,
+}
+
+impl WriteQueue {
+    fn push(&mut self, transaction: DBTransaction) {
+        match transaction.priority {
+            WritePriority::Head => self.head.push_back(transaction),
+            WritePriority::Backfill => self.backfill.push_back(transaction),
+        }
+    }
+
+    fn pop(&mut self) -> Option<DBTransaction> {
+        self.head
+            .pop_front()
+            .or_else(|| self.backfill.pop_front())
+    }
+}
+
 /// Extractors can start transaction.
 /// This will guarantee that a group of changes they provide is executed atomically.
 ///
@@ -326,32 +352,6 @@ pub enum DBCacheMessage {
 /// Read Operations
 /// The class does provide read operations for completeness, but it will not consider any
 /// cached changes while reading. Any reads are direct pass through to the database.
-/// Transactions waiting for the write executor. [`WritePriority::Head`] transactions leave first,
-/// each priority in arrival order.
-///
-/// Unbounded, but each gateway instance waits for the result of its transaction before it sends
-/// the next one, so the queue holds at most one transaction per instance.
-#[derive(Default)]
-struct WriteQueue {
-    head: VecDeque<DBTransaction>,
-    backfill: VecDeque<DBTransaction>,
-}
-
-impl WriteQueue {
-    fn push(&mut self, transaction: DBTransaction) {
-        match transaction.priority {
-            WritePriority::Head => self.head.push_back(transaction),
-            WritePriority::Backfill => self.backfill.push_back(transaction),
-        }
-    }
-
-    fn pop(&mut self) -> Option<DBTransaction> {
-        self.head
-            .pop_front()
-            .or_else(|| self.backfill.pop_front())
-    }
-}
-
 pub(crate) struct DBCacheWriteExecutor {
     name: String,
     chain: Chain,
@@ -704,8 +704,8 @@ impl CachedGateway {
     }
 
     /// Opens a transaction with `priority`, or extends the open one to `block`. Extending with
-    /// [`WritePriority::Head`] raises the open transaction to head priority: its owner has caught
-    /// up with the chain head.
+    /// [`WritePriority::Head`] raises the open transaction to head priority, because its owner has
+    /// caught up with the chain head.
     async fn open_transaction(
         &self,
         block: &models::blockchain::Block,
@@ -752,8 +752,9 @@ impl CachedGateway {
     /// Increments the database writer epoch, makes this process the writer, and returns the new
     /// epoch.
     ///
-    /// From then on this process's writes go through, and every write of a process that became
-    /// the writer before fails with [`StorageError::Fenced`].
+    /// From then on this process's writes go through, and every write of a process that
+    /// incremented the epoch earlier fails with [`StorageError::Fenced`]. Waits while a write
+    /// transaction of a former writer is still open.
     pub async fn increment_writer_epoch(&self) -> Result<i64, StorageError> {
         let mut conn = self
             .pool
@@ -794,12 +795,13 @@ impl CachedGateway {
         }
     }
 
-    /// Records in the in-memory token cache when each `chain` token of `last_traded` last traded,
+    /// Moves the cached `last_traded` timestamp of each `chain` token in `last_traded` forward,
     /// without writing to the database.
     ///
-    /// A cached value only moves forward, and unknown tokens are ignored. Does nothing when the
-    /// token cache is disabled. Lets a process that does not write balances keep the "recently
-    /// traded" filter of token queries current: the cache refresh reads only token rows.
+    /// A cached timestamp never moves back, and tokens not in the cache are ignored. Does nothing
+    /// when the token cache is disabled. Lets a process that does not write balances keep the
+    /// "recently traded" filter of token queries current, because the cache refresh reads only
+    /// token rows.
     pub fn cache_last_traded(&self, chain: &Chain, last_traded: &[(Address, NaiveDateTime)]) {
         if let Some(token_cache) = &self.state_gateway.token_cache {
             token_cache.update_last_traded(
@@ -1455,7 +1457,7 @@ impl EntryPointGateway for CachedGateway {
 
 impl Gateway for CachedGateway {}
 
-/// The number of the block of each extractor cursor, by extractor name.
+/// The block number of each extractor cursor, keyed by extractor name.
 fn committed_blocks(cursors: &HashMap<String, ExtractorCursor>) -> HashMap<String, u64> {
     let mut blocks = HashMap::with_capacity(cursors.len());
     for (name, cursor) in cursors {

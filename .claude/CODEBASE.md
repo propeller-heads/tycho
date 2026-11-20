@@ -161,8 +161,8 @@ blocks are served to RPC via `PendingDeltasBuffer`.
 ### Single writer, many servers
 
 Several `index` processes can share one database for high availability. A Postgres advisory lock
-elects one leader that commits finalized blocks; the others extract and serve WS/RPC as followers,
-retaining finalized blocks until the leader's `extraction_state` shows them committed. A follower
+elects one leader that commits finalized blocks. The others extract and serve WS/RPC as followers,
+and retain finalized blocks until the leader's `extraction_state` shows them committed. A follower
 takes over without a restart when it gets the lock. Every write transaction checks the
 `writer_epoch` row, so a former leader cannot write after a takeover. See `tycho-indexer/CLAUDE.md`
 (Leader election) and `tycho-storage/CLAUDE.md` (Writer fencing).

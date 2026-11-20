@@ -55,8 +55,8 @@ use crate::{
 /// Where a new extractor resumes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResumeFrom {
-    /// The extractor reads the writer role and then its cursor from the database when it is
-    /// built.
+    /// When it is built, the extractor reads the writer role and then reads its cursor from the
+    /// database.
     Database,
     /// A cursor read earlier, and the writer role read before it. `cursor` is `None` when the
     /// extractor had committed nothing.
@@ -65,10 +65,11 @@ pub enum ResumeFrom {
 
 /// Reads the writer role and then the cursor of the extractor of `gateway`.
 ///
-/// The role comes first. A role only changes from follower to leader, so a leader role here
-/// means the epoch increment came first, and the cursor is final. A process that becomes the
-/// leader after the role read builds the extractor as a follower; it takes over on its next block
-/// and reads the cursor again then.
+/// The role comes first. A role changes only from follower to leader, and a process increments
+/// the writer epoch before it switches to leader. So a leader role here means the former leader
+/// is already fenced, and no other process moves the cursor after this read. A process that
+/// becomes the leader after the role read builds the extractor as a follower. The extractor takes
+/// over on its next block and reads the cursor again then.
 async fn read_resume_point<G: ExtractorGateway>(
     gateway: &G,
     writer: &WriterStatus,
@@ -116,8 +117,9 @@ async fn join_commit_task(handle: BatchCommitHandle) -> Result<(), ExtractionErr
     }
 }
 
-/// Returns each token with a component balance change in `blocks`, with the timestamp of the
-/// newest such block. The leader's balance write sets a token's `last_traded` to the same value.
+/// Returns each token with a component balance change in `blocks`, paired with the timestamp of
+/// the newest block that changes its balance. The leader sets the token's `last_traded` to the
+/// same value when it writes the balance.
 fn last_traded_in(blocks: &[DrainedBlock]) -> Vec<(Address, NaiveDateTime)> {
     let mut last_traded: HashMap<Address, NaiveDateTime> = HashMap::new();
     for block in blocks {
@@ -139,34 +141,39 @@ fn last_traded_in(blocks: &[DrainedBlock]) -> Vec<(Address, NaiveDateTime)> {
 }
 
 /// Most chain time the drained blocks of a following extractor may cover while they wait for the
-/// leader to commit them. At this span it stops taking blocks until the leader's commits release
-/// some, so its memory stays bounded when the leader stops committing for this extractor after
-/// the follower opened its stream, e.g. while the leader's extractor waits in a restart backoff.
-/// Chain time and not a block count, so the limit means the same on chains with very different
-/// block times. Larger than the finality delay of every chain (about 13 minutes on Ethereum):
-/// the leader commits only finalized blocks, so a follower at the head retains about one finality
-/// delay of blocks.
+/// leader to commit them.
+///
+/// At this span the follower stops taking blocks until the leader's commits release some. This
+/// bounds its memory when the leader stops committing for this extractor after the follower
+/// opened its stream, for example while the leader's extractor waits in a restart backoff.
+///
+/// The limit is chain time and not a block count, so it means the same on chains with very
+/// different block times. It is larger than the finality delay of every chain (about 13 minutes
+/// on Ethereum). The leader commits only finalized blocks, so a follower at the head retains about
+/// one finality delay of blocks.
 ///
 /// A follower opens an extractor's stream only while the leader's newest committed block is
-/// younger than this span (`WriterStatus::needs_stream`). So it can retain every block from the
-/// leader's commit to the head, and it does not pause before it reaches the head.
+/// younger than this span (see [`WriterStatus::needs_stream`]). So it can retain every block from
+/// the leader's commit to the head, and it does not pause before it reaches the head.
 pub(crate) const FOLLOWER_RETENTION_SPAN: Duration = Duration::hours(1);
 
 /// How often a following extractor at its retention limit checks whether it can continue.
 const CAPACITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Age from which a block's write counts as backfill: it then runs after the writes of
-/// extractors at the chain head. Generous, so a head extractor that briefly lags keeps priority,
-/// while one syncing history from an old snapshot is far past it.
+/// Age of an extractor's newest block above which its writes count as backfill. Backfill writes
+/// run after the writes of extractors at the chain head. The value is generous, so a head
+/// extractor that briefly lags keeps its priority, while an extractor that syncs history from an
+/// old snapshot is far past it.
 const BACKFILL_BLOCK_AGE: Duration = Duration::minutes(10);
 
 /// Returns the priority of the writes an extractor queues while `newest_block` is the newest
 /// block it has received: [`WritePriority::Backfill`] while the extractor syncs history, else
 /// [`WritePriority::Head`].
 ///
-/// Decided by how far the extractor is behind the chain head, not by the age of the blocks it
-/// writes: it writes only finalized blocks, which are minutes old even at the head on many
-/// chains. Finality cannot decide it either: on other chains a block at the head is already final.
+/// The priority depends on how far the extractor is behind the chain head, not on the age of the
+/// blocks it writes. The extractor writes only finalized blocks, and on many chains these are
+/// minutes old even at the head. Finality cannot decide it either, because on other chains a
+/// block at the head is already final.
 fn write_priority(newest_block: &Block, now: NaiveDateTime) -> WritePriority {
     if now.signed_duration_since(newest_block.ts) > BACKFILL_BLOCK_AGE {
         WritePriority::Backfill
@@ -194,8 +201,8 @@ struct Retention {
 }
 
 impl Retention {
-    /// Returns whether the extractor may retain another block: not once the retained blocks
-    /// span [`FOLLOWER_RETENTION_SPAN`] or more.
+    /// Returns whether the extractor may retain another block. It may not once the retained
+    /// blocks span [`FOLLOWER_RETENTION_SPAN`] or more.
     fn has_capacity(&self) -> bool {
         self.span
             .is_none_or(|span| span < FOLLOWER_RETENTION_SPAN)
@@ -245,6 +252,10 @@ where
     /// Builds an extractor that resumes after the block of its cursor, and commits or follows
     /// according to the writer role read before that cursor. `resume` gives the cursor and the
     /// role, or tells the extractor to read both now.
+    ///
+    /// # Errors
+    /// Returns an error when reading the cursor or its block fails, or when the protocol types
+    /// cannot be stored.
     #[expect(
         clippy::too_many_arguments,
         reason = "takes each dependency of the extractor as a separate argument"
@@ -340,9 +351,10 @@ where
 
     /// Makes `plugin` process each block before the extractor buffers it.
     ///
-    /// Load the plugin's state from the database after [`Self::new`] read the cursor. The
-    /// stream then starts at or below the block of the plugin's state, and the plugin sees again
-    /// the blocks its state already holds, instead of missing the blocks between the two reads.
+    /// Load the plugin's state from the database after [`Self::new`] has read the cursor. The
+    /// stream then starts at or below the block of the plugin's state. The plugin sees some blocks
+    /// its state already holds a second time, but it does not miss the blocks committed between
+    /// the two reads.
     pub fn with_dci_plugin(mut self, plugin: E) -> Self {
         self.dci_plugin = Some(Arc::new(Mutex::new(plugin)));
         self
@@ -888,10 +900,10 @@ where
     /// this process became the leader since the previous block. The takeover's commit runs at
     /// `priority`.
     ///
-    /// An extractor with a DCI plugin does not take over: it returns
-    /// [`ExtractionError::RestartToTakeOver`] and commits nothing. Its retained blocks and its DCI
-    /// state come from this process's own traces. A trace that failed here but not on the former
-    /// leader (or the opposite) makes them track other contracts than the database does.
+    /// An extractor with a DCI plugin does not take over. It commits nothing and returns
+    /// [`ExtractionError::RestartToTakeOver`]. Its retained blocks and its DCI state come from
+    /// this process's own traces. A trace that failed here but not on the former leader, or the
+    /// opposite, would make them track other contracts than the database does.
     async fn commit_mode(&self, priority: WritePriority) -> Result<CommitMode, ExtractionError> {
         let mut mode = self.commit_mode.lock().await;
         if *mode == CommitMode::Following && self.writer.role() == Role::Leader {
@@ -908,6 +920,9 @@ where
     /// Reads the newest block the former leader committed for this extractor, drops the
     /// retained blocks it covers and queues a commit of the remaining ones. Returns that
     /// block's number, or `None` when no block was ever committed for this extractor.
+    ///
+    /// Returns [`ExtractionError::ReorgBufferError`] and commits nothing when the first remaining
+    /// block does not continue the former leader's newest block.
     async fn take_over_commits(
         &self,
         priority: WritePriority,
@@ -973,16 +988,16 @@ where
     /// Buffers `msg` and returns the finalized blocks to commit once a batch is complete.
     ///
     /// Three heights decide what happens to a block:
-    /// - `final_block_height`, sent by Substreams with `msg`: blocks below it are final. Once
+    /// - `final_block_height`, which Substreams sends with `msg`. Blocks below it are final. Once
     ///   `commit_batch_size` of them are buffered, they move into the committing section and are
     ///   returned for commit.
-    /// - The gateway's flushed height: the newest block whose write reached the database. It lags
+    /// - The gateway's flushed height, the newest block whose write reached the database. It lags
     ///   the drained blocks, because the commit runs in a background task and, during sync, the
     ///   gateway holds writes across blocks until its batch is large enough. Until a block is
     ///   flushed it stays in the committing section, so revert lookups still find it.
-    /// - `floor`: after this process took over from a former leader, the newest block that leader
-    ///   committed; `None` otherwise. A process that was behind the former leader drains blocks the
-    ///   database already holds, so these are dropped instead of returned.
+    /// - `floor`, the newest block the former leader committed when this process took over from it,
+    ///   else `None`. A process that was behind the former leader drains blocks the database
+    ///   already holds, so these are dropped instead of returned.
     ///
     /// The database covers every block at or below the larger of the flushed height and `floor`,
     /// so those leave the committing section.
@@ -1017,8 +1032,10 @@ where
         Ok(drained)
     }
 
-    /// Buffers `msg` like the leader does, but keeps drained blocks until the leader's commits
-    /// cover them, without writing anything.
+    /// Buffers `msg` like a committing extractor, but writes nothing.
+    ///
+    /// Drained blocks stay in the committing section until the leader's commits cover them.
+    /// Blocks the leader has already committed are dropped first, and their new tokens are cached.
     async fn retain_until_leader_commits(
         &self,
         msg: &BlockChanges,
@@ -1047,8 +1064,8 @@ where
     /// Returns the newest block the database holds for this extractor, as reported on outgoing
     /// messages: the leader's committed height while following, else this process's own.
     ///
-    /// After a takeover the former leader may have committed past the blocks this extractor
-    /// has seen, so the height never exceeds `final_block_height`.
+    /// The leader may have committed past the blocks this extractor has seen, both while it
+    /// follows and when it takes over. So the height never exceeds `final_block_height`.
     async fn reported_committed_height(&self, final_block_height: u64) -> Option<u64> {
         let commit_mode = self.commit_mode.lock().await;
         let following = match *commit_mode {
@@ -1108,9 +1125,9 @@ where
     }
 
     /// Caches the new tokens of blocks the database now covers, and when each token with a
-    /// component balance change in them last traded. The leader's writes update its token cache
-    /// in the same way when it commits the block; this gives every other process the same tokens
-    /// and "recently traded" filter at the same point.
+    /// component balance change in them last traded. The leader's own writes update its token
+    /// cache in the same way when it commits a block. Doing the same here gives this process the
+    /// same tokens and the same "recently traded" filter at the same block.
     fn cache_committed_tokens(&self, blocks: &[DrainedBlock]) {
         let tokens: Vec<Token> = blocks
             .iter()
@@ -1220,7 +1237,8 @@ where
     }
 
     /// Commits every final block in the reorg buffer and every staged write, and waits until
-    /// the database holds them. Does nothing while following: the leader commits those blocks.
+    /// the database holds them. Does nothing while following, because the leader commits those
+    /// blocks. Skips the blocks a former leader committed before this process took over.
     async fn commit_final_blocks(&self) -> Result<(), ExtractionError> {
         let CommitMode::Committing { floor } = *self.commit_mode.lock().await else {
             return Ok(());
@@ -1277,8 +1295,8 @@ where
 
     /// Process a full block
     ///
-    /// This includes updating the reorg buffer, committing to the database, emitting sync updates
-    /// and metrics and aggregating the changes).
+    /// This includes updating the reorg buffer, committing finalized blocks or retaining them for
+    /// the leader, emitting sync updates and metrics, and aggregating the changes.
     #[instrument(skip_all, fields(block_number = msg.block.number, final_block_height))]
     async fn process_full_block_message(
         &self,
@@ -2214,8 +2232,8 @@ where
         ))
     }
 
-    /// Commits every final block in the reorg buffer and every staged write while this process
-    /// writes the database. See [`ProtocolExtractor::commit_final_blocks`].
+    /// Commits every final block in the reorg buffer and every staged write, unless the extractor
+    /// follows the leader. See [`ProtocolExtractor::commit_final_blocks`].
     async fn shutdown(&self) -> Result<(), ExtractionError> {
         self.commit_final_blocks().await
     }
@@ -3140,7 +3158,7 @@ mod test {
             .await
             .expect("final blocks should commit");
 
-        // Block 5 says block 4 is the final height: blocks 1 to 3 are final, 4 and 5 are not.
+        // Block 5 carries final height 4, so blocks 1 to 3 are final and blocks 4 and 5 are not.
         assert_eq!(
             *commits.advanced.lock().unwrap(),
             vec![(1, false), (2, false), (3, true)],
@@ -3523,7 +3541,8 @@ mod test {
 
     /// The snapshot was read while the process was a follower, and the process became the leader
     /// before the build. The extractor follows from the snapshot cursor and takes over from the
-    /// newer database cursor on its first block, so it does not commit a block again.
+    /// newer database cursor on its first block, so it does not commit the former leader's blocks
+    /// a second time.
     #[tokio::test]
     async fn test_extractor_read_as_a_follower_in_the_snapshot_takes_over_from_the_database_cursor()
     {
@@ -3618,7 +3637,8 @@ mod test {
     }
 
     /// Processes empty blocks `numbers`, each `interval` of chain time after the previous one,
-    /// with finality trailing by one block. Retains every block below the last two.
+    /// with finality trailing by one block. A following extractor then retains every block except
+    /// the last two.
     async fn process_blocks_every(
         extractor: &ProtocolExtractor<
             MockExtractorGateway,
@@ -3738,7 +3758,7 @@ mod test {
         let (channels, writer) = WriterChannels::follower();
         let extractor = create_extractor_with_writer(gw, 1, Chain::Ethereum, writer).await;
         process_trailing_blocks(&extractor, 1..=5).await;
-        // Lose block 2: the database ends at block 1 and the retained blocks start at 3.
+        // Drop block 2, so the database ends at block 1 and the retained blocks start at 3.
         extractor
             .reorg_buffer
             .lock()

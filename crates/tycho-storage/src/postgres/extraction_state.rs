@@ -37,7 +37,8 @@ impl PostgresGateway {
         }
     }
 
-    /// Returns the block each extraction state of `chain` last saved, keyed by the state's name.
+    /// Returns the number and timestamp of the block each extraction state of `chain` last saved,
+    /// keyed by the state's name.
     ///
     /// A state is saved in the same transaction as the block data it covers, so this is the
     /// newest block whose data is in the database for that extractor.
@@ -69,7 +70,7 @@ impl PostgresGateway {
     }
 
     /// Returns the cursor of each extraction state of `chain` and the block it points to, keyed
-    /// by the state's name.
+    /// by the state's name. A state saved without a cursor has an empty one.
     pub async fn get_extractor_cursors(
         &self,
         chain: &Chain,
