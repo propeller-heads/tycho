@@ -342,6 +342,7 @@ impl MetricBookAssembler {
                 quote_token: token1.clone(),
                 metadata,
                 bid_ask,
+                fill: None,
             };
             books.insert(pair_book(
                 self.protocol_system,
