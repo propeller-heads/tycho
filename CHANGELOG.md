@@ -1,3 +1,10 @@
+## [0.533.0](https://github.com/propeller-heads/tycho/compare/0.532.2...0.533.0) (2026-11-20)
+
+
+### Features
+
+* **ekubo-v3:** add an Elysium manifest ([34aa299](https://github.com/propeller-heads/tycho/commit/34aa29957e1ce8e1c188266d7e5132248ccc548a))
+
 ## [0.532.2](https://github.com/propeller-heads/tycho/compare/0.532.1...0.532.2) (2026-11-20)
 
 
