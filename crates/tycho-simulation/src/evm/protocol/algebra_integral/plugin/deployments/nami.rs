@@ -1,9 +1,10 @@
 //! Nami V4's plugins.
 //!
-//! Nami runs two implementations per chain: `NamiPluginV1Diamond`, and
+//! Nami runs `NamiPluginV1Diamond` on every chain and, on Base,
 //! `NamiPluginV1WithAntiSniperDiamond` for pools launched behind the AntiSniper module. Both
 //! answer `beforeSwap` with the fee override module's fee, and their `afterSwap` runs the MEVX
-//! and farming modules.
+//! and farming modules. The AntiSniper implementations on Ethereum and Robinhood have no pools
+//! and are not registered.
 
 use alloy::primitives::{address, Address};
 use tycho_common::{models::Chain, simulation::errors::SimulationError};
@@ -28,11 +29,9 @@ use crate::{
 // Implementations the beacons pointed at on 2026-11-19, read on chain. A beacon upgrade needs an
 // entry here before it happens.
 const PLUGIN_ETHEREUM: Address = address!("7360C8207AdD8B8dd0332831A19c20bba6e3CABD");
-const ANTI_SNIPER_PLUGIN_ETHEREUM: Address = address!("FD1eff2688EeA5D8579b335491c8dec6fdf8C78d");
 const PLUGIN_BASE: Address = address!("d1dfA0aEDE1dd17153457d8D8C7C042B8e37a642");
 const ANTI_SNIPER_PLUGIN_BASE: Address = address!("9c5D328a1bDdb841E889d1976670F3C0C153D037");
 const PLUGIN_ROBINHOOD: Address = address!("1a2898f77957B9C5B7bAfD29a2dAFBA4404b6874");
-const ANTI_SNIPER_PLUGIN_ROBINHOOD: Address = address!("E7fA5e8057E28b44155E345AE13f5F0eD06E7F1B");
 
 // The fee source contracts a pool's `fee_override/source` can name. A new source contract needs
 // an entry here before a pool is pointed at it, even when its code is unchanged.
@@ -81,7 +80,7 @@ impl PluginHandlerCreator for NamiPluginCreator {
 struct Deployment {
     chain: Chain,
     plugin: Address,
-    anti_sniper_plugin: Address,
+    anti_sniper_plugin: Option<Address>,
     sources: &'static [(Address, FeeSource)],
 }
 
@@ -89,19 +88,19 @@ const DEPLOYMENTS: [Deployment; 3] = [
     Deployment {
         chain: Chain::Ethereum,
         plugin: PLUGIN_ETHEREUM,
-        anti_sniper_plugin: ANTI_SNIPER_PLUGIN_ETHEREUM,
+        anti_sniper_plugin: None,
         sources: &FEE_SOURCES_ETHEREUM,
     },
     Deployment {
         chain: Chain::Base,
         plugin: PLUGIN_BASE,
-        anti_sniper_plugin: ANTI_SNIPER_PLUGIN_BASE,
+        anti_sniper_plugin: Some(ANTI_SNIPER_PLUGIN_BASE),
         sources: &FEE_SOURCES_BASE,
     },
     Deployment {
         chain: Chain::Robinhood,
         plugin: PLUGIN_ROBINHOOD,
-        anti_sniper_plugin: ANTI_SNIPER_PLUGIN_ROBINHOOD,
+        anti_sniper_plugin: None,
         sources: &FEE_SOURCES_ROBINHOOD,
     },
 ];
@@ -114,11 +113,13 @@ pub(super) fn register_plugin_handlers() -> Result<(), SimulationError> {
             deployment.plugin,
             Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper: false }),
         )?;
-        register_plugin_handler(
-            deployment.chain,
-            deployment.anti_sniper_plugin,
-            Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper: true }),
-        )?;
+        if let Some(anti_sniper_plugin) = deployment.anti_sniper_plugin {
+            register_plugin_handler(
+                deployment.chain,
+                anti_sniper_plugin,
+                Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper: true }),
+            )?;
+        }
     }
     Ok(())
 }
