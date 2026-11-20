@@ -67,6 +67,11 @@ pub use state::BaibaiState;
 /// BaiBai's encoder on it.
 pub const PROTOCOL_SYSTEM: &str = "pamm:baibai";
 
+/// Protocol system stamped instead of [`PROTOCOL_SYSTEM`] by a feed built
+/// [`with_fallback_router`](BaibaiFeedBuilder::with_fallback_router), which settles swaps through
+/// BaiBai's fallback router.
+pub const FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:pamm:baibai";
+
 /// Component type stamped on every pair this integration emits.
 pub(crate) const PROTOCOL_TYPE: &str = "baibai_pair";
 
@@ -128,6 +133,11 @@ pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
 /// [`BaibaiFeedBuilder::taker`] sets another. The books carry the fee the entrypoint charges this
 /// router; a router BaiBai has not whitelisted pays the venue default of 50 millionths.
 pub(crate) const BASE_ROUTER: Address = address!("d374c00614f95492D816b5957E3797ce3f0c445C");
+
+/// Tycho's `BaibaiFallbackRouter` on Base, the taker the books are priced for when the feed is
+/// built [`with_fallback_router`](BaibaiFeedBuilder::with_fallback_router).
+pub(crate) const BASE_FALLBACK_ROUTER: Address =
+    address!("08B33Db32e64E175991b24f405BFbFf02ad134B0");
 
 #[cfg(test)]
 mod test_support;
