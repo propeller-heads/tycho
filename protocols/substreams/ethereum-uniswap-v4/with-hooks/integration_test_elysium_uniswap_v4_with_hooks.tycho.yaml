@@ -519,6 +519,10 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0xbb63e0b09dfd0d1b506b5847b61291aeb82aeab42628b63819bbc8aa904e384a"
+        tvl_only: &ascend_tvl_only
+          bps: 0.01
+          wei: 1000
+          reason: "indexed balances are the summed Swap and ModifyLiquidity token flows, and the UniswapV4Balances lens recomputes the amounts from the final price, rounded down, so indexed sits above it by about one Q96 price step per swap, never below. The PoolManager holds that dust: for the single-pool launch tokens its balanceOf equals the indexed balance exactly (ASCENSION, ELYXIR, ETOOLS, KAT, META_CAPTAIN, ELMO, KM at their snapshot blocks; PNTH holds 4 wei more, from a swap settled across transactions). Ascend swaps charge no LP fee (every Swap event carries fee 0), so this is not fee rounding. Measured by a range --report run with tvl_only removed, over the 8 components: at most 0.002 bps (574 of 2,805,774,267 USDC in pool 0xea03c9c4), 310,400,288 wei on PNTH (5e-19 of its balance), and 4 and 12 wei on KNTQ, which the lens reads as 0. The drift grows with a pool's swaps and has no fixed bound. bps 0.01 is the smallest step; wei 1000 covers the KNTQ entries only."
       # WHYPE quote as currency1, 2% fee; launched at block 3261205
       - id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
         tokens:
@@ -530,6 +534,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0xe0cfec6208b92b324ef7fa7c97f62354823b97ae1c4e074183bdc8a332949bb7"
+        tvl_only: *ascend_tvl_only
       # WHYPE quote as currency0, 3% fee; launched at block 3258042
       - id: "0x2af577e53577561bd0d0d7d46fa697b03a74a31aa999498d6f7271a3afaebc03"
         tokens:
@@ -541,6 +546,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0xb9e481f26a78e7c32baa2d314a145cc058f0e93e61b36532b7c3853687d22de2"
+        tvl_only: *ascend_tvl_only
       # KNTQ quote as currency1, 1% fee; launched at block 3268520
       - id: "0x914d891afa8d95ee7ea5d3f255df4cccd12720a2b4448f914a8a262415c49f09"
         tokens:
@@ -552,6 +558,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x194fccb73ff9dd1d0b71743a0cd59ad01c7b7620344ec1120a3e905f036bf15c"
+        tvl_only: *ascend_tvl_only
       # USDC quote as currency0, 1.5% fee and a 0.5% builder fee; launched at block 3258830
       - id: "0x723b1867f8a08a5ca91c53d256a66230c3d1bf3e65592327bbac2339d647dcf8"
         tokens:
@@ -563,6 +570,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x8a12467a0ddff0859f72d17d41c7e3ddc242afde7ed9ecbd26247ae8b739846a"
+        tvl_only: *ascend_tvl_only
       # WHYPE quote as currency0, 1% fee; launched at block 3266703
       - id: "0x8ed85f008212d2ee1cb30d1fb241f77326d8597a8612ee14119ad69450094121"
         tokens:
@@ -574,6 +582,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x5aaa22676de68c3290909137ba58f68c6565f7ef83fdce05d7aa765643a660a3"
+        tvl_only: *ascend_tvl_only
       # KNTQ quote as currency1, no dev buy; launched at block 3255759
       - id: "0xd4916d4721c54d66ae4e594fb2ad2dbc12fd295cfd8e9a9359a7d0cfe271acd2"
         tokens:
@@ -585,6 +594,7 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x54927397bb63df048da4b39e7bb4fda890d3697afec41354b2b5c4bc2b44db5f"
+        tvl_only: *ascend_tvl_only
   # The one fill whose pool launches inside a bounded range: pool 0x21e12450... launched at 3437284,
   # its bid funded at 3527638 and filled at 3527702, so the range covers the bid words and the fill
   # path. The hook emitted 777 Filled events on 43 pools to block 8365800; this is the only pool of
@@ -605,3 +615,4 @@ tests:
           hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
           key_lp_fee: "0x00800000"
         creation_tx: "0x8e7e10b5e1c9b73d035d68bbb021c21bc56e241de3786d3f7ebff091d533f500"
+        tvl_only: *ascend_tvl_only

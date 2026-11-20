@@ -156,7 +156,10 @@ not established, since its source is unverified.
 
 ### Balances of Ascend pools
 
-As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test.
+As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test and a
+`tvl_only` tolerance (bps 0.01, wei 1000) on the eight Ascend components, declared on the measured
+cause below. The `PoolManager`'s own balance of each single-pool launch token equals the indexed amount
+at 7 of 8 pools (PNTH holds 4 wei more); the lens's rounded-down tick math is the lower figure.
 The Ascend pool's own swaps charge no LP fee (every `Swap` event carries fee 0, and
 `feeGrowthGlobal0/1X128` read 0 at the end of the tests' ranges), the hook's fee is its
 ERC-6909 claim, and the pipeline's amounts are the summed `Swap` amounts. They sit above the lens
