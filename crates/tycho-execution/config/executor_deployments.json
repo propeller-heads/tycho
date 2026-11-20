@@ -176,6 +176,10 @@
       "contract": "BaibaiExecutor",
       "args": ["0x98c1D9E102Eb2806D902b13186BDc7892aC4fFBa"]
     },
+    "fallback:pamm:baibai": {
+      "contract": "BaibaiFallbackExecutor",
+      "args": ["0x08B33Db32e64E175991b24f405BFbFf02ad134B0"]
+    },
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
       "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
