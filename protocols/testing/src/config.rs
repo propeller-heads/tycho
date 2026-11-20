@@ -22,6 +22,10 @@ pub struct ProtocolComponentExpectation {
     pub tokens: Vec<Bytes>,
     #[serde(default)]
     pub static_attributes: HashMap<String, Bytes>,
+    /// State attributes the component holds at the test's `stop_block`. Unlisted ones are not
+    /// checked.
+    #[serde(default)]
+    pub state_attributes: HashMap<String, Bytes>,
     pub creation_tx: Bytes,
 }
 
@@ -57,6 +61,8 @@ struct ExpectedComponentEntry {
     tokens: Vec<Bytes>,
     #[serde(default)]
     static_attributes: HashMap<String, Bytes>,
+    #[serde(default)]
+    state_attributes: HashMap<String, Bytes>,
     creation_tx: Bytes,
     #[serde(default)]
     skip_simulation: Skip,
@@ -88,6 +94,7 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             id,
             tokens,
             static_attributes,
+            state_attributes,
             creation_tx,
             skip_simulation,
             skip_execution,
@@ -97,7 +104,13 @@ impl From<ExpectedComponentEntry> for ProtocolComponentWithTestConfig {
             tvl_only,
         } = entry;
         Self {
-            base: ProtocolComponentExpectation { id, tokens, static_attributes, creation_tx },
+            base: ProtocolComponentExpectation {
+                id,
+                tokens,
+                static_attributes,
+                state_attributes,
+                creation_tx,
+            },
             skip_simulation,
             skip_execution,
             limits,
@@ -170,6 +183,35 @@ impl ProtocolComponentExpectation {
             Some(diffs.join("\n"))
         }
     }
+
+    /// Compares the expected state attributes with `attributes`, the component's indexed ones.
+    pub fn compare_state_attributes(&self, attributes: &HashMap<String, Bytes>) -> Option<String> {
+        let mut diffs = Vec::new();
+        for (key, expected) in self
+            .state_attributes
+            .iter()
+            .sorted_by_key(|(key, _)| *key)
+        {
+            match attributes.get(key) {
+                Some(actual) if actual == expected => {}
+                Some(actual) => diffs.push(format!(
+                    "State attribute '{key}' mismatch for {}: expected {expected}, found {actual}",
+                    self.id
+                )),
+                None => diffs.push(format!(
+                    "State attribute '{key}' mismatch for {}: expected {expected}, not found. \
+                     Available attributes: {:?}",
+                    self.id,
+                    attributes
+                        .keys()
+                        .sorted()
+                        .collect::<Vec<_>>()
+                )),
+            }
+        }
+        (!diffs.is_empty()).then(|| diffs.join("\n"))
+    }
+
     fn format_diff(_field_name: &str, left: &str, right: &str, colorize: bool) -> String {
         let diff = TextDiff::from_lines(left, right);
 
