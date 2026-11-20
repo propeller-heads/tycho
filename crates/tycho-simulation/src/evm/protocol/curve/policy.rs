@@ -3,7 +3,8 @@ use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
-use tycho_common::{simulation::errors::SimulationError, Bytes};
+use thiserror::Error;
+use tycho_common::Bytes;
 
 /// Name of the state attribute that holds the pool's policy contract.
 pub(super) const POLICY_ATTRIBUTE: &str = "policy";
@@ -17,6 +18,21 @@ pub(super) const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
 pub(super) const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
 /// Name of the state attribute that holds the lowest fee of a granted swap, in units of 1e-10.
 pub(super) const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
+
+/// A policy attribute whose value is malformed.
+#[derive(Debug, Error)]
+#[error("curve `{name}` attribute is {value}, expected {expected}")]
+pub(super) struct PolicyDecodeError {
+    name: String,
+    value: Bytes,
+    expected: &'static str,
+}
+
+impl PolicyDecodeError {
+    fn new(name: &str, value: &Bytes, expected: &'static str) -> Self {
+        Self { name: name.to_string(), value: value.clone(), expected }
+    }
+}
 
 /// The policy contract of a pool and the terms of its grants. A zero attribute value means unset:
 /// a pool without a grant policy has version 0.
@@ -32,7 +48,7 @@ pub(super) struct CurvePolicy {
 
 impl CurvePolicy {
     /// Decodes the policy from a pool's state attributes. Absent attributes stay unset.
-    pub fn from_attributes(attributes: &HashMap<String, Bytes>) -> Result<Self, SimulationError> {
+    pub fn from_attributes(attributes: &HashMap<String, Bytes>) -> Result<Self, PolicyDecodeError> {
         let mut policy = Self::default();
         for (name, value) in attributes {
             policy.update(name, value)?;
@@ -41,7 +57,7 @@ impl CurvePolicy {
     }
 
     /// Sets the value of a policy attribute. Ignores other attributes.
-    pub fn update(&mut self, name: &str, value: &Bytes) -> Result<(), SimulationError> {
+    pub fn update(&mut self, name: &str, value: &Bytes) -> Result<(), PolicyDecodeError> {
         match name {
             POLICY_ATTRIBUTE => self.address = decode_address(name, value)?,
             POLICY_VERSION_ATTRIBUTE => self.version = decode_uint(name, value)?,
@@ -84,11 +100,9 @@ impl CurvePolicy {
 }
 
 /// Decodes an address attribute. The zero address means unset.
-fn decode_address(name: &str, value: &Bytes) -> Result<Option<Bytes>, SimulationError> {
+fn decode_address(name: &str, value: &Bytes) -> Result<Option<Bytes>, PolicyDecodeError> {
     if value.len() != 20 {
-        return Err(SimulationError::FatalError(format!(
-            "curve `{name}` attribute is {value}, expected a 20-byte address"
-        )));
+        return Err(PolicyDecodeError::new(name, value, "a 20-byte address"));
     }
     if value.iter().all(|byte| *byte == 0) {
         return Ok(None);
@@ -97,12 +111,9 @@ fn decode_address(name: &str, value: &Bytes) -> Result<Option<Bytes>, Simulation
 }
 
 /// Decodes a big-endian unsigned integer attribute.
-fn decode_uint(name: &str, value: &Bytes) -> Result<U256, SimulationError> {
-    U256::try_from_be_slice(value).ok_or_else(|| {
-        SimulationError::FatalError(format!(
-            "curve `{name}` attribute is {value}, expected at most 32 bytes"
-        ))
-    })
+fn decode_uint(name: &str, value: &Bytes) -> Result<U256, PolicyDecodeError> {
+    U256::try_from_be_slice(value)
+        .ok_or_else(|| PolicyDecodeError::new(name, value, "at most 32 bytes"))
 }
 
 #[cfg(test)]

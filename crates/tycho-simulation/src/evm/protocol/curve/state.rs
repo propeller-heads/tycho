@@ -411,7 +411,9 @@ impl ProtocolSim for CurveState {
     ) -> Result<(), TransitionError> {
         let mut policy = self.policy.clone();
         for (name, value) in &delta.updated_attributes {
-            policy.update(name, value)?;
+            policy
+                .update(name, value)
+                .map_err(|error| TransitionError::DecodeError(error.to_string()))?;
         }
         for name in &delta.deleted_attributes {
             policy.delete(name);
@@ -951,7 +953,7 @@ mod tests {
         let result =
             curve.delta_transition(delta(attributes), &HashMap::new(), &Balances::default());
 
-        assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
+        assert!(matches!(result, Err(TransitionError::DecodeError(_))), "got {result:?}");
         assert_eq!(curve.policy, before);
     }
 
