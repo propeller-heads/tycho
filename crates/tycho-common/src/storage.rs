@@ -17,8 +17,8 @@ use crate::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, Balance, BlockHash, Chain, Code, CodeHash, ComponentId, ContractId, EntryPointId,
@@ -511,6 +511,62 @@ pub trait ProtocolGateway {
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError>;
+}
+
+/// Store and retrieve admin pauses of protocol components.
+#[async_trait]
+pub trait ComponentPauseGateway {
+    /// Records admin pauses of components.
+    ///
+    /// A component that is already paused keeps its existing pause and audit details. A
+    /// component can be paused before it is indexed. The call records every pause or none, so a
+    /// failed call can be retried as a whole.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `system` The protocol system the components belong to.
+    /// - `pauses` The pauses to record. A repeated id keeps its first pause.
+    ///
+    /// # Returns
+    /// The ids of the components this call paused. Err if the protocol system is unknown or
+    /// storage access failed.
+    async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+    ) -> Result<Vec<ComponentId>, StorageError>;
+
+    /// Ends admin pauses of components.
+    ///
+    /// Ended pauses stay stored as history. Ids that are not paused are ignored.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `component_ids` The external ids of the components to unpause.
+    /// - `unpause` Who ended the pauses and why, stored on every pause this call ends.
+    ///
+    /// # Returns
+    /// The ids of the components whose pause this call ended. Err if storage access failed.
+    async fn unpause_components(
+        &self,
+        chain: &Chain,
+        component_ids: &[&str],
+        unpause: &UnpauseRecord,
+    ) -> Result<Vec<ComponentId>, StorageError>;
+
+    /// Reads the admin pauses that are in effect.
+    ///
+    /// # Parameters
+    /// - `chain` The chain to read pauses for.
+    ///
+    /// # Returns
+    /// Every pause in effect on the chain, across all protocol systems. Err if storage access
+    /// failed.
+    async fn get_component_pauses(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<ComponentPause>, StorageError>;
 }
 
 /// Filters for entry points queries in the database.

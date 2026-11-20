@@ -4,18 +4,21 @@ A comprehensive integration test that validates the Tycho system by performing e
 This test runs continuously in the cluster but it can also be run locally for debugging.
 
 1. **Stream Processing**: Connects to Tycho indexer and receives live protocol state updates
-2. **State Validation**: For each protocol update (after the first one) and for each swap direction:
+2. **State Validation**: For each tested protocol update (after the first one, and every
+   `--test-every-n-updates`-th), for the components selected from it, and for each swap direction:
     1. **Get Limits**: Retrieves maximum input/output limits for token pairs
-    2. **Simulate Swap**: Calls `get_amount_out` with 0.1% of max input amount
+    2. **Simulate Swap**: Calls `get_amount_out` with the max input, capped at 5 ETH worth of the
+       token (at the token price snapshot) and at 2^96 - 1
     3. **Encode Transaction**: Builds the actual swap transaction via TychoRouterV3
     4. **Execute Simulation**: Runs `debug_traceCall` with necessary state overrides
-    5. **Calculate Slippage**: Compares simulated vs actual execution results
+    5. **Calculate Slippage**: Compares simulated vs actual execution results, and records it as a
+       metric
 
 ## Supported Protocols
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
-- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set
-- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric)
+- **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set, and Euclid, whose gateway is public and which runs on Ethereum without credentials. Euclid's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
+- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai on Base when listed). BaiBai's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -26,9 +29,10 @@ This test runs continuously in the cluster but it can also be run locally for de
 |-----------------|----------------------------|--------------------------------------------|
 | `RUST_LOG`      | Logging configuration      | `tycho_integration_test=info,error`        |
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
-| `RPC_URL`       | Blockchain RPC endpoint    | `https://eth-mainnet.alchemyapi.io/v2/...` |
-| `TYCHO_API_KEY` | API key for Tycho services | `your-api-key`                             |
-| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped | |
+| `RPC_URL`       | Blockchain RPC endpoint; BaiBai's feed polls it too, so it must be a Base node with `--pamm baibai` | `https://eth-mainnet.alchemyapi.io/v2/...` |
+| `TYCHO_API_KEY` | API key for Tycho services; defaults to `sampletoken` | `your-api-key`                             |
+| `TYCHO_NO_TLS`  | Connect to Tycho over plain HTTP/WS (a local instance) | `true`                     |
+| `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped. Euclid needs none and runs on Ethereum | |
 | `METRIC_API_KEY` | Metric (pAMM) credentials; required when `--pamm` lists `metric` | |
 
 ### Command Line Arguments
@@ -41,19 +45,28 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--max-simulations-stale`  | `10`       | Maximum simulations (of stale states) per update per protocol                                                    |
 | `--parallel-simulations`   | `5`        | Number of concurrent simulations                                                                                 |
 | `--parallel-updates`       | `5`        | Number of concurrent update processors                                                                           |
-| `--tvl-threshold`          | `100.0`    | TVL threshold in native tokens for filtering                                                                     |
+| `--tvl-threshold`          | chain's medium tier | TVL threshold in native tokens for filtering; without it, the chain's default for about $200K |
+| `--tvl-buffer-ratio`       | `1.1`      | A component is removed when its TVL drops below `--tvl-threshold` divided by this                                |
 | `--protocol-tvl-thresholds` | -         | Comma-separated `protocol=threshold` pairs. Each one replaces `--tvl-threshold` for its protocol. Every named protocol must be enabled |
 | `--metrics-port`           | `9898`     | Port for Prometheus metrics server                                                                               |
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
-| `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native)                                                     |
+| `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native, Euclid)                                             |
 | `--disable-pamm`           | `false`    | Skip the pAMM book feeds. Conflicts with `--pamm`                                                                |
-| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run; replaces the default list. A listed venue missing its credentials, or whose feed fails to build, fails the run |
+| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run (`metric`, `baibai`); replaces the default list. `baibai` runs on Base only and reads its books over `RPC_URL`. A listed venue missing its credentials, or whose feed fails to build, fails the run |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |
 | `--price-level-stream-stale-threshold-secs` | `10` | Seconds without a Titan message before marking served pAMMs stale in metrics (0 disables)              |
 | `--skip-messages-duration` | `600`      | Book stream skip duration (seconds) after processing a message                                                   |
-| `--block-wait-time`        | `12`       | Time to wait (seconds) for block N+1 before executing debug_traceCall                                            |
+| `--rpc-poll-attempts`      | `10`       | Attempts to poll the RPC when the update's block is ahead of it                                                  |
+| `--rpc-poll-interval-ms`   | `500`      | Milliseconds between those attempts                                                                              |
+| `--test-every-n-updates`   | `1`        | Test every Nth protocol update (alias `--test-every-n-blocks`); every update's state is ingested either way    |
+| `--partial-blocks`         | `false`    | Stream partial block updates (flashblocks)                                                                       |
+| `--stale-threshold-secs`   | `30`       | Seconds without a protocol update before every known protocol is marked stale in metrics (0 disables)            |
+| `--min-token-quality`      | -          | Minimum token quality to load (100 when not given)                                                               |
+| `--max-days-since-last-trade` | -       | Maximum days since a token last traded (chain-specific default when not given)                                   |
+| `--disable-execution`      | `false`    | Simulate only: no swap encoding or execution                                                                     |
+| `--bypass-executor-timelock` | `false`  | Mark every known executor as activated in the simulation's state overrides                                       |
 | `--always-test-components` | -          | Comma-separated list of component IDs to test every block                                                        |
 | `--max-blocks`             | `0`        | Maximum number of blocks to process before exiting (0 = run indefinitely). When set, prints a summary at the end |
 
@@ -93,3 +106,14 @@ cargo run --package tycho-integration-test -- \
   --max-blocks 10 \
   --protocols uniswap_v2,uniswap_v3
 ```
+
+## Strict packages
+
+A protocol whose package sets `harness: strict` in its `integration_test.tycho.yaml` also gets
+limit probes: each tested direction is swapped at 0.1%, 1%, 10% of its limit or the limit itself,
+one size per sample in turn, and past the limit as its declared kind claims, and judged with the
+declared limits and execution tolerance, the component's own where a test lists it, else the
+package's. The yamls are embedded at build time. Outcomes are in
+`tycho_integration_check_total` and the "Strict checks" row of the Integration test dashboard
+(`grafana/integration-test.json`). See `CLAUDE.md`, "Strict packages".
+

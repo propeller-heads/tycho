@@ -426,6 +426,16 @@ where
         state.final_block_height = Some(final_block_height);
     }
 
+    /// Sets the block that the first streamed block follows, before the stream starts. The
+    /// extractor stamps its first block after this block. The final block height stays unset
+    /// until the first message brings it.
+    pub(crate) async fn set_block_before_start(&self, block: Block) {
+        self.inner
+            .lock()
+            .await
+            .last_processed_block = Some(block);
+    }
+
     /// Reports sync progress if a minute has passed since the last report.
     async fn report_sync_progress(
         &self,
@@ -501,45 +511,74 @@ where
             drop(state); // Release the lock before doing potentially slow operations
 
             // Report the memory usage for all buffers and caches
+            let reorg_buffer_size = async {
+                self.reorg_buffer
+                    .lock()
+                    .await
+                    .deep_size_of()
+            }
+            .instrument(info_span!("reorg_buffer_size"))
+            .await;
             gauge!(
                 "extractor_reorg_buffer_size",
                 "chain" => self.chain.to_string(),
                 "extractor" => self.name.clone(),
             )
-            .set(
-                self.reorg_buffer
+            .set(reorg_buffer_size as f64);
+
+            let partial_block_buffer_size = async {
+                self.partial_block_buffer
                     .lock()
                     .await
-                    .deep_size_of() as f64,
-            );
+                    .deep_size_of()
+            }
+            .instrument(info_span!("partial_block_buffer_size"))
+            .await;
             gauge!(
                 "extractor_partial_block_buffer_size",
                 "chain" => self.chain.to_string(),
                 "extractor" => self.name.clone(),
             )
-            .set(
-                self.partial_block_buffer
-                    .lock()
-                    .await
-                    .deep_size_of() as f64,
-            );
+            .set(partial_block_buffer_size as f64);
 
-            // As the protocol cache is shared with other extractors, we only index it by chain
+            // As the protocol cache is shared with other extractors, we only index it by chain.
+            // Counts, not a deep size: a size walk visits every entry and takes about 1 s on a
+            // large cache, during which it blocks an extraction runtime thread.
             gauge!(
-                "protocol_cache_size",
+                "protocol_cache_tokens",
                 "chain" => self.chain.to_string(),
             )
-            .set(self.protocol_cache.size_of().await as f64);
+            .set(self.protocol_cache.token_count().await as f64);
+            gauge!(
+                "protocol_cache_components",
+                "chain" => self.chain.to_string(),
+            )
+            .set(
+                self.protocol_cache
+                    .component_count()
+                    .await as f64,
+            );
+            if let Some(price_age) = self.protocol_cache.price_age().await {
+                gauge!(
+                    "protocol_cache_price_age_seconds",
+                    "chain" => self.chain.to_string(),
+                )
+                .set(price_age.num_seconds() as f64);
+            }
 
             if let Some(dci_plugin) = &self.dci_plugin {
-                let dci = dci_plugin.lock().await;
-                gauge!(
-                    "dci_cache_size",
-                    "chain" => self.chain.to_string(),
-                    "extractor" => self.name.clone(),
-                )
-                .set(dci.cache_size() as f64);
-                dci.emit_cache_metrics(&self.chain.to_string(), &self.name);
+                async {
+                    let dci = dci_plugin.lock().await;
+                    gauge!(
+                        "dci_cache_size",
+                        "chain" => self.chain.to_string(),
+                        "extractor" => self.name.clone(),
+                    )
+                    .set(dci.cache_size() as f64);
+                    dci.emit_cache_metrics(&self.chain.to_string(), &self.name);
+                }
+                .instrument(info_span!("dci_cache_metrics"))
+                .await;
             }
         }
     }
@@ -2213,6 +2252,8 @@ where
             component_tvl: HashMap::new(),
             dci_update: DCIUpdate::default(), // TODO: get reverted entrypoint info?
             partial_block_index: revert_partial_block_index,
+            paused_components: HashSet::new(),
+            unpaused_components: HashSet::new(),
         };
 
         debug!("Successfully retrieved all previous states during revert!");
@@ -2784,9 +2825,9 @@ mod test {
 
     use super::*;
     use crate::{
-        extractor::MockExtractorExtension,
+        extractor::{factory::earlier_blocks_in_second, MockExtractorExtension},
         pb::sf::substreams::v1::BlockRef,
-        testing::{fixtures as pb_fixtures, MockGateway},
+        testing::{fixtures as pb_fixtures, mock_node::node, MockGateway},
     };
 
     mock! {
@@ -3838,6 +3879,91 @@ mod test {
         let res = extractor.get_cursor().await;
 
         assert_eq!(res, "cursor");
+    }
+
+    /// Starts a new extractor at block `first` the way the factory does, with a node that serves
+    /// `seconds` as (number, second) pairs, then sends it the blocks from `first` to `last`.
+    async fn run_new_extractor(
+        seconds: &[(u64, i64)],
+        first: u64,
+        last: u64,
+    ) -> Vec<NaiveDateTime> {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Err(StorageError::NotFound("ExtractionState".into(), "test".into())));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        let extractor = create_extractor(gw).await;
+        let second_of = |number: u64| {
+            seconds
+                .iter()
+                .find(|(n, _)| *n == number)
+                .map(|(_, second)| *second)
+                .unwrap()
+        };
+
+        // The factory sets the block before `first` in its second as the last processed block.
+        let (_server, rpc) = node(seconds).await;
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, first)
+            .await
+            .unwrap();
+        let (_first, earlier) = blocks.split_last().unwrap();
+        if let Some(before) = earlier.last() {
+            extractor
+                .set_block_before_start(before.clone())
+                .await;
+        }
+
+        let mut stamps = Vec::new();
+        for number in first..=last {
+            extractor
+                .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                    &tycho_pb::BlockChanges {
+                        block: Some(tycho_pb::Block {
+                            number,
+                            hash: Bytes::from(number).lpad(32, 0).to_vec(),
+                            parent_hash: Bytes::from(number - 1)
+                                .lpad(32, 0)
+                                .to_vec(),
+                            ts: u64::try_from(second_of(number)).unwrap(),
+                        }),
+                        ..Default::default()
+                    },
+                    Some(&format!("cursor@{number}")),
+                    Some(1),
+                ))
+                .await
+                .unwrap();
+            stamps.push(
+                extractor
+                    .get_last_processed_block()
+                    .await
+                    .unwrap()
+                    .ts,
+            );
+        }
+        stamps
+    }
+
+    #[tokio::test]
+    async fn test_extractors_starting_at_different_blocks_stamp_the_same() {
+        // Blocks 8, 9 and 10 share one second; block 7 is in the second before.
+        const SECOND: i64 = 1_700_000_000;
+        let node = [(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)];
+        let at = |micros| {
+            chrono::DateTime::from_timestamp(SECOND, 0)
+                .unwrap()
+                .naive_utc() +
+                Duration::microseconds(micros)
+        };
+
+        let from_10 = run_new_extractor(&node, 10, 10).await;
+        let from_8 = run_new_extractor(&node, 8, 10).await;
+
+        assert_eq!(from_10, vec![at(2)]);
+        assert_eq!(from_8, vec![at(0), at(1), at(2)]);
     }
 
     #[tokio::test]

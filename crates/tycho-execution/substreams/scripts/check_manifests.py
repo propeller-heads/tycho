@@ -4,8 +4,9 @@
 `map_trades` selects on the routers in its params, and its block filter has to name the same
 addresses. `map_vault_transfers` reads logs from the same routers, so it carries the same params
 and the same filter. `map_fee_config_events` decodes from any emitter, so it filters on
-`fee_cfg`, a key the index sets from the same decoders. A filter that is too narrow drops rows
-without an error, so this runs in CI.
+`fee_cfg`, a key the index sets from the same decoders, and `map_subsidy_events` likewise
+filters on `subsidy`. Every module carries the same params. A filter that is too narrow drops
+rows without an error, so this runs in CI.
 
 Run from anywhere: python3 crates/tycho-execution/substreams/scripts/check_manifests.py
 """
@@ -65,6 +66,16 @@ def main() -> int:
         if fee_query != "fee_cfg":
             failures.append(
                 f"{path.name} map_fee_config_events: filter is {fee_query!r}, expected 'fee_cfg'"
+            )
+        subsidy_params = re.search(r"^  map_subsidy_events: (.+)$", manifest, re.M)
+        if subsidy_params is None:
+            failures.append(f"{path.name}: no map_subsidy_events params")
+        elif subsidy_params.group(1) != params:
+            failures.append(f"{path.name} map_subsidy_events: params differ from map_trades")
+        subsidy_query = query(manifest, "map_subsidy_events")
+        if subsidy_query != "subsidy":
+            failures.append(
+                f"{path.name} map_subsidy_events: filter is {subsidy_query!r}, expected 'subsidy'"
             )
     for failure in failures:
         print(failure, file=sys.stderr)

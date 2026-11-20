@@ -27,6 +27,10 @@ for _ in {1..60}; do
 done
 
 psql_in <"$workspace_dir/schema.sql"
+# The vault balance snapshot reads pinned decimals, which the pricer's setup creates.
+psql_in <"$workspace_dir/pricing/preferred_tokens.sql"
+psql_in <"$workspace_dir/views.sql"
+# Every container applies views.sql on start, so it has to apply on top of itself.
 psql_in <"$workspace_dir/views.sql"
 psql_in <"$workspace_dir/test_views.sql"
 

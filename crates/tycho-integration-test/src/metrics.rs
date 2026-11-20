@@ -61,7 +61,8 @@ pub fn initialize_metrics() {
     );
     describe_histogram!(
         "tycho_integration_simulation_execution_slippage_ratio",
-        "Slippage ratio between simulated and actual execution amounts"
+        "Slippage between the fee-deducted simulated amount and the executed amount, in percent: \
+         positive when the execution paid more"
     );
     describe_gauge!(
         "tycho_integration_protocol_sync_state",
@@ -75,6 +76,10 @@ pub fn initialize_metrics() {
     describe_counter!(
         "tycho_integration_protocol_updates_skipped_total",
         "Total number of protocol updates skipped due to being behind current block"
+    );
+    describe_counter!(
+        "tycho_integration_protocol_updates_sampled_out_total",
+        "Protocol updates whose state was ingested but not tested, by --test-every-n-updates"
     );
     describe_histogram!(
         "tycho_integration_protocol_update_block_delay_blocks",
@@ -93,6 +98,27 @@ pub fn initialize_metrics() {
         "tycho_integration_simulation_gas_signed_error_absolute",
         "Signed gas estimation error in absolute gas units: estimated - actual. \
          Positive = overestimate, negative = underestimate"
+    );
+    describe_counter!(
+        "tycho_integration_check_total",
+        "Strict-mode check outcomes of limit probes, by protocol, check (exec.ladder, \
+         limits.at_limit, limits.past_limit, limits.max_output, sim.ladder), outcome (pass, fail, \
+         not_run), reason and probe size"
+    );
+    describe_gauge!(
+        "tycho_integration_strict_protocol",
+        "1 for each protocol whose package is in strict mode, and so gets limit probes"
+    );
+    describe_gauge!(
+        "tycho_integration_strict_tolerance_bps",
+        "The execution tolerance a strict protocol's package declares, in bps; 0 when it declares \
+         none, since strict mode is then exact, and unset when it declares only wei. A \
+         component's own declaration overrides it"
+    );
+    describe_histogram!(
+        "tycho_integration_probe_drift_bps",
+        "Signed difference between a probe's executed and simulated amount out, in bps of the \
+         executed amount, after the router fee: positive = the simulation underquotes"
     );
 }
 
@@ -188,6 +214,48 @@ pub fn record_simulation_execution_failure(protocol: &str, error_category: &str)
         "error_category" => error_category.to_string(),
     )
     .increment(1);
+}
+
+/// Record one strict-mode check outcome of a limit probe. `reason` names why a check failed or did
+/// not run, from a fixed set, and is empty for a pass.
+pub fn record_check(protocol: &str, check: &str, outcome: &str, reason: &str, size: &str) {
+    counter!(
+        "tycho_integration_check_total",
+        "protocol" => protocol.to_string(),
+        "check" => check.to_string(),
+        "outcome" => outcome.to_string(),
+        "reason" => reason.to_string(),
+        "size" => size.to_string(),
+    )
+    .increment(1);
+}
+
+/// Mark `protocol` as strict, so dashboards can list the protocols that get limit probes, and
+/// record the bps tolerance its package declares, which judges the probes of every component
+/// that declares none. A package that declares only `wei` has no bps tolerance, and none is set.
+pub fn record_strict_protocol(protocol: &str, tolerance_bps: Option<f64>) {
+    gauge!(
+        "tycho_integration_strict_protocol",
+        "protocol" => protocol.to_string(),
+    )
+    .set(1.0);
+    if let Some(bps) = tolerance_bps {
+        gauge!(
+            "tycho_integration_strict_tolerance_bps",
+            "protocol" => protocol.to_string(),
+        )
+        .set(bps);
+    }
+}
+
+/// Record the drift of a probe that executed, in bps of the executed amount.
+pub fn record_probe_drift(protocol: &str, size: &str, drift_bps: f64) {
+    histogram!(
+        "tycho_integration_probe_drift_bps",
+        "protocol" => protocol.to_string(),
+        "size" => size.to_string(),
+    )
+    .record(drift_bps);
 }
 
 /// Record slippage between simulation and execution
@@ -350,6 +418,11 @@ pub async fn create_metrics_exporter(port: u16) -> Result<tokio::task::JoinHandl
                 -10.0, -1.0, -0.5, -0.25, -0.2, -0.15, -0.1, -0.05, -0.01, 0.0, 0.01, 0.05, 0.1,
                 0.15, 0.2, 0.25, 0.5, 1.0, 10.0,
             ],
+        )
+        .map_err(|e| miette::miette!("Failed to set buckets: {}", e))?
+        .set_buckets_for_metric(
+            Matcher::Full("tycho_integration_probe_drift_bps".to_string()),
+            &[-100.0, -10.0, -1.0, -0.1, -0.01, -0.001, 0.0, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
         )
         .map_err(|e| miette::miette!("Failed to set buckets: {}", e))?
         .set_buckets_for_metric(

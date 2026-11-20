@@ -164,7 +164,126 @@ BEGIN
     END IF;
 END $$;
 
+-- The snapshot holds what vault_balances holds, valued at each token's latest settled price.
+DO $$
+DECLARE
+    zero TEXT := '0x0000000000000000000000000000000000000000';
+    differ BIGINT;
+    usd DOUBLE PRECISION;
+    token_decimals INTEGER;
+    rows_before BIGINT;
+BEGIN
+    -- Two settled fills of the fee token, a day apart, and a later probe the chain discarded.
+    PERFORM add_trade('usdc-old',   '0xu1', 10, '0xin', '0xusdc', 100, TRUE, TRUE, TRUE);
+    PERFORM add_trade('usdc-new',   '0xu2', 10, '0xin', '0xusdc', 100, TRUE, TRUE, TRUE);
+    PERFORM add_trade('usdc-probe', '0xu3', 10, '0xin', '0xusdc', 100, TRUE, TRUE, FALSE);
+    UPDATE trades SET price_out_usd = 0.5, decimals_out = 18, block_time = '2026-09-02'
+    WHERE id = 'usdc-old';
+    UPDATE trades SET price_out_usd = 2, decimals_out = 18, block_time = '2026-09-03'
+    WHERE id = 'usdc-new';
+    UPDATE trades SET price_out_usd = 1000, decimals_out = 18, block_time = '2026-09-04'
+    WHERE id = 'usdc-probe';
+    -- Pinned decimals win over the 18 the trades carry.
+    INSERT INTO preferred_tokens (
+        chain, address, symbol, decimals, is_stable, priority, min_usd, max_usd
+    ) VALUES ('robinhood', '0xusdc', 'USDC', 6, TRUE, 1, 0.9, 1.1);
+
+    PERFORM refresh_vault_balances_snapshot();
+
+    SELECT count(*) INTO differ FROM (
+        (SELECT chain, router, owner, token, balance, credited_as_fees, n_flows, last_block,
+                last_change FROM vault_balances
+         EXCEPT
+         SELECT chain, router, owner, token, balance, credited_as_fees, n_flows, last_block,
+                last_change FROM vault_balances_snapshot)
+        UNION ALL
+        (SELECT chain, router, owner, token, balance, credited_as_fees, n_flows, last_block,
+                last_change FROM vault_balances_snapshot
+         EXCEPT
+         SELECT chain, router, owner, token, balance, credited_as_fees, n_flows, last_block,
+                last_change FROM vault_balances)
+    ) d;
+    IF differ <> 0 THEN
+        RAISE EXCEPTION 'the snapshot differs from vault_balances in % rows', differ;
+    END IF;
+
+    -- 380 raw units at the pinned 6 decimals and the latest settled price of 2 USD.
+    SELECT s.balance_usd, s.decimals INTO usd, token_decimals
+    FROM vault_balances_snapshot s
+    WHERE s.owner = '0xfeetaker' AND s.token = '0xusdc';
+    IF token_decimals IS DISTINCT FROM 6 OR abs(usd - 0.00076) > 1e-12 THEN
+        RAISE EXCEPTION 'fee taker usdc is % USD at % decimals, expected 0.00076 at 6',
+            usd, token_decimals;
+    END IF;
+
+    -- No trade prices weth, so its rows carry no price and no USD value.
+    IF EXISTS (
+        SELECT 1 FROM vault_balances_snapshot s
+        WHERE s.token = '0xweth' AND (s.price_usd IS NOT NULL OR s.balance_usd IS NOT NULL)
+    ) THEN
+        RAISE EXCEPTION 'an unpriced token has a USD value';
+    END IF;
+
+    -- A later refresh replaces the rows: the withdrawal shows, and no row is doubled.
+    SELECT count(*) INTO rows_before FROM vault_balances_snapshot;
+    PERFORM add_vault('w3', '0xfeetaker', zero, '0xusdc', 380, 'debit');
+    PERFORM refresh_vault_balances_snapshot();
+    IF (SELECT count(*) FROM vault_balances_snapshot) <> rows_before THEN
+        RAISE EXCEPTION 'a refresh changed the row count from %', rows_before;
+    END IF;
+    IF (SELECT s.balance FROM vault_balances_snapshot s
+        WHERE s.owner = '0xfeetaker' AND s.token = '0xusdc') <> 0 THEN
+        RAISE EXCEPTION 'the refresh kept the balance from before the withdrawal';
+    END IF;
+END $$;
+
 DROP FUNCTION add_fee(TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_vault(TEXT, TEXT, TEXT, TEXT, NUMERIC, TEXT);
 DROP FUNCTION add_trade(TEXT, TEXT, INTEGER, TEXT, TEXT, NUMERIC, BOOLEAN, BOOLEAN, BOOLEAN);
+-- A paid subsidy sits next to the settled trade it was paid on; one on a discarded call, one
+-- skipped, and one whose trade was not indexed stay out of the view.
+CREATE OR REPLACE FUNCTION add_subsidy(
+    p_id TEXT, p_event TEXT, p_trade TEXT, p_token TEXT, p_amount NUMERIC
+) RETURNS VOID AS $$
+    INSERT INTO subsidies (
+        id, chain, block_number, block_time, tx_hash, log_index, payer, event, nonce, trade_id,
+        bound_to, receiver, token, amount, reason
+    ) VALUES (
+        p_id, 'robinhood', 3, '2026-09-01T00:00:00Z', '0x' || p_id, 0, '0xpayer', p_event,
+        '0xnonce' || p_id, p_trade,
+        CASE WHEN p_event = 'paid' THEN '0xuser' END, CASE WHEN p_event = 'paid' THEN '0xr' END,
+        CASE WHEN p_event = 'paid' THEN p_token END, CASE WHEN p_event = 'paid' THEN p_amount END,
+        CASE WHEN p_event = 'skipped' THEN 'insufficient_balance' END
+    );
+$$ LANGUAGE sql;
+
+DO $$
+DECLARE
+    kept TEXT[];
+    usd DOUBLE PRECISION;
+BEGIN
+    UPDATE trades SET price_out_usd = 2, decimals_out = 6, volume_usd = 100 WHERE id = 'committed';
+    PERFORM add_subsidy('s-committed', 'paid', 'committed', '0xout', 874);
+    PERFORM add_subsidy('s-other-token', 'paid', 'fill', '0xmid', 874);
+    PERFORM add_subsidy('s-discarded', 'paid', 'discarded', '0xout', 874);
+    PERFORM add_subsidy('s-skipped', 'skipped', 'committed', NULL, NULL);
+    PERFORM add_subsidy('s-no-trade', 'paid', 'not-indexed', '0xout', 874);
+
+    SELECT array_agg(tx_hash ORDER BY tx_hash) INTO kept FROM subsidized_trades;
+    IF kept IS DISTINCT FROM ARRAY['0xs-committed', '0xs-other-token'] THEN
+        RAISE EXCEPTION 'subsidized_trades kept %', kept;
+    END IF;
+
+    -- 874 raw units of a 6-decimal token at 2 USD.
+    SELECT subsidy_usd INTO usd FROM subsidized_trades WHERE tx_hash = '0xs-committed';
+    IF abs(usd - 0.001748) > 1e-9 THEN
+        RAISE EXCEPTION 'subsidy_usd is %, expected 0.001748', usd;
+    END IF;
+    -- A subsidy paid in another token than the trade's output has no price here.
+    SELECT subsidy_usd INTO usd FROM subsidized_trades WHERE tx_hash = '0xs-other-token';
+    IF usd IS NOT NULL THEN
+        RAISE EXCEPTION 'a subsidy in another token is priced: %', usd;
+    END IF;
+END $$;
+
 COMMIT;

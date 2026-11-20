@@ -21,6 +21,7 @@ extractor/
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
+  pause.rs                  PauseRegistry — admin pauses per protocol system, loaded at startup (a failed load stops startup); PauseRefresher re-reads them periodically, queues pause/unpause events for the extracted systems and signals each change
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
   writer_status.rs          Role (Leader | Follower) + WriterStatus: role, leader's committed blocks and last lock confirmation as watch receivers; `needs_stream`, `extractors_behind_head`
@@ -43,7 +44,7 @@ extractor/
 
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
-  rpc.rs                    HTTP endpoints: state snapshots, component queries
+  rpc.rs                    HTTP endpoints: state snapshots, component queries; clears the protocol_components and protocol_state response caches on each admin pause change
   off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
@@ -88,6 +89,19 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
    and schedule a DB write (see Persistence).
 7. Aggregate all tx-level deltas → `BlockAggregatedChanges`; compute TVL.
 8. Broadcast `Arc<BlockAggregatedChanges>` to subscribers.
+
+### Block timestamps
+
+Several blocks of a fast chain share one second. The extractor stamps such a block one
+microsecond after the block before it, so every extractor gives a block the same timestamp. An
+extractor with no stored block has no block before its first one. The factory reads the blocks of
+that second up to the first one from the node, stamped (`earlier_blocks_in_second`). It never
+reads the stamp from the database, so the stamp depends only on the chain. Then it runs
+`check_stored_block` on the first block: when the block is already stored with another timestamp,
+the extractor stops with a setup error. After the check, it sets the block before the first one as
+the last processed block. The blocks after the first one are stamped from it, so this one check
+at start is enough, and the write path has no check. Account initialisation (used in tests)
+stores its block outside an extractor, so it takes the stamp from `earlier_blocks_in_second` too.
 
 ### Partial-block path
 

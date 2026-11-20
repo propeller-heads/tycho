@@ -39,6 +39,7 @@ infer_chain() {
         bsc-*)      echo "bsc" ;;
         polygon-*)  echo "polygon" ;;
         robinhood-*) echo "robinhood" ;;
+        elysium-*)  echo "elysium" ;;
         *)          echo "ethereum" ;;
     esac
 }
@@ -48,8 +49,8 @@ infer_chain() {
 GENERIC_RPC_URL="${RPC_URL:-}"
 
 # Return the appropriate RPC URL for the given protocol.
-# Most chain-specific URLs fall back to generic RPC_URL. Arc and Robinhood require explicit archive
-# endpoints.
+# Most chain-specific URLs fall back to generic RPC_URL. Arc, Robinhood and Elysium require
+# explicit archive endpoints.
 get_rpc_url() {
     local protocol="$1"
     case "$protocol" in
@@ -60,6 +61,7 @@ get_rpc_url() {
         bsc-*)      echo "${BSC_RPC_URL:-$GENERIC_RPC_URL}" ;;
         polygon-*)  echo "${POLYGON_RPC_URL:-$GENERIC_RPC_URL}" ;;
         robinhood-*) echo "${ROBINHOOD_RPC_URL:?ROBINHOOD_RPC_URL must be set to an archive RPC to test a robinhood-* package}" ;;
+        elysium-*)  echo "${ELYSIUM_RPC_URL:?ELYSIUM_RPC_URL must be set to an archive RPC to test an elysium-* package}" ;;
         *)          echo "$GENERIC_RPC_URL" ;;
     esac
 }
@@ -85,13 +87,23 @@ for test in "${args[@]}"; do
 	cmd=(tycho-protocol-sdk "$MODE" --package "$protocol" --chain "$chain" \
 		--rpc-url "$rpc_url" --db-url "$DATABASE_URL" --prebuilt-wasm)
 	# The "=" suffix in PROTOCOLS means different things per mode:
-	#   range → --match-test (run one named test case)
+	#   range → --match-test (run the test cases whose name contains it)
 	#   full  → --initial-block (start syncing from this block)
 	if [[ "$test" == *"="* ]]; then
 		if [ "$MODE" = "full" ]; then
 			cmd+=(--initial-block "$suffix")
 		else
 			cmd+=(--match-test "$suffix")
+		fi
+	fi
+	# REPORT_DIR: write each package's test report there, as <package>.json for range and
+	# <package>.jsonl for full (one line per failed update, strict packages only).
+	if [ -n "${REPORT_DIR:-}" ]; then
+		mkdir -p "$REPORT_DIR"
+		if [ "$MODE" = "full" ]; then
+			cmd+=(--report "$REPORT_DIR/$protocol.jsonl")
+		else
+			cmd+=(--report "$REPORT_DIR/$protocol.json")
 		fi
 	fi
 	"${cmd[@]}"

@@ -13,11 +13,7 @@ use alloy::{
 use futures::StreamExt;
 use itertools::Itertools;
 use miette::{ensure, miette, IntoDiagnostic, WrapErr};
-use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use postgres::NoTls;
-use serde_json::json;
 use tokio::runtime::Runtime;
 use tracing::{debug, error, info, warn};
 use tycho_execution::encoding::evm::utils::bytes_to_address;
@@ -44,19 +40,28 @@ use tycho_simulation::{
     },
 };
 use tycho_test::{
+    checks::{
+        execution::check_executions_match,
+        ladder::{self, executable_max_input, DeclaredLimits, LadderOutput},
+        tvl_only,
+    },
     execution::{
-        encoding::{encode_swap, EXECUTOR_ADDRESS},
         models::{TychoExecutionInput, TychoExecutionResult},
         simulate_swap_transaction,
     },
+    expectations::PackageExpectations,
     RPCTools,
 };
 
 use crate::{
     adapter_builder::AdapterContractBuilder,
-    config::{IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig},
+    balances,
+    config::{
+        component_directions, DeclaredTolerance, Direction, ExecutionTolerances, Harness,
+        IntegrationTest, IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
+    },
     execution,
-    report::{CheckId, Checks, Report},
+    report::{CheckId, Checks, Finished, Report},
     rpc::RPCProvider,
     state_registry::register_protocol,
     tycho_rpc::TychoClient,
@@ -80,6 +85,10 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
+        ("robinhood-swaphood-v3", "ethereum-pancakeswap-v3"),
+        ("elysium-kleos-v3", "ethereum-uniswap-v3-logs-only"),
+        ("elysium-elyspump-v3", "ethereum-uniswap-v3-logs-only"),
+        ("elysium-stockiumswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("unichain-curve", "ethereum-curve"),
         ("arbitrum-ramses-v3", "polygon-ramses-v3"),
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
@@ -87,57 +96,255 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("bsc-ekubo-v3", "ethereum-ekubo-v3"),
         ("base-ekubo-v3", "ethereum-ekubo-v3"),
         ("robinhood-up-v3", "base-aerodrome-slipstreams"),
+        ("elysium-aero-cl", "evm-aero-cl"),
         ("robinhood-pancakeswap-infinity-cl", "base-pancakeswap-infinity-cl"),
+        ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
     ])
 });
 
-/// Largest relative difference tolerated between the simulated and the executed amount out.
-const MAX_EXECUTION_SLIPPAGE: f64 = 0.005;
+/// The chain the balance check reads, at one block.
+struct RpcChain<'a> {
+    runner: &'a TestRunner,
+    block: u64,
+}
 
-/// Reports whether an executed amount out matches the simulated one, i.e. whether the difference
-/// between them stays within [`MAX_EXECUTION_SLIPPAGE`] of the executed amount.
-///
-/// Returns the reason for the mismatch otherwise. A zero executed amount never matches, since no
-/// relative difference can be expressed against it.
-fn check_execution_slippage(
-    expected_amount_out: &BigUint,
-    amount_out: &BigUint,
-) -> Result<(), String> {
-    if amount_out.is_zero() {
-        return Err("execution returned no output".to_string());
-    }
-
-    let diff = BigInt::from(expected_amount_out.clone()) - BigInt::from(amount_out.clone());
-    let slippage = BigRational::new(diff.abs(), BigInt::from(amount_out.clone()));
-
-    // A slippage that cannot be evaluated counts as out of tolerance.
-    if slippage
-        .to_f64()
-        .is_none_or(|slippage| slippage > MAX_EXECUTION_SLIPPAGE)
-    {
-        Err(format!("amounts differ by more than {}%", MAX_EXECUTION_SLIPPAGE * 100.0))
-    } else {
-        Ok(())
+impl balances::Chain for RpcChain<'_> {
+    fn call_code(&self, code: Bytes, calldata: Bytes) -> Result<Bytes, String> {
+        // Both `Bytes` wrap `bytes::Bytes`, so the conversions copy nothing.
+        let returned = self
+            .runner
+            .runtime
+            .block_on(self.runner.rpc_provider.call_code(
+                alloy::primitives::Bytes(code.0),
+                alloy::primitives::Bytes(calldata.0),
+                self.block,
+            ))
+            .map_err(|e| format!("{e:#}"))?;
+        Ok(Bytes(returned.0))
     }
 }
 
-/// The largest input amount a swap can actually be executed with, given `limit`.
+/// The limit `package` declares for every direction of every component in `update`, with where it
+/// comes from, keyed as [`ladder::run_ladder`] reads it: by lowercase id and direction. A strict
+/// package declares a default, so every direction has a declaration.
+fn declared_limits_of(
+    update: &Update,
+    protocol_components: &HashMap<String, ProtocolComponentModel>,
+    package: &PackageExpectations,
+) -> DeclaredLimits {
+    let mut declared = HashMap::new();
+    for id in update.states.keys() {
+        let Some(component) = protocol_components.get(id) else {
+            continue;
+        };
+        for pair in component.tokens.iter().permutations(2) {
+            let direction =
+                Direction { token_in: pair[0].address.clone(), token_out: pair[1].address.clone() };
+            if let Some((limits, by)) = package.declaration_for(id, &direction) {
+                declared.insert((id.to_lowercase(), direction), (limits.clone(), by));
+            }
+        }
+    }
+    declared
+}
+
+/// Strict mode's balance checks of one test: each expected component's `balances`, read by the
+/// package's `lens` (`check_component`), or skipped for the component's reason.
 ///
-/// Uniswap V4 settles a swap through a `BalanceDelta` of two `int128`s, and the executor's
-/// `swapExactInputSingle` takes the amount as a `uint128` that v4-core casts to `int128`, so no
-/// amount above `int128::MAX` can be executed however deep the pool is. A limit above that
-/// ceiling is not executable, and the percentages the harness trades at must stay distinct sizes,
-/// so the cap belongs on the limit itself rather than on each amount derived from it.
+/// A lens that failed to build fails `balances` once for the test, not once per component: the
+/// build failed, not a component's balances. `lens` is `Ok(None)` only when no `balance_lens` is
+/// declared, which `from_yaml` allows only when every component skips the check. The error
+/// [`Checks::run`] returns in legacy mode is passed on; in strict mode this returns `Ok`.
+fn record_strict_balances(
+    checks: &mut Checks,
+    lens: miette::Result<Option<balances::Lens>>,
+    components: &[ProtocolComponentWithTestConfig],
+    mut check_component: impl FnMut(&ProtocolComponentWithTestConfig, &balances::Lens) -> Vec<String>,
+) -> miette::Result<()> {
+    let lens = match lens {
+        Ok(lens) => Some(lens),
+        Err(e) => {
+            checks.run(CheckId::Balances, || Err::<(), _>(e))?;
+            None
+        }
+    };
+    for component in components {
+        let id = &component.base.id;
+        if let Some(reason) = component.skip_balance_check.reason() {
+            info!("[{id}] Skipping the balance check: {reason}");
+            checks.skip_component(CheckId::Balances, id, reason);
+            continue;
+        }
+        // A failed lens build was recorded once, above.
+        let Some(lens) = &lens else {
+            continue;
+        };
+        let failures = match lens {
+            Some(lens) => check_component(component, lens),
+            None => vec!["no `balance_lens` is declared".to_string()],
+        };
+        checks.record_balances(CheckId::Balances, id, component.tvl_only.as_ref(), &failures);
+    }
+    Ok(())
+}
+
+/// What became of one update's swaps in strict `full`.
+enum UpdateExecutions {
+    /// The ladder queued no swap.
+    Nothing,
+    /// The node did not serve the update's block, with its error, so nothing was executed.
+    Unserved(String),
+    /// The swaps were executed, or the batch failed with this error.
+    Ran(miette::Result<HashMap<String, TychoExecutionResult>>),
+}
+
+/// Strict `full`'s checks of one update at `block_number`: the ladder's `output`, then the
+/// executions of its swaps.
 ///
-/// Returns `limit` unchanged when it is at or below the ceiling.
-fn executable_max_input(limit: &BigUint) -> BigUint {
-    let ceiling = BigUint::from(i128::MAX as u128);
-    if *limit > ceiling {
-        ceiling
-    } else {
-        limit.clone()
+/// A pool that trades no direction at this block is passed over (`failure_of_traded`): every
+/// pool of the protocol is laddered at every update, and one with no capacity says nothing about
+/// the package. At a block the node does not serve, `exec.ladder` is not run, with the node's
+/// error, so the report says why nothing was executed.
+fn judge_strict_update(
+    block_number: u64,
+    output: &LadderOutput,
+    executions: UpdateExecutions,
+    tolerances: &ExecutionTolerances,
+) -> Checks {
+    let mut checks = Checks::new(Harness::Strict, "full").with_block(block_number);
+    let failure = output.failure_of_traded();
+    let ladder_failed = failure.is_some();
+    // Strict mode records each failure and goes on, so neither of these returns an error.
+    if let Err(e) = checks.run(CheckId::SimLadder, || failure.map_or(Ok(()), Err)) {
+        error!("Recording the ladder of block {block_number} failed: {e:#}");
+    }
+    let executed = match executions {
+        UpdateExecutions::Ran(executed) => Some(executed),
+        UpdateExecutions::Nothing | UpdateExecutions::Unserved(_) if ladder_failed => {
+            checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
+            None
+        }
+        UpdateExecutions::Nothing => None,
+        UpdateExecutions::Unserved(error) => {
+            checks.not_run_for(
+                CheckId::ExecLadder,
+                &format!("the node does not serve block {block_number}: {error}"),
+            );
+            None
+        }
+    };
+    if let Err(e) = record_strict_executions(output, executed, tolerances, None, &mut checks) {
+        error!("Recording the executions of block {block_number} failed: {e:#}");
+    }
+    checks
+}
+
+/// How many updates strict `full` has checked, how many of them had a failed check, and at how
+/// many the node did not serve the block, so nothing was executed.
+#[derive(Default)]
+struct StrictTally {
+    checked: usize,
+    failed: usize,
+    unexecuted: usize,
+}
+
+impl StrictTally {
+    fn add(&mut self, update: UpdateVerdict) {
+        self.checked += 1;
+        self.failed += usize::from(update.failed);
+        self.unexecuted += usize::from(update.unexecuted);
+    }
+}
+
+/// How one update of strict `full` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateVerdict {
+    /// A check failed.
+    failed: bool,
+    /// The node did not serve the block, so its swaps were not executed.
+    unexecuted: bool,
+}
+
+/// Records strict mode's execution checks for `output`: the ladder, then per direction the quote
+/// at the limit, the swap past it, and the max output.
+///
+/// `executed` is `None` when nothing was executed, as at an update with nothing to execute:
+/// nothing is recorded for the ladder, and the limit checks are recorded from the simulation
+/// alone. An error fails the ladder and `limits.at_limit`, and leaves a hard or under-cap limit's
+/// `limits.past_limit` not run, since nothing past a limit that did not execute proves anything; a
+/// soft limit's still passes on its simulation, and a capped one is still not run. With
+/// `execution_skip_reason`, the reason every component skips execution, the ladder is recorded as
+/// skipped.
+fn record_strict_executions(
+    output: &LadderOutput,
+    executed: Option<miette::Result<HashMap<String, TychoExecutionResult>>>,
+    tolerances: &ExecutionTolerances,
+    execution_skip_reason: Option<&str>,
+    checks: &mut Checks,
+) -> miette::Result<()> {
+    let executed = match executed {
+        None => None,
+        Some(Ok(results)) => {
+            observe_executions(checks, output.executions(), &results);
+            // A swap past the limit pays against the quote at the limit, so only the swaps at the
+            // limit measure drift.
+            observe_executions(checks, &output.at_limit_executions(), &results);
+            match execution_skip_reason {
+                Some(reason) => checks.skip(CheckId::ExecLadder, reason),
+                None => {
+                    checks.run(CheckId::ExecLadder, || {
+                        check_executions_match(output.executions(), &results, tolerances)
+                    })?;
+                }
+            }
+            Some(Ok(results))
+        }
+        Some(Err(e)) => {
+            checks.fail(CheckId::ExecLadder, &e);
+            // Every execution a limit check needs fails with the batch's error.
+            Some(Err(format!("the executions could not be simulated: {e:#}")))
+        }
+    };
+    let executed = executed.as_ref().map(|executed| {
+        executed
+            .as_ref()
+            .map_err(String::as_str)
+    });
+    for judged in ladder::judge_limits(output, executed, tolerances) {
+        checks.record_direction(
+            judged.check,
+            &judged.component,
+            &judged.direction,
+            &judged.limit,
+            judged.unfailed,
+            &judged.failures,
+        );
+    }
+    Ok(())
+}
+
+/// Notes every execution in `inputs` that returned an output, for the report's drift.
+fn observe_executions(
+    checks: &mut Checks,
+    inputs: &HashMap<String, TychoExecutionInput>,
+    results: &HashMap<String, TychoExecutionResult>,
+) {
+    // Sorted, so a tie between executions resolves the same way on every run.
+    for (simulation_id, input) in inputs
+        .iter()
+        .sorted_by(|a, b| a.0.cmp(b.0))
+    {
+        if let Some(TychoExecutionResult::Success { amount_out, .. }) = results.get(simulation_id) {
+            checks.observe_execution(
+                simulation_id,
+                &input.component_id,
+                &input.token_out,
+                &input.expected_amount_out,
+                amount_out,
+            );
+        }
     }
 }
 
@@ -148,6 +355,9 @@ pub enum TestType {
 
 pub struct TestTypeFull {
     pub initial_block: Option<u64>,
+    /// Strict: where to append the checks of every update with a failed check, one line of JSON
+    /// per update, if anywhere.
+    pub report: Option<PathBuf>,
 }
 
 pub struct TestTypeRange {
@@ -296,6 +506,20 @@ impl TestRunner {
         substreams_yaml_path: &PathBuf,
         test_type: &TestTypeFull,
     ) -> miette::Result<()> {
+        // Read before the build and the sync, so a yaml it rejects fails at the start.
+        let strict = match config.harness {
+            Harness::Strict => Some(self.package_expectations()?),
+            Harness::Legacy => {
+                if let Some(path) = &test_type.report {
+                    warn!(
+                        "`--report {}` is ignored: `full` writes a report for a strict package \
+                         only",
+                        path.display()
+                    );
+                }
+                None
+            }
+        };
         let start_block = match test_type.initial_block {
             Some(b) => b,
             None => {
@@ -358,13 +582,30 @@ impl TestRunner {
         self.run_tvl_import()?;
 
         // Start live testing with streaming (updates will come as indexer catches up)
-        self.run_live_testing(&config).await
+        self.run_live_testing(&config, strict.as_ref(), test_type.report.as_deref())
+            .await
     }
 
     /// Runs live testing by streaming from Tycho RPC and processing updates in real-time.
     /// Processes each update immediately with simulation and batched execution for scalability.
-    async fn run_live_testing(&self, config: &IntegrationTestsConfig) -> miette::Result<()> {
+    ///
+    /// A strict package's checks run on every update, and each update with a failed check is
+    /// logged and appended to `report`, one line of JSON per update; the run keeps going. A legacy
+    /// package logs failures and keeps going.
+    async fn run_live_testing(
+        &self,
+        config: &IntegrationTestsConfig,
+        strict: Option<&PackageExpectations>,
+        report: Option<&Path>,
+    ) -> miette::Result<()> {
         info!("Starting live testing for protocol {}", &config.protocol_system);
+        if let (Some(_), Some(path)) = (strict, report) {
+            // A new run starts a new report, rather than appending to an earlier run's.
+            std::fs::write(path, "")
+                .into_diagnostic()
+                .wrap_err_with(|| format!("Failed to create the test report {}", path.display()))?;
+        }
+        let mut tally = StrictTally::default();
 
         let chain = self.chain;
         // Load tokens for the stream
@@ -471,70 +712,29 @@ impl TestRunner {
                         }
                     };
 
-                    // Step 1: Run simulation get amount out
-                    let execution_data = match self.run_simulation(
-                        &update,
-                        &protocol_components,
-                        &[], // No skip filters for live testing
-                        &config.protocol_system,
-                    ) {
-                        Ok(data) => data,
-                        Err(e) => {
-                            error!("Failed to run simulation: {:#}", e);
-                            continue;
+                    match strict {
+                        Some(package) => {
+                            let verdict = self
+                                .check_strict_update(&update, &protocol_components, package, report)
+                                .await;
+                            tally.add(verdict);
+                            if verdict.failed {
+                                error!(
+                                    "{} of the {} updates checked so far have a failed check",
+                                    tally.failed, tally.checked
+                                );
+                            }
+                            if verdict.unexecuted {
+                                warn!(
+                                    "The node did not serve the block of {} of the {} updates \
+                                     checked so far, so their swaps were not executed",
+                                    tally.unexecuted, tally.checked
+                                );
+                            }
                         }
-                    };
-
-                    if execution_data.is_empty() {
-                        info!("No simulation data to execute for this update");
-                        continue;
-                    }
-
-                    info!(
-                        "Gathered {} simulation entries, sleeping for block time...",
-                        execution_data.len()
-                    );
-
-                    // Step 2: Get the actual block from RPC
-                    let block = match self
-                        .rpc_provider
-                        .get_block(BlockNumberOrTag::Number(update.block_number))
-                        .await
-                    {
-                        Ok(block) => block,
-                        Err(e) => {
-                            error!("Failed to fetch block {}: {}", update.block_number, e);
-                            continue;
-                        }
-                    };
-
-                    info!(
-                        "Fetched block {}, executing {} execution simulations...",
-                        block.header.number,
-                        execution_data.len()
-                    );
-
-                    // Step 3: Execute the batch against the real block
-                    match self
-                        .run_execution(
-                            execution_data,
-                            &block,
-                            &config.protocol_system,
-                            &[], // No skip filters for live testing
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            info!(
-                                "Batch execution completed successfully for block {}",
-                                block.header.number
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                "Batch execution failed for block {}: {}",
-                                block.header.number, e
-                            );
+                        None => {
+                            self.run_legacy_update(&update, &protocol_components, config)
+                                .await
                         }
                     }
                 }
@@ -547,6 +747,160 @@ impl TestRunner {
 
         info!("Stream ended, live testing completed");
         Ok(())
+    }
+
+    /// The package's declarations, from its test yaml, for checking pools its tests do not list.
+    fn package_expectations(&self) -> miette::Result<PackageExpectations> {
+        let source = self
+            .config_file_path
+            .display()
+            .to_string();
+        let file = std::fs::File::open(&self.config_file_path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to open {source}"))?;
+        PackageExpectations::from_yaml(file, &source)
+    }
+
+    /// Legacy full mode on one update: runs the ladder, executes its quotes at the update's block,
+    /// and logs whatever fails.
+    async fn run_legacy_update(
+        &self,
+        update: &Update,
+        protocol_components: &HashMap<String, ProtocolComponentModel>,
+        config: &IntegrationTestsConfig,
+    ) {
+        // Step 1: Run simulation get amount out
+        let output = self.run_simulation(
+            update,
+            protocol_components,
+            &[], // No skip filters for live testing
+            &config.protocol_system,
+            None,
+        );
+        if let Some(e) = output.failure() {
+            error!("Failed to run simulation: {:#}", e);
+        }
+        let execution_data = output.into_executions();
+
+        if execution_data.is_empty() {
+            info!("No simulation data to execute for this update");
+            return;
+        }
+
+        info!(
+            "Gathered {} simulation entries, fetching the update's block...",
+            execution_data.len()
+        );
+
+        // Step 2: Get the actual block from RPC
+        let block = match self
+            .rpc_provider
+            .get_block(BlockNumberOrTag::Number(update.block_number))
+            .await
+        {
+            Ok(block) => block,
+            Err(e) => {
+                error!("Failed to fetch block {}: {}", update.block_number, e);
+                return;
+            }
+        };
+
+        info!(
+            "Fetched block {}, executing {} execution simulations...",
+            block.header.number,
+            execution_data.len()
+        );
+
+        // Step 3: Execute the batch against the real block
+        match self
+            .run_execution(execution_data, &block, &config.protocol_system)
+            .await
+        {
+            Ok(_) => {
+                info!("Batch execution completed successfully for block {}", block.header.number);
+            }
+            Err(e) => {
+                error!("Batch execution failed for block {}: {}", block.header.number, e);
+            }
+        }
+    }
+
+    /// Strict full mode on one update: runs the ladder and the declared limits' checks, executes
+    /// at the update's block, and records every check at that block. Returns whether a check
+    /// failed and whether the swaps were executed; a failed update is logged, naming its checks,
+    /// and appended to `report`.
+    ///
+    /// At a block the node does not serve, the update is judged from the simulation alone, with
+    /// `exec.ladder` not run. Executions that cannot be simulated fail every check that needs them,
+    /// with the reason, so a package whose swaps cannot be executed fails rather than going
+    /// unnoticed.
+    async fn check_strict_update(
+        &self,
+        update: &Update,
+        protocol_components: &HashMap<String, ProtocolComponentModel>,
+        package: &PackageExpectations,
+        report: Option<&Path>,
+    ) -> UpdateVerdict {
+        let block_number = update.block_number;
+        let declared = declared_limits_of(update, protocol_components, package);
+        let output = self.run_simulation(
+            update,
+            protocol_components,
+            &[],
+            &package.protocol_system,
+            Some(&declared),
+        );
+        let inputs = output.all_executions();
+        let executions = if inputs.is_empty() {
+            UpdateExecutions::Nothing
+        } else {
+            match self
+                .rpc_provider
+                .get_block(BlockNumberOrTag::Number(block_number))
+                .await
+            {
+                Ok(block) => UpdateExecutions::Ran(
+                    self.simulate_executions(inputs, &block, &package.protocol_system)
+                        .await,
+                ),
+                Err(e) => {
+                    warn!(
+                        "The node does not serve block {block_number}, so its swaps are not \
+                         executed; judging the update from the simulation alone: {e}"
+                    );
+                    UpdateExecutions::Unserved(format!("{e:#}"))
+                }
+            }
+        };
+        let unexecuted = matches!(executions, UpdateExecutions::Unserved(_));
+        let checks = judge_strict_update(block_number, &output, executions, &package.tolerances());
+        let Finished { outcome, results, drift } = checks.finish();
+        let Err(failed) = outcome else {
+            if unexecuted {
+                info!("Block {block_number}: every check that ran passed; nothing was executed");
+            } else {
+                info!("Block {block_number}: every check passed");
+            }
+            return UpdateVerdict { failed: false, unexecuted };
+        };
+        error!("Block {block_number}: {failed}");
+        if let Some(path) = report {
+            let appended = Report {
+                package: self.protocol.clone(),
+                chain: self.chain.to_string(),
+                harness: Harness::Strict,
+                results,
+                drift: drift.into_iter().collect(),
+            }
+            .append_line(path);
+            match appended {
+                Ok(()) => {
+                    info!("Appended the checks of block {block_number} to {}", path.display())
+                }
+                Err(e) => error!("{e:#}"),
+            }
+        }
+        UpdateVerdict { failed: true, unexecuted }
     }
 
     fn run_tests_in_range(
@@ -577,6 +931,7 @@ impl TestRunner {
             chain: self.chain.to_string(),
             harness: config.harness,
             results: Vec::new(),
+            drift: Vec::new(),
         };
 
         for (idx, test) in tests.iter().enumerate() {
@@ -614,9 +969,9 @@ impl TestRunner {
                         });
                 if let Err(e) = indexed {
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
+                    let result = report.add_test(checks.finish(), Err(e));
                     Self::write_report(test_type, &report)?;
-                    return Err(e);
+                    return result;
                 }
             }
             let rpc_server = tycho_runner.start_rpc_server();
@@ -632,14 +987,11 @@ impl TestRunner {
                         test.stop_block
                     );
                     let run = self.run_test(test, config, block, &mut checks);
-                    let (outcome, results) = checks.finish();
-                    report.results.extend(results);
-                    run.and(outcome)
+                    report.add_test(checks.finish(), run)
                 }
                 Err(e) => {
                     checks.fail(CheckId::Index, &e);
-                    report.results.extend(checks.finish().1);
-                    Err(e)
+                    report.add_test(checks.finish(), Err(e))
                 }
             };
             match result {
@@ -682,6 +1034,21 @@ impl TestRunner {
             .iter()
             .map(|c| c.base.id.to_lowercase())
             .collect::<Vec<String>>();
+        // Strict: the components whose balances are declared to feed only TVL, which the runner
+        // verifies by quoting them again with their balances scaled down.
+        let tvl_only: Vec<(String, &DeclaredTolerance)> = match config.harness {
+            Harness::Strict => test
+                .expected_components
+                .iter()
+                .filter_map(|component| {
+                    component
+                        .tvl_only
+                        .as_ref()
+                        .map(|declared| (component.base.id.clone(), declared))
+                })
+                .collect(),
+            Harness::Legacy => Vec::new(),
+        };
 
         let Some((header, (protocol_components, snapshot, all_tokens))) =
             checks.run(CheckId::Index, || {
@@ -708,6 +1075,10 @@ impl TestRunner {
             ] {
                 checks.not_run(id, CheckId::Index);
             }
+            if !tvl_only.is_empty() {
+                checks.not_run(CheckId::BalancesTvlOnly, CheckId::Index);
+            }
+            checks.limits_not_run(CheckId::Index);
             return Ok(());
         };
 
@@ -737,9 +1108,27 @@ impl TestRunner {
             Self::validate_excluded_components(&test.excluded_components, &protocol_components)
         })?;
 
-        if config.skip_balance_check {
-            info!("Skipping balance check");
-            checks.skip(CheckId::Balances, "skip_balance_check: true");
+        if config.harness == Harness::Strict {
+            // `from_yaml` rejected a package-level skip, and a missing lens unless every
+            // component skips the check.
+            let lens = config
+                .balance_lens
+                .as_deref()
+                .map(|name| self.build_balance_lens(name))
+                .transpose();
+            record_strict_balances(checks, lens, &test.expected_components, |component, lens| {
+                self.check_component_balances(
+                    component,
+                    lens,
+                    &protocol_components,
+                    &response_protocol_states_by_id,
+                    &all_tokens,
+                    block,
+                )
+            })?;
+        } else if let Some(reason) = config.skip_balance_check.reason() {
+            info!("Skipping balance check: {reason}");
+            checks.skip(CheckId::Balances, reason);
         } else {
             checks.run(CheckId::Balances, || {
                 self.validate_token_balances(
@@ -752,14 +1141,51 @@ impl TestRunner {
             })?;
         }
 
-        let Some(update) = checks.run(CheckId::Decode, || {
-            let adapter_contract_path_str = self.get_adapter_contract_path(
+        let ladder_skips = record_ladder_skips(&test.expected_components, checks);
+        if config.harness == Harness::Strict {
+            for component in &test.expected_components {
+                if let Some(reason) = component.skip_simulation.reason() {
+                    for limit_check in CheckId::LIMITS {
+                        checks.skip_component(limit_check, &component.base.id, reason);
+                    }
+                }
+            }
+        }
+
+        let adapter_contract_path = || {
+            self.get_adapter_contract_path(
                 config.adapter_contract.as_deref(),
                 config
                     .adapter_build_signature
                     .as_deref(),
                 config.adapter_build_args.as_deref(),
-            )?;
+            )
+        };
+        // The copy with scaled-down balances holds only the `tvl_only` components, and is decoded
+        // first: VM states read a shared database each decode replaces, so the original decode
+        // below must come last for the ladders to run on it.
+        let scaled = (!tvl_only.is_empty()).then(|| {
+            let mut scaled = snapshot.clone();
+            let ids: Vec<String> = tvl_only
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect();
+            let changed = tvl_only::scale_balances(&mut scaled, &ids);
+            let decoded = adapter_contract_path().and_then(|path| {
+                self.decode_snapshot(
+                    &config.protocol_system,
+                    &header,
+                    scaled,
+                    all_tokens.clone(),
+                    path.as_deref(),
+                    self.vm_simulation_traces,
+                )
+            });
+            (decoded, changed)
+        });
+
+        let Some(update) = checks.run(CheckId::Decode, || {
+            let adapter_contract_path_str = adapter_contract_path()?;
             let update = self.decode_snapshot(
                 &config.protocol_system,
                 &header,
@@ -779,33 +1205,119 @@ impl TestRunner {
         else {
             checks.not_run(CheckId::SimLadder, CheckId::Decode);
             checks.not_run(CheckId::ExecLadder, CheckId::Decode);
+            if scaled.is_some() {
+                checks.not_run(CheckId::BalancesTvlOnly, CheckId::Decode);
+            }
+            checks.limits_not_run(CheckId::Decode);
             return Ok(());
         };
+
+        if let Some((decoded, changed)) = &scaled {
+            for (id, declared) in &tvl_only {
+                let failures = match decoded {
+                    Ok(scaled) => tvl_only::check(id, &update, scaled, changed, |limit| {
+                        executable_max_input(limit).amount
+                    }),
+                    Err(e) => vec![format!(
+                        "decoding the snapshot with scaled-down balances failed: {e:#}"
+                    )],
+                };
+                checks.record_balances(CheckId::BalancesTvlOnly, id, Some(declared), &failures);
+            }
+        }
 
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
-        let Some(execution_data) = checks.run(CheckId::SimLadder, || {
-            self.run_simulation(
-                &update,
-                &protocol_components_simulation,
-                &test.expected_components,
-                &config.protocol_system,
-            )
-        })?
-        else {
-            checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
-            return Ok(());
-        };
+        // Strict mode tests each direction's limit as declared; `from_yaml` made sure every
+        // direction of every expected component has a declaration.
+        let declared_limits: Option<DeclaredLimits> =
+            (config.harness == Harness::Strict).then(|| {
+                test.expected_components
+                    .iter()
+                    .flat_map(|component| {
+                        component_directions(component)
+                            .into_iter()
+                            .filter_map(move |direction| {
+                                let (limits, by) = config.declaration_for(component, &direction)?;
+                                let key = (component.base.id.to_lowercase(), direction);
+                                Some((key, (limits.clone(), by)))
+                            })
+                    })
+                    .collect()
+            });
+        if let Some(declared) = &declared_limits {
+            // A reviewer sees at a glance how many directions pass on a soft or under_cap claim.
+            let counts = declared
+                .values()
+                .counts_by(|(limits, _)| limits.kind());
+            info!(
+                "[{}] limits: {} hard, {} soft, {} under_cap",
+                test.name,
+                counts
+                    .get(&LimitKind::Hard)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::Soft)
+                    .unwrap_or(&0),
+                counts
+                    .get(&LimitKind::UnderCap)
+                    .unwrap_or(&0)
+            );
+        }
 
+        if let Some(reason) = ladder_skips.simulation {
+            checks.skip(CheckId::SimLadder, reason);
+            checks.skip(CheckId::ExecLadder, reason);
+            checks.limits_skipped(reason);
+            return Ok(());
+        }
+
+        // A component whose ladder fails fails `sim.ladder`; in strict mode the other components
+        // are still executed and their limits checked, and legacy mode stops here.
+        let output = self.run_simulation(
+            &update,
+            &protocol_components_simulation,
+            &test.expected_components,
+            &config.protocol_system,
+            declared_limits.as_ref(),
+        );
+        checks.run(CheckId::SimLadder, || output.failure().map_or(Ok(()), Err))?;
+        if output.failure().is_some() && !output.has_executions() {
+            checks.not_run(CheckId::ExecLadder, CheckId::SimLadder);
+            return record_strict_executions(&output, None, &config.tolerances(), None, checks);
+        }
+
+        let execution_skip_reason = ladder_skips.execution;
+        if declared_limits.is_some() {
+            return self.check_strict_executions(
+                &output,
+                &header,
+                &config.protocol_system,
+                &config.tolerances(),
+                execution_skip_reason,
+                checks,
+            );
+        }
+        if let Some(reason) = execution_skip_reason {
+            checks.skip(CheckId::ExecLadder, reason);
+            return Ok(());
+        }
+
+        let executed = self
+            .runtime
+            .block_on(self.execute_inputs(
+                output.into_executions(),
+                &header,
+                &config.protocol_system,
+            ));
+        // Noted before the check, so a failing run still reports how far off it was.
+        if let Ok((inputs, results)) = &executed {
+            observe_executions(checks, inputs, results);
+        }
         checks.run(CheckId::ExecLadder, || {
-            self.runtime
-                .block_on(self.run_execution(
-                    execution_data,
-                    &header,
-                    &config.protocol_system,
-                    &test.expected_components,
-                ))
+            let (inputs, results) = executed?;
+            check_executions_match(&inputs, &results, &config.tolerances())
         })?;
 
         Ok(())
@@ -1256,371 +1768,160 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Runs simulations for all protocol components and swap directions.
-    ///
-    /// This method performs comprehensive simulation testing on protocol components by:
-    /// 1. Computing spot prices for all token pairs
-    /// 2. Simulating swaps with different input amounts (0.1%, 1%, 10% of limits)
-    /// 3. Testing all possible swap directions between tokens
-    /// 4. Preparing execution data for each simulation
-    ///
-    /// The simulation uses the Tycho SDK to calculate expected outputs and prepare
-    /// transaction data for subsequent execution testing.
-    ///
-    /// # Arguments
-    /// * `update` - The decoded protocol state containing all component data
-    /// * `protocol_components` - Mapping of component IDs to their ProtocolComponent models
-    /// * `expected_components` - Test configuration to determine which components to skip
-    /// * `protocol_system` - The protocol system identifier
-    ///
-    /// # Returns
-    /// Returns a HashMap of simulation IDs to TychoExecutionInput data for execution.
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Spot price calculation fails for any component
-    /// - Simulation fails to calculate amount out
-    /// - Transaction encoding fails
-    ///
-    /// Components can be skipped using `skip_simulation` flag in the test configuration.
+    /// Runs the ladder on `update` for the expected components, honoring their skips.
     fn run_simulation(
         &self,
         update: &Update,
         protocol_components: &HashMap<String, ProtocolComponentModel>,
         expected_components: &[ProtocolComponentWithTestConfig],
-        protocol_system: &String,
-    ) -> miette::Result<HashMap<String, TychoExecutionInput>> {
-        let skip_simulation: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_simulation)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
-
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
-
-        let mut execution_data = HashMap::new();
-
-        for (id, state) in update.states.iter() {
-            if skip_simulation.contains(id) {
-                info!("Skipping simulation for component {id}");
-                continue;
-            }
-            let component = protocol_components
-                .get(id)
-                .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
-
-            let tokens = component.tokens.clone();
-
-            // Test get_amount_out with different percentages of limits. The reserves or limits
-            // are relevant because we need to know how much to test with. We
-            // don't know if a pool is going to revert with 10 or 10 million
-            // USDC, for example, so by using the limits we can use "safe
-            // values" where the sim shouldn't break. We then retrieve the
-            // amount out for 0.1%, 1% and 10%.
-            let percentages = [0.001, 0.01, 0.1];
-
-            // Test all permutations of swap directions
-            let swap_directions: Vec<_> = tokens
-                .iter()
-                .permutations(2)
-                .map(|perm| (perm[0], perm[1]))
-                .collect();
-
-            let mut quoted_any_direction = false;
-
-            for (token_in, token_out) in &swap_directions {
-                let (max_input, max_output) = state
-                    .get_limits(token_in.address.clone(), token_out.address.clone())
-                    .into_diagnostic()
-                    .wrap_err(format!(
-                        "Error getting limits for Pool {id:?} for in token: {}, and out token: {}",
-                        token_in.address, token_out.address
-                    ))?;
-
-                info!(
-                    "[{}] Retrieved limits. | Max input: {max_input} {} | Max output: {max_output} {}",
-                    id, token_in.symbol, token_out.symbol
-                );
-
-                let executable_input = executable_max_input(&max_input);
-                if executable_input != max_input {
-                    warn!(
-                        "[{}] Limit of {max_input} {} exceeds what a swap can be executed with; \
-                         sizing trades from {executable_input} instead",
-                        id, token_in.symbol
-                    );
-                }
-                let max_input = executable_input;
-
-                // A zero limit means the venue does not quote this direction at all - a
-                // one-directional component such as ETH -> stETH staking, or a redemption
-                // rate limit with no capacity at this block. Skip the direction instead of
-                // failing the component; the guard below still requires that at least one
-                // direction was exercised.
-                if max_input.is_zero() {
-                    warn!(
-                        "[{}] Zero limit for {} -> {}, skipping direction",
-                        id, token_in.symbol, token_out.symbol
-                    );
-                    continue;
-                }
-
-                // Priced per direction rather than once per component: consumers key their
-                // price data by swap direction, so a venue that quotes only one ordering
-                // leaves them without a price for a direction that does trade. Asked after
-                // the zero-limit skip, so a direction the venue does not trade is not
-                // required to have a price either.
-                let spot_price = state
-                    .spot_price(token_in, token_out)
-                    .into_diagnostic()
-                    .wrap_err(format!(
-                        "Error calculating spot price for Pool {id:?} for in token: {}, and out token: {}",
-                        token_in.address, token_out.address
-                    ))?;
-                info!(
-                    "[{}] Spot price {}/{}: {:?}",
-                    id, token_in.symbol, token_out.symbol, spot_price
-                );
-
-                for percentage in percentages.iter() {
-                    // For precision, multiply by 1000 then divide by 1000
-                    let percentage_biguint =
-                        BigUint::from_f64(percentage * 1000.0).ok_or_else(|| {
-                            miette!("[{id}] Percentage {percentage} is not a non-negative number")
-                        })?;
-                    let thousand = BigUint::from(1000u32);
-                    let amount_in = (&max_input * &percentage_biguint) / &thousand;
-
-                    // Skip if amount is zero
-                    if amount_in.is_zero() {
-                        return Err(miette!(
-                                "Amount in multiplied by percentage {percentage} is zero for pool {id}."
-                            ));
-                    }
-
-                    let amount_out_result = state
-                            .get_amount_out(amount_in.clone(), token_in, token_out)
-                            .into_diagnostic()
-                            .wrap_err(format!(
-                                "Error calculating amount out for Pool {id:?} at {:.1}% with input of {amount_in} {}.",
-                                percentage * 100.0,
-                                token_in.symbol,
-                            ))?;
-
-                    info!(
-                            "[{}] Simulated amount out for trading {:.1}% of max: ({} {} -> {} {}) (gas: {})",
-                            id,
-                            percentage * 100.0,
-                            amount_in,
-                            token_in.symbol,
-                            amount_out_result.amount,
-                            token_out.symbol,
-                            amount_out_result.gas
-                        );
-
-                    quoted_any_direction = true;
-
-                    if skip_execution.contains(id) {
-                        info!("Skipping execution for component {id}");
-                        continue;
-                    }
-
-                    // Swaps are grouped before their encoder is looked up, and grouping folds
-                    // `uniswap_v4_hooks` into `uniswap_v4` because both swap through the same
-                    // PoolManager. Registering the executor under both names lets the lookup
-                    // find it whichever of the two the group ends up carrying.
-                    let mut executors = serde_json::Map::new();
-                    executors.insert(protocol_system.to_string(), json!(EXECUTOR_ADDRESS));
-                    if protocol_system == "uniswap_v4_hooks" {
-                        executors.insert("uniswap_v4".to_string(), json!(EXECUTOR_ADDRESS));
-                    }
-                    let executors_json = json!({ (self.chain.to_string()): executors });
-                    let chain_model = self.chain;
-                    let (solution, calldata) = encode_swap(
-                        component,
-                        None,
-                        token_in,
-                        token_out,
-                        amount_in.clone(),
-                        chain_model,
-                        Some(executors_json.to_string()),
-                        amount_out_result.gas.clone(),
-                        amount_out_result.amount.clone(),
-                    )?;
-
-                    // Create unique simulation ID
-                    let simulation_id = format!(
-                        "test_{}_{}_{}_{}",
-                        component.id, token_in.symbol, token_out.symbol, amount_in
-                    );
-
-                    execution_data.insert(
-                        simulation_id,
-                        TychoExecutionInput {
-                            solution: solution.clone(),
-                            transaction: calldata.clone(),
-                            expected_amount_out: amount_out_result.amount.clone(),
-                            protocol_system: protocol_system.to_string(),
-                            component_id: component.id.to_string(),
-                            token_in: token_in.symbol.clone(),
-                            token_out: token_out.symbol.clone(),
-                            estimated_gas: amount_out_result.gas.clone(),
-                            account_overwrites: None,
-                        },
-                    );
-                }
-            }
-
-            if !quoted_any_direction {
-                return Err(miette!(
-                    "No tradable direction for pool {id}: every swap direction reported a zero limit."
-                ));
-            }
-        }
-
-        Ok(execution_data)
+        protocol_system: &str,
+        declared_limits: Option<&DeclaredLimits>,
+    ) -> LadderOutput {
+        ladder::run_ladder(
+            self.chain,
+            update,
+            protocol_components,
+            ladder::Skips {
+                simulation: &skip_reasons(expected_components, |c| &c.skip_simulation),
+                execution: &skip_reasons(expected_components, |c| &c.skip_execution),
+            },
+            protocol_system,
+            declared_limits,
+        )
     }
 
     /// Simulates executing trades through RPC requests using historical block data
     /// and validates the accuracy of the Tycho simulation predictions.
     ///
-    /// This method processes large execution sets using batching (batch size: 30) to avoid
-    /// RPC request size limits caused by large state overwrites. Each batch is processed
-    /// sequentially to maintain stability and provide detailed progress reporting.
+    /// tycho-test splits the executions into JSON-RPC batches of at most 30 calls, a few in flight
+    /// at once, to stay under the RPC's request size limit with large state overwrites.
     ///
     /// # Arguments
     /// * `execution_data` - HashMap of simulation IDs to TychoExecutionInput data
     /// * `block` - The historical block to use for execution testing
     /// * `protocol_system` - The protocol system identifier
-    /// * `expected_components` - Test configuration to determine which components to skip
-    ///
-    /// # Returns
-    /// Returns `Ok(())` if all executions complete successfully within tolerance.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - Execution simulation fails or reverts
-    /// - Difference between simulation and execution exceeds 0.5% tolerance
-    /// - Any critical execution failures occur
-    ///
-    /// Components can be skipped using `skip_execution` flag in the test configuration.
+    /// Returns an error if an execution cannot be simulated, reverts, or differs from its
+    /// simulation by more than 0.5%, the legacy tolerance, whatever the package declares.
     async fn run_execution(
         &self,
         execution_data: HashMap<String, TychoExecutionInput>,
         block: &Block,
         protocol_system: &str,
-        expected_components: &[ProtocolComponentWithTestConfig],
     ) -> miette::Result<()> {
+        let (inputs, results) = self
+            .execute_inputs(execution_data, block, protocol_system)
+            .await?;
+        check_executions_match(&inputs, &results, &ExecutionTolerances::legacy())
+    }
+
+    /// Simulates executing every input, returning the inputs and their results.
+    async fn execute_inputs(
+        &self,
+        execution_data: HashMap<String, TychoExecutionInput>,
+        block: &Block,
+        protocol_system: &str,
+    ) -> miette::Result<(HashMap<String, TychoExecutionInput>, HashMap<String, TychoExecutionResult>)>
+    {
         if execution_data.is_empty() {
             info!("No execution data to process");
-            return Ok(());
+            return Ok((HashMap::new(), HashMap::new()));
         }
 
-        let skip_execution: HashSet<_> = expected_components
-            .iter()
-            .filter(|c| c.skip_execution)
-            .map(|c| c.base.id.to_lowercase())
-            .collect();
+        let results = self
+            .simulate_executions(execution_data.clone(), block, protocol_system)
+            .await?;
+        Ok((execution_data, results))
+    }
 
-        // Filter out skipped components
-        let filtered_execution_data: HashMap<_, _> = execution_data
-            .into_iter()
-            .filter(|(_, input)| !skip_execution.contains(&input.component_id.to_lowercase()))
-            .collect();
-
-        if filtered_execution_data.is_empty() {
-            info!("All components skipped execution");
-            return Ok(());
+    /// Simulates executing every input at `block`, keyed like the inputs. tycho-test splits them
+    /// into JSON-RPC batches.
+    async fn simulate_executions(
+        &self,
+        inputs: HashMap<String, TychoExecutionInput>,
+        block: &Block,
+        protocol_system: &str,
+    ) -> miette::Result<HashMap<String, TychoExecutionResult>> {
+        if inputs.is_empty() {
+            return Ok(HashMap::new());
         }
-
-        let chain_model = self.chain;
-        let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
-
-        // Prepare router overwrites data
+        let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &self.chain).await?;
         let router_overwrites_data =
             execution::create_router_overwrites_data(self.chain, protocol_system)?;
 
-        info!("Executing {} simulations ...", filtered_execution_data.len());
+        info!("Executing {} simulations ...", inputs.len());
 
-        let results = simulate_swap_transaction(
-            &rpc_tools,
-            filtered_execution_data.clone(),
-            block,
-            router_overwrites_data,
-            None,
+        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data, None)
+            .await
+            .map_err(|(error, _, _)| error)
+    }
+
+    /// Strict mode's execution checks: the ladder, then per direction the quote at the limit,
+    /// the swap one unit past it (reverting past a hard limit, executing past an under-cap one),
+    /// and the max output. Every execution is simulated in one call to
+    /// [`Self::simulate_executions`], which splits them into JSON-RPC batches, and each limit check
+    /// is recorded per component and direction. With `execution_skip_reason`, the
+    /// reason every component skips execution, the ladder is recorded as skipped.
+    fn check_strict_executions(
+        &self,
+        output: &LadderOutput,
+        block: &Block,
+        protocol_system: &str,
+        tolerances: &ExecutionTolerances,
+        execution_skip_reason: Option<&str>,
+        checks: &mut Checks,
+    ) -> miette::Result<()> {
+        let executed = self
+            .runtime
+            .block_on(self.simulate_executions(output.all_executions(), block, protocol_system));
+        record_strict_executions(output, Some(executed), tolerances, execution_skip_reason, checks)
+    }
+
+    /// Strict: checks an expected component's indexed balances against what the package's lens
+    /// reads on chain at `block`, exactly or within its `tvl_only`. Returns every failure, empty
+    /// when all its balances match.
+    fn check_component_balances(
+        &self,
+        expected: &ProtocolComponentWithTestConfig,
+        lens: &balances::Lens,
+        indexed_components: &[ProtocolComponent],
+        states: &HashMap<String, ProtocolComponentState>,
+        all_tokens: &HashMap<Bytes, Token>,
+        block: u64,
+    ) -> Vec<String> {
+        let id = expected.base.id.to_lowercase();
+        let (Some(indexed), Some(state)) = (
+            indexed_components
+                .iter()
+                .find(|component| component.id.to_lowercase() == id),
+            states.get(&id),
+        ) else {
+            return vec!["the component is not in the snapshot".to_string()];
+        };
+        let tokens: Vec<(Bytes, String)> = indexed
+            .tokens
+            .iter()
+            .map(|address| {
+                let symbol = all_tokens
+                    .get(address)
+                    .map_or_else(|| address.to_string(), |token| token.symbol.clone());
+                (address.clone(), symbol)
+            })
+            .collect();
+        let component = balances::Component {
+            id: &id,
+            tokens: &tokens,
+            balances: &state.balances,
+            static_attributes: &indexed.static_attributes,
+            state_attributes: &state.attributes,
+        };
+        balances::check_component(
+            &component,
+            lens,
+            expected.tvl_only.as_ref(),
+            &RpcChain { runner: self, block },
         )
-        .await
-        .map_err(|(error, _, _)| error)?;
-
-        let mut success_count = 0;
-        let mut failure_count = 0;
-
-        for (simulation_id, expected_input) in &filtered_execution_data {
-            let success = match results.get(simulation_id) {
-                Some(TychoExecutionResult::Success { amount_out, .. }) => {
-                    info!(
-                        "[{}] Execution returned: {} {} -> {} {}",
-                        expected_input.component_id,
-                        expected_input.solution.amount_in(),
-                        expected_input.token_in,
-                        amount_out,
-                        expected_input.token_out
-                    );
-
-                    match check_execution_slippage(&expected_input.expected_amount_out, amount_out)
-                    {
-                        Ok(()) => true,
-                        Err(reason) => {
-                            error!(
-                                "[{}] Execution does not match simulation for {}: {} (simulation={}, execution={})",
-                                expected_input.component_id, simulation_id, reason, expected_input.expected_amount_out, amount_out
-                            );
-                            false
-                        }
-                    }
-                }
-                Some(TychoExecutionResult::Revert { reason, .. }) => {
-                    error!(
-                        "[{}] Execution reverted for {}: {}",
-                        expected_input.component_id, simulation_id, reason
-                    );
-                    false
-                }
-                Some(TychoExecutionResult::Failed { error_msg }) => {
-                    error!(
-                        "[{}] Execution failed for {}: {}",
-                        expected_input.component_id, simulation_id, error_msg
-                    );
-                    false
-                }
-                None => {
-                    error!(
-                        "[{}] No result found for simulation {}",
-                        expected_input.component_id, simulation_id
-                    );
-                    false
-                }
-            };
-
-            if success {
-                success_count += 1;
-            } else {
-                failure_count += 1;
-            }
-        }
-
-        info!("Batch execution complete: {} successes, {} failures", success_count, failure_count);
-
-        ensure!(
-            failure_count.is_zero(),
-            "Execution validation failed: {success_count} successes, {failure_count} failures"
-        );
-
-        Ok(())
     }
 
     /// Validate that the token balances of the components match the values
@@ -1675,7 +1976,21 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Gets the adapter contract path if needed, building it if not found
+    /// Builds the balance lens `name` from `protocols/adapter-integration/evm/src/` and reads its
+    /// runtime bytecode. It is built every time, so a changed lens is never read stale; forge
+    /// recompiles only what changed.
+    fn build_balance_lens(&self, name: &str) -> miette::Result<balances::Lens> {
+        let path = self
+            .adapter_contract_builder
+            .build_target(name, None, None)
+            .wrap_err_with(|| format!("Failed to build the balance lens {name}"))?;
+        let code = std::fs::read(&path)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+        Ok(balances::Lens { name: name.to_string(), code: Bytes::from(code) })
+    }
+
+    /// Gets the adapter contract path if needed, building it if not found.
     fn get_adapter_contract_path(
         &self,
         adapter_contract: Option<&str>,
@@ -1748,10 +2063,63 @@ fn undecoded_components<'a>(
         .collect();
     expected_components
         .iter()
-        .filter(|component| !component.skip_simulation)
+        .filter(|component| !component.skip_simulation.is_skipped())
         .map(|component| component.base.id.to_lowercase())
         .filter(|id| !decoded.contains(id))
         .collect()
+}
+
+/// Which ladder the whole test skips, because every expected component skips it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LadderSkips {
+    /// Why `sim.ladder` and `exec.ladder` do not run, when every component skips simulation.
+    simulation: Option<&'static str>,
+    /// Why `exec.ladder` does not run, when every component skips simulation or execution.
+    execution: Option<&'static str>,
+}
+
+/// Records and logs each expected component's ladder skips, once per component: a
+/// `skip_simulation` skips both ladders, a `skip_execution` the execution one. Returns which
+/// ladder every component skips, if any; an empty list skips nothing, since it stands for every
+/// component of the protocol.
+fn record_ladder_skips(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    checks: &mut Checks,
+) -> LadderSkips {
+    for component in expected_components {
+        let id = &component.base.id;
+        if let Some(reason) = component.skip_simulation.reason() {
+            info!("Skipping simulation and execution for component {id}: {reason}");
+            checks.skip_component(CheckId::SimLadder, id, reason);
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        } else if let Some(reason) = component.skip_execution.reason() {
+            info!("Skipping execution for component {id}: {reason}");
+            checks.skip_component(CheckId::ExecLadder, id, reason);
+        }
+    }
+    let every = |skips: fn(&ProtocolComponentWithTestConfig) -> bool| {
+        !expected_components.is_empty() && expected_components.iter().all(skips)
+    };
+    LadderSkips {
+        simulation: every(|c| c.skip_simulation.is_skipped())
+            .then_some("every expected component skips simulation"),
+        execution: every(|c| c.execution_skip_reason().is_some())
+            .then_some("every expected component skips execution"),
+    }
+}
+
+/// The lowercase ids of the expected components whose `flag` is skipped, each with its reason.
+fn skip_reasons<'a>(
+    expected_components: &'a [ProtocolComponentWithTestConfig],
+    flag: impl Fn(&'a ProtocolComponentWithTestConfig) -> &'a Skip,
+) -> HashMap<String, &'a str> {
+    let mut reasons = HashMap::new();
+    for component in expected_components {
+        if let Some(reason) = flag(component).reason() {
+            reasons.insert(component.base.id.to_lowercase(), reason);
+        }
+    }
+    reasons
 }
 
 #[cfg(test)]
@@ -1759,10 +2127,452 @@ mod tests {
     use std::{collections::HashMap, env, str::FromStr};
 
     use dotenvy::dotenv;
-    use glob::glob;
-    use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
+    use num_bigint::BigUint;
+    use num_traits::Zero;
+    use tycho_execution::encoding::models::Solution;
+    use tycho_simulation::tycho_common::{
+        models::protocol::ProtocolComponentState, simulation::protocol_sim::ProtocolSim, Bytes,
+    };
+    use tycho_test::{
+        execution::models::Transaction,
+        expectations::{DeclaredBy, LimitKind},
+    };
 
     use super::*;
+    use crate::{
+        config::{Harness, ProtocolComponentExpectation},
+        report::{CheckResult, Outcome},
+    };
+
+    fn component(
+        id: &str,
+        skip_simulation: Skip,
+        skip_execution: Skip,
+    ) -> ProtocolComponentWithTestConfig {
+        ProtocolComponentWithTestConfig {
+            base: ProtocolComponentExpectation {
+                id: id.to_string(),
+                tokens: Vec::new(),
+                static_attributes: HashMap::new(),
+                creation_tx: Bytes::default(),
+            },
+            skip_simulation,
+            skip_execution,
+            limits: None,
+            skip_balance_check: Skip::No,
+            execution_tolerance: None,
+            tvl_only: None,
+        }
+    }
+
+    fn reason(text: &str) -> Skip {
+        Skip::Reason(text.to_string())
+    }
+
+    #[test]
+    fn a_lens_that_does_not_build_fails_balances_once_for_the_test() {
+        let mut skipped = component("0xb", Skip::No, Skip::No);
+        skipped.skip_balance_check = reason("a singleton");
+        let components =
+            [component("0xa", Skip::No, Skip::No), skipped, component("0xc", Skip::No, Skip::No)];
+        let mut checks = Checks::new(Harness::Strict, "t");
+        record_strict_balances(
+            &mut checks,
+            Err(miette!("Failed to build the balance lens PoolLens")),
+            &components,
+            |component, _| vec![format!("{} was checked without a lens", component.base.id)],
+        )
+        .unwrap();
+        let results = checks.finish().results;
+        let balances: Vec<(Option<&str>, &Outcome)> = results
+            .iter()
+            .map(|result| (result.component.as_deref(), &result.outcome))
+            .collect();
+        assert_eq!(
+            balances,
+            vec![
+                (
+                    None,
+                    &Outcome::Fail {
+                        detail: "Failed to build the balance lens PoolLens".to_string()
+                    }
+                ),
+                (Some("0xb"), &Outcome::Skipped { reason: "a singleton".to_string() }),
+            ]
+        );
+    }
+
+    /// The skips recorded for `components`, as `(check, component, reason)`, and what the whole
+    /// test skips.
+    fn ladder_skips(
+        components: &[ProtocolComponentWithTestConfig],
+    ) -> (Vec<(CheckId, Option<String>, String)>, LadderSkips) {
+        let mut checks = Checks::new(Harness::Strict, "t");
+        let skips = record_ladder_skips(components, &mut checks);
+        let results = checks.finish().results;
+        let recorded = results
+            .into_iter()
+            .map(|CheckResult { check, component, outcome, .. }| {
+                let Outcome::Skipped { reason } = outcome else {
+                    panic!("{check} recorded {outcome:?}")
+                };
+                (check, component, reason)
+            })
+            .collect();
+        (recorded, skips)
+    }
+
+    /// An update with a uniswap v2 pool for each id, all over tokens 0x01 and 0x02.
+    fn pools_update(ids: &[&str]) -> (Update, HashMap<String, ProtocolComponentModel>) {
+        pools_update_over(ids, ["0x01", "0x02"])
+    }
+
+    /// An update with a uniswap v2 pool for each id, all over `tokens`.
+    fn pools_update_over(
+        ids: &[&str],
+        tokens: [&str; 2],
+    ) -> (Update, HashMap<String, ProtocolComponentModel>) {
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+        let token = |address: &str| {
+            Token::new(&Bytes::from_str(address).unwrap(), "T", 18, 0, &[], Chain::Ethereum, 100)
+        };
+        let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
+        let mut components = HashMap::new();
+        for id in ids {
+            let reserve = U256::from(1_000_000u64);
+            states.insert(id.to_string(), Box::new(UniswapV2State::new(reserve, reserve)));
+            components.insert(
+                id.to_string(),
+                ProtocolComponentModel::new(
+                    Bytes::from_str(id).unwrap(),
+                    "vault".to_string(),
+                    "pool".to_string(),
+                    Chain::Ethereum,
+                    tokens
+                        .iter()
+                        .map(|address| token(address))
+                        .collect(),
+                    Vec::new(),
+                    HashMap::new(),
+                    Bytes::default(),
+                    Default::default(),
+                ),
+            );
+        }
+        (Update::new(1, states, components.clone()), components)
+    }
+
+    #[test]
+    fn full_mode_checks_a_listed_pool_as_declared_and_an_unlisted_one_by_the_package_default() {
+        let package = PackageExpectations::from_yaml(
+            r#"
+protocol_system: "vault"
+harness: strict
+limits: {kind: soft, reason: "any input trades"}
+substreams_yaml_path: ./substreams.yaml
+tests:
+  - name: first
+    expected_components:
+      - id: "0xAA"
+        tokens: ["0x01", "0x02"]
+        limits:
+          "0x01->0x02": {kind: hard}
+"#
+            .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        let (update, components) = pools_update(&["0xAA", "0xbb"]);
+        let declared = declared_limits_of(&update, &components, &package);
+        let kind = |id: &str, token_in: &str, token_out: &str| {
+            let direction = Direction {
+                token_in: Bytes::from_str(token_in).unwrap(),
+                token_out: Bytes::from_str(token_out).unwrap(),
+            };
+            declared
+                .get(&(id.to_string(), direction))
+                .map(|(limits, by)| (limits.kind(), *by))
+        };
+        // Keyed by lowercase id, as the ladder looks limits up.
+        assert_eq!(kind("0xaa", "0x01", "0x02"), Some((LimitKind::Hard, DeclaredBy::Component)));
+        assert_eq!(
+            kind("0xaa", "0x02", "0x01"),
+            Some((LimitKind::Soft, DeclaredBy::PackageDefault))
+        );
+        assert_eq!(
+            kind("0xbb", "0x01", "0x02"),
+            Some((LimitKind::Soft, DeclaredBy::PackageDefault))
+        );
+        assert_eq!(declared.len(), 4);
+    }
+
+    const POOL_A: &str = "0x00000000000000000000000000000000000000aa";
+    const POOL_B: &str = "0x00000000000000000000000000000000000000bb";
+
+    /// The ladder of strict `full` over `ids`, every direction declared soft; `missing` is left
+    /// out of the components, so its ladder fails.
+    fn strict_full_ladder(ids: &[&str], missing: Option<&str>) -> LadderOutput {
+        strict_full_ladder_with(ids, missing, None)
+    }
+
+    /// [`strict_full_ladder`], with the pool `empty` holding no reserves, so every direction of it
+    /// has a zero limit.
+    fn strict_full_ladder_with(
+        ids: &[&str],
+        missing: Option<&str>,
+        empty: Option<&str>,
+    ) -> LadderOutput {
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+        // Addresses the router encodes, unlike `pools_update`'s.
+        let (mut update, mut components) = pools_update_over(
+            ids,
+            [
+                "0x00000000000000000000000000000000000000a1",
+                "0x00000000000000000000000000000000000000b1",
+            ],
+        );
+        let package = PackageExpectations::from_yaml(
+            "protocol_system: \"uniswap_v2\"\nharness: strict\nlimits: {kind: soft, reason: \"r\"}\nsubstreams_yaml_path: ./substreams.yaml\ntests: []\n"
+                .as_bytes(),
+            "uniswap_v2",
+        )
+        .unwrap();
+        let declared = declared_limits_of(&update, &components, &package);
+        for component in components.values_mut() {
+            component.protocol_system = "uniswap_v2".to_string();
+        }
+        if let Some(id) = missing {
+            components.remove(id);
+        }
+        if let Some(id) = empty {
+            update
+                .states
+                .insert(id.to_string(), Box::new(UniswapV2State::new(U256::ZERO, U256::ZERO)));
+        }
+        let no_skips = HashMap::new();
+        ladder::run_ladder(
+            Chain::Ethereum,
+            &update,
+            &components,
+            ladder::Skips { simulation: &no_skips, execution: &no_skips },
+            "uniswap_v2",
+            Some(&declared),
+        )
+    }
+
+    /// A check's result: the check, its component, and its outcome's kind.
+    type Kind = (CheckId, Option<String>, &'static str);
+
+    /// The error naming the failed checks, if any, and each check's outcome kind.
+    fn outcomes(checks: Checks) -> (Option<String>, Vec<Kind>) {
+        let Finished { outcome, results, .. } = checks.finish();
+        assert!(results
+            .iter()
+            .all(|result| result.block == Some(7)));
+        let kinds = results
+            .into_iter()
+            .map(|result| {
+                let kind = match result.outcome {
+                    Outcome::Pass => "pass",
+                    Outcome::Fail { .. } => "fail",
+                    Outcome::Skipped { .. } => "skipped",
+                    Outcome::NotRun { .. } => "not_run",
+                };
+                (result.check, result.component, kind)
+            })
+            .dedup()
+            .collect();
+        (outcome.err().map(|e| e.to_string()), kinds)
+    }
+
+    #[test]
+    fn strict_full_fails_the_checks_whose_executions_could_not_be_simulated() {
+        let output = strict_full_ladder(&[POOL_A], None);
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Ran(Err(miette!("the RPC is down"))),
+            &ExecutionTolerances::exact(),
+        ));
+        assert!(failed
+            .unwrap()
+            .contains(CheckId::ExecLadder.as_str()));
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "pass")));
+        assert!(kinds.contains(&(CheckId::ExecLadder, None, "fail")));
+    }
+
+    #[test]
+    fn strict_full_judges_an_update_the_node_does_not_serve_from_the_simulation() {
+        let output = strict_full_ladder(&[POOL_A], None);
+        let unserved = UpdateExecutions::Unserved("block 7 not found".to_string());
+        let Finished { outcome, results, .. } =
+            judge_strict_update(7, &output, unserved, &ExecutionTolerances::exact()).finish();
+        assert!(outcome.is_ok(), "{results:?}");
+        let outcome_of = |check: CheckId| {
+            results
+                .iter()
+                .find(|result| result.check == check)
+                .map(|result| result.outcome.clone())
+        };
+        assert_eq!(outcome_of(CheckId::SimLadder), Some(Outcome::Pass));
+        assert_eq!(
+            outcome_of(CheckId::ExecLadder),
+            Some(Outcome::NotRun {
+                reason: "the node does not serve block 7: block 7 not found".to_string()
+            })
+        );
+        assert!(results
+            .iter()
+            .any(|result| CheckId::LIMITS.contains(&result.check)));
+    }
+
+    #[test]
+    fn strict_full_passes_over_a_pool_that_trades_nothing_at_the_block() {
+        let output = strict_full_ladder_with(&[POOL_A, POOL_B], None, Some(POOL_B));
+        // `range` still fails it: a test lists the pools it expects to trade.
+        assert!(output.failure().is_some());
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Nothing,
+            &ExecutionTolerances::exact(),
+        ));
+        assert_eq!(failed, None, "{kinds:?}");
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "pass")));
+        for check in CheckId::LIMITS {
+            assert!(kinds.contains(&(check, Some(POOL_B.to_string()), "skipped")), "{kinds:?}");
+        }
+    }
+
+    #[test]
+    fn strict_full_checks_the_other_pools_of_an_update_one_pool_fails() {
+        let output = strict_full_ladder(&[POOL_A, POOL_B], Some(POOL_B));
+        assert!(output
+            .executions()
+            .keys()
+            .all(|id| id.contains(POOL_A)));
+        assert!(!output.executions().is_empty());
+        let (failed, kinds) = outcomes(judge_strict_update(
+            7,
+            &output,
+            UpdateExecutions::Nothing,
+            &ExecutionTolerances::exact(),
+        ));
+        assert!(failed
+            .unwrap()
+            .contains(CheckId::SimLadder.as_str()));
+        assert!(kinds.contains(&(CheckId::SimLadder, None, "fail")));
+        for check in CheckId::LIMITS {
+            assert!(kinds.contains(&(check, Some(POOL_B.to_string()), "not_run")), "{kinds:?}");
+            assert!(kinds
+                .iter()
+                .any(|(c, component, kind)| *c == check &&
+                    component.as_deref() == Some(POOL_A) &&
+                    *kind != "not_run"));
+        }
+    }
+
+    #[test]
+    fn without_a_package_default_only_the_declared_directions_are_checked() {
+        let package = PackageExpectations::from_yaml(
+            r#"
+protocol_system: "vault"
+substreams_yaml_path: ./substreams.yaml
+tests:
+  - name: first
+    expected_components:
+      - id: "0xAA"
+        tokens: ["0x01", "0x02"]
+        limits:
+          "0x01->0x02": {kind: hard}
+"#
+            .as_bytes(),
+            "vault",
+        )
+        .unwrap();
+        let (update, components) = pools_update(&["0xAA", "0xbb"]);
+        let declared = declared_limits_of(&update, &components, &package);
+        let direction = Direction { token_in: Bytes::from("0x01"), token_out: Bytes::from("0x02") };
+        assert_eq!(
+            declared
+                .into_iter()
+                .map(|(key, (limits, by))| (key, limits.kind(), by))
+                .collect::<Vec<_>>(),
+            [(("0xaa".to_string(), direction), LimitKind::Hard, DeclaredBy::Component)]
+        );
+    }
+
+    #[test]
+    fn every_component_skipping_simulation_skips_both_ladders() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xAA", reason("no adapter"), Skip::No),
+            component("0xbb", reason("no state"), Skip::No),
+        ]);
+        assert_eq!(
+            recorded,
+            vec![
+                (CheckId::SimLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::ExecLadder, Some("0xaa".to_string()), "no adapter".to_string()),
+                (CheckId::SimLadder, Some("0xbb".to_string()), "no state".to_string()),
+                (CheckId::ExecLadder, Some("0xbb".to_string()), "no state".to_string()),
+            ]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: Some("every expected component skips simulation"),
+                execution: Some("every expected component skips execution"),
+            }
+        );
+    }
+
+    #[test]
+    fn every_component_skipping_execution_skips_only_the_execution_ladder() {
+        let (recorded, skips) = ladder_skips(&[component("0xaa", Skip::No, reason("no fork"))]);
+        assert_eq!(
+            recorded,
+            vec![(CheckId::ExecLadder, Some("0xaa".to_string()), "no fork".to_string())]
+        );
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_simulation_skip_counts_as_an_execution_skip_for_the_whole_test() {
+        let (_, skips) = ladder_skips(&[
+            component("0xaa", reason("no adapter"), Skip::No),
+            component("0xbb", Skip::No, reason("no fork")),
+        ]);
+        assert_eq!(
+            skips,
+            LadderSkips {
+                simulation: None,
+                execution: Some("every expected component skips execution")
+            }
+        );
+    }
+
+    #[test]
+    fn a_mix_with_an_unskipped_component_skips_nothing_test_wide() {
+        let (recorded, skips) = ladder_skips(&[
+            component("0xaa", Skip::No, reason("no fork")),
+            component("0xbb", Skip::No, Skip::Bool(false)),
+        ]);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(skips, LadderSkips::default());
+    }
+
+    #[test]
+    fn no_expected_components_skips_nothing() {
+        let (recorded, skips) = ladder_skips(&[]);
+        assert!(recorded.is_empty());
+        assert_eq!(skips, LadderSkips::default());
+    }
 
     #[test]
     fn snapshot_block_reads_at_the_last_committed_block() {
@@ -1806,69 +2616,109 @@ mod tests {
         );
     }
 
-    /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
-    /// size the venue reported, untouched.
-    #[test]
-    fn execution_trades_are_sized_within_uniswap_v4s_int128_range() {
-        let ceiling = BigUint::from(i128::MAX as u128);
+    fn execution_input(component: &str, amount_in: u32, simulated: u32) -> TychoExecutionInput {
+        TychoExecutionInput {
+            solution: Solution::new(
+                Bytes::default(),
+                Bytes::default(),
+                Bytes::from("0x01"),
+                Bytes::from("0x02"),
+                BigUint::from(amount_in),
+                BigUint::from(simulated),
+                BigUint::from(simulated),
+                Vec::new(),
+            ),
+            transaction: Transaction::new(
+                Bytes::default(),
+                BigUint::zero(),
+                Vec::new(),
+                BigUint::zero(),
+            ),
+            expected_amount_out: BigUint::from(simulated),
+            protocol_system: "vault".to_string(),
+            component_id: component.to_string(),
+            token_in: "A".to_string(),
+            token_out: "B".to_string(),
+            estimated_gas: BigUint::zero(),
+            account_overwrites: None,
+        }
+    }
 
-        assert_eq!(executable_max_input(&BigUint::from(1_000u32)), BigUint::from(1_000u32));
-        assert_eq!(executable_max_input(&ceiling), ceiling);
-        assert_eq!(executable_max_input(&(&ceiling + 1u32)), ceiling);
-        // The limit the deep Pons pool reports, some 12 orders of magnitude past the ceiling.
-        let pons_limit = BigUint::from_str("1693513416259416009682992155640660564186233").unwrap();
-        assert_eq!(executable_max_input(&pons_limit), ceiling);
+    fn success(amount_out: u32) -> TychoExecutionResult {
+        TychoExecutionResult::Success {
+            amount_out: BigUint::from(amount_out),
+            gas_used: 0,
+            state_overwrites: None,
+            overwrite_metadata: None,
+        }
     }
 
     #[test]
-    fn execution_within_slippage_tolerance_matches() {
-        let executed = BigUint::from(1000u32);
+    fn drift_is_noted_for_ladder_and_at_limit_executions_when_the_ladder_fails() {
+        let ladder = HashMap::from([("test_a".to_string(), execution_input("0x01", 10, 1000))]);
+        let at_limit =
+            HashMap::from([("at_limit_b".to_string(), execution_input("0x02", 99, 997))]);
+        let results = HashMap::from([
+            ("test_a".to_string(), success(999)),
+            ("at_limit_b".to_string(), success(1000)),
+        ]);
+        assert!(check_executions_match(&ladder, &results, &ExecutionTolerances::exact()).is_err());
 
-        assert!(check_execution_slippage(&BigUint::from(1000u32), &executed).is_ok());
-        // 5/1000 is exactly MAX_EXECUTION_SLIPPAGE, in either direction.
-        assert!(check_execution_slippage(&BigUint::from(1005u32), &executed).is_ok());
-        assert!(check_execution_slippage(&BigUint::from(995u32), &executed).is_ok());
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &ladder, &results);
+        observe_executions(&mut checks, &at_limit, &results);
+        let drift = checks.finish().drift.unwrap();
+        // The at-limit execution is 30 bps off, the ladder's 10.
+        assert_eq!(
+            (drift.test.as_str(), drift.simulation.as_str(), drift.component.as_str()),
+            ("t", "at_limit_b", "0x02")
+        );
+        assert_eq!(
+            (drift.largest_difference.as_str(), drift.largest_difference_token.as_str()),
+            ("3", "B")
+        );
     }
 
     #[test]
-    fn execution_beyond_slippage_tolerance_does_not_match() {
-        let executed = BigUint::from(1000u32);
-
-        assert!(check_execution_slippage(&BigUint::from(1006u32), &executed).is_err());
-        assert!(check_execution_slippage(&BigUint::from(994u32), &executed).is_err());
+    fn drift_ties_resolve_the_same_way_on_every_run() {
+        let inputs: HashMap<String, TychoExecutionInput> = (0..20)
+            .map(|i| (format!("test_{i:02}"), execution_input("0x01", 10, 1000)))
+            .collect();
+        let results: HashMap<String, TychoExecutionResult> = inputs
+            .keys()
+            .map(|id| (id.clone(), success(1000)))
+            .collect();
+        let mut checks = Checks::new(Harness::Strict, "t");
+        observe_executions(&mut checks, &inputs, &results);
+        assert_eq!(
+            checks
+                .finish()
+                .drift
+                .unwrap()
+                .simulation,
+            "test_00"
+        );
     }
 
-    #[test]
-    fn zero_output_execution_does_not_match() {
-        let reason = check_execution_slippage(&BigUint::from(1000u32), &BigUint::zero())
-            .expect_err("a zero output must never match");
-        assert!(reason.contains("no output"), "unexpected reason: {reason}");
-
-        // Simulating zero as well does not turn a swap that returned nothing into a match.
-        assert!(check_execution_slippage(&BigUint::zero(), &BigUint::zero()).is_err());
-    }
-
-    /// Every integration test yaml under `protocols/substreams/`, clone and nested ones included,
-    /// as paths relative to `protocols/`.
+    /// Every integration test yaml under `protocols/substreams/`, clone, nested and template
+    /// ones included, as paths relative to `protocols/`: the files `load_packages` walks, and the
+    /// templates.
     fn all_test_yamls() -> Vec<String> {
         let protocols_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
             .to_path_buf();
-        let pattern = protocols_dir.join("substreams/**/integration_test*.tycho.yaml");
-        let mut yamls: Vec<String> = glob(pattern.to_str().unwrap())
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .strip_prefix(&protocols_dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|path| !path.contains("/target/"))
-            .collect();
-        yamls.sort();
+        let yamls: Vec<String> =
+            tycho_test::expectations::test_yamls(&protocols_dir.join("substreams"), true)
+                .unwrap()
+                .into_iter()
+                .map(|path| {
+                    path.strip_prefix(&protocols_dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
         assert!(!yamls.is_empty(), "No integration test yamls found under substreams/");
         yamls
     }
@@ -1891,6 +2741,45 @@ mod tests {
             })
             .collect();
         assert!(errors.is_empty(), "Config files failed to parse:\n{}", errors.join("\n"));
+    }
+
+    /// `PackageExpectations`, which reads a package's declarations alone, agrees with the test
+    /// configuration on every package: the tolerance, and the limit of every direction of every
+    /// expected component.
+    #[test]
+    fn package_expectations_agree_with_every_test_configuration() {
+        for path in all_test_yamls() {
+            let full = protocols_path(&path);
+            let config = TestRunner::parse_config(&full).unwrap();
+            let package = tycho_test::expectations::PackageExpectations::from_yaml(
+                std::fs::File::open(&full).unwrap(),
+                &path,
+            )
+            .unwrap();
+            assert_eq!(package.tolerances(), config.tolerances(), "{path}");
+            for component in config
+                .tests
+                .iter()
+                .flat_map(|test| &test.expected_components)
+            {
+                for direction in component_directions(component) {
+                    assert_eq!(
+                        package.limits_for(&component.base.id, &direction),
+                        config.limits_for(component, &direction),
+                        "{path}: {} {direction}",
+                        component.base.id
+                    );
+                }
+                assert_eq!(
+                    package
+                        .component(&component.base.id)
+                        .and_then(|declared| declared.tvl_only.as_ref()),
+                    component.tvl_only.as_ref(),
+                    "{path}: {} tvl_only",
+                    component.base.id
+                );
+            }
+        }
     }
 
     #[test]

@@ -59,7 +59,7 @@ pub fn decode_direct_swap_call(
             .ok_or_else(|| {
                 anyhow!(
                     "Failed to convert base token to address for direct swap call: {:?}",
-                    &external_input_params[0]
+                    external_input_params[0]
                 )
             })?
             .to_fixed_bytes()
@@ -71,7 +71,7 @@ pub fn decode_direct_swap_call(
             .ok_or_else(|| {
                 anyhow!(
                     "Failed to convert quote token to address for direct swap call: {:?}",
-                    &external_input_params[1]
+                    external_input_params[1]
                 )
             })?
             .to_fixed_bytes()
@@ -104,7 +104,7 @@ pub fn decode_pool_init(
         let cmd_bytes = external_params[1]
             .to_owned()
             .into_bytes()
-            .ok_or_else(|| anyhow!("Failed to convert to bytes: {:?}", &external_params[1]))?;
+            .ok_or_else(|| anyhow!("Failed to convert to bytes: {:?}", external_params[1]))?;
 
         // Call data is structured differently depending on the cmd code, so only
         // decode if this is an init pool code.
@@ -115,7 +115,7 @@ pub fn decode_pool_init(
                     .to_owned()
                     .into_address()
                     .ok_or_else(|| {
-                        anyhow!("Failed to convert to address: {:?}", &internal_params[1])
+                        anyhow!("Failed to convert to address: {:?}", internal_params[1])
                     })?
                     .to_fixed_bytes()
                     .to_vec();
@@ -124,7 +124,7 @@ pub fn decode_pool_init(
                     .to_owned()
                     .into_address()
                     .ok_or_else(|| {
-                        anyhow!("Failed to convert to address: {:?}", &internal_params[2])
+                        anyhow!("Failed to convert to address: {:?}", internal_params[2])
                     })?
                     .to_fixed_bytes()
                     .to_vec();

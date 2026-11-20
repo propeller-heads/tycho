@@ -38,6 +38,7 @@ pub mod chain_state;
 mod dynamic_contract_indexer;
 pub mod factory;
 pub mod models;
+pub mod pause;
 pub mod post_processors;
 pub mod protocol_cache;
 pub mod protocol_extractor;

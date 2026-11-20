@@ -46,7 +46,8 @@ where
     pause_after_retries: u32,
 }
 
-type ComponentWithTxHash = (TxHash, ProtocolComponent); // TODO: See if it makes sens to make this a struct
+// TODO: See if it makes sens to make this a struct
+type ComponentWithTxHash = (TxHash, ProtocolComponent);
 
 impl<AE, T, G> UniswapV4HookDCI<AE, T, G>
 where

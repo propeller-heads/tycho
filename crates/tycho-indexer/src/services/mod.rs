@@ -9,7 +9,7 @@ use actix_web::{dev::ServerHandle, http, middleware as actix_middleware, web, Ap
 use actix_web_opentelemetry::RequestTracing;
 use deltas_buffer::PendingDeltasBuffer;
 use futures03::future::try_join_all;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use tracing::info;
 use tycho_common::storage::Gateway;
 use tycho_ethereum::{
@@ -84,6 +84,8 @@ pub struct ServicesBuilder<G> {
     /// Turns `true` when the process shuts down, which closes every websocket connection and
     /// ends the open HTTP/1 connections after their next response.
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Notified whenever the set of paused components changes.
+    pause_changes: watch::Receiver<()>,
 }
 
 /// Resolves with the first error either service task produces, or with `Ok` once both end
@@ -105,7 +107,14 @@ impl<G> ServicesBuilder<G>
 where
     G: Gateway + Send + Sync + 'static,
 {
-    pub fn new(db_gateway: G, rpc: EthereumRpcClient, api_key: String) -> Self {
+    /// Creates a builder. `pause_changes` is notified whenever the set of paused components
+    /// changes; each notification clears the response caches that depend on it.
+    pub fn new(
+        db_gateway: G,
+        rpc: EthereumRpcClient,
+        api_key: String,
+        pause_changes: watch::Receiver<()>,
+    ) -> Self {
         Self {
             prefix: "v1".to_owned(),
             port: 4242,
@@ -125,6 +134,7 @@ where
             writer_status: None,
             ready_head_tolerance: rpc::DEFAULT_READY_HEAD_TOLERANCE,
             shutdown: None,
+            pause_changes,
         }
     }
 
@@ -358,6 +368,7 @@ where
             .with_shutdown_signal(self.shutdown.clone())
             .with_state_service(state_service),
         );
+        tokio::spawn(rpc::clear_caches_on_pause_change(rpc_data.clone(), self.pause_changes));
 
         let server = HttpServer::new(move || {
             let cors = Cors::default()

@@ -39,7 +39,9 @@ export METRIC_API_KEY=<your-metric-trading-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
 
-Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as the Bearer token the authenticated `bid_ask` endpoint requires. The example registers Metric by default; `--disable-pamm` leaves it out.
+Metric's feed talks to Metric's public endpoint (`MetricFeedBuilder::base_url` points it elsewhere) and sends the trading key as a Bearer token with every request: the `bid_ask` endpoint requires it, and so does the metadata endpoint on the chains Metric serves only to partners. The example registers Metric by default; `--disable-pamm` leaves it out.
+
+The Metric feed serves a pool only while Metric reports its price provider `healthy`, and only in the directions where the pool quotes a price and its depth holds volume. It quotes a swap by walking that depth, and a swap larger than the depth fails. The feed refreshes quotes on every poll and the pool list every 15 seconds, so a pool Metric adds or unpauses reaches the books up to 15 seconds later. A paused pool leaves them on the next poll, since its quote reports `pool_paused`. If a list refresh fails, the feed retries it 15 seconds later and keeps quoting the pools of the last list until that list is 90 seconds old.
 
 Then run the example:
 
@@ -97,7 +99,7 @@ let bebop_feed = BebopFeedBuilder::new(config.clone(), usd_quote_tokens.clone(),
 
 **Minimum TVL** (`min_tvl_usd`) counts in USD. This setting filters out token pairs whose book is thin on the venue's side, helping avoid illiquid quotes.
 
-**USD quote tokens:** The Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none.
+**USD quote tokens:** The Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none, and Metric applies `min_tvl_usd` itself, leaving out pools whose TVL it cannot compute unless the floor is 0.
 
 You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one.
 
@@ -295,6 +297,16 @@ Market conditions can change rapidly. Delays in your decision-making can lead to
 
 {% hint style="info" %}
 Because the RFQ will only let you swap up to the amount of tokens specified in the quote, when the RFQ swap happens after another protocol in a sequential swap, if positive slippage occurs during the preceding swap, any additional input tokens beyond the permitted quote amount will remain in the Tycho Router and not be sent to the RFQ protocol.
+{% endhint %}
+
+{% hint style="warning" %}
+**BaiBai: priority-fee surcharge**
+
+BaiBai's entrypoint withholds part of a swap's output when the transaction's priority fee (gas price minus basefee) is above 0.002 gwei (2e6 wei): 0.01 bps per 1e4 wei above that, up to 50 bps, which is reached at 0.052 gwei. Below the threshold nothing is withheld.
+
+BaiBai books do not include it, because the priority fee is set when the transaction is sent, not when it is quoted. A route through BaiBai sent with a higher tip receives up to 50 bps less than simulated, and reverts if its minimum amount out is tighter than that. Send BaiBai routes with a priority fee of at most 0.002 gwei, or widen the slippage tolerance by the surcharge the tip implies.
+
+These values were measured on Base at block 53,545,000. The venue owner can change the threshold and the cap without a contract upgrade, and Tycho does not read them.
 {% endhint %}
 
 ## pAMM Price Level Stream

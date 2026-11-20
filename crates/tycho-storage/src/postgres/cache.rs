@@ -28,8 +28,8 @@ use tycho_common::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
@@ -37,9 +37,9 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, CatchUpRead, ChainGateway, CommitWatermark,
-        ContractStateGateway, EntryPointFilter, EntryPointGateway, ExtractionStateGateway,
-        ExtractorCursor, Gateway, ProtocolGateway, StateSnapshot, StateSnapshotGateway,
-        StorageError, Version, WithTotal,
+        ComponentPauseGateway, ContractStateGateway, EntryPointFilter, EntryPointGateway,
+        ExtractionStateGateway, ExtractorCursor, Gateway, ProtocolGateway, StateSnapshot,
+        StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
 };
@@ -1367,6 +1367,48 @@ impl ProtocolGateway for CachedGateway {
         let mut conn = self.checkout().await?;
         self.state_gateway
             .get_component_tvls(chain, system, ids, pagination_params, &mut conn)
+            .await
+    }
+}
+
+#[async_trait]
+impl ComponentPauseGateway for CachedGateway {
+    // Pause writes skip `DBCacheWriteExecutor` and use their own connection, because they are
+    // not block data.
+    #[instrument(skip_all)]
+    async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .pause_components(chain, system, pauses, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn unpause_components(
+        &self,
+        chain: &Chain,
+        component_ids: &[&str],
+        unpause: &UnpauseRecord,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .unpause_components(chain, component_ids, unpause, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_component_pauses(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<ComponentPause>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .get_component_pauses(chain, &mut conn)
             .await
     }
 }

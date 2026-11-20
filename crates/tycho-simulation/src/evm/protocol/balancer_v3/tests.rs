@@ -351,7 +351,7 @@ fn limits_bound_a_quotable_amount() {
         assert!(max_out > BigUint::ZERO, "limit must allow a non-zero output");
 
         let quoted = pool
-            .get_amount_out(max_in.clone(), &token_at(&pool, 0), &token_at(&pool, 1))
+            .get_amount_out(max_in, &token_at(&pool, 0), &token_at(&pool, 1))
             .expect("the reported limit must be quotable");
         assert_eq!(quoted.amount, max_out, "limit output must match a quote at the limit");
     }

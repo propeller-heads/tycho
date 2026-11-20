@@ -67,7 +67,7 @@ impl LiquoriceTokenPairPrice {
     /// The quantity-weighted average price over the whole ladder; `None` without any level.
     pub fn average_price(&self) -> Option<f64> {
         let (total_quantity, total_value) = self.levels.totals();
-        (total_quantity > 0.0).then(|| total_value / total_quantity)
+        (total_quantity > 0.0).then_some(total_value / total_quantity)
     }
 }
 

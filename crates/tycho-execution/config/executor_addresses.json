@@ -35,7 +35,8 @@
     "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28",
     "aero_basic": "0x9929EE6e01C0d599C4b791c6D6093293b05Ea91C",
     "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
-    "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458"
+    "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458",
+    "subsidy": "0x38eD3945e574Ff7C390fa03F16d0dF554a37D789"
   },
   "base": {
     "uniswap_v2": "0x321C00604355DD20A2CB472D44fe8f37d821A82c",
@@ -58,7 +59,9 @@
     "pancakeswap_infinity_cl": "0x6EbFE9c9b8Ed29260a1301db5F2a7fDf72899E25",
     "aero_basic": "0xf6F8fb2321FB8431400ae546037cD2AE969a2c22",
     "fallback:rfq:native": "0x57D9099BB65dCAB2F64238718f2CbB261255Fc5c",
-    "biconomy": "0xF30f4c985fCA63913f421F78058031FA6514eF7f"
+    "biconomy": "0xF30f4c985fCA63913f421F78058031FA6514eF7f",
+    "baibai": "0x997Ada592ea5b2eF46c4d30A9C1ea3a59156F798",
+    "subsidy": "0xD17dDe2936E24eaCB7076F23cefF36fC165c9FAE"
   },
   "unichain": {
     "uniswap_v2": "0x55345739FCB5c5393f9BE32864439754649A204A",
@@ -95,7 +98,8 @@
     "fallback:rfq:metric": "0x78FddACdd167d25efb81d5a45a9A3003Fd8c0643",
     "lunarbase": "0x99576B7C64Fe225785bd69E91fc9dC857Dd7AaA5",
     "pancakeswap_infinity_cl": "0xEaF480bc13D8Af32f19D7B780e484d60d277a27d",
-    "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79"
+    "fallback:rfq:native": "0x2F3331bcC7a97c3cE155A0D473bF8909E43CAc79",
+    "subsidy": "0xBCF7EcE8e2ea5c43e47B42bD3503db5620b1aB85"
   },
   "polygon": {
     "uniswap_v2": "0xb9f140F4f8d674c453b3Ee00646189452a74E10c",
@@ -119,6 +123,7 @@
     "sushiswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "robinswap_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "gigadex_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
+    "swaphood_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "ramses_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "up_v3": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
     "aero_cl": "0x33E8602FeDD1215CB04c865C66648DbA5b81fb75",
@@ -138,5 +143,18 @@
     "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D",
     "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
     "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
+  },
+  "elysium": {
+    "uniswap_v2": "0x6B8DFbbef1f5EF947427985F7C27D1c50CD025ea",
+    "uniswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "uniswap_v4": "0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5",
+    "kleos_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "elyspump_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "stockiumswap_v3": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "aero_cl": "0x618bC57D1e133C861730e28b64C3ffe93bA264fe",
+    "aero_basic": "0x5aEE932D9E17D4bad31898Cf6fd8b6bFe701Ac0b",
+    "native_wrapper": "0x3FF36AE3cD6579f79B776D5861A17fDFde7495cf",
+    "rfq:metric": "0x9a98EBA41d56eD6172Dc4167179f7e0f9638a974",
+    "fallback:rfq:metric": "0xB64E27B8ff972EB0aF32fA6b4830De382CfD74F2"
   }
 }

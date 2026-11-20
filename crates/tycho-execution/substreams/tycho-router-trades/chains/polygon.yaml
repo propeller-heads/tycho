@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: tycho_router_trades
-  version: v0.3.0
+  version: v0.6.0
   url: https://github.com/propeller-heads/tycho/tree/main/crates/tycho-execution/substreams
 
 imports:
@@ -54,7 +54,7 @@ modules:
     blockFilter:
       module: index_router_activity
       query:
-        string: "addr:0x7cb3e87095f6cf95982dc6f57445171a6d3b511c || addr:0x0c85409014d6c8caef60c837198c931246bd6296 || addr:0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1"
+        string: "addr:0x7cb3e87095f6cf95982dc6f57445171a6d3b511c || addr:0x0c85409014d6c8caef60c837198c931246bd6296 || addr:0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1 || addr:0x4db0b661dc706f7e09e54273028b22f61f8f94c2"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -68,12 +68,25 @@ modules:
     blockFilter:
       module: index_router_activity
       query:
-        string: "addr:0x7cb3e87095f6cf95982dc6f57445171a6d3b511c || addr:0x0c85409014d6c8caef60c837198c931246bd6296 || addr:0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1"
+        string: "addr:0x7cb3e87095f6cf95982dc6f57445171a6d3b511c || addr:0x0c85409014d6c8caef60c837198c931246bd6296 || addr:0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1 || addr:0x4db0b661dc706f7e09e54273028b22f61f8f94c2"
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
     output:
       type: proto:tycho.router.v1.VaultTransfers
+
+  - name: map_subsidy_events
+    kind: map
+    initialBlock: 86935804
+    blockFilter:
+      module: index_router_activity
+      query:
+        string: "subsidy"
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.router.v1.SubsidyEvents
 
   - name: db_out
     kind: map
@@ -82,15 +95,17 @@ modules:
       - map: map_trades
       - map: map_fee_config_events
       - map: map_vault_transfers
+      - map: map_subsidy_events
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
 network: polygon
 
 params:
-  map_fee_config_events: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc
-  map_trades: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc
-  map_vault_transfers: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc
+  map_fee_config_events: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:0xe928709b0faaa5a4b450c7baf9f8901dd15d5e08
+  map_trades: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:0xe928709b0faaa5a4b450c7baf9f8901dd15d5e08
+  map_vault_transfers: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:0xe928709b0faaa5a4b450c7baf9f8901dd15d5e08
+  map_subsidy_events: chain=polygon&routers=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:v3_0,0x0c85409014d6c8caef60c837198c931246bd6296:v3_1,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:v3_1,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:v3_1&fee_calculators=0x7cb3e87095f6cf95982dc6f57445171a6d3b511c:0xae1367cda31829d76fb7cf8202272dbc2050995b,0x0c85409014d6c8caef60c837198c931246bd6296:0x64a487c26c39f7bcfdb04b60e906715f5b8ac5f2,0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1:0x3970230eaac99d1c1880c04fcec069e61da823dc,0x4db0b661dc706f7e09e54273028b22f61f8f94c2:0xe928709b0faaa5a4b450c7baf9f8901dd15d5e08
 
 sink:
   module: db_out

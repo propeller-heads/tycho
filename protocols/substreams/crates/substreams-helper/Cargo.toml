@@ -13,7 +13,3 @@ hex = "0.4.3"
 prost = "0.11"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
-
-
-[build-dependencies]
-anyhow = "1.0.75"
