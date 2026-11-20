@@ -476,9 +476,9 @@ Beside it, the same findings as data for scripts (the `tycho-integrate` ledger r
 - `findings`: every finding of section 2 and the pre-existing list, each with the Findings format
   fields as `severity`, `file`, `lines` (`"<start>-<end>"`), `quote`, `claim`, `evidence`,
   `failure_scenario`, `rule`, `pr`, `pre_existing`, `verification` (`{"method", "result"}`), and
-  `earlier_id`: the id of the earlier finding it restates, when an earlier finding carried an id
-  (an `--existing` file may give each entry one, such as `F12`); a finding that restates an earlier
-  one reports it there rather than as new;
+  `earlier_id`: the `id` of the `earlier` entry it restates (an `--existing` id such as `F12`, or
+  an `E<n>`), `null` when it restates none; a finding that restates an earlier one reports it there
+  rather than as new;
 - `earlier`: every earlier finding of the merged list of step 3, once each, as `{"id", "status",
   "evidence", "rule", "file", "claim"}`, with the status of section 4 (`fixed`, `open`, `deferred`,
   `disproven`). A finding that restates an `--existing` entry, from the `--since` report or a PR
