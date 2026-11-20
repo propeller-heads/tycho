@@ -157,21 +157,32 @@ not established, since its source is unverified.
 
 ### Balances of Ascend pools
 
-As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test and
-a `tvl_only` tolerance (bps 0.01, wei 1000) on the eight Ascend components, declared on the
-measured cause below. The wei bound applies to every token of every Ascend component; the 4 and 12
-wei measured on KNTQ, which the lens reads as 0, are the entries it was sized for. The `PoolManager`'s own balance of each single-pool launch token equals the indexed amount
-at 7 of 8 pools (PNTH holds 4 wei more); the lens's rounded-down tick math is the lower figure.
+As for Montra: the shared V4 pipeline's amounts, with the `UniswapV4Balances` lens in the test
+and a `tvl_only` tolerance (bps 0.01, wei 1000) on the eight Ascend components, declared on the
+measured cause below. The wei bound applies to every token of every Ascend component; KNTQ,
+which the lens reads as 0, is the measured case it was sized for.
+
+Measurements: a `range --report` run of the two Ascend tests with `tvl_only` removed (in
+`rounds/indexing-2` of the integration run) gave these worst values:
+
+- 574 wei of 2,805,774,267 USDC on pool `0xea03c9c4…` (0.002 bps);
+- 310,400,288 wei on PNTH (5e-19 of its amount);
+- 4 and 12 wei on the KNTQ entries the lens reads as 0.
+
+The `PoolManager`'s own balance of each single-pool launch token equals the indexed amount at 7
+of 8 pools (PNTH holds 4 wei more); the lens's rounded-down tick math is the lower figure.
+
 The Ascend pool's own swaps charge no LP fee (every `Swap` event carries fee 0, and
 `feeGrowthGlobal0/1X128` read 0 at the end of the tests' ranges), the hook's fee is its
-ERC-6909 claim, and the pipeline's amounts are the summed `Swap` amounts. They sit above the lens
-by a small amount, never below it. It was reproduced by replaying every `Swap` event of two pools
-against the amounts their price steps imply: the surplus is the sum of the events' amounts over
-those implied amounts (4610 and 254 wei of 4612 and 255 measured, in the 940 swaps of
-`0x21e12450…`; 310,400,285 and 573 wei of 310,400,288 and 574 measured, in the 2384 swaps of
-`0xea03c9c4…`). One unit of the Q96 price is worth `L * 2^96 / P^2` of currency0, which is 58 wei
-in the first pool and 2.2 million in the second, so the surplus grows with a pool's swap count
-and with how low its price is.
+ERC-6909 claim, and the pipeline's amounts are the summed `Swap` amounts. They sit above the
+lens by a small amount, never below it. It was reproduced by replaying every `Swap` event of
+two pools against the amounts their price steps imply: the surplus is the sum of the events'
+amounts over those implied amounts (4610 and 254 wei of 4612 and 255 measured, in the 940 swaps
+of `0x21e12450…`; 310,400,285 and 573 wei of 310,400,288 and 574 measured, in the 2384 swaps of
+`0xea03c9c4…`). One unit of the Q96 price is worth `L * 2^96 / P^2` of currency0, which is 58
+wei in the first pool and 2.2 million in the second, so the surplus grows with a pool's swap
+count and with how low its price is.
+
 The bid inventory is quote the hook holds at its own address, paid out only through fills; it is
 not in the pool's amounts and not counted in the balance, so a pool's payable size on a fill is
 larger than its indexed balance. The hook's fee claims are ERC-6909 balances at the `PoolManager`,
