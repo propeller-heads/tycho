@@ -5,14 +5,15 @@
     final_gates.py --protocol P --recheck        the venue against the spec: proxies, watched code and
                                                  getters, venue quotes (`onchain.py`)
 
-Gates: every layer stopped clean; all checks once more (checks.toml, layer `final`, which adds the
-mutation score when G10 has landed); one test per spec mutation surface (G5); every proxy's
-implementation at the latest block equals the spec's; the branch contains the base's tip (the run's
-base moves while it builds); open sibling PRs that append an executor to
-TychoRouterTestSetup (they predict the same test address); the executor's runtime bytecode fixture
-registered for the protocol system, so protocol-testing executes through it before deployment,
-and no `skip_execution`; the package's test yamls strict, with a balance lens and declared limits.
-A gate whose harness support has not landed is `off`.
+Gates: every layer clean by its stop rules now; no guarded change a person did not accept; all
+checks once more (checks.toml, layer `final`: protocol-testing on every chain, and the mutation score
+when G10 has landed); one test per spec mutation surface (G5); every proxy's implementation at the
+latest block equals the spec's; the venue's quotes as recorded and from the Tycho router; a
+simulation test naming each venue quote's block; the watched code and getters unchanged; the
+branch contains the base's tip; open sibling PRs that append an executor to TychoRouterTestSetup
+(they predict the same test address); the executor's runtime bytecode fixture registered for the
+protocol system on every chain, and no `skip_execution`; the package's test yamls strict, with a
+balance lens and declared limits. A gate whose harness support has not landed is `off`.
 The fresh full review is not run here: the skill runs it through run_agent.py.
 """
 

@@ -99,6 +99,19 @@ def caps_summary(tree: Path) -> str:
     return "\n".join(f"- {gap}: {'on' if c['on'] else 'OFF'} — {c['what']}" + ("" if c["on"] else f" ({c['reason']})") for gap, c in caps.items())
 
 
+def review_level(st, layer: str, round_n: int) -> str:
+    """The tycho-review level of a round's review. `full` adds the on-chain integration pass and the
+    execution verifier: on a layer's first round (the design meets the chain), and whenever a
+    dispute awaits a verdict, so a dispute is settled by running its experiment, not by reading the
+    implementer's evidence. `partial` otherwise; the final review is always `full`."""
+    if not layer or round_n <= 1:
+        return "full"
+    for f in st.open_findings(layer):
+        if f["answers"] and f["answers"][-1]["kind"] == "dispute" and f["answers"][-1]["round"] >= round_n - 1:
+            return "full"
+    return "partial"
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--protocol", required=True)
@@ -135,6 +148,7 @@ def main() -> None:
         "dci": dci_summary(run, intake.get("chains", [])),
         "checks": failed_checks(run, args.layer, args.round) if args.layer else "",
         "decision_classes": ", ".join(schema.DECISION_CLASSES),
+        "level": review_level(st, args.layer, args.round),
         "extra": Path(args.extra_file).read_text() if args.extra_file else "(none)",
     }
     for item in args.set:

@@ -38,7 +38,8 @@ A closed list. Anything else, the agents and the scripts resolve.
 6. Relaxing a test: a skip flag, a wider tolerance, a removed assertion (`relax-test`).
 7. A loop that stopped without converging (`not-converged`).
 
-Plus the three gates: the spec (Gate 1), open decisions (Gate 2), push and PR (Gate 3). Ask with
+Plus the three gates: the spec (Gate 1), the indexing design and open decisions (Gate 2), push
+and PR (Gate 3). Ask with
 `AskUserQuestion`, each question standing on its own: what was found, the options, their cost.
 Every question to a person is a ledger entry: `S/state.py P ask --class <class> --question '…'`
 opens it (escalations from `next` open their own) and prints its id `Q<n>`; record the answer with
@@ -165,13 +166,20 @@ S/run_agent.py --protocol P --label review-decisions --role reviewer --cwd <work
 Findings in `RUN/review-decisions.json` go back to `decide` once (`--extra-file`); its
 `must_be_open` decisions become open.
 
-### 8. Gate 2: open decisions (`gate2`)
+### 8. Gate 2: the indexing design and open decisions (`gate2`)
 
-Only when `decisions.json` has open decisions. Ask the person each one (question, options, cost,
-the rules and the sibling involved); write the answer into `decisions.json` (`choice`, `open:
-false`, `"by": "person"`), and record it in the ledger (`state.py ask --class <its class> --record
-D<n> --question '…'`, then `state.py decide`). No open decision: mark the stage done without
-asking.
+Always, before any code. First the indexing design, which past reviews found the costliest to get
+wrong (a hard-coded address that differs per chain, a state value no attribute carries): show the
+person `decisions.json` `agreements` (what one component is and its id, each attribute with the
+state it carries, who writes and who reads it), the spec's `read_set` with what tracks each slot,
+the dependencies and how each chain indexes them, and the balance lens. Ask: approve, or correct;
+a correction goes back to `decide` (`--extra-file`) and is shown again.
+
+Then each open decision (question, options, cost, the rules and the sibling involved); write the
+answer into `decisions.json` (`choice`, `open: false`, `"by": "person"`), and record it in the
+ledger (`state.py ask --class <its class> --record D<n> --question '…'`, then `state.py decide`).
+A different simulation kind asked for here is a spec correction: the `amend` brief, then `decide`
+again.
 
 ### 9. Build, per layer in order (`build:indexing`, `build:simulation`, `build:execution`)
 
@@ -251,16 +259,20 @@ the ledger's findings (the existing file), never review transcripts.
    A layer with a new `blocking` finding gets more rounds (step 9, with `next --extra-rounds` up to
    `budgets.toml` `final.extra_rounds`), then this stage runs again; past that, it escalates.
    Findings below blocking stay in the ledger and the PR lists them.
-2. **Gates.** `S/final_gates.py --protocol P --round <attempt>`: every layer clean, all checks once
-   more (with the mutation score once G10 lands), one test per mutation surface (G5), proxies
-   unchanged since the spec (a beacon proxy's implementation is read through its beacon), the branch
-   containing the base's tip (`base-current`: the base moves while the run builds; a failure means
-   rebase, rerun the layer checks and these gates), sibling PRs that predict the same test executor address, the new
-   executor's runtime bytecode fixture registered so protocol-testing executes through it (no
-   `skip_execution` in the package), and the strict yaml (`harness: strict`, a `balance_lens`, every
-   direction's limit declared). A failing gate: fix it with an
-   implement round of its layer when it is code, an amendment when a proxy was upgraded (below),
-   a person's decision otherwise. `off` gates are listed, not failed.
+2. **Gates.** `S/final_gates.py --protocol P --round <attempt>`: every layer clean (its stop rules
+   now, not its last stop), no guarded change a person did not accept, all checks once more with
+   protocol-testing on every chain (with the mutation score once G10 lands), one test per mutation
+   surface (G5), proxies unchanged since the spec (a beacon proxy's implementation is read through
+   its beacon), the venue's own quotes as the spec records them and the same from the Tycho router
+   (`venue-quotes`), a simulation test against those quotes (`venue-quote-test`), the watched code
+   and getters unchanged (`watch`), the branch containing the base's tip (`base-current`: behind by
+   any commit fails; rebase, rerun the layer checks and these gates), sibling PRs that predict the
+   same test executor address, the new executor's runtime bytecode fixture registered on every chain
+   so protocol-testing executes through it (no `skip_execution` in the package), and the strict yaml
+   (`harness: strict`, a `balance_lens`, every direction's limit declared). A failing gate: fix it
+   with an implement round of its layer when it is code (a chain's protocol-testing: rounds with
+   `--chains <chain>`), an amendment when the venue changed (below), a person's decision otherwise.
+   `off` gates are listed as not verified, not failed.
 
 **Splitting the PR.** When a person decides to split the branch into stacked PRs, cut them from the
 gated branch, never by hand: `S/split.py --protocol P --branch <b> --onto <ref> --paths …` for each
@@ -332,6 +344,23 @@ comment:
    `ingest-review --layer auto`; the affected layers run rounds as in
    step 9. Ask before every push. Then post `RUN/PR-held.md` as a PR comment, with approval.
 
+## What this skill does not do yet
+
+Each is listed in the PR as not verified, or left to the person, never implied:
+
+- A full sync from the start block, a live run of about 30 minutes, and an indexer synced to tip
+  with the `extractors.yaml` entry: past integrations required them before merge. The harness's
+  strict `full` mode (`harness_caps` `full-strict`) is detected but not yet run by `checks.toml`;
+  until it is, the person runs them, or a block replay of the package against getters.
+- The range's coverage floor (G12) and one test per mutation surface (G5): the gates are `off`
+  until the harness supports them, so the research picks the range by counting events.
+- Working with the protocol team (a router whitelist, verified source, a generic or custom
+  executor) is an `outside-repo` decision with no stage of its own to wait in; intake `contacts`
+  is optional. A run that waits on the team stops at the decision and resumes when it is answered.
+- Rollout (spkg release, executor deployment, the config PR) is a checklist in the PR, not a stage.
+- Budgets cap dollars and rounds, not time; past integrations took two to four weeks over three or
+  four revisions, mostly waiting on the chain and the protocol team.
+
 ## Budgets
 
 `budgets.toml`: per layer rounds and dollars, per integration dollars, extra final rounds. The
@@ -351,6 +380,7 @@ caps are placeholders until shadow runs measure spend (`--status` shows it per s
 | `scripts/layer_checks.py`, `checks.toml` | each layer's checks, run in the worktree |
 | `scripts/spec_render.py` | `spec.json` → `SPEC.md`, with `--check` |
 | `scripts/final_gates.py` | final gates, `--recheck` |
+| `scripts/onchain.py` | the venue read again: quotes (also from the router), watched code and getters, a quote's read set |
 | `scripts/worktree.py` | the run's worktree, on `origin/main` plus the strict test suite while it is unmerged |
 | `scripts/pr_body.py` | the PR description (`--shadow` holds the ledger back) |
 | `scripts/test_state.py` | tests of the ledger, stop rules, guards and spec validation |
