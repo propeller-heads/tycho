@@ -981,6 +981,77 @@ class SignedFacts(RunCase):
         self.assertEqual(final_gates.gate_signed_facts(self.run, spec)["status"], "pass")
 
 
+class VerifierFindings(RunCase):
+    def test_a_blocking_final_finding_gets_its_extra_rounds_before_no_progress(self):
+        for opened in (3, 2, 1, 1):
+            n = self.round(checks="red")
+            for i in range(opened):
+                self.finding(f"F{n}{i}", n=n)
+            self.review(n)
+            for i in range(opened):
+                self.add(t="verdict", id=f"F{n}{i}", status="fixed", by="review", round=n)
+        self.review(self.round())
+        self.assertEqual(self.next()["action"], "clean")
+        ledger.ingest_review(self.run, "auto", None, self.sidecar({"findings": [{"rule": "q", "file": "protocols/substreams/x/src/b.rs", "claim": "d"}]}))
+        self.assertEqual(self.next(), {"action": "continue", "reason": "open findings"})
+
+    def test_the_status_counts_the_extra_rounds(self):
+        self.round()
+        ledger.ingest_review(self.run, "auto", None, self.sidecar({"findings": [{"rule": "q", "file": "protocols/substreams/x/src/b.rs", "claim": "d"}]}))
+        cap = BUDGETS["layer"]["rounds"] + BUDGETS["final"]["extra_rounds"]
+        self.assertIn(f"1/{cap} rounds", ledger.status_text(self.run, self.state()))
+
+    def test_the_mutation_score_runs_at_the_final_gates(self):
+        step = {"name": "mutation-score", "layers": ["final"], "requires": "G10", "cmd": "x {package}"}
+        self.assertEqual(layer_checks.applies(step, "final", {"package": "p"}, {"G10": {"on": True}}, Path("."), ["indexing"]), ("run", None))
+        self.assertEqual(layer_checks.applies(step, "final", {"package": "p"}, {"G10": {"on": False, "reason": "not landed"}}, Path("."), ["indexing"])[0], "off")
+
+    def test_no_description_without_final_gates(self):
+        script = [sys.executable, "-I", str(Path(__file__).resolve().parent / "pr_body.py"), "--protocol", "Foo"]
+        with mock.patch.object(schema, "run_dir", return_value=self.run):
+            with mock.patch.object(sys, "argv", script[2:]), self.assertRaises(SystemExit) as e:
+                pr_body.main()
+        self.assertIn("final gates have not run", str(e.exception))
+
+    def test_integration_yamls_finds_nested_and_changed_yamls(self):
+        root = Path(self.tmp.name) / "tree"
+        nested = root / "protocols/substreams/ethereum-uniswap-v4/with-hooks"
+        nested.mkdir(parents=True)
+        (nested / "Cargo.toml").write_text("[package]")
+        (nested / "integration_test.tycho.yaml").write_text("harness: strict")
+        clone = root / "protocols/substreams/base/integration_test_base-foo.tycho.yaml"
+        clone.parent.mkdir(parents=True)
+        clone.write_text("harness: strict")
+        self.assertEqual(final_gates.integration_yamls(root, "ethereum-uniswap-v4-with-hooks", []), [nested / "integration_test.tycho.yaml"])
+        self.assertEqual(final_gates.integration_yamls(root, "base-foo", ["protocols/substreams/base/integration_test_base-foo.tycho.yaml"]), [clone])
+
+
+class GuardVerifierForms(GitTree):
+    CASES = [
+        ("reviewer", "cat > {repo}/.claude/reviews/x/r.md <<'EOF'\ngas: measured 120k -> estimate 90k\nA => 1\n# x\nEOF", "allow", ""),
+        ("researcher", "python3 - <<'EOF'\nx = 5\nif x > 3: print(x)\nEOF", "allow", "research"),
+        ("researcher", "git clone --depth 1 https://github.com/x/y {run}/refs/y", "allow", "research"),
+        ("researcher", "git clone -b v2 https://github.com/x/y {run}/refs/y", "allow", "research"),
+        ("researcher", "curl -sLo {tree}/src/x.rs https://x", "deny", "research"),
+        ("researcher", "curl --output={tree}/src/x.rs https://x", "deny", "research"),
+        ("implementer", "mise exec -- perl -pi -e 's/a/b/' {tree}/.claude/knowledge/x.md", "deny", ""),
+        ("implementer", "mise exec -- git -C {repo}/../other reset --hard", "deny", ""),
+        ("implementer", "python3 -I -B s/scripts/state.py foo decide --id Q1 --choice x", "deny", ""),
+        ("reviewer", "git stash", "deny", ""),
+        ("reviewer", "git stash create", "allow", ""),
+        ("reviewer", "git config user.name x", "deny", ""),
+        ("reviewer", "git config --get user.name", "allow", ""),
+        ("implementer", "git status --short", "allow", ""),
+        ("implementer", "git -C {tree} add -A", "allow", ""),
+    ]
+
+    def test_each_form(self):
+        run = Path(self.tmp.name) / "run"
+        for role, command, want, label in self.CASES:
+            with self.subTest(role=role, command=command):
+                self.assertEqual(self.hook(role, "Bash", {"command": command.format(repo=self.tree, tree=self.tree, run=run)}, label=label), want)
+
+
 class LayerChecksSteps(unittest.TestCase):
     STEP = {"name": "adapter-test", "layers": ["simulation"], "when": ["vm"], "cmd": "forge test --match-contract {adapter}"}
 

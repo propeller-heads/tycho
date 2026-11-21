@@ -260,6 +260,8 @@ def main() -> None:
                    help="carry the decisions and ledger in the description; by default (shadow mode) they are held back in PR-held.md until the person's blind review")
     args = p.parse_args()
     run = schema.run_dir(args.protocol)
+    if not (run / "final_gates.json").exists():
+        raise SystemExit("the final gates have not run (final_gates.py): no description without them")
     out = Path(args.out) if args.out else run / "PR.md"
     body, held = render(args.protocol, args.shadow)
     out.write_text(body)

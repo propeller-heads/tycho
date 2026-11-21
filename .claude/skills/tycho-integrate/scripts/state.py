@@ -329,6 +329,14 @@ def remaining_usd(state: State, layer=None) -> float:
     return max(left, 0.0)
 
 
+def round_cap(state: State, layer: str) -> int:
+    """The layer's rounds: the budget's, a person's grants, and `final.extra_rounds` once the final
+    review found a blocking finding in it."""
+    budgets = load_budgets()
+    final_blocking = any(f["final"] and f["severity"] == "blocking" for f in state.findings.values() if f["layer"] == layer)
+    return budgets["layer"]["rounds"] + state.grant_rounds[layer] + (budgets["final"]["extra_rounds"] if final_blocking else 0)
+
+
 def next_step(state: State, layer: str) -> dict:
     """The stop rules. Returns {"action": "continue" | "clean" | "closed" | "stopped" | "escalate",
     "reason": ...}. `stopped`: a person stopped the whole run.
@@ -342,14 +350,11 @@ def next_step(state: State, layer: str) -> dict:
     Findings of the final review (or a person's PR review) below blocking do not hold a layer: the
     PR lists them. A blocking one gives the layer `budgets.toml` `final.extra_rounds` more rounds.
     """
-    budgets = load_budgets()
     since = state.reset_round[layer]
     rounds = state.rounds[layer]
     reviews = state.reviews[layer]
     open_now = state.open_findings(layer)
     holding = [f for f in open_now if not (f["final"] and f["severity"] != "blocking")]
-    final_blocking = any(f["final"] and f["severity"] == "blocking" for f in state.findings.values() if f["layer"] == layer)
-    extra_rounds = budgets["final"]["extra_rounds"] if final_blocking else 0
 
     # A person closed the layer after it stopped (an escalation answered with no more rounds or
     # dollars) and nothing ran since: it stays closed, `next` never re-escalates it.
@@ -394,7 +399,7 @@ def next_step(state: State, layer: str) -> dict:
         return {"action": "escalate", "reason": "integration-usd-cap", "class": "not-converged"}
     if layer_cap(state, layer) - state.spend_layer[layer] < MIN_CALL_USD:
         return {"action": "escalate", "reason": "usd-cap", "class": "not-converged"}
-    if len(rounds) >= budgets["layer"]["rounds"] + extra_rounds + state.grant_rounds[layer]:
+    if len(rounds) >= round_cap(state, layer):
         return {"action": "escalate", "reason": "round-cap", "class": "not-converged"}
 
     # The specific causes first: an oscillation or a deadlock also stalls progress, and naming
@@ -407,7 +412,10 @@ def next_step(state: State, layer: str) -> dict:
     if deadlocked:
         return {"action": "escalate", "reason": "dispute-deadlock", "class": "rule-conflict", "findings": deadlocked}
 
-    counts = [r["open"] for r in reviews if r["n"] > since]
+    # Progress is counted from the last whole-branch review on: its findings are new work, not a
+    # round that failed to fix the old ones.
+    last_whole = max((i for i, r in enumerate(reviews) if r.get("whole_branch")), default=0)
+    counts = [r["open"] for r in reviews[last_whole:] if r["n"] > since]
     if len(counts) >= 3 and counts[-1] >= counts[-3]:
         return {"action": "escalate", "reason": "no-progress", "class": "not-converged", "open": counts[-3:]}
 
@@ -950,7 +958,6 @@ def resume_point(run: Path, state: State) -> dict:
 
 
 def status_text(run: Path, state: State) -> str:
-    budgets = load_budgets()
     out = [f"Run: {run}", f"Resume at: {json.dumps(resume_point(run, state))}"]
     out.append("Stages: " + ", ".join(f"{s}={state.stages[s]}" for s in schema.STAGES if s in state.stages))
     out.append("Gates: " + (", ".join(f"{g}={s}" for g, s in sorted(state.gates.items())) or "none yet"))
@@ -963,7 +970,7 @@ def status_text(run: Path, state: State) -> str:
         opened = state.open_findings(layer)
         by_sev = {s: sum(1 for f in opened if f["severity"] == s) for s in SEVERITIES}
         out.append(
-            f"{layer}: {len(rounds)}/{budgets['layer']['rounds'] + state.grant_rounds[layer]} rounds, ${state.spend_layer[layer]:.2f}/${layer_cap(state, layer):.2f}, "
+            f"{layer}: {len(rounds)}/{round_cap(state, layer)} rounds, ${state.spend_layer[layer]:.2f}/${layer_cap(state, layer):.2f}, "
             f"open {len(opened)} {by_sev}, open after each review {counts}, stop: {state.stops.get(layer, '-')}"
         )
     if state.open_decisions():

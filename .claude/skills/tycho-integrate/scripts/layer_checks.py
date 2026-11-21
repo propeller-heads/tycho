@@ -194,7 +194,8 @@ def applies(step: dict, layer: str, values: dict, caps: dict, tree: Path, route:
     layers = step.get("layers", [])
     if layer != "final" and layer not in layers:
         return None, None
-    if layer == "final" and not set(layers) & set(route):
+    # At the final run: the steps of the layers the route builds, and the final-only steps.
+    if layer == "final" and not (set(layers) & set(route) or layers == ["final"]):
         return None, None
     when = step.get("when")
     if isinstance(when, list):

@@ -63,6 +63,13 @@ GIT_DENIED = {
     "researcher": {"push", "commit", "rebase", "reset", "merge", "cherry-pick", "revert", "update-ref", "am", "apply", "stash", "checkout", "switch", "restore", "worktree", "filter-branch", "replace", "notes"},
     "reviewer": {"push", "commit", "rebase", "reset", "merge", "cherry-pick", "revert", "update-ref", "am", "apply", "checkout", "switch", "restore", "filter-branch", "replace", "notes"},
 }
+CLONE_VALUED = {"-b", "--branch", "--depth", "-o", "--origin", "-c", "--config", "--reference", "--reference-if-able", "--separate-git-dir",
+                "-u", "--upload-pack", "--filter", "--shallow-since", "--shallow-exclude", "-j", "--jobs", "--template", "--server-option"}
+# Commands a researcher or reviewer may not run in any checkout (they change its files, index or
+# config); `stash` only as `create`, `list` or `show`, `config` only to read.
+GIT_CHECKOUT_WRITES = {"add", "rm", "mv", "clean", "stash", "config", "symbolic-ref", "gc", "prune", "repack"}
+GIT_READ_ONLY = {"status", "log", "show", "diff", "rev-parse", "ls-files", "ls-tree", "grep", "blame", "cat-file", "merge-base",
+                 "describe", "rev-list", "for-each-ref", "name-rev", "shortlog", "whatchanged"}
 GIT_GLOBAL_WITH_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path")
 # `git branch` and `git tag` options that only list.
 GIT_LIST_FLAGS = {"-a", "-r", "-l", "--list", "-v", "-vv", "--show-current", "--all", "--remotes", "--merged", "--no-merged", "--contains", "--no-contains", "--sort", "--format", "--points-at", "-n", "--column", "--no-column"}
@@ -168,7 +175,8 @@ def check_target(role: str, path: Path, worktree: Path, run: Path, repo: Path, h
         rel = str(path.resolve().relative_to(worktree.resolve()))
         # A directory that holds guarded paths counts as one (`rm -r .claude`, `find .claude -delete`).
         if schema.guarded_path(rel) or schema.guarded_path(rel.rstrip("/") + "/x") or rel == ".":
-            deny(f"{how} writes the guarded path {rel}; change guarded files with Edit, and only the integration's wiring")
+            deny(f"{how} writes the guarded path {rel} (a directory holding guarded files counts, the worktree's root too: "
+                 "name the directory you mean); change guarded files with Edit, and only the integration's wiring")
         if schema.INTEGRATION_YAML_RE.search(rel):
             deny(f"{how} writes {rel}; edit integration test yamls with Edit, so the guard sees the lines")
 
@@ -198,9 +206,29 @@ def check_edit(role: str, tool: str, inp: dict, worktree: Path, run: Path, repo:
             deny(f"the edit changes test-relaxing lines {lines} in {rel}; relaxing a test is a person's decision (class relax-test)")
 
 
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+
+def strip_heredocs(command: str) -> str:
+    """The command without its heredoc bodies: a body is data (a report, a script fed to an
+    interpreter), not more commands. What a script fed this way writes is not seen here; run_agent's
+    comparison after the session and check-guards catch that."""
+    lines, out, end = command.split("\n"), [], None
+    for line in lines:
+        if end is not None:
+            if line.strip() == end:
+                end = None
+            continue
+        out.append(line)
+        m = HEREDOC.search(line)
+        if m:
+            end = m.group(2)
+    return "\n".join(out)
+
+
 def segments(command: str) -> list:
     """The command's simple commands, as token lists, split at `;`, `&&`, `||`, `|` and newlines."""
-    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|<>()")
+    lex = shlex.shlex(strip_heredocs(command).replace("\n", " ; "), posix=True, punctuation_chars=";&|<>()")
     lex.whitespace_split = True
     try:
         tokens = list(lex)
@@ -266,6 +294,17 @@ def git_subcommand(args: list) -> tuple:
     return (args[i], args[i + 1:]) if i < len(args) else ("", [])
 
 
+def git_dir_of(args: list, cwd: Path) -> Path:
+    """The checkout a git command works on: `-C <dir>` (each one relative to the last), else cwd."""
+    where, i = cwd, 1
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] == "-C" and i + 1 < len(args):
+            nxt = Path(args[i + 1]).expanduser()
+            where = nxt if nxt.is_absolute() else where / nxt
+        i += 2 if args[i] in GIT_GLOBAL_WITH_VALUE else 1
+    return where
+
+
 def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo: Path, label: str) -> list:
     """Denies a git command the role may not run; the paths it writes, as (target, how)."""
     sub, rest = git_subcommand(args)
@@ -275,6 +314,15 @@ def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo:
         deny(f"`git {sub}` is not a {role}'s: history, branches and worktrees belong to the orchestrator")
     flags = [a for a in rest if a.startswith("-")]
     positional = [a for a in rest if not a.startswith("-")]
+    if role != "implementer" and sub in GIT_CHECKOUT_WRITES:
+        reading = (sub == "stash" and positional[:1] in (["create"], ["list"], ["show"])) or \
+                  (sub == "config" and set(flags) & {"--get", "--get-all", "--get-regexp", "--list", "-l"}) or \
+                  (sub == "symbolic-ref" and len(positional) <= 1)
+        if not reading:
+            deny(f"`git {sub}` changes a checkout; a {role} only reads")
+    target_dir = git_dir_of(args, cwd)
+    if role == "implementer" and sub not in GIT_READ_ONLY and not inside(target_dir, worktree):
+        deny(f"an implementer's git writes only to its worktree, not {target_dir}")
     if sub == "submodule" and "foreach" in rest:
         deny("`git submodule foreach` runs commands the guard cannot see")
     if sub in ("branch", "tag") and role != "implementer":
@@ -296,7 +344,15 @@ def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo:
             if target is None or not inside(target if target.is_absolute() else cwd / target, repo / ".claude" / "reviews"):
                 deny(f"a review adds and removes only its own worktree under .claude/reviews/, not {positional[1:2]}")
     if sub == "clone":
-        urlish = [a for a in positional if a]
+        # The URL and the destination, past options and the values some take (`--depth 1`, `-b v2`).
+        urlish, skip = [], False
+        for a in rest:
+            if skip:
+                skip = False
+            elif a in CLONE_VALUED:
+                skip = True
+            elif not a.startswith("-"):
+                urlish.append(a)
         if urlish:
             dest = urlish[1] if len(urlish) > 1 else re.sub(r"\.git$", "", urlish[0].rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1])
             return [(dest, "git clone")]
@@ -316,7 +372,7 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
         deny("a command nested this deep is not checked")
     if verb in ORCHESTRATOR_SCRIPTS:
         check_script(verb, args)
-    script = next((Path(a).name for a in args[1:3] if Path(a).name in ORCHESTRATOR_SCRIPTS), None)
+    script = next((Path(a).name for a in args[1:] if Path(a).name in ORCHESTRATOR_SCRIPTS), None)
     if verb.rstrip("0123456789.") in ("python", "python3") and script:
         check_script(script, args[args.index(next(a for a in args if Path(a).name == script)):])
     if verb in SHELLS and "-c" in args[1:]:
@@ -344,12 +400,14 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
         if re.search(r"print[f]?[^;}]*>|system\s*\(|\|\s*\"", program) or "inplace" in args:
             deny("awk that writes files or runs commands is not checked; write with a file tool")
         return out
-    if verb in ("curl",):
-        for flag in ("-o", "--output"):
-            if flag in args and args.index(flag) + 1 < len(args):
-                out.append((args[args.index(flag) + 1], "curl"))
-        if "-O" in args or "--remote-name" in args:
-            out.append((".", "curl -O"))
+    if verb == "curl":
+        for i, a in enumerate(args[1:], 1):
+            if a.startswith("--output="):
+                out.append((a.split("=", 1)[1], "curl"))
+            elif (a == "--output" or (re.fullmatch(r"-[A-Za-z]+", a) and a.endswith("o"))) and i + 1 < len(args):
+                out.append((args[i + 1], "curl"))
+            elif a in ("-O", "--remote-name") or (re.fullmatch(r"-[A-Za-z]+", a) and "O" in a):
+                out.append((".", "curl -O"))
         return out
     if verb == "wget":
         target = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-O", "--output-document", "-P", "--directory-prefix")), ".")
@@ -360,6 +418,11 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
         return out + [(a, verb) for a in rest]
     if WRITERS.get(verb) == "last" and rest:
         return out + [(rest[-1], verb)]
+    if verb.rstrip("0123456789.") in ("perl", "ruby") and any(re.fullmatch(r"-[a-zA-Z]*i\S*", a) for a in args[1:]):
+        # In-place editing: the files after the code are written.
+        code_at = next((j for j, a in enumerate(args) if a in ("-e", "-E") or re.fullmatch(r"-[a-zA-Z]*e", a)), None)
+        files = [a for a in args[(code_at + 2 if code_at is not None else 1):] if not a.startswith("-")]
+        return out + [(f, f"{verb} -i") for f in files]
     if verb.rstrip("0123456789.") in INTERPRETERS:
         code = next((args[j + 1] for j, a in enumerate(args[:-1]) if a in ("-c", "-e", "-E")), "")
         if code and RUNS_COMMANDS.search(code):
