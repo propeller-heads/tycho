@@ -81,12 +81,12 @@ const ASCEND_FILL_BEFORE_SWAP_GAS: u64 = 171_820;
 /// A sell's `afterSwap` without a fill: the mint of the fee on the pool's output. Measured by
 /// replaying the transaction of [`ASCEND_SELL_CONSIDERED_BEFORE_SWAP_GAS`], which is the same
 /// 20,319 gas with the bid inventory set to 0. It costs 9,844 more than the mint after a fill
-/// ([`ASCEND_FILL_AFTER_SWAP_GAS`]); which storage slots account for the difference was not
-/// traced. Both constants are measured on two states only: a sell with no fill in an
-/// otherwise untouched transaction, and a sell after its own fill. Any other state (a second
-/// swap of the same pool in one transaction, a claim slot written earlier by another call) is
-/// priced from one of the two by whether this swap fills, which was not measured: after a
-/// fill it is priced as the cheaper mint, otherwise as the dearer one.
+/// ([`ASCEND_FILL_AFTER_SWAP_GAS`]); no trace shows which storage slots account for the
+/// difference. These two `afterSwap` constants come from two states only: a sell with no fill in
+/// an otherwise untouched transaction, and a sell after its own fill. The model prices every
+/// other state (a second swap of the same pool in one transaction, a claim slot written earlier
+/// by another call) by whether this swap fills, which nobody measured: the cheaper mint after a
+/// fill, the dearer one otherwise.
 const ASCEND_SELL_AFTER_SWAP_GAS: u64 = 20_319;
 /// A sell's `afterSwap` after a fill, whose mint finds the hook's claim slot already written by
 /// the fill's own: the larger of 10,475 and 10,416, from the replays of the two fill transactions
@@ -127,16 +127,15 @@ const ASCEND_HOOK_DISPATCH_GAS: u64 = 1_689;
 /// Only a sell on a pool with bid inventory has an amount that depends on `block.timestamp`
 /// (through the EMA, the decay of the discount and the 600 s window); [`HookHandler::apply_block`]
 /// moves the handler to the block a quote is for. The timestamp still matters to every swap in
-/// two ways: the observation refuses a timestamp before the pool's last observation, as the
-/// hook's subtraction would revert, and it stores the timestamp in the state the quote returns.
+/// two ways: the observation refuses a timestamp before the pool's last observation, and it
+/// stores the timestamp in the state the quote returns.
 ///
 /// The hook refuses what its contract reverts on or what no router settles, with `InvalidInput`:
-/// zero input, exact-output swaps (the hook does price them, with a different fee split, but
+/// zero input, exact-output swaps (the hook prices them with a different fee split, which SPEC
+/// S12 traced with V4Quoter `quoteExactOutputSingle` at block 8365800, but
 /// `ProtocolSim::get_amount_out` quotes exact-input only), an input above `type(int128).max`
-/// (the largest amount a v4 `BalanceDelta` holds, and the largest the hook treats as a fill
-/// candidate), a swap the pool cannot
-/// fill in full (`check_swap_outcome`: the router would leave a credit and the PoolManager's
-/// `unlock` reverts) and a swap whose swapper output is 0.
+/// (`exact_input`), a swap the pool cannot fill in full (`check_swap_outcome`: the router would
+/// leave a credit and the PoolManager's `unlock` reverts) and a swap whose swapper output is 0.
 ///
 /// Not modelled, since each depends on state that no attribute carries and none binds on a route
 /// that settles its input first: the hook's quote balance and the PoolManager's token balance
@@ -179,32 +178,12 @@ struct SwapPlan {
 }
 
 impl SwapPlan {
-    fn is_buy(&self) -> bool {
-        matches!(self.path, SwapPath::Buy)
-    }
-
-    /// The fill a sell gets, if any.
-    fn fill(&self) -> Option<Fill> {
-        match self.path {
-            SwapPath::SellFilled(fill) => Some(fill),
-            SwapPath::Buy | SwapPath::SellNotConsidered | SwapPath::SellDeclined => None,
-        }
-    }
-
-    /// What the fill pays the swapper: its quote less the fill fee.
-    fn fill_net(&self, fee_pips: u32) -> Result<U256, SimulationError> {
-        match self.fill() {
-            None => Ok(U256::ZERO),
-            Some(fill) => {
-                sub(fill.quote_out, fee_floor(fill.quote_out, fee_pips)?, "the fill's net")
-            }
-        }
-    }
-
     /// The tokens the fill takes from the swapper.
     fn fill_tokens(&self) -> U256 {
-        self.fill()
-            .map_or(U256::ZERO, |fill| fill.tokens_in)
+        match self.path {
+            SwapPath::SellFilled(fill) => fill.tokens_in,
+            SwapPath::Buy | SwapPath::SellNotConsidered | SwapPath::SellDeclined => U256::ZERO,
+        }
     }
 
     /// The gas of the hook's `beforeSwap` frame on this path.
@@ -227,6 +206,11 @@ impl SwapPlan {
     }
 }
 
+/// What `fill` pays the swapper: its quote less the fill fee.
+fn fill_net(fill: &Fill, fee_pips: u32) -> Result<U256, SimulationError> {
+    sub(fill.quote_out, fee_floor(fill.quote_out, fee_pips)?, "the fill's net")
+}
+
 /// `floor(amount * fee_pips / 1e6)`.
 pub(super) fn fee_floor(amount: U256, fee_pips: u32) -> Result<U256, SimulationError> {
     mul_div_floor(amount, U256::from(fee_pips), U256::from(FEE_PIPS_DENOMINATOR))
@@ -237,8 +221,9 @@ pub(super) fn fee_ceil(amount: U256, fee_pips: u32) -> Result<U256, SimulationEr
     mul_div_ceil(amount, U256::from(fee_pips), U256::from(FEE_PIPS_DENOMINATOR))
 }
 
-/// `value` as an `int128` delta; `what` names the quantity. Each quantity is bounded by an input
-/// that `exact_input` kept within `int128`, so a failure is a fault of the model.
+/// `value` as an `int128` delta; `what` names the quantity. Fails with a `FatalError`: every
+/// caller passes a quantity that a `BalanceDelta` amount or `INT128_MAX` bounds, so a value that
+/// does not fit is a fault of the model, not of the swap.
 fn to_i128(value: U256, what: &str) -> Result<I128, SimulationError> {
     u128::try_from(value)
         .ok()
@@ -295,11 +280,13 @@ impl AscendHookHandler {
         zero_for_one != self.state.token_is_currency0()
     }
 
-    /// Whether every swap refuses: the block's timestamp is before the pool's last observation
-    /// (a delta can carry one ahead of the block the handler is at), which the hook's
-    /// subtraction would revert on.
+    /// Whether every swap refuses: the observation every swap runs first refuses a block
+    /// timestamp before the pool's last observation, which a delta can carry ahead of the block
+    /// the handler is at.
     fn refuses_every_swap(&self) -> bool {
-        self.block_timestamp < self.state.observation.updated_at
+        self.state
+            .observation
+            .is_ahead_of(self.block_timestamp)
     }
 
     /// The validated input of a swap and what the hook does to it, from the pool's price and tick
@@ -378,12 +365,16 @@ impl AscendHookHandler {
         amm_out: U256,
     ) -> Result<SettledOutput, SimulationError> {
         let fee_pips = self.state.fee_pips;
-        if plan.is_buy() {
-            return Ok(SettledOutput { fee: U256::ZERO, swapper_output: amm_out });
-        }
+        let filled_net = match plan.path {
+            SwapPath::Buy => {
+                return Ok(SettledOutput { fee: U256::ZERO, swapper_output: amm_out });
+            }
+            SwapPath::SellFilled(fill) => fill_net(&fill, fee_pips)?,
+            SwapPath::SellNotConsidered | SwapPath::SellDeclined => U256::ZERO,
+        };
         let fee = fee_ceil(amm_out, fee_pips)?;
         let amm_net = sub(amm_out, fee, "the pool's output net of the fee")?;
-        let swapper_output = add(plan.fill_net(fee_pips)?, amm_net, "the swapper's output")?;
+        let swapper_output = add(filled_net, amm_net, "the swapper's output")?;
         Ok(SettledOutput { fee, swapper_output })
     }
 }
@@ -404,13 +395,14 @@ impl HookHandler for AscendHookHandler {
 
     /// Moves the handler to the block's timestamp. Reports a change when the timestamp moved and
     /// either the pool has bid inventory (only a fill's amount depends on the time) or the move
-    /// started or ended the refusal of every swap (a timestamp before the pool's last
-    /// observation, [`Self::refuses_every_swap`]).
+    /// started or ended the refusal of every swap (`refuses_every_swap`).
     fn apply_block(&mut self, block: &BlockContext) -> bool {
         let moved = self.block_timestamp != block.timestamp();
         let was_refusing = self.refuses_every_swap();
         self.block_timestamp = block.timestamp();
-        moved && (!self.state.bid.inventory.is_zero() || was_refusing != self.refuses_every_swap())
+        let amounts_depend_on_time = !self.state.bid.inventory.is_zero();
+        let refusal_changed = was_refusing != self.refuses_every_swap();
+        moved && (amounts_depend_on_time || refusal_changed)
     }
 
     /// Returns `true`. Every Ascend pool opens one tick spacing outside its single position,
@@ -445,7 +437,7 @@ impl HookHandler for AscendHookHandler {
             SwapPath::SellFilled(fill) => {
                 // The hook takes the tokens (a positive specified delta) and pays the quote, net
                 // of its fee (a negative unspecified delta).
-                let net = plan.fill_net(self.state.fee_pips)?;
+                let net = fill_net(&fill, self.state.fee_pips)?;
                 BalanceDelta::new(
                     to_i128(fill.tokens_in, "the fill's tokens")?,
                     -to_i128(net, "the fill's net quote")?,
@@ -536,11 +528,17 @@ impl HookHandler for AscendHookHandler {
     /// A bound at which the swapper's output is 0 gives 0, as `after_swap` refuses every swap
     /// up to it.
     ///
-    /// The limit is hard, though the hook never reverts on the size of an input: on chain a larger
-    /// input settles partially (a buy's net is capped at the pool's capacity to the curve end, a
-    /// sell consumes what the range absorbs). A router settles the whole input and the pool
-    /// manager's `unlock` reverts on the credit the rest leaves (`check_swap_outcome`), so an
-    /// input above the limit is refused rather than quoted as a partial swap.
+    /// The limit is hard, though the hook does not revert on the size of an input: SPEC S28 read
+    /// `lib 0xe08461e7` with an input of 1e27 at block 8365604, which returns the capped net, and
+    /// a V4Quoter sell past the range's capacity, where the PoolManager's swap succeeds. So on
+    /// chain a larger input settles partially (a buy's net is capped at the pool's capacity to the
+    /// curve end, a sell consumes what the range absorbs). A router settles the whole input and
+    /// the pool manager's `unlock` reverts on the credit the rest leaves (SPEC S34, and
+    /// `check_swap_outcome`), so an input above the limit is refused rather than quoted as a
+    /// partial swap.
+    ///
+    /// A pool whose every swap refuses (`refuses_every_swap`) fails here in both directions, as
+    /// its quotes do.
     fn max_amount_in(
         &self,
         state: &UniswapV4State,
@@ -549,6 +547,8 @@ impl HookHandler for AscendHookHandler {
         let curve = &self.state.curve;
         let (spot, tick) = state.price_and_tick();
         if self.is_buy(zero_for_one) {
+            // The refusal of a quote: the observation every swap runs first.
+            observe(curve, &self.state.observation, spot, tick, self.block_timestamp)?;
             let target = swap_bound(curve.far_end, zero_for_one);
             let walk = state.amount_in_to_price(zero_for_one, target, None)?;
             if walk.amount_in.is_zero() || walk.amount_out.is_zero() {

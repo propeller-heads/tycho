@@ -77,6 +77,15 @@ struct Observation {
     discount: u32,
 }
 
+impl Observation {
+    /// Whether the observation is later than the block timestamp `now`. The hook's subtraction
+    /// of the two reverts then, so every swap refuses: a delta can carry `updated_at` ahead of
+    /// the block the handler is at.
+    fn is_ahead_of(&self, now: u64) -> bool {
+        now < self.updated_at
+    }
+}
+
 /// What the hook keeps for one pool's bid (`Bid` words 0 to 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bid {
@@ -98,7 +107,7 @@ pub struct AscendPoolState {
     start_tick: i32,
     observation: Observation,
     bid: Bid,
-    /// The launch curve of `start_tick` and the orientation, which it also holds.
+    /// The launch curve of `start_tick` and of the orientation, which the curve carries.
     curve: Curve,
 }
 
@@ -259,8 +268,7 @@ fn fixed<const N: usize>(
     })
 }
 
-/// An 8-byte big-endian `uint64`: the indexer's format for the timestamps, the fee and the
-/// discount.
+/// An 8-byte big-endian `uint64`: the indexer's format for every attribute of 64 bits or fewer.
 fn uint64(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
     Ok(u64::from_be_bytes(fixed(name, value, "a big-endian u64")?))
 }

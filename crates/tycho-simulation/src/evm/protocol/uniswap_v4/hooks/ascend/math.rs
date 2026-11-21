@@ -5,8 +5,9 @@
 //! The library function `0x15821c64` is pure: the tests replay its outputs, read with `eth_call`
 //! on Elysium at block 8660000. Besides the exits its arithmetic implies, the function returns no
 //! fill in two cases that only those `eth_call`s show: when the pool's price is past the curve
-//! end on the far side from the fill price, and when it is exactly at the curve end (nothing is
-//! left to fill). `size_fill` reproduces both.
+//! end on the far side from the fill price, and when the tokens left up to the curve end round
+//! down to 0 (a spot at the end, or close enough to it that the whole tokens up to it floor to
+//! 0). `size_fill` reproduces both.
 //!
 //! The errors this module raises are [`SimulationError::InvalidInput`] and mean the same as a
 //! revert of the hook: this one swap cannot be served, as when a checked operation of the
@@ -201,14 +202,13 @@ pub(super) fn observe(
     tick: i32,
     now: u64,
 ) -> Result<Observation, SimulationError> {
-    let dt = now
-        .checked_sub(observation.updated_at)
-        .ok_or_else(|| {
-            refuse(format!(
-                "the block timestamp {now} is before the last observation {}",
-                observation.updated_at
-            ))
-        })?;
+    if observation.is_ahead_of(now) {
+        return Err(refuse(format!(
+            "the block timestamp {now} is before the last observation {}",
+            observation.updated_at
+        )));
+    }
+    let dt = now - observation.updated_at;
     if dt == 0 {
         return Ok(*observation);
     }
@@ -304,26 +304,37 @@ fn end_price_and_quote(
     }
 }
 
+/// A fault of the model: an invariant of the hook's arithmetic that the caller's inputs keep does
+/// not hold, which no swap causes.
+fn broken_invariant(what: &str) -> SimulationError {
+    SimulationError::FatalError(format!("ascend hook: {what}"))
+}
+
 /// The tokens of a fill whose quote is capped at `cap`, inverting [`end_price_and_quote`].
-fn tokens_for_capped_quote(curve: &Curve, x0: U256, cap: U256) -> Result<U256, SimulationError> {
+///
+/// `cap` stays below the quote of the whole band at `x0` (`size_fill` takes it from `qmax`, which
+/// is at most `liquidity * x0 / 2^96 / 40`), so the price move and the inverse price below
+/// are positive; a `cap` that breaks that is a fault of the model.
+pub(super) fn tokens_for_capped_quote(
+    curve: &Curve,
+    x0: U256,
+    cap: U256,
+) -> Result<U256, SimulationError> {
     let liquidity = U256::from(curve.liquidity);
     let scaled_liquidity = liquidity << 96usize;
     if curve.token_is_currency0 {
         let d_sqrt = (cap << 96usize) / liquidity;
         let scaled = mul_div_floor(scaled_liquidity, d_sqrt, x0)?;
-        // `x0 - d_sqrt` is positive: the cap is below the quote the pool pays out over the whole
-        // band, which is `liquidity * x0 / 2^96` at most. The check guards the division.
         let remaining_price = sub(x0, d_sqrt, "the capped fill's price move")?;
         if remaining_price.is_zero() {
-            return Err(refuse("the capped fill reaches a price of 0"));
+            return Err(broken_invariant("the capped fill reaches a price of 0"));
         }
         Ok(scaled / remaining_price)
     } else {
         let capped_inverse =
             sub(scaled_liquidity.div_ceil(x0), cap, "the capped fill's inverse price")?;
-        // `capped_inverse` is positive for the same reason; the check guards the division.
         if capped_inverse.is_zero() {
-            return Err(refuse("the capped fill reaches an infinite price"));
+            return Err(broken_invariant("the capped fill reaches an infinite price"));
         }
         let capped_price = scaled_liquidity / capped_inverse;
         mul_div_floor(liquidity, sub(capped_price, x0, "the capped fill's price move")?, Q96)
@@ -417,7 +428,8 @@ pub(super) fn size_fill(
         mul_div_floor(liquidity, curve.curve_end - x0, Q96)?
     };
     tokens_in = tokens_in.min(to_curve_end);
-    // A spot exactly at the curve end leaves nothing to fill. The library returns no fill there
+    // Whole tokens of 0 up to the curve end leave nothing to fill: the spot is at the end, or
+    // close enough that the tokens floor to 0. The library returns no fill at the end itself
     // (`eth_call` at block 8660000, token0 spot equal to the end, fill price above it), where the
     // arithmetic below would round the fill's end price to the price it starts at or above it.
     if tokens_in.is_zero() {

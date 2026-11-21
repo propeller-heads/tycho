@@ -227,8 +227,7 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// accepted the result, before `after_swap`; a swap refused later returns its error and drops
     /// the handler. `None` keeps the hook as it is, which is the default.
     ///
-    /// A handler that keeps the default writes no storage of its own on a swap, and a test pins
-    /// that with `test_hook::assert_handler_after_swap_keeps_the_hook`.
+    /// A handler that keeps the default writes no storage of its own on a swap.
     fn handler_after_swap(
         &self,
         _context: &StateContext,

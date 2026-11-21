@@ -22,11 +22,12 @@ use tycho_common::{
 use super::{
     hook_handler::{fee_ceil, fee_floor, max_gross_buy, AscendHookHandler, ASCEND_HOOK_ELYSIUM},
     hook_handler_creator::AscendHookCreator,
-    math::{amount0_delta_down, observe, size_fill, Curve, FillRequest},
+    math::{amount0_delta_down, observe, size_fill, tokens_for_capped_quote, Curve, FillRequest},
     *,
 };
 use crate::{
     evm::protocol::{
+        u256_num::u256_to_biguint,
         uniswap_v4::{
             hooks::{
                 hook_handler::HookHandler,
@@ -186,28 +187,23 @@ fn amm_only(pool: &UniswapV4State) -> UniswapV4State {
     amm_only
 }
 
-/// What a buy of `gross` raw units of quote on `pool` gives, as worked by hand: the hook takes
-/// `ceil(gross * fee / 1e6)` and the AMM alone swaps the rest.
-fn buy_through_the_amm_on_the_net(
-    pool: &UniswapV4State,
-    token_is_currency0: bool,
-    gross: u128,
-    fee_pips: u128,
-) -> BigUint {
-    let fee = (gross * fee_pips).div_ceil(1_000_000);
-    buy(&amm_only(pool), token_is_currency0, &(gross - fee).to_string()).unwrap()
+/// What a buy of `gross` raw units of quote on `pool` gives: the hook takes `ceil(gross * fee /
+/// 1e6)` and the AMM swaps the rest, with the pool's own fee and orientation. Only the fee's
+/// rounding is worked here: the AMM leg is the production path, which the literal quotes of
+/// `test_a_buy_and_a_sell_without_a_fill_quote_the_pinned_amounts` pin.
+fn buy_through_the_amm_on_the_net(pool: &UniswapV4State, gross: u128) -> BigUint {
+    let state = hook_of(pool).state;
+    let fee = (gross * u128::from(state.fee_pips)).div_ceil(1_000_000);
+    buy(&amm_only(pool), state.token_is_currency0(), &(gross - fee).to_string()).unwrap()
 }
 
-/// What a sell of `amount` on `pool` gives with no fill, as worked by hand: the AMM's output less
-/// the hook's `ceil(out * fee / 1e6)`.
-fn sell_through_the_amm_less_the_fee(
-    pool: &UniswapV4State,
-    token_is_currency0: bool,
-    amount: &str,
-    fee_pips: u128,
-) -> BigUint {
-    let out = sell(&amm_only(pool), token_is_currency0, amount).unwrap();
-    let fee = (&out * fee_pips + 999_999u32) / 1_000_000u32;
+/// What a sell of `amount` on `pool` gives with no fill: the AMM's output less the hook's
+/// `ceil(out * fee / 1e6)`, with the pool's own fee and orientation. Only the fee's rounding is
+/// worked here, as in [`buy_through_the_amm_on_the_net`].
+fn sell_through_the_amm_less_the_fee(pool: &UniswapV4State, amount: &str) -> BigUint {
+    let state = hook_of(pool).state;
+    let out = sell(&amm_only(pool), state.token_is_currency0(), amount).unwrap();
+    let fee = (&out * state.fee_pips + 999_999u32) / 1_000_000u32;
     out - fee
 }
 
@@ -878,18 +874,15 @@ fn funded_pool(token_is_currency0: bool, fee_pips: u32, inventory: &str) -> Unis
     }
 }
 
-/// Fills as the library sizes them (at `A = V` its quote is the venue's 238899517702555132, read
-/// at block 8660000), with the swapper's share `quote - floor(quote * 1%)`.
-#[rstest]
-#[case::the_fill_takes_all_of_the_input("1000000000000000000", "47658354437")]
-#[case::the_fill_runs_to_the_curve_end_and_the_amm_takes_the_rest(
-    "4988498616072757541375877",
-    "236558180832118545"
-)]
-fn test_a_sell_fills_from_the_bid_on_a_token0_pool(#[case] amount: &str, #[case] expected: &str) {
+/// A fill that runs to the curve end and leaves the AMM the rest, as the library sizes it (at
+/// `A = V` its quote is the venue's 238899517702555132, read at block 8660000), with the
+/// swapper's share `quote - floor(quote * 1%)`. The fill that takes the whole input is a case of
+/// `test_the_fee_moves_the_quote_against_the_trader`.
+#[test]
+fn test_a_sell_fills_to_the_curve_end_and_the_amm_takes_the_rest_on_a_token0_pool() {
     let pool = funded_pool(true, 10_000, PLENTY);
 
-    assert_eq!(sell(&pool, true, amount).unwrap(), big(expected));
+    assert_eq!(sell(&pool, true, "4988498616072757541375877").unwrap(), big("236558180832118545"));
 }
 
 /// A sell that fills nothing is the AMM's: the same pool without inventory quotes the
@@ -1040,7 +1033,7 @@ fn test_a_pool_sold_back_to_its_lower_edge_quotes_buys() {
     let quote = buy(&edge, true, "1000000000000000").unwrap();
 
     // The AMM alone on the net input after the 1% fee (1e13), nonzero as on chain.
-    assert_eq!(quote, buy_through_the_amm_on_the_net(&edge, true, 1_000_000_000_000_000, 10_000));
+    assert_eq!(quote, buy_through_the_amm_on_the_net(&edge, 1_000_000_000_000_000));
     assert!(quote > BigUint::from(0u32));
 }
 
@@ -1091,15 +1084,7 @@ fn test_a_pool_at_its_start_price_quotes_buys(#[case] token_is_currency0: bool) 
 
     let quote = buy(&pool, token_is_currency0, "1000000000000000000").unwrap();
 
-    assert_eq!(
-        quote,
-        buy_through_the_amm_on_the_net(
-            &pool,
-            token_is_currency0,
-            1_000_000_000_000_000_000,
-            10_000
-        )
-    );
+    assert_eq!(quote, buy_through_the_amm_on_the_net(&pool, 1_000_000_000_000_000_000));
     assert!(quote > BigUint::from(0u32));
 }
 
@@ -1386,16 +1371,17 @@ fn test_a_sell_after_a_buy_in_the_same_block_does_not_fill() {
 #[test]
 fn test_a_sell_fills_when_the_buy_before_it_is_not_carried() {
     let funded = pool_observed_100_seconds_ago(PLENTY);
-    let empty = pool_observed_100_seconds_ago("0");
     let mut stale = after_a_buy(&funded);
     stale.set_hook_handler(Box::new(hook_of(&funded).clone()));
 
     let uncarried = sell(&stale, true, "1000000000000000000").unwrap();
     let carried = sell(&after_a_buy(&funded), true, "1000000000000000000").unwrap();
 
-    assert!(uncarried > carried, "{uncarried} is not above {carried}");
-    assert_eq!(sell(&funded, true, "1000000000000000000").unwrap(), big("47658354437"));
-    assert_eq!(sell(&empty, true, "1000000000000000000").unwrap(), big("47658354435"));
+    // Both quotes are at the price the buy moved to. The carried one is the AMM's (no fill, as in
+    // the test above); the uncarried one fills 2 units higher. Neither has a chain read (none
+    // holds a stale hook state), so both are the model's own, pinned as regression values.
+    assert_eq!(uncarried, big("47717470825"));
+    assert_eq!(carried, big("47717470823"));
 }
 
 /// With the stored observed tick one off the pool's, a quote at the same second rejects the fill
@@ -1450,6 +1436,18 @@ fn test_apply_block_reports_the_start_and_the_end_of_a_refusal_of_every_swap() {
     let one = "1000000000000000000";
     assert_refused(&sell(&pool, true, one), "a sell before the observation");
     assert_refused(&buy(&pool, true, one), "a buy before the observation");
+    // The limits refuse as the quotes do, in both directions.
+    let (launched, quote) = tokens(true);
+    assert!(
+        pool.get_limits(quote.address.clone(), launched.address.clone())
+            .is_err(),
+        "a buy limit before the observation"
+    );
+    assert!(
+        pool.get_limits(launched.address, quote.address)
+            .is_err(),
+        "a sell limit before the observation"
+    );
 
     assert!(!ProtocolSim::apply_block(&mut pool, &BlockContext::new(1, TS + 5)));
     assert_refused(&sell(&pool, true, one), "a sell at TS + 5");
@@ -1460,43 +1458,61 @@ fn test_apply_block_reports_the_start_and_the_end_of_a_refusal_of_every_swap() {
     assert_refused(&sell(&pool, true, one), "a sell at TS + 9");
 }
 
-/// Fees of 0 and 1 pips, below the 10000 to 110000 the chain's pools charge: the hook's own bounds
-/// on a fee are unknown (its source is unverified), so the model prices any fee the format holds.
-/// The expectations are worked by hand from the hook's rules: a buy pays `ceil(A * f / 1e6)` and
-/// the AMM swaps the rest, a sell without a fill gets the AMM's output less `ceil(out * f / 1e6)`,
-/// and a fill of the library's quote 48139751956 (block 8660000) pays it less `floor(q * f / 1e6)`
-/// (48139751956 for f = 0, and 48139751956 - 48139 = 48139703817 for f = 1).
+/// The pool's fee lowers what the swapper receives for the same input of 1e18, in each
+/// orientation and direction, by the amount the hook's rules give: a buy pays `ceil(A * f / 1e6)`
+/// and the AMM swaps the rest, a sell without a fill gets the AMM's output less `ceil(out * f /
+/// 1e6)`, and a sell filled in full gets the library's quote 48139751956 (block 8660000, either
+/// orientation) less `floor(q * f / 1e6)`, which are the literals of the cases. The chain's pools
+/// charge 1% and 2% (and up to 11%); the cases of 0 and 1 pip are edges the format holds, which
+/// no observed pool charges: the hook's own bounds on a fee are unknown (its source is
+/// unverified), so the model prices any fee below 100%. The limits of every direction settle at
+/// each fee.
 #[rstest]
-fn test_a_fee_of_0_or_1_pips_quotes_as_the_hook_rules_give(
+#[case::no_fee(0, "48139751956")]
+#[case::one_pip(1, "48139703817")]
+#[case::one_percent(10_000, "47658354437")]
+#[case::two_percent(20_000, "47176956917")]
+fn test_the_fee_moves_the_quote_against_the_trader(
     #[values(true, false)] token_is_currency0: bool,
-    #[values(0, 1)] fee_pips: u32,
+    #[case] fee_pips: u32,
+    #[case] filled_sell: &str,
 ) {
+    let one = "1000000000000000000";
     let no_inventory = funded_pool(token_is_currency0, fee_pips, "0");
     let funded = funded_pool(token_is_currency0, fee_pips, PLENTY);
-    let fee = u128::from(fee_pips);
 
     assert_eq!(
-        buy(&no_inventory, token_is_currency0, "1000000000000000000").unwrap(),
-        buy_through_the_amm_on_the_net(&no_inventory, token_is_currency0, 10u128.pow(18), fee)
+        buy(&no_inventory, token_is_currency0, one).unwrap(),
+        buy_through_the_amm_on_the_net(&no_inventory, 10u128.pow(18))
     );
     assert_eq!(
-        sell(&no_inventory, token_is_currency0, "1000000000000000000").unwrap(),
-        sell_through_the_amm_less_the_fee(
-            &no_inventory,
-            token_is_currency0,
-            "1000000000000000000",
-            fee
-        )
+        sell(&no_inventory, token_is_currency0, one).unwrap(),
+        sell_through_the_amm_less_the_fee(&no_inventory, one)
     );
-    assert_eq!(
-        sell(&funded, token_is_currency0, "1000000000000000000").unwrap(),
-        big(["48139751956", "48139703817"][usize::try_from(fee_pips).unwrap()])
-    );
+    assert_eq!(sell(&funded, token_is_currency0, one).unwrap(), big(filled_sell));
     for pool in [&no_inventory, &funded] {
         for quote_in in [false, true] {
-            assert!(check_limit(pool, token_is_currency0, quote_in, "a fee of 0 or 1 pips"));
+            assert!(check_limit(pool, token_is_currency0, quote_in, "the fee table"));
         }
     }
+}
+
+/// A buy of 1e18 and a sell of 1e18 without a fill at the 1% fee, pinned as literals so that the
+/// fee table's oracle, which runs the production AMM path, cannot drift with it. The sell is the
+/// pool's AMM output less `ceil(out * 1%)`, a buy swaps the net 0.99e18.
+#[rstest]
+#[case::token0(true, "20148706015779155991173129", "47658354435")]
+#[case::mirrored(false, "20148706015779155991173176", "47658354435")]
+fn test_a_buy_and_a_sell_without_a_fill_quote_the_pinned_amounts(
+    #[case] token_is_currency0: bool,
+    #[case] buy_quote: &str,
+    #[case] sell_quote: &str,
+) {
+    let pool = funded_pool(token_is_currency0, 10_000, "0");
+    let one = "1000000000000000000";
+
+    assert_eq!(buy(&pool, token_is_currency0, one).unwrap(), big(buy_quote));
+    assert_eq!(sell(&pool, token_is_currency0, one).unwrap(), big(sell_quote));
 }
 
 /// The local round-down `getAmount0Delta` is `floor(floor(L << 96 * (b - a) / b) / a)`, as v4
@@ -1510,9 +1526,9 @@ fn test_amount0_delta_down_floors_the_product_as_v4_does() {
     use crate::evm::protocol::utils::uniswap::sqrt_price_math::get_amount0_delta;
     let reference = |a: U256, b: U256, liquidity: u128| {
         let (lower, upper) = (a.min(b), a.max(b));
-        let product = (BigUint::from(liquidity) << 96usize) * big(&(upper - lower).to_string()) /
-            big(&upper.to_string());
-        product / big(&lower.to_string())
+        let product = (BigUint::from(liquidity) << 96usize) * u256_to_biguint(upper - lower) /
+            u256_to_biguint(upper);
+        product / u256_to_biguint(lower)
     };
     let mut rng = Rng(0xde17a);
     for _ in 0..200 {
@@ -1523,7 +1539,7 @@ fn test_amount0_delta_down_floors_the_product_as_v4_does() {
         let local = amount0_delta_down(b, a, liquidity).unwrap();
         let shared = get_amount0_delta(a, b, liquidity, false).unwrap();
 
-        assert_eq!(big(&local.to_string()), reference(a, b, liquidity), "{a} {b} {liquidity}");
+        assert_eq!(u256_to_biguint(local), reference(a, b, liquidity), "{a} {b} {liquidity}");
         assert!(shared == local || shared == local + U256::ONE, "{shared} against {local}");
     }
 
@@ -1581,11 +1597,12 @@ fn test_a_fills_new_discount_beyond_uint32_is_refused() {
 
 /// A whole-input fill leaves the pool nothing to swap: `PoolManager.swap` still runs, and v4-core's
 /// `Pool.swap` returns at once on a zero amount (`if (params.amountSpecified == 0) return ...`
-/// before its price checks and its loop), so the swap leg costs the model's 3000 of a no-op. The
-/// gas is that, the hook's two frames of a fill (171,820 and 10,475) and the PoolManager's
-/// 1,689 for each of the two calls.
+/// before its price checks and its loop), so the swap leg costs the 3,000 of a no-op. The route
+/// around it (`base` 150,000 and `settlement` 30,000 of the Uniswap v4 costs) is charged as for
+/// any swap, with the hook's two frames of a fill (171,820 and 10,475) and the PoolManager's
+/// 1,689 for each of the two calls. The total of such a swap was not measured on chain.
 #[test]
-fn test_a_fill_that_takes_the_whole_input_costs_a_noop_swap_and_the_hook_frames() {
+fn test_a_whole_input_fill_costs_the_route_the_noop_swap_and_the_hook_frames() {
     let pool = funded_pool(true, 10_000, PLENTY);
     let (launched, quote) = tokens(true);
 
@@ -1594,7 +1611,7 @@ fn test_a_fill_that_takes_the_whole_input_costs_a_noop_swap_and_the_hook_frames(
         .unwrap();
 
     assert_eq!(result.amount, big("47658354437"));
-    assert_eq!(result.gas, big(&(3_000 + 171_820 + 10_475 + 2 * 1_689).to_string()));
+    assert_eq!(result.gas, big("368673"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1723,6 +1740,53 @@ fn test_a_delta_updates_only_the_attributes_it_carries() {
     expected.bid.inventory = U256::from(99u64);
     expected.observation.discount = 5;
     assert_eq!(handler.state, expected);
+}
+
+/// The curve depends on the start tick and the orientation alone, so a delta that leaves both
+/// reuses the handler's curve; one that changes either rebuilds it. The state a delta of the
+/// changed attributes gives equals the state decoded afresh from the full set, whose curve is
+/// built without a base, and differs from the sample's.
+#[rstest]
+#[case::another_start_tick(true, -170_000)]
+#[case::the_other_orientation(false, -168_500)]
+fn test_a_delta_that_changes_the_start_tick_or_the_orientation_rebuilds_the_curve(
+    #[case] token_is_currency0: bool,
+    #[case] start_tick: i32,
+) {
+    let mut handler = AscendHookHandler::new(ASCEND_HOOK_ELYSIUM, sample_state(), TS);
+    let changed: HashMap<String, Bytes> = [
+        (TOKEN_IS_CURRENCY0_ATTRIBUTE.to_string(), Bytes::from(vec![u8::from(token_is_currency0)])),
+        (START_TICK_ATTRIBUTE.to_string(), Bytes::from(start_tick.to_be_bytes().to_vec())),
+    ]
+    .into();
+    let mut full = attributes(&sample_state());
+    full.extend(changed.clone());
+
+    transition(&mut handler, changed, &[]).unwrap();
+
+    assert_eq!(handler.state, AscendPoolState::from_attributes(&full).unwrap());
+    assert_ne!(handler.state.curve, sample_state().curve);
+}
+
+/// A cap that swallows the whole price at `x0` breaks the invariant `size_fill` keeps (its cap is
+/// below the band's quote), which is a fault of the model and not a bad swap. At `x0 = 2^96` a
+/// cap of the liquidity leaves a price move of 0 (token0) or an inverse price of 0 (mirrored).
+#[rstest]
+#[case::token0(true, "reaches a price of 0")]
+#[case::mirrored(false, "reaches an infinite price")]
+fn test_a_cap_beyond_the_band_is_a_fault_of_the_model(
+    #[case] token_is_currency0: bool,
+    #[case] reached: &str,
+) {
+    let curve = Curve::try_new(token_is_currency0, -168_600).unwrap();
+
+    let result =
+        tokens_for_capped_quote(&curve, U256::from(1) << 96usize, U256::from(curve.liquidity));
+
+    assert!(
+        matches!(&result, Err(SimulationError::FatalError(message)) if message.contains(reached)),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -1854,47 +1918,6 @@ fn test_an_observed_tick_at_the_int24_extremes_decodes(#[case] observed: i32) {
 // ---------------------------------------------------------------------------------------------
 // Fees, refusals and gas of each path
 // ---------------------------------------------------------------------------------------------
-
-/// In each orientation and direction the pool's fee lowers what the swapper receives for the same
-/// input of 1e18, by the amount the hook's rules give, at the two fees the cited Elysium pools
-/// charge (1% and 2%): a buy is the AMM's on the input net of `ceil(A * f)`, a sell with no
-/// inventory the AMM's output less `ceil(out * f)`, and a sell filled in full is the library's
-/// quote 48139751956 (block 8660000, either orientation) less `floor(q * f)`: 47658354437 at 1%
-/// and 47176956917 at 2%.
-#[rstest]
-fn test_the_fee_moves_the_quote_against_the_trader(
-    #[values(true, false)] token_is_currency0: bool,
-    #[values(10_000, 20_000)] fee_pips: u32,
-    #[values("buy", "sell", "filled sell")] kind: &str,
-) {
-    let one = "1000000000000000000";
-    let fee = u128::from(fee_pips);
-    let (pool, expected) = match kind {
-        "buy" => {
-            let pool = funded_pool(token_is_currency0, fee_pips, "0");
-            let expected =
-                buy_through_the_amm_on_the_net(&pool, token_is_currency0, 10u128.pow(18), fee);
-            (pool, expected)
-        }
-        "sell" => {
-            let pool = funded_pool(token_is_currency0, fee_pips, "0");
-            let expected = sell_through_the_amm_less_the_fee(&pool, token_is_currency0, one, fee);
-            (pool, expected)
-        }
-        _ => (
-            funded_pool(token_is_currency0, fee_pips, PLENTY),
-            big(if fee_pips == 10_000 { "47658354437" } else { "47176956917" }),
-        ),
-    };
-
-    let quote = if kind == "buy" {
-        buy(&pool, token_is_currency0, one)
-    } else {
-        sell(&pool, token_is_currency0, one)
-    };
-
-    assert_eq!(quote.unwrap(), expected);
-}
 
 /// A buy of 1 raw unit pays a fee of 1 (the ceiling) and leaves the pool nothing to swap, so the
 /// swapper's output is 0 and the swap is refused.

@@ -1116,7 +1116,16 @@ impl ProtocolSim for UniswapV4State {
             let hook_calls = u64::from(before_swap_gas > 0) + u64::from(after_swap_gas > 0);
             hook_overhead += hook_calls * hook.pool_manager_call_overhead();
         }
-        let total_gas_used = result.gas_used + U256::from(hook_overhead);
+        // A hook that took the whole input leaves the pool leg a no-op, whose own gas is the 3,000
+        // of `swap`. The router overhead, the executor preamble and the token transfer in (`base`)
+        // and the settlement still run around it. No trace measured the total of such a swap;
+        // `base` is a fitted constant for the whole route, so it is charged as for any swap.
+        let route_gas = if amount_to_swap.is_zero() {
+            U256::from(self.gas_costs.base + self.gas_costs.settlement)
+        } else {
+            U256::ZERO
+        };
+        let total_gas_used = result.gas_used + route_gas + U256::from(hook_overhead);
         Ok(GetAmountOutResult::new(
             u256_to_biguint(U256::from(amount_out.abs())),
             u256_to_biguint(total_gas_used),
