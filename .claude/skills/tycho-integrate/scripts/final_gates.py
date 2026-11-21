@@ -2,7 +2,8 @@
 """The final gates of a tycho-integrate run, and the proxy re-check.
 
     final_gates.py --protocol P                  run every gate, write <run>/final_gates.json
-    final_gates.py --protocol P --recheck        proxies only: implementation slots vs the spec
+    final_gates.py --protocol P --recheck        the venue against the spec: proxies, watched code and
+                                                 getters, venue quotes (`onchain.py`)
 
 Gates: every layer stopped clean; all checks once more (checks.toml, layer `final`, which adds the
 mutation score when G10 has landed); one test per spec mutation surface (G5); every proxy's
@@ -25,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import envcheck  # noqa: E402
 import harness_caps  # noqa: E402
+import onchain  # noqa: E402
 import schema  # noqa: E402
 import state as ledger  # noqa: E402
 
@@ -178,6 +180,50 @@ def gate_proxies(spec: dict) -> dict:
     return gate("proxies", "pass", f"{len(rows)} proxies unchanged", proxies=rows)
 
 
+def gate_venue_quotes(spec: dict, tree: Path, facts: set) -> dict:
+    """The spec's venue quotes hold at their blocks, and the venue quotes the Tycho router the same
+    as anyone, unless the spec states the difference as a fact (`caller_fact`)."""
+    rows = onchain.check_quotes(spec, tree)
+    if not rows:
+        return gate("venue-quotes", "fail", "the spec records no venue quote (`venue_quotes`)")
+    bad = [r for r in rows if r["status"] != "same" and not (r["status"] == "caller-dependent" and next(
+        (q.get("caller_fact") for q in spec["venue_quotes"] if q.get("id") == r.get("id")), None) in facts)]
+    if bad:
+        return gate("venue-quotes", "fail", "; ".join(f"{r.get('id')}: {r['status']}: {r.get('detail', '')}" for r in bad[:5]), quotes=rows)
+    return gate("venue-quotes", "pass", f"{len(rows)} venue quotes hold at their blocks, from the router too", quotes=rows)
+
+
+def gate_venue_quote_test(spec: dict, tree: Path) -> dict:
+    """The simulation layer tests the implementation against the venue's own quotes, to the wei: a
+    test the branch adds that names each venue quote's block (`implement.md`, venue-quote test).
+    Exact simulation-vs-execution cannot show an under-quote: the router keeps the surplus."""
+    try:
+        changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
+    except subprocess.CalledProcessError as e:
+        return gate("venue-quote-test", "fail", f"cannot diff against origin/{schema.BASE}: {e}")
+    tests = [p for p in changed if p.startswith(("crates/tycho-simulation/", "protocols/adapter-integration/")) and (tree / p).is_file()]
+    text = "\n".join((tree / p).read_text(errors="replace") for p in tests)
+    blocks = sorted({str(q["block"]) for q in spec.get("venue_quotes", [])})
+    missing = [b for b in blocks if b not in text and f"{int(b):_}" not in text]
+    if not blocks:
+        return gate("venue-quote-test", "fail", "the spec records no venue quote to test against")
+    if missing:
+        return gate("venue-quote-test", "fail", f"no simulation test names the venue quotes' blocks {missing}")
+    return gate("venue-quote-test", "pass", f"the simulation tests name every venue quote block ({', '.join(blocks)})")
+
+
+def gate_watch(spec: dict) -> dict:
+    """Each watched contract's code and getter on the quote path is as it was at the spec's block."""
+    rows = onchain.check_watch(spec)
+    if not rows:
+        return gate("watch", "fail", "the spec watches nothing (`watch`): list the quote path's contracts and config getters")
+    bad = [r for r in rows if r["status"] != "same"]
+    if bad:
+        return gate("watch", "fail", "changed or unread since the spec: a spec amendment reruns the affected layers; "
+                    + "; ".join(f"{r['address']} {r.get('what') or r.get('data') or 'code'}: {r['status']} {r.get('detail', '')}" for r in bad[:5]), watch=rows)
+    return gate("watch", "pass", f"{len(rows)} watched contracts and getters unchanged since the spec", watch=rows)
+
+
 def gate_base_current(tree: Path) -> dict:
     """The run pins its base at the worktree's creation; main moves on while the layers are built.
     The gates before Gate 3 must run on a branch that contains the base's tip, or what merges is
@@ -296,9 +342,11 @@ def main() -> None:
     yamls = sorted({y for name in names for y in integration_yamls(tree, name)} or set(integration_yamls(tree, "")))
 
     if args.recheck:
-        rows = proxy_drift(spec)
+        # After the PR opens (and after merge, until the integration is retired): the venue as the
+        # spec describes it, re-read.
+        rows = {"proxies": proxy_drift(spec), "watch": onchain.check_watch(spec), "quotes": onchain.check_quotes(spec, tree)}
         print(json.dumps(rows, indent=2))
-        sys.exit(1 if any(r["status"] != "same" for r in rows) else 0)
+        sys.exit(1 if any(r["status"] != "same" for group in rows.values() for r in group) else 0)
 
     caps = harness_caps.detect(tree)
 
@@ -308,6 +356,9 @@ def main() -> None:
         gate_checks(args.protocol, args.round),
         gate_mutation_surfaces(spec, yamls, caps),
         gate_proxies(spec),
+        gate_venue_quotes(spec, tree, {f["id"] for f in spec.get("facts", [])}),
+        gate_venue_quote_test(spec, tree),
+        gate_watch(spec),
         gate_base_current(tree),
         gate_sibling_executors(tree),
         gate_executor_fixture(tree, system, chains, yamls),

@@ -42,15 +42,60 @@ def layer_summary(st: ledger.State, layer: str) -> str:
 
 def rollout(values: dict, spec: dict, new_executor: bool) -> list:
     chains = ", ".join(spec.get("chains", []))
+    package = values.get("package", "<package>")
+    package = ", ".join(sorted(set(package.values()))) if isinstance(package, dict) else package
     items = [
-        f"Release the `{values.get('package', '<package>')}` spkg (`protocols/substreams/release.sh`) and add its `extractors.yaml` entry.",
+        f"Release the `{package}` spkg (`protocols/substreams/release.sh`) and add its `extractors.yaml` entry; a later spkg bump forces a re-sync.",
     ]
     if new_executor:
         items += [
             f"Deploy the executor on {chains} and register it with TychoRouter (timelocked role). Until then protocol-testing executes through its runtime bytecode fixture.",
-            "Add the deployed address to `crates/tycho-execution/config/executor_addresses.json` after the deployment.",
+            "After the deployment: add its address to `crates/tycho-execution/config/executor_addresses.json`, and its address-to-protocol row to "
+            "`crates/tycho-execution/substreams/executors.sql`; `make check-executors` (in `crates/tycho-execution/substreams`, run by Router Trades CI) fails until both agree.",
         ]
+    items.append("Keep `--recheck` running after merge until the release is live: venues upgrade and swap config after merge too.")
     return items
+
+
+def evidence(run: Path, st, final: dict) -> list:
+    """What a reviewer would otherwise redo by hand: the final harness runs (range, drift), the
+    venue's own quotes and the watched state as the gates read them, and the dispute log."""
+    out = []
+    checks_gate = next((g for g in final.get("gates", []) if g["name"] == "checks"), {})
+    checks = maybe(Path(checks_gate["file"]), {}) if checks_gate.get("file") else {}
+    for step in checks.get("steps", []):
+        if not step.get("report"):
+            continue
+        report = maybe(Path(step["report"]), {})
+        results = report.get("results", [])
+        by = {}
+        for r in results:
+            by.setdefault(r.get("outcome"), []).append(r)
+        out.append(f"- `{step['name']}` (`{step.get('cmd', '')}`): **{step['status']}**; "
+                   + ", ".join(f"{len(v)} {k}" for k, v in sorted(by.items())) + ".")
+        out += [f"  - skipped `{r.get('check')}` {r.get('component', '')} {r.get('direction', '')}: {r.get('reason')}" for r in by.get("skipped", [])]
+        drift = report.get("drift", [])
+        if drift:
+            out.append("  - drift (largest per test, executed against simulated): " + "; ".join(
+                f"{d.get('test')} {d.get('component', '')[:12]}: {d.get('bps')} bps, {d.get('largest_difference')} {d.get('largest_difference_token', '')}" for d in drift))
+        else:
+            out.append("  - drift: none; every execution matched its simulation exactly.")
+    for name, key in (("venue-quotes", "quotes"), ("watch", "watch"), ("proxies", "proxies")):
+        g = next((g for g in final.get("gates", []) if g["name"] == name), {})
+        for r in g.get(key, []):
+            what = r.get("id") or r.get("what") or r.get("proxy") or r.get("address")
+            out.append(f"- {name} {what} on {r.get('chain')} (spec block {r.get('block', '-')}, re-read at latest): {r['status']}" + (f" — {r['detail']}" if r.get("detail") else ""))
+    disputes = []
+    for f in st.findings.values():
+        for a in f["answers"]:
+            if a["kind"] != "dispute":
+                continue
+            verdict = next((v for v in f["verdicts"] if v["round"] >= a["round"]), None)
+            disputes.append(f"- {f['id']} `{f['rule']}` (round {a['round']}): {a.get('evidence', '')[:200]} → "
+                            + (f"{verdict['status']} by {verdict['by']}" if verdict else "not yet verified"))
+    if disputes:
+        out += ["", "Disputes (the implementer's evidence, and who verified it):", ""] + disputes
+    return out
 
 
 def render(protocol: str, shadow: bool = False) -> tuple:
@@ -129,9 +174,15 @@ def render(protocol: str, shadow: bool = False) -> tuple:
         out.append(f"- {g['name']}: **{g['status']}**{why}")
         for pr in g.get("prs", []):
             out.append(f"  - {pr}")
+    ev = evidence(run, st, final)
+    if ev:
+        out += ["", "### Evidence", ""] + ev
     if final.get("off"):
-        out += ["", "Checks off because the harness does not support them yet:", ""]
-        out += [f"- {o['gap']}: {o['what']} — {o['reason']}" for o in final["off"]]
+        out += ["", "### Not verified", "", "The harness cannot check these yet, so nothing in this PR shows them:", ""]
+        out += [f"- {o['what']} ({o['gap']}: {o['reason']})" for o in final["off"]]
+    out += ["", "### What CI will not guard", "",
+            "- The `src/evm/**` simulation tests are excluded from PR CI (`not test(evm)`); this run ran the module's tests locally.",
+            "- Protocol tests run on `pull_request_target` for changed packages only, and a fork PR's run waits for approval."]
 
     # The per-call spend is the run's bookkeeping, not what the PR does: it goes beside the PR text.
     spend = ["# Spend", ""] + [f"- {label}: ${usd:.2f}" for label, usd in sorted(st.spend_label.items())] + [f"- total: ${st.spend_total:.2f}"]

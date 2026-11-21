@@ -8,7 +8,7 @@ description: Take a DEX integration request (protocol, chains, one anchor) and d
 ```
 /tycho-integrate <protocol>             start a run, or resume the run that exists
 /tycho-integrate <protocol> --status    stage, rounds, spend, open items
-/tycho-integrate <protocol> --recheck   proxies of an open PR: implementation slots vs the spec
+/tycho-integrate <protocol> --recheck   the venue against the spec: proxies, watched code and getters, venue quotes
 /tycho-integrate <protocol> --pr-review <PR>   answer the person's blind review of the PR
 ```
 
@@ -133,8 +133,9 @@ contested becomes `contested` with an open risk. Then `spec_render.py --check` a
 ### 6. Gate 1: the spec (`gate1`)
 
 Show the person `RUN/SPEC.md` (its path and a summary: route, contracts, how a swap works,
-the critical facts, open risks, which harness gates are off, and per chain whether DCI is
-available and which dependencies need it). Ask the simulation kind as a question of its own:
+the coverage (what share of the venue's TVL or volume the integration serves, and what it leaves
+out), the gas of one swap, any caller-dependent pricing, the critical facts, open risks, which
+harness gates are off, and per chain whether DCI is available and which dependencies need it). Ask the simulation kind as a question of its own:
 native, hybrid or vm as research chose it, the other kinds with their costs from the kind fact, or
 not worth integrating (the run stops: `{"t":"stage","stage":"gate1","status":"stopped"}`). Then
 ask: approve the spec, or correct it. A different kind or any correction goes to the `amend` brief
@@ -285,7 +286,9 @@ gh pr create --head integrate/<slug> --base main --title "feat: integrate <proto
 
 Shadow mode is the default until the escape rate earns more (the person decides when to drop
 `--shadow`): the decisions and the ledger are held back in `RUN/PR-held.md` until the person has
-reviewed the PR blind. Then offer to schedule `--recheck` with `/loop` while the PR is open.
+reviewed the PR blind. Then offer to schedule `--recheck` with `/loop` while the PR is open, and
+after it merges until the integration's first release is live: venues upgrade and swap config
+after merge too, often with no event.
 
 ## Spec amendments
 
@@ -308,8 +311,10 @@ open decisions, amendments, escapes.
 
 ## `--recheck`
 
-`S/final_gates.py --protocol P --recheck`. An upgraded implementation is a spec amendment (above)
-with the affected rounds rerun; tell the person, since the PR is open.
+`S/final_gates.py --protocol P --recheck`: every proxy's implementation, every watched contract's
+code and getter, and every venue quote, against the spec. A change is a spec amendment (above) with
+the affected rounds rerun while the PR is open; after merge it is a follow-up PR. Tell the person
+either way.
 
 ## `--pr-review <PR>`
 

@@ -93,7 +93,9 @@ timeout_min = 40
 name = "execution-clippy"
 layers = ["execution"]
 cwd = "."
-cmd = 'cargo +"$RUST_NIGHTLY" clippy -p tycho-execution --all-features --all-targets -- -D warnings'
+# tycho-router-model is a workspace member tycho-execution does not depend on: built on its own, or
+# a change to the router's variants (a new protocol's) breaks it unseen.
+cmd = 'cargo +"$RUST_NIGHTLY" clippy -p tycho-execution -p tycho-router-model --all-features --all-targets -- -D warnings'
 timeout_min = 40
 
 [[step]]
@@ -132,6 +134,14 @@ layers = ["execution"]
 cwd = "crates/tycho-execution/contracts"
 cmd = "forge test --match-contract RuntimeBytecodeFixtures"
 timeout_min = 30
+
+[[step]]
+# The licensing check CI runs (ci-licensing.yaml): a new package's license fields.
+name = "licensing"
+layers = ["indexing", "simulation", "execution"]
+when = "file:scripts/check-licensing.sh"
+cwd = "."
+cmd = "./scripts/check-licensing.sh"
 
 [[step]]
 name = "ast-grep"

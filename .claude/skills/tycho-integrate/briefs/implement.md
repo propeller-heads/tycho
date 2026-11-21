@@ -85,10 +85,20 @@ the capacity it gives up), and changing or dropping a limit kind once written (`
 **Simulation**: for a native integration, the `ProtocolSim` and its decoder registration in
 `crates/tycho-simulation` (ported math reproduces the contract: `ported-math-matches-contract`;
 the new state applies every change the swap makes: `simulation-new-state-applies-every-change`;
-limits exact: `simulation-limits-are-settleable`). For a VM integration, the adapter under
+limits exact: `simulation-limits-are-settleable`). A hybrid is the same native `ProtocolSim` over
+VM-indexed state: its quote reads the spec's `vm_reads` through the VM (`SimulationDB`), as Fluid
+V1, Balancer V3 and Curve do. For a VM integration, the adapter under
 `protocols/adapter-integration/evm/src/<protocol>/` with its manifest and fork tests (the
 constructor never calls the protocol: the harness deploys the adapter where the protocol's code is
 injected only at call time; capabilities match the manifest: `adapter-manifest-matches-capabilities`).
+
+Every kind adds a **venue-quote test**: from the state at each of the spec's `venue_quotes` blocks
+(a native or hybrid state built from that block's chain reads, as literals; a VM adapter in a fork
+test at that block), quote the same amount and assert the venue's `result` to the wei, in each
+direction the spec records. Name the block in the test (the `venue-quote-test` gate looks for it).
+Exact simulation-vs-execution in protocol-testing cannot show an under-quote: the router keeps the
+surplus and the harness expects what was simulated. A difference you cannot remove is a finding to
+explain to the wei, never a tolerance.
 
 **Execution**: the swap encoder, the executor, their registration and config, and the four test
 layers (`router-integration-test-layers`: encoder byte layout per direction, executor Foundry
@@ -107,6 +117,11 @@ executor is in `EXECUTOR_MAPPING` with its fixture). `executor_addresses.json` s
 deployment (`deployment-artifacts-after-launch`). A change to `TychoRouterTestSetup`'s deployment
 order re-derives the test executor addresses and reruns one existing router suite
 (`router-test-setup-addresses`).
+
+**Gas** (execution): report the router test's measured gas for one swap through the new executor
+(`forge test --match-contract <paths.router_test> --gas-report`) beside the spec's `gas.swap_gas_used`, and
+make the simulation's `gas` estimate match the measurement, not a sibling's constant; put the
+numbers in your summary. A gas estimate off by more than 25% is a finding.
 
 **Every layer**: test expectations come from outside the code under test
 (`expectations-from-outside-code-under-test`: a literal, real chain data, hand-worked arithmetic),

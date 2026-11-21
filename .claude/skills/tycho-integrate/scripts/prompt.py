@@ -119,6 +119,7 @@ def main() -> None:
         "protocol": intake.get("protocol", args.protocol),
         "slug": schema.slug(args.protocol),
         "run": str(run),
+        "skill": str(schema.skill_dir()),
         "worktree": str(tree),
         "branch": schema.branch(args.protocol),
         "repo": str(schema.repo_root()),

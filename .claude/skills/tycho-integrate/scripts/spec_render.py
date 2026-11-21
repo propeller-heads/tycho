@@ -84,6 +84,8 @@ def render(spec: dict, intake: dict, env: dict = None) -> str:
     facts = spec.get("facts", [])
     by_section = {s: [f for f in facts if f.get("section") == s] for s in schema.SPEC_SECTIONS}
     route = intake.get("route") or {}
+    cov, gas = spec.get("coverage") or {}, spec.get("gas") or {}
+    share = f"{100 * cov['served'] / cov['total']:.1f}%" if cov.get("total") else "unknown"
     out = [
         f"# {spec['protocol']}: integration spec",
         "",
@@ -91,6 +93,10 @@ def render(spec: dict, intake: dict, env: dict = None) -> str:
         + (f" (sibling `{route.get('sibling')}`, layers {', '.join(route.get('layers', []))})" if route.get("sibling") else ""),
         "",
         *([f"Hybrid: the quote reads through the VM: {'; '.join(spec['vm_reads'])}.", ""] if spec.get("vm_reads") else []),
+        f"Coverage: **{share}** of the venue's {cov.get('unit', '?')} ({cov.get('served')} of {cov.get('total')}, {cov.get('source', 'no source')})"
+        f" · gas of one swap on the venue: **{gas.get('swap_gas_used', 'unknown')}** ({gas.get('evidence', 'no evidence')})"
+        + (" · **caller-dependent pricing**: " + ", ".join(q["id"] for q in spec.get("venue_quotes", []) if q.get("caller_fact")) if any(q.get("caller_fact") for q in spec.get("venue_quotes", [])) else ""),
+        "",
         "Every fact links its evidence: a transaction, a block or a command anyone can rerun. An "
         "unknown is written as unknown. Generated from `spec.json`; do not edit.",
         "",
@@ -195,6 +201,19 @@ def render(spec: dict, intake: dict, env: dict = None) -> str:
         out.append("### Proxies (checked again at the final gates)")
         out.append("")
         out += table(["chain", "proxy", "implementation", "slot"], [[p["chain"], p["proxy"], p["implementation"], p.get("slot", "EIP-1967")] for p in spec["proxies"]])
+    if spec.get("venue_quotes"):
+        out.append("### Venue quotes (replayed from the Tycho router, and tested against the simulation to the wei)")
+        out.append("")
+        out += table(["id", "chain", "block", "direction", "amount in", "result", "caller-dependent"],
+                     [[q.get("id"), q.get("chain"), q.get("block"), q.get("direction", ""), q.get("amount_in", ""), q.get("result", ""), q.get("caller_fact") or "no"] for q in spec["venue_quotes"]])
+    if spec.get("watch"):
+        out.append("### Watched on chain (re-read at the final gates and by `--recheck`)")
+        out.append("")
+        out += table(["chain", "address", "block", "what"], [[w.get("chain"), w.get("address"), w.get("block"), w.get("what") or ("getter " + w["data"][:10] if w.get("data") else "code")] for w in spec["watch"]])
+    if spec.get("read_set"):
+        out.append("### What a quote reads (prestateTracer)")
+        out.append("")
+        out += table(["address", "slots", "tracked by"], [[r.get("address"), len(r.get("slots", [])), r.get("tracked_by") or f"untracked: {r.get('why_untracked', '')}"] for r in spec["read_set"]])
 
     section("differences")
     sib = spec.get("sibling") or {}

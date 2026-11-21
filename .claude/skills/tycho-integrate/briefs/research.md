@@ -78,8 +78,22 @@ Each answer is one or more facts (below). Mark the facts every layer depends on 
    quote path checks versus what settlement checks; they can differ.
 6. **Freshness gates**: anything that expires (quote timestamps, deadlines, max-age getters); read
    the constants. A zero window means exact-match gating.
-7. **What a quote depends on**: each piece of state, where it lives (slot or getter), what changes
-   it.
+7. **What a quote depends on**, from the chain, not only the code: run
+   `python3 -I {{skill}}/scripts/onchain.py --chain <chain> read-set --to <quote contract> --data
+   <calldata> --block <block>` on a real quote, and list every account and slot it read in
+   `read_set`, each with what tracks it (`tracked_by`: an attribute, VM storage) or why nothing
+   needs to (`why_untracked`: an immutable, a constant). Past integrations missed a signer, a
+   router list and an implementation that sat on the quote path untracked. Then each piece of
+   state: where it lives (slot or getter) and what changes it. Put each contract on the quote path
+   in `watch` (its code), and each config getter the quote depends on (`data`: the getter's
+   calldata), at the spec's block: the final gates and `--recheck` re-read them.
+7a. **Who is asking**: does the price or the call's success depend on the caller or the
+   transaction (`msg.sender` or `tx.origin` screening, a whitelist or router list, gasprice or
+   priority fee, `block.coinbase`)? In production the Tycho router is the caller
+   (`crates/tycho-execution/config/router_addresses.json`): record each venue quote anonymously,
+   and `onchain.py quotes` replays it from the router. A difference is a critical fact
+   (`caller_fact` on the quote), and usually a conversation with the protocol team (a person's
+   decision, class `outside-repo`).
 8. **Mutation surfaces**: every way that state changes (swaps, liquidity, fee or config writes,
    pause, upgrade, admin keys): who can trigger it, its signal (event or storage write only), and
    the blocks where it fired.
@@ -100,7 +114,18 @@ Each answer is one or more facts (below). Mark the facts every layer depends on 
     accounting kept as a number), and which tokens the protocol does not account per component.
 11. **How quotes are checked**: the venue's own quote function (the harness calls it through
     `eth_call` as an independent oracle), checked against a real swap; golden vectors: real swaps
-    in both directions, near capacity, and around mutation events.
+    in both directions, near capacity, and around mutation events. Record `venue_quotes` on every
+    chain: the quote function's raw `eth_call` (`to`, `data`, the returned `result` word for word)
+    at a block, for small, medium and near-limit amounts in each direction. The simulation layer
+    tests the implementation against exactly these, to the wei: an under-quote is invisible to
+    exact simulation-vs-execution, because the router keeps the surplus.
+11a. **Gas**: `gas.swap_gas_used` of a real swap on the venue (its receipt's `gasUsed`, the tx as
+    `evidence`), and what the router hop adds if a sibling shows it. Past estimates were off by 2x
+    to 10x; the execution layer measures the router test against this.
+11b. **Coverage**: what the integration serves against the venue's whole, as one number per
+    chain: `coverage.served` and `coverage.total` in `tvl_usd` (or `volume_usd_30d`), with the
+    `source` (DefiLlama, the venue's subgraph, a chain query). Pools or hooks left out are named in
+    `out_of_scope` with their share. A person sees it at Gate 1.
 12. **Test range**: a block range on one chain that meets the streamed test's coverage floor: at
     least 20 blocks in which an expected component changes, every expected component changing in
     at least 2 blocks, at least 100 execution checks in total and 10 per component, every tradable
@@ -148,6 +173,11 @@ DCI on this run's chains:
   "directions": [{"component": "0x… or a kind", "only": ["0xTokenA", "0xTokenB"], "reason": "…"}],
   "balance_source": [{"component_kind": "pool", "source": "self | holder:<attribute or address> | min_of:[…]", "simulation_reads": false, "lens": "ComponentIdBalances | BalanceOwnerBalances | own: <what it calls>", "unaccounted_tokens": []}],
   "limits": [{"component": "0x… or a kind", "direction": "0xTokenIn->0xTokenOut or default", "kind": "hard | soft | under_cap", "rounding": 0, "why": "the contract code or chain read that shows it", "fact_ids": ["S9"]}],
+  "venue_quotes": [{"id": "V1", "chain": "ethereum", "block": 21000000, "to": "0x… (quote contract)", "data": "0x… (cast calldata …)", "result": "0x… (the raw return)", "direction": "0xIn->0xOut", "amount_in": "…", "caller_fact": "S14 (only when the router gets another answer)"}],
+  "watch": [{"chain": "ethereum", "address": "0x…", "block": 21000000, "what": "implementation code"}, {"chain": "ethereum", "address": "0x…", "block": 21000000, "data": "0x… (getter calldata)", "what": "fee()"}],
+  "read_set": [{"chain": "ethereum", "address": "0x…", "slots": ["0x…"], "tracked_by": "attribute `reserves` | VM storage", "why_untracked": "immutable after deploy"}],
+  "gas": {"swap_gas_used": 0, "evidence": "0x… (tx)", "router_overhead": "from the sibling's router test, if known"},
+  "coverage": {"served": 0, "total": 0, "unit": "tvl_usd | volume_usd_30d", "source": "…", "per_chain": {"ethereum": [0, 0]}},
   "proxies": [{"chain": "ethereum", "proxy": "0x…", "implementation": "0x…", "slot": "0x3608…bbc"}]  (a beacon proxy: "slot": "0xa3f0…d50", the beacon slot; the gate then asks the beacon for `implementation()`),
   "test_range": {"chain": "ethereum", "start_block": 0, "stop_block": 0, "why": "counts per floor item"},
   "fork_setup": {"script": null, "why": ""},

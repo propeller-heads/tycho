@@ -447,7 +447,24 @@ class GuardHoles(Guards):
 
 class SpecValidation(unittest.TestCase):
     def spec(self, **fact):
-        return {"protocol": "Foo", "kind": "native", "kind_fact": "S1", "facts": [{"id": "S1", "section": "swap", "claim": "fee is 30 bps", **fact}]}
+        return {"protocol": "Foo", "kind": "native", "kind_fact": "S1", "chains": ["ethereum"], **self.READINGS,
+                "facts": [{"id": "S1", "section": "swap", "claim": "fee is 30 bps", **fact}]}
+
+    READINGS = {
+        "venue_quotes": [{"id": "V1", "chain": "ethereum", "block": 21000000, "to": "0xpool", "data": "0x12", "result": "0x01"}],
+        "watch": [{"chain": "ethereum", "address": "0xpool", "block": 21000000}],
+        "read_set": [{"address": "0xpool", "slots": ["0x0"], "tracked_by": "attribute reserves"}],
+        "gas": {"swap_gas_used": 120000, "evidence": "0xtx"},
+        "coverage": {"served": 8, "total": 10, "unit": "tvl_usd", "source": "defillama"},
+    }
+
+    def test_the_spec_carries_the_readings_the_gates_re_read(self):
+        spec = self.spec(status="unknown")
+        self.assertEqual(schema.validate_spec(spec), [])
+        for key in self.READINGS:
+            self.assertTrue(schema.validate_spec({k: v for k, v in spec.items() if k != key}), key)
+        self.assertTrue(schema.validate_spec({**spec, "chains": ["ethereum", "base"]}))
+        self.assertTrue(schema.validate_spec({**spec, "read_set": [{"address": "0xpool", "slots": ["0x0"]}]}))
 
     def test_the_kind_is_one_of_three_and_rests_on_a_fact(self):
         ok = self.spec(status="unknown")
@@ -591,6 +608,32 @@ class Chains(RunCase):
         self.assertEqual(layer_checks.placeholders(self.run, Path("/t"), "base")["test_package"], "base-foo")
         self.assertEqual(layer_checks.placeholders(self.run, Path("/t"), "ethereum")["test_package"], "ethereum-foo")
         self.assertTrue(schema.validate_intake({"protocol": "Foo", "chains": ["ethereum"], "primary_chain": "base", "anchor": {"docs": "x"}}))
+
+
+class PullRequestBody(RunCase):
+    def test_the_description_carries_the_evidence_and_what_is_not_verified(self):
+        import pr_body
+        report = Path(self.tmp.name) / "pt.report.json"
+        report.write_text(json.dumps({"results": [{"check": "index", "outcome": "pass"}, {"check": "exec.ladder", "outcome": "skipped", "component": "0xc", "reason": "dust"}], "drift": []}))
+        checks = Path(self.tmp.name) / "checks.json"
+        checks.write_text(json.dumps({"steps": [{"name": "protocol-testing@ethereum", "status": "pass", "cmd": "cargo run -- range", "report": str(report)}]}))
+        (self.run / "final_gates.json").write_text(json.dumps({"gates": [
+            {"name": "checks", "status": "pass", "detail": "", "file": str(checks)},
+            {"name": "venue-quotes", "status": "pass", "detail": "", "quotes": [{"id": "V1", "chain": "ethereum", "block": 1, "status": "same"}]}],
+            "off": [{"gap": "G6", "what": "golden vectors replayed", "reason": "not landed"}]}))
+        (self.run / "spec.json").write_text(json.dumps({"protocol": "Foo", "kind": "native", "chains": ["ethereum"]}))
+        self.finding("F1")
+        self.add(t="answer", id="F1", round=1, kind="dispute", evidence="cast call at 21000000 returns 5")
+        self.add(t="verdict", id="F1", status="refuted", by="review", round=1)
+        original = schema.run_dir
+        schema.run_dir = lambda protocol: self.run
+        try:
+            body, _ = pr_body.render("Foo")
+        finally:
+            schema.run_dir = original
+        for text in ("### Evidence", "1 pass, 1 skipped", "skipped `exec.ladder` 0xc : dust", "venue-quotes V1 on ethereum", "### Not verified",
+                     "golden vectors replayed (G6", "→ refuted by review", "executors.sql", "What CI will not guard"):
+            self.assertIn(text, body)
 
 
 class LayersCleanGate(RunCase):

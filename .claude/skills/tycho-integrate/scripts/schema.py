@@ -482,9 +482,46 @@ def validate_spec(doc: dict) -> list:
             errors.append(f"spec.limits[{i}]: a limit kind needs its `why` and the `fact_ids` that show it")
     if doc.get("kind_fact") and doc["kind_fact"] not in ids:
         errors.append(f"spec: `kind_fact` {doc['kind_fact']} is not a fact")
+    errors += _validate_venue_reads(doc)
     for i, ref in enumerate(_fact_refs(doc)):
         if ref not in ids:
             errors.append(f"spec: reference to unknown fact {ref}")
+    return errors
+
+
+COVERAGE_UNITS = ("tvl_usd", "volume_usd_30d")
+
+
+def _validate_venue_reads(doc: dict) -> list:
+    """The spec's chain readings the final gates and `--recheck` re-read (`onchain.py`): venue quotes
+    on every chain, the watched code and getters, the quote's read set, gas and coverage."""
+    errors = []
+    quotes = doc.get("venue_quotes") or []
+    for chain in doc.get("chains") or []:
+        if not any(q.get("chain") == chain for q in quotes):
+            errors.append(f"spec.venue_quotes: none on {chain}; record the venue's own quote at a block, per chain")
+    for i, q in enumerate(quotes):
+        missing = [k for k in ("id", "chain", "block", "to", "data", "result") if q.get(k) in (None, "")]
+        if missing or not isinstance(q.get("block"), int):
+            errors.append(f"spec.venue_quotes[{i}]: needs {missing or ['an integer block']}")
+    if not doc.get("watch"):
+        errors.append("spec.watch: list the quote path's contracts (code) and config getters (data) at a block")
+    for i, w in enumerate(doc.get("watch") or []):
+        if not (w.get("chain") and w.get("address") and isinstance(w.get("block"), int)):
+            errors.append(f"spec.watch[{i}]: needs `chain`, `address` and an integer `block`")
+    for i, r in enumerate(doc.get("read_set") or []):
+        if not (r.get("address") and isinstance(r.get("slots"), list)):
+            errors.append(f"spec.read_set[{i}]: needs `address` and its `slots`")
+        elif not (r.get("tracked_by") or r.get("why_untracked")):
+            errors.append(f"spec.read_set[{i}] ({r.get('address')}): say what tracks these slots (`tracked_by`) or why nothing needs to (`why_untracked`)")
+    if not doc.get("read_set"):
+        errors.append("spec.read_set: the accounts and slots a quote reads (`onchain.py read-set`), each tracked or explained")
+    gas = doc.get("gas") or {}
+    if not (isinstance(gas.get("swap_gas_used"), int) and gas.get("evidence")):
+        errors.append("spec.gas: `swap_gas_used` of a real swap on the venue and its `evidence` (the tx)")
+    cov = doc.get("coverage") or {}
+    if cov.get("unit") not in COVERAGE_UNITS or not all(cov.get(k) is not None for k in ("served", "total", "source")):
+        errors.append(f"spec.coverage: `served` and `total` in a `unit` of {COVERAGE_UNITS}, with the `source`")
     return errors
 
 
