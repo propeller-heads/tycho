@@ -131,8 +131,8 @@ const ASCEND_HOOK_DISPATCH_GAS: u64 = 1_689;
 /// stores the timestamp in the state the quote returns.
 ///
 /// The hook refuses what its contract reverts on or what no router settles, with `InvalidInput`:
-/// zero input, exact-output swaps (the hook prices them with a different fee split, which SPEC
-/// S12 traced with V4Quoter `quoteExactOutputSingle` at block 8365800, but
+/// zero input, exact-output swaps (the hook prices them with a different fee split, seen by tracing
+/// V4Quoter `quoteExactOutputSingle` at block 8365800, but
 /// `ProtocolSim::get_amount_out` quotes exact-input only), an input above `type(int128).max`
 /// (`exact_input`), a swap the pool cannot fill in full (`check_swap_outcome`: the router would
 /// leave a credit and the PoolManager's `unlock` reverts) and a swap whose swapper output is 0.
@@ -528,14 +528,14 @@ impl HookHandler for AscendHookHandler {
     /// A bound at which the swapper's output is 0 gives 0, as `after_swap` refuses every swap
     /// up to it.
     ///
-    /// The limit is hard, though the hook does not revert on the size of an input: SPEC S28 read
-    /// `lib 0xe08461e7` with an input of 1e27 at block 8365604, which returns the capped net, and
-    /// a V4Quoter sell past the range's capacity, where the PoolManager's swap succeeds. So on
-    /// chain a larger input settles partially (a buy's net is capped at the pool's capacity to the
-    /// curve end, a sell consumes what the range absorbs). A router settles the whole input and
-    /// the pool manager's `unlock` reverts on the credit the rest leaves (SPEC S34, and
-    /// `check_swap_outcome`), so an input above the limit is refused rather than quoted as a
-    /// partial swap.
+    /// The limit is hard, though the hook does not revert on the size of an input: a read of
+    /// the hook's library `0xe08461e7` with an input of 1e27 at block 8365604, which returns the
+    /// capped net, and a V4Quoter sell past the range's capacity, where the PoolManager's swap
+    /// succeeds. So on chain a larger input settles partially (a buy's net is capped at the
+    /// pool's capacity to the curve end, a sell consumes what the range absorbs). A router
+    /// settles the whole input and the pool manager's `unlock` reverts on the credit the rest
+    /// leaves (`check_swap_outcome`), so an input above the limit is refused rather than quoted as
+    /// a partial swap.
     ///
     /// A pool whose every swap refuses (`refuses_every_swap`) fails here in both directions, as
     /// its quotes do.
