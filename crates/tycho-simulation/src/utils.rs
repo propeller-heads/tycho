@@ -4,6 +4,8 @@ use std::{
     path::Path,
 };
 
+use num_bigint::BigUint;
+use num_traits::CheckedSub;
 use tracing::info;
 use tycho_client::{
     rpc::{AllTokensParams, HttpRPCClientOptions, RPCClient, RPC_CLIENT_CONCURRENCY},
@@ -14,6 +16,13 @@ use tycho_common::{
     simulation::errors::SimulationError,
     Bytes,
 };
+
+/// `amount` less `taken`, or nothing where `taken` is more.
+pub(crate) fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
+    amount
+        .checked_sub(taken)
+        .unwrap_or_default()
+}
 
 /// The signed exponent `from_decimals - to_decimals` of a decimals correction factor, or an
 /// error when it does not fit an `i32`.
