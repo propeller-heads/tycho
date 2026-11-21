@@ -1,3 +1,10 @@
+## [0.535.0](https://github.com/propeller-heads/tycho/compare/0.534.0...0.535.0) (2026-11-21)
+
+
+### Features
+
+* **execution:** register the Euclid executor on Ethereum ([e115102](https://github.com/propeller-heads/tycho/commit/e11510281daae5e7b788f558d421433cecb3600d))
+
 ## [0.534.0](https://github.com/propeller-heads/tycho/compare/0.533.0...0.534.0) (2026-11-21)
 
 
