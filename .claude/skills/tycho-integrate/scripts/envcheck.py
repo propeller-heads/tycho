@@ -33,9 +33,6 @@ MIN_FREE_GB = 40
 HARNESS_PORTS = (5431, 4242)  # protocol-testing's Postgres and indexer defaults
 TOOLS = ("cargo", "forge", "cast", "anvil", "substreams", "docker", "gh", "claude", "git")
 # Files the tests read their environment from; a variable set in the shell wins.
-ENV_FILES = schema.ENV_FILES
-load_env_files = schema.load_env_files
-rpc_var = schema.rpc_vars
 
 
 def rpc(url: str, method: str, params: list, timeout=20):
@@ -57,10 +54,9 @@ def check_rpc(chain: str, contract) -> list:
     `debug_storageRangeAt` (informational: whether DCI is available on the chain; reth returns null,
     some Geth and Nitro nodes fail)."""
     results = []
-    names = rpc_var(chain)
-    url = next((os.environ[n] for n in names if os.environ.get(n)), None)
+    url = schema.rpc_url(chain)
     if not url:
-        return [("rpc:" + chain, False, f"set {' or '.join(names)} to an archive RPC for {chain}")]
+        return [("rpc:" + chain, False, schema.no_rpc(chain))]
     try:
         head = int(rpc(url, "eth_blockNumber", []), 16)
         old = max(head - 2_000_000, 1)
@@ -158,7 +154,7 @@ def main() -> None:
     if not chains:
         raise SystemExit("no chains: pass --chains or write intake.json first")
 
-    load_env_files()
+    schema.load_env_files()
     checks = []
     for chain in chains:
         checks += check_rpc(chain, contracts[0] if contracts else None)

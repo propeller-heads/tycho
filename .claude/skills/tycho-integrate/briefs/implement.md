@@ -121,7 +121,7 @@ order re-derives the test executor addresses and reruns one existing router suit
 **Gas** (execution): report the router test's measured gas for one swap through the new executor
 (`forge test --match-contract <paths.router_test> --gas-report`) beside the spec's `gas.swap_gas_used`, and
 make the simulation's `gas` estimate match the measurement, not a sibling's constant; put the
-numbers in your summary. A gas estimate off by more than 25% is a finding.
+three numbers (spec, measured, estimate) in your summary. The review compares them.
 
 **Every layer**: test expectations come from outside the code under test
 (`expectations-from-outside-code-under-test`: a literal, real chain data, hand-worked arithmetic),

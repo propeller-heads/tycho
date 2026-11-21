@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import schema  # noqa: E402
 
-ENV_FILES = schema.ENV_FILES
+ENV_FILES = schema.LINKED_ENV_FILES
 
 
 git = schema.git
@@ -33,8 +33,7 @@ def main() -> None:
     git("fetch", "origin", cwd=repo)
     if not tree.exists():
         git("worktree", "add", "-b", branch, str(tree), f"origin/{schema.BASE}", cwd=repo)
-    # Every time, not only on creation: a failed update (no network) is retried by the rerun
-    # instead of leaving the worktree without forge's `lib/`.
+    # On every call, so a rerun completes an update that failed (no network) and forge's `lib/` is there.
     git("submodule", "update", "--init", "--recursive", cwd=tree)
 
     for rel in ENV_FILES:

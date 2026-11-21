@@ -99,17 +99,30 @@ def caps_summary(tree: Path) -> str:
     return "\n".join(f"- {gap}: {'on' if c['on'] else 'OFF'} — {c['what']}" + ("" if c["on"] else f" ({c['reason']})") for gap, c in caps.items())
 
 
-def review_level(st, layer: str, round_n: int) -> str:
+# A round that changes these re-checks the design against the chain: how indexing turns state into
+# attributes, and the simulation's quote path.
+ATTRIBUTE_MAPPING = re.compile(r"^[+-].*\battribute", re.I | re.M)
+QUOTE_PATH = re.compile(r"^(crates/tycho-simulation/src/evm/protocol/.*/(state|decoder|vm|math|quote|swap)[^/]*\.rs|protocols/adapter-integration/evm/src/.*\.sol)$")
+
+
+def review_level(st, layer: str, round_n: int, tree: Path) -> str:
     """The tycho-review level of a round's review. `full` adds the on-chain integration pass and the
-    execution verifier: on a layer's first round (the design meets the chain), and whenever a
-    dispute awaits a verdict, so a dispute is settled by running its experiment, not by reading the
-    implementer's evidence. `partial` otherwise; the final review is always `full`."""
-    if not layer or round_n <= 1:
+    execution verifier: on a layer's first round (the design meets the chain); when the round
+    changes the attribute mapping or the quote path; and whenever a dispute awaits a verdict, so a
+    dispute is settled by running its experiment, not by reading the implementer's evidence.
+    `partial` otherwise; the final review is always `full`."""
+    rounds = st.rounds.get(layer, []) if layer else []
+    if not layer or round_n <= 1 or len(rounds) < 2:
         return "full"
     for f in st.open_findings(layer):
         if f["answers"] and f["answers"][-1]["kind"] == "dispute" and f["answers"][-1]["round"] >= round_n - 1:
             return "full"
-    return "partial"
+    prev, head = rounds[-2]["head"], rounds[-1]["head"]
+    changed = schema.git("-C", str(tree), "diff", "--name-only", f"{prev}..{head}", check=False).stdout.split()
+    if any(QUOTE_PATH.match(p) for p in changed):
+        return "full"
+    substreams = schema.git("-C", str(tree), "diff", f"{prev}..{head}", "--", "protocols/substreams", check=False).stdout
+    return "full" if ATTRIBUTE_MAPPING.search(substreams) else "partial"
 
 
 def main() -> None:
@@ -148,7 +161,7 @@ def main() -> None:
         "dci": dci_summary(run, intake.get("chains", [])),
         "checks": failed_checks(run, args.layer, args.round) if args.layer else "",
         "decision_classes": ", ".join(schema.DECISION_CLASSES),
-        "level": review_level(st, args.layer, args.round),
+        "level": review_level(st, args.layer, args.round, tree),
         "extra": Path(args.extra_file).read_text() if args.extra_file else "(none)",
     }
     for item in args.set:

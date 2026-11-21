@@ -9,7 +9,9 @@ lands in the ledger as a `spend` event.
     run_agent.py --protocol P --label implement:indexing:2 --role implementer \
         --agent tycho-implementer --layer indexing --cwd <worktree> --prompt-file F --out R
 
-Exit codes: 0 done, 2 the agent ended with an error, 3 no budget left (nothing was started).
+Exit codes: 0 done, 2 the agent ended with an error, 3 no budget left (nothing was started), 4 the
+agent changed the run's records (the ledger, the intake, ...): they were restored and its output is
+not used.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +71,20 @@ def render_settings(role: str, run: Path) -> Path:
     return path
 
 
+def restore_protected(run: Path, saved: Path, before: dict) -> list:
+    """Puts back every protected record an agent session changed, added or removed; their paths."""
+    after = schema.protected_digest(run)
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    for rel in changed:
+        target = run / rel
+        if rel in before:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(saved / rel, target)
+        else:
+            target.unlink(missing_ok=True)
+    return changed
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--protocol", required=True)
@@ -96,9 +113,11 @@ def main() -> None:
         "--max-budget-usd", f"{budget:.2f}",
         "--permission-mode", PERMISSION_MODE,
         "--settings", str(render_settings(args.role, run)),
-        # The role's settings are the whole policy: the person's own user, project and local
-        # settings (their allow lists and hooks) would otherwise merge into every agent's.
-        "--setting-sources", "",
+        # The role's settings plus the repository's own: the project source is what loads the
+        # project's skills (a review runs tycho-review) and CLAUDE.md. The person's user and local
+        # settings (their allow lists and hooks) stay out, so a role's policy does not depend on who
+        # runs it.
+        "--setting-sources", "project",
         "--add-dir", str(run),
     ]
     if args.agent:
@@ -116,10 +135,23 @@ def main() -> None:
         "TYCHO_INTEGRATE_REPO": str(schema.repo_root()),
     }
     prompt = Path(args.prompt_file).read_text()
-    with tempfile.TemporaryFile("w+") as stderr:
-        proc = subprocess.run(cmd, input=prompt, capture_output=False, stdout=subprocess.PIPE, stderr=stderr, text=True, cwd=args.cwd, env=env)
-        stderr.seek(0)
-        err_text = stderr.read()
+    before = schema.protected_digest(run)
+    with tempfile.TemporaryDirectory() as saved:
+        for rel in before:
+            dst = Path(saved) / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(run / rel, dst)
+        with tempfile.TemporaryFile("w+") as stderr:
+            proc = subprocess.run(cmd, input=prompt, capture_output=False, stdout=subprocess.PIPE, stderr=stderr, text=True, cwd=args.cwd, env=env)
+            stderr.seek(0)
+            err_text = stderr.read()
+        tampered = restore_protected(run, Path(saved), before)
+    if tampered:
+        # The session changed the run's records: they are back as they were, and the person hears
+        # of it. The call's output is not used.
+        ledger.append(run, {"t": "tamper", "label": args.label, "paths": tampered, **({"layer": args.layer} if args.layer else {})})
+        print(json.dumps({"label": args.label, "error": "the agent changed the run's records; they were restored", "paths": tampered}))
+        sys.exit(4)
 
     try:
         result = json.loads(proc.stdout)

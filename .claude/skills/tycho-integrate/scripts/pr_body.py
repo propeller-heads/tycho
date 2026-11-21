@@ -13,7 +13,6 @@ the description, and `STALE:` lines on stderr name what the text refers to that 
 
 import argparse
 import re
-import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -57,7 +56,16 @@ def rollout(values: dict, spec: dict, new_executor: bool) -> list:
     return items
 
 
-def evidence(run: Path, st, final: dict) -> list:
+# What the skill never runs (SKILL.md, "What this skill does not do yet"), listed in every PR.
+NOT_RUN_BY_THE_SKILL = (
+    "A full sync from the start block, a live run of about 30 minutes, and an indexer synced to tip with the "
+    "`extractors.yaml` entry (the harness's strict `full` mode is not run by the skill's checks).",
+    "Per-trade differences against the venue's own quote at each executed amount and at each `get_limits` value: the "
+    "harness report carries no per-trade amounts; the venue-quote test covers the spec's recorded quotes only.",
+)
+
+
+def evidence(st, final: dict) -> list:
     """What a reviewer would otherwise redo by hand: the final harness runs (range, drift), the
     venue's own quotes and the watched state as the gates read them, and the dispute log."""
     out = []
@@ -84,7 +92,7 @@ def evidence(run: Path, st, final: dict) -> list:
         g = next((g for g in final.get("gates", []) if g["name"] == name), {})
         for r in g.get(key, []):
             what = r.get("id") or r.get("what") or r.get("proxy") or r.get("address")
-            out.append(f"- {name} {what} on {r.get('chain')} (spec block {r.get('block', '-')}, re-read at latest): {r['status']}" + (f" — {r['detail']}" if r.get("detail") else ""))
+            out.append(f"- {name} {what} on {r.get('chain')} (spec block {r.get('block', '-')}, re-read at {r.get('now_block', 'latest')}): {r['status']}" + (f" — {r['detail']}" if r.get("detail") else ""))
     disputes = []
     for f in st.findings.values():
         for a in f["answers"]:
@@ -174,12 +182,12 @@ def render(protocol: str, shadow: bool = False) -> tuple:
         out.append(f"- {g['name']}: **{g['status']}**{why}")
         for pr in g.get("prs", []):
             out.append(f"  - {pr}")
-    ev = evidence(run, st, final)
+    ev = evidence(st, final)
     if ev:
         out += ["", "### Evidence", ""] + ev
-    if final.get("off"):
-        out += ["", "### Not verified", "", "The harness cannot check these yet, so nothing in this PR shows them:", ""]
-        out += [f"- {o['what']} ({o['gap']}: {o['reason']})" for o in final["off"]]
+    out += ["", "### Not verified", "", "Nothing in this PR shows these; a person runs them, or they wait for the harness:", ""]
+    out += [f"- {o['what']} ({o['gap']}: {o['reason']})" for o in final.get("off", [])]
+    out += [f"- {d}" for d in NOT_RUN_BY_THE_SKILL]
     out += ["", "### What CI will not guard", "",
             "- The `src/evm/**` simulation tests are excluded from PR CI (`not test(evm)`); this run ran the module's tests locally.",
             "- Protocol tests run on `pull_request_target` for changed packages only, and a fork PR's run waits for approval."]
@@ -222,14 +230,15 @@ def stale_references(protocol: str, body: str) -> list:
         return problems
     dec = maybe(run / "decisions.json", {})
     for key in ("package", "test_package"):
-        pkg = (dec.get("paths") or {}).get(key)
-        if pkg and not (tree / "protocols/substreams" / pkg).exists() and not (tree / "protocols/substreams" / pkg.replace("-", "/", 1)).exists():
-            problems.append(f"decisions.json {key} `{pkg}` is not under protocols/substreams in the worktree")
+        value = (dec.get("paths") or {}).get(key)
+        for pkg in sorted(set(value.values())) if isinstance(value, dict) else [value] if value else []:
+            if not (tree / "protocols/substreams" / pkg).exists() and not (tree / "protocols/substreams" / pkg.replace("-", "/", 1)).exists():
+                problems.append(f"decisions.json {key} `{pkg}` is not under protocols/substreams in the worktree")
     for rel in sorted(set(re.findall(r"protocols/substreams/[A-Za-z0-9_./-]+", body))):
         if "<" not in rel and not (tree / rel.rstrip(".")).exists():
             problems.append(f"the text names `{rel}`, which the branch does not have")
     final = maybe(run / "final_gates.json", {})
-    head = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    head = schema.git("-C", str(tree), "rev-parse", "HEAD", check=False).stdout.strip()
     if final.get("head") and head and final["head"] != head:
         problems.append(f"final gates ran at {final['head'][:10]}, the branch is at {head[:10]}: rerun them")
     return problems

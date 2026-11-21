@@ -39,7 +39,7 @@ def replay(tree: Path, run_branch: str, onto: str, paths: list) -> list:
         patch = git("diff", "--binary", f"{sha}^", sha, "--", *paths, cwd=tree).stdout
         if not patch.strip():
             continue
-        subprocess.run(["git", "apply", "--index", "--3way", "-"], input=patch, text=True, cwd=tree, check=True, capture_output=True)
+        git("apply", "--index", "--3way", "-", cwd=tree, input=patch)
         if git("diff", "--cached", "--quiet", cwd=tree, check=False).returncode == 0:
             continue
         git("commit", "-q", "--no-verify", "-C", sha, cwd=tree)

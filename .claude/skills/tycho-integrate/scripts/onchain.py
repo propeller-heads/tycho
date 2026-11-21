@@ -15,7 +15,7 @@ What each guards against, from past integrations:
   vector), and pricing that depends on the caller (`msg.sender`/`tx.origin` screening, a router
   whitelist): the router is the caller in production, so a quote that differs with it is a fact the
   spec must state. Exactness against the implementation is the simulation layer's venue-quote test
-  (`simulation.venue_quote_test`), which these recorded quotes feed.
+  (implement.md; the `venue-quote-test` final gate), which these recorded quotes feed.
 - `watch`: an upgrade or redeploy the EIP-1967 slot does not show (a new address behind a custom
   pointer, a config swap with no event): any code or getter on the quote path that changed since
   the spec's block reopens the spec.
@@ -29,6 +29,7 @@ node.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ import envcheck  # noqa: E402
 import schema  # noqa: E402
 
 ROUTER_ADDRESSES = "crates/tycho-execution/config/router_addresses.json"
+REVERTED = re.compile(r"execution reverted|\brevert(ed)?\b", re.I)
 
 
 def router(chain: str, tree: Path):
@@ -46,11 +48,16 @@ def router(chain: str, tree: Path):
     return (schema.load_json(path) if path.exists() else {}).get(chain)
 
 
+def block_tag(block) -> str:
+    return hex(block) if isinstance(block, int) else block
+
+
+def tx(to: str, data: str, sender=None) -> dict:
+    return {"to": to, "data": data, **({"from": sender} if sender else {})}
+
+
 def call(url: str, to: str, data: str, block, sender=None) -> str:
-    tx = {"to": to, "data": data}
-    if sender:
-        tx["from"] = sender
-    return envcheck.rpc(url, "eth_call", [tx, hex(block) if isinstance(block, int) else block], timeout=60)
+    return envcheck.rpc(url, "eth_call", [tx(to, data, sender), block_tag(block)], timeout=60)
 
 
 def check_quotes(spec: dict, tree: Path) -> list:
@@ -61,7 +68,7 @@ def check_quotes(spec: dict, tree: Path) -> list:
         row = {k: q.get(k) for k in ("id", "chain", "block", "to", "note")}
         url = schema.rpc_url(q["chain"])
         if not url:
-            rows.append({**row, "status": "unread", "detail": f"no RPC for {q['chain']}"})
+            rows.append({**row, "status": "unread", "detail": schema.no_rpc(q["chain"])})
             continue
         try:
             now = call(url, q["to"], q["data"], q["block"])
@@ -78,12 +85,12 @@ def check_quotes(spec: dict, tree: Path) -> list:
             continue
         try:
             as_router = call(url, q["to"], q["data"], q["block"], sender=addr)
-        except RuntimeError as e:
-            # The anonymous call answered, the router's did not: the venue screens its caller.
-            rows.append({**row, "status": "caller-dependent", "detail": f"from the router {addr} the call fails ({e}); anonymously it returns {now}"})
-            continue
         except Exception as e:  # noqa: BLE001 - reported per quote
-            rows.append({**row, "status": "unread", "detail": str(e)})
+            # Only a revert says the venue refused the router; a node's error (a quota, a timeout,
+            # missing state) says nothing about the venue.
+            reverted = REVERTED.search(str(e))
+            rows.append({**row, "status": "caller-dependent" if reverted else "unread",
+                         "detail": f"from the router {addr} the call {'reverts' if reverted else 'fails'} ({e}); anonymously it returns {now}"})
             continue
         if as_router.lower() != now.lower():
             rows.append({**row, "status": "caller-dependent", "detail": f"from the router {addr} the venue returns {as_router}, anonymously {now}"})
@@ -95,18 +102,23 @@ def check_quotes(spec: dict, tree: Path) -> list:
 def check_watch(spec: dict) -> list:
     """Each `watch` entry ({chain, address, block, data?}): its code (no `data`) or the getter's
     return (`data`) at the spec's block against the latest block."""
-    rows = []
+    rows, heads = [], {}
     for w in spec.get("watch", []):
         row = {k: w.get(k) for k in ("chain", "address", "block", "data", "what")}
         url = schema.rpc_url(w["chain"])
         if not url:
-            rows.append({**row, "status": "unread", "detail": f"no RPC for {w['chain']}"})
+            rows.append({**row, "status": "unread", "detail": schema.no_rpc(w["chain"])})
             continue
         try:
+            # One block per chain, so every reading of a chain is at the same, named block.
+            if w["chain"] not in heads:
+                heads[w["chain"]] = int(envcheck.rpc(url, "eth_blockNumber", []), 16)
+            now_block = heads[w["chain"]]
+            row["now_block"] = now_block
             if w.get("data"):
-                then, now = (call(url, w["address"], w["data"], b) for b in (w["block"], "latest"))
+                then, now = (call(url, w["address"], w["data"], b) for b in (w["block"], now_block))
             else:
-                then, now = (envcheck.rpc(url, "eth_getCode", [w["address"], hex(b) if isinstance(b, int) else b], timeout=60) for b in (w["block"], "latest"))
+                then, now = (envcheck.rpc(url, "eth_getCode", [w["address"], block_tag(b)], timeout=60) for b in (w["block"], now_block))
             if then.lower() == now.lower():
                 rows.append({**row, "status": "same"})
             else:
@@ -120,11 +132,8 @@ def check_watch(spec: dict) -> list:
 def read_set(chain: str, to: str, data: str, block, sender=None) -> dict:
     url = schema.rpc_url(chain)
     if not url:
-        raise SystemExit(f"no RPC for {chain}: set {' or '.join(schema.rpc_vars(chain))}")
-    tx = {"to": to, "data": data}
-    if sender:
-        tx["from"] = sender
-    trace = envcheck.rpc(url, "debug_traceCall", [tx, hex(block) if isinstance(block, int) else block, {"tracer": "prestateTracer"}], timeout=120)
+        raise SystemExit(schema.no_rpc(chain))
+    trace = envcheck.rpc(url, "debug_traceCall", [tx(to, data, sender), block_tag(block), {"tracer": "prestateTracer"}], timeout=120)
     return {addr: sorted((acct.get("storage") or {}).keys()) for addr, acct in trace.items()}
 
 

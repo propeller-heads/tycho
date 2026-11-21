@@ -9,12 +9,12 @@ rules are code here, not a judgement the model makes.
     state.py <protocol> append '<event json>'     validate and append one event
     state.py <protocol> status                    stage, rounds, spend, open items
     state.py <protocol> resume                    the stage to resume at, as JSON
-    state.py <protocol> round --layer L --head H --checks green|red
+    state.py <protocol> round --layer L --head H --checks-file F
     state.py <protocol> answers --layer L --round N --file answers.json
     state.py <protocol> ingest-review --layer L|auto --round N --sidecar <report>.findings.json
     state.py <protocol> open-findings --layer L   open findings as JSON
     state.py <protocol> answers-file --layer L --out F   the `--existing` file for the next review
-    state.py <protocol> next --layer L            continue | clean | escalate:<reason>, as JSON
+    state.py <protocol> next --layer L            continue | clean | closed | stopped | escalate, as JSON
     state.py <protocol> remaining [--layer L]     USD left for the next agent call
     state.py <protocol> check-guards --worktree W --from A --to B [--layer L --round N --record]
     state.py <protocol> ask --class C --question '...' [--record D3] [--layer L]   open a question for a person
@@ -55,8 +55,9 @@ def read_events(run: Path) -> list:
                 event = json.loads(line)
             except json.JSONDecodeError as e:
                 raise SystemExit(f"{path}:{n}: not JSON ({e}); the ledger is append-only, fix the line by hand")
-            # Replay trusts nothing it would not have appended: a line written around `append`
-            # (a gate approval, a closed finding) stops the run instead of changing its state.
+            # Every line must be an event `append` would have written. This catches a malformed
+            # line, not a well-formed forged one: agents cannot write the ledger (guard.py), and
+            # run_agent.py restores it if an agent session changed it anyway.
             errors = schema.validate_event(event) if isinstance(event, dict) else ["not an object"]
             if errors:
                 raise SystemExit(f"{path}:{n}: invalid event ({'; '.join(errors)}); the ledger is append-only, fix the line by hand")
@@ -99,7 +100,7 @@ class State:
         self.findings = {}
         self.decisions = {}  # D<n> -> {class, question, finding, layer, resolved, choice}
         self.guard_violations = defaultdict(list)
-        self.accepted_guards = set()  # paths whose guarded change a person accepted
+        self.accepted_guards = set()  # (path, what changed) of guarded changes a person accepted
         self.stops = {}  # layer or "run" -> reason
         # layer -> the decision id by which a person closed a layer that stopped without converging
         # (an escalation answered without more rounds or dollars, and no round since).
@@ -107,6 +108,7 @@ class State:
         self.signed_facts = set()
         self.amendments = []
         self.escapes = []
+        self.tampers = defaultdict(list)  # layer (or "run") -> sessions that changed the run's records
         # A person's answer to an escalation resets the layer's stop rules from that round on and
         # may grant more rounds or dollars.
         self.reset_round = defaultdict(int)
@@ -149,7 +151,10 @@ class State:
             if e.get("layer"):
                 self.spend_layer[e["layer"]] += usd
         elif t == "finding":
-            self.stops.pop(e["layer"], None)  # a new or reopened finding supersedes a clean stop
+            # A new or reopened finding supersedes a clean stop, and reopens a layer a person
+            # closed: they closed it on the findings they saw, not on this one.
+            self.stops.pop(e["layer"], None)
+            self.closed.pop(e["layer"], None)
             f = self.findings.get(e["id"])
             if f is None:
                 self.findings[e["id"]] = {
@@ -205,10 +210,12 @@ class State:
             d["choice"] = e["choice"]
             d["by"] = e["by"]
             if e.get("accept_guard") and d.get("layer"):
-                self.accepted_guards.update(v["path"] for g in self.guard_violations[d["layer"]] for v in g["paths"])
+                self.accepted_guards.update(guard_key(v) for g in self.guard_violations[d["layer"]] for v in g["paths"])
             # The implementer applies the decision next round; the next review statuses the finding.
             if d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "open"
+            if d.get("escalation") == "tamper":
+                self.tampers.pop(d.get("layer") or RUN, None)  # the person has heard of it
             if e.get("waive") and d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "waived"
             layer = d.get("layer")
@@ -241,6 +248,8 @@ class State:
             self.amendments.append(e)
         elif t == "escape":
             self.escapes.append(e)
+        elif t == "tamper":
+            self.tampers[e.get("layer", RUN)].append(e)
 
     def open_findings(self, layer: str) -> list:
         return [f for f in self.findings.values() if f["layer"] == layer and f["status"] in ("open", "decision")]
@@ -294,7 +303,8 @@ def remaining_usd(state: State, layer=None) -> float:
 
 
 def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
-    """The stop rules. Returns {"action": "continue" | "clean" | "closed" | "escalate", "reason": ...}.
+    """The stop rules. Returns {"action": "continue" | "clean" | "closed" | "stopped" | "escalate",
+    "reason": ...}. `stopped`: a person stopped the whole run.
 
     `closed` means a person ended the layer's loop: treat it as `clean` for the stage, and the PR
     lists the findings still open.
@@ -318,6 +328,11 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
 
     if state.open_decisions(layer):
         return {"action": "escalate", "reason": "decision-needed", "decisions": [d["id"] for d in state.open_decisions(layer)]}
+    tampered = state.tampers[layer]
+    if tampered:
+        return {"action": "escalate", "reason": "tamper", "class": "outside-repo", "sessions": [t["label"] for t in tampered],
+                "question": f"An agent session ({', '.join(t['label'] for t in tampered)}) changed the run's records "
+                            f"({', '.join(p for t in tampered for p in t['paths'])}); they were restored and its output was not used. Rerun it, or stop?"}
     guard = [g for g in state.guard_violations[layer] if g["round"] > since]
     if guard:
         return {"action": "escalate", "reason": "guard", "class": "relax-test", "paths": guard[-1]["paths"]}
@@ -330,8 +345,8 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
                 + ". Fix it (renew the token, free the disk, restore the RPC or Docker) and rerun the round's checks, or stop?"}
 
     last_green = bool(rounds) and checks_accepted(state, layer, rounds[-1])
-    # A review counts for the round only if it reviewed that round's commit with every pass run.
-    reviewed_last = bool(reviews) and bool(rounds) and reviews[-1]["n"] == rounds[-1]["n"] and not reviews[-1].get("partial")
+    # A review counts for the round only if it reviewed that round's commit with its core passes run.
+    reviewed_last = bool(reviews) and bool(rounds) and reviews[-1]["n"] == rounds[-1]["n"] and not reviews[-1].get("incomplete")
     if rounds and last_green and reviewed_last and not open_now:
         return {"action": "clean", "reason": "clean"}
 
@@ -359,7 +374,7 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
     if not last_green:
         why = "checks red"
     elif not reviewed_last:
-        why = "the last round's review did not run every pass" if reviews and reviews[-1].get("partial") and reviews[-1]["n"] == rounds[-1]["n"] else "not reviewed"
+        why = "the last round's review left out a core pass" if reviews and reviews[-1].get("incomplete") and reviews[-1]["n"] == rounds[-1]["n"] else "not reviewed"
     else:
         why = "open findings"
     return {"action": "continue", "reason": why}
@@ -373,7 +388,7 @@ def checks_accepted(state: State, layer: str, rnd: dict) -> bool:
     failed = rnd.get("failed_checks")
     if not failed:
         return False
-    ok = {f["rule"] + "|" + f.get("quote", "") for f in state.findings.values() if f["layer"] == layer and f["status"] in ("refuted", "waived")}
+    ok = {check_key(f["rule"], f.get("quote", "")) for f in state.findings.values() if f["layer"] == layer and f["status"] in ("refuted", "waived")}
     return all(c in ok for c in failed)
 
 
@@ -460,14 +475,27 @@ def _layer_of(path: str):
 
 EARLIER_STATUS = {"fixed": "fixed", "disproven": "refuted", "open": "open", "deferred": "open"}
 
+# A review that did not run one of these did not review the round: the chunk passes, the
+# simplification pass, or the verification of findings. tycho-review also lists, in `not_run`,
+# parts a review may leave out by design (the integration pass and the execution verifier at
+# `partial`, tools the base lacks, files unchanged since a `--since` report); those do not make it
+# incomplete.
+CORE_NOT_RUN = re.compile(r"\b(chunk|pass(es)?\b|simplif|verif|every|all)", re.I)
+OPTIONAL_NOT_RUN = re.compile(r"integration pass|execution verifier|not at base|not set up|tools? missing|unchanged since|ast-grep|dylint|review-only lint|harness|ci\b", re.I)
+
+
+def core_not_run(not_run: list) -> list:
+    """The `not_run` entries that leave a review short of reviewing the round."""
+    return [x for x in not_run if CORE_NOT_RUN.search(str(x)) and not OPTIONAL_NOT_RUN.search(str(x))]
+
 
 def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
     """Maps a tycho-review sidecar onto the ledger: new findings get ids, findings the review
     matched to ledger ids get verdicts, a closed finding that comes back is reopened.
 
     The review is of a layer's last round (`n`, which `auto` takes per layer from the ledger): its
-    sidecar must name that round's commit, and one whose passes did not all run is recorded as
-    partial, which does not count as the round's review. Ingesting the same sidecar again changes
+    sidecar must name that round's commit, and one whose core passes did not all run is recorded as
+    incomplete, which does not count as the round's review. Ingesting the same sidecar again changes
     nothing; a later review of the same round replaces the earlier one."""
     sidecar = schema.load_json(sidecar_path)
     state = State(read_events(run))
@@ -542,12 +570,15 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
         (reopened if event.get("reopened") else added).append(event["id"])
 
     not_run = sidecar.get("not_run") or []
+    missing = core_not_run(not_run)
     for lay in targets:
         review = {"t": "review", "layer": lay, "n": n_of[lay], "report": report, "head": head, "open": len(state.open_findings(lay))}
         if not_run:
-            review.update(partial=True, not_run=not_run)
+            review["not_run"] = not_run
+        if missing:
+            review["incomplete"] = missing
         append(run, review)
-    return {"added": added, "reopened": reopened, "pre_existing_skipped": skipped_pre, "unmatched_earlier": unmatched, "partial": bool(not_run)}
+    return {"added": added, "reopened": reopened, "pre_existing_skipped": skipped_pre, "unmatched_earlier": unmatched, "incomplete": missing}
 
 
 def record_answers(run: Path, layer: str, n: int, answers_path: Path) -> dict:
@@ -587,6 +618,17 @@ def record_answers(run: Path, layer: str, n: int, answers_path: Path) -> dict:
     return {"recorded": recorded, "missing": missing, "errors": errors}
 
 
+def guard_key(v: dict) -> tuple:
+    """A guarded change as a person accepts it: the file and what changed in it. A later, different
+    change to the same file is not accepted with it."""
+    return v["path"], v["why"]
+
+
+def check_key(rule: str, quote: str) -> str:
+    """The identity of a failed check across rounds: its rule (`check:<step>[:<check>]`) and where."""
+    return f"{rule}|{quote}"
+
+
 def failed_check_ids(checks: dict) -> list:
     """(rule, quote, claim) for each failure of a layer_checks.py result: a failed step, or each
     failing check of its protocol-testing report, with the test, component and direction as its
@@ -597,8 +639,6 @@ def failed_check_ids(checks: dict) -> list:
             continue
         if step.get("checks"):
             for c in step["checks"]:
-                if c.get("outcome") == "skipped" and c.get("reason"):
-                    continue
                 where = " ".join(str(c[k]) for k in ("test", "component", "direction") if c.get(k))
                 out.append((f"check:{step['name']}:{c.get('check', '?')}", where,
                             f"{c.get('check')} {c.get('outcome')}" + (f" at {where}" if where else "") + f": {c.get('detail') or c.get('reason') or ''}"))
@@ -607,30 +647,38 @@ def failed_check_ids(checks: dict) -> list:
     return out
 
 
-def record_round(run: Path, state: State, layer: str, head: str, checks: str, checks_file) -> dict:
-    """Records a round. The same head as the layer's last round records that round again (a rerun
-    after a crash or an infrastructure failure), so resuming never adds a round. Each failed check
+def record_round(run: Path, state: State, layer: str, head: str, checks, checks_file) -> dict:
+    """Records a round. The same head as the layer's last round, before that round was reviewed,
+    records it again (a rerun after a crash or an infrastructure failure), so resuming never adds a
+    round. After its review, the same head is a new round: an implementer round that only disputed
+    findings changes no code, and still counts toward the caps. Each failed check
     is a finding of the layer (rule `check:<step>[:<check>]`), answered like a review's: fixed, or
     disputed with evidence the review verifies, or a decision for a person (`decide --waive`
     accepts the failure). A check that passes again closes its finding."""
     last = state.rounds[layer][-1] if state.rounds[layer] else None
-    n = last["n"] if last and last["head"] == head else len(state.rounds[layer]) + 1
+    rerun = last and last["head"] == head and not any(r["n"] == last["n"] for r in state.reviews[layer])
+    n = last["n"] if rerun else len(state.rounds[layer]) + 1
+    data = schema.load_json(Path(checks_file)) if checks_file else {}
+    if checks_file:
+        checks = "green" if data.get("green") else "red"  # the file's verdict, never a second one
+    if checks not in ("green", "red"):
+        raise SystemExit("a round needs --checks-file (or --checks green|red without one)")
     event = {"t": "round", "layer": layer, "n": n, "head": head, "checks": checks}
     failed = []
+    passed_steps = {s["name"] for s in data.get("steps", []) if s.get("status") == "pass"}
     if checks_file:
         event["checks_file"] = str(checks_file)
-        data = schema.load_json(Path(checks_file))
         failed = failed_check_ids(data) if checks == "red" else []
-        event["failed_checks"] = [f"{rule}|{quote}" for rule, quote, _ in failed]
+        event["failed_checks"] = [check_key(rule, quote) for rule, quote, _ in failed]
         infra = [{"step": s["name"], "cause": s.get("infra"), "detail": s.get("detail", ""), "tail": s.get("tail", [])[-8:]}
                  for s in data.get("steps", []) if s.get("status") == "infra"]
         if infra:
             event["infra"] = infra
     out = append(run, event)
     failing = set(event.get("failed_checks", []))
-    by_id = {f["rule"] + "|" + f.get("quote", ""): f for f in state.findings.values() if f["layer"] == layer and f["rule"].startswith("check:")}
+    by_id = {check_key(f["rule"], f.get("quote", "")): f for f in state.findings.values() if f["layer"] == layer and f["rule"].startswith("check:")}
     for rule, quote, claim in failed:
-        known = by_id.get(f"{rule}|{quote}")
+        known = by_id.get(check_key(rule, quote))
         if known and known["status"] in ("open", "decision", "refuted", "waived"):
             continue  # still failing: the open finding stands, and a refuted or waived one stays accepted
         finding = {"t": "finding", "id": known["id"] if known else state.next_finding_id(), "layer": layer, "rule": rule, "severity": "blocking",
@@ -638,9 +686,11 @@ def record_round(run: Path, state: State, layer: str, head: str, checks: str, ch
         if known:
             finding["reopened"] = True
         state._apply(append(run, finding))
-        by_id[f"{rule}|{quote}"] = state.findings[finding["id"]]
+        by_id[check_key(rule, quote)] = state.findings[finding["id"]]
+    # A check finding is fixed only when its step ran and passed: a step that did not run this
+    # round (`--only`, a chain left out, the environment failing) says nothing about it.
     for key, f in by_id.items():
-        if key not in failing and f["status"] in ("open", "decision"):
+        if key not in failing and f["status"] in ("open", "decision") and f["rule"].split(":")[1] in passed_steps:
             append(run, {"t": "verdict", "id": f["id"], "status": "fixed", "by": "checks", "round": n})
     return out
 
@@ -841,7 +891,7 @@ def main() -> None:
     a = sub.add_parser("round")
     a.add_argument("--layer", required=True, choices=schema.LAYERS)
     a.add_argument("--head", required=True)
-    a.add_argument("--checks", required=True, choices=("green", "red"))
+    a.add_argument("--checks", choices=("green", "red"), help="only without --checks-file, which carries the verdict")
     a.add_argument("--checks-file")
     a = sub.add_parser("answers")
     a.add_argument("--layer", required=True, choices=schema.LAYERS)

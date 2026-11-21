@@ -6,7 +6,10 @@ Run the `tycho-review` skill (Skill tool) with exactly these arguments:
 
 This is the final review of the tycho-integrate run for **{{protocol}}**: a full review of the
 whole branch from a context that has seen none of the loop. Write the JSON sidecar beside the
-report as the skill's Output section describes. Change no code and post nothing.
+report as the skill's Output section describes. Compare the router test's measured gas with the
+spec's `gas.swap_gas_used` and the simulation's gas estimate: an estimate more than 25% off the
+measurement is a finding (rule id `tycho-integrate`, severity suggestion). Change no code and post
+nothing.
 
 Headless session notes (this session cannot ask for permission):
 

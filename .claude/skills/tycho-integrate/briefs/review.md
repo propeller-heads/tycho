@@ -10,7 +10,10 @@ its verdict: settle each dispute by running its experiment, against the chain wh
 claim about the chain, never by reading the evidence alone). The existing-findings file carries the ledger's open findings, each under its
 ledger id with the implementer's answer: report every one's status under that id in the sidecar's
 `earlier` list. Write the JSON sidecar beside the report as the skill's Output section describes.
-Change no code and post nothing.
+In the execution layer, compare the router test's measured gas with the spec's
+`gas.swap_gas_used` and the simulation's gas estimate: an estimate more than 25% off the
+measurement is a finding (rule id `tycho-integrate`, severity suggestion). Change no code and
+post nothing.
 
 Headless session notes (this session cannot ask for permission):
 

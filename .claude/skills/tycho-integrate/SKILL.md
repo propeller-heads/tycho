@@ -193,7 +193,10 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    S/run_agent.py --protocol P --label implement:L:N --role implementer --agent tycho-implementer \
      --layer L --cwd <worktree> --prompt-file RUN/prompts/implement-L-N.md --out RUN/out/implement-L-N.md
    ```
-   Exit 3 means no budget is left: go to step 6 (`next` escalates).
+   Exit 3 means no budget is left: go to step 6 (`next` escalates). Exit 4 means the session changed
+   the run's records (the ledger, the intake, the role settings, round results); `run_agent.py`
+   restored them and recorded a `tamper` event: discard the session's output and go to step 6,
+   where `next` asks the person.
 2. **Answers.** Take the JSON at the end of `RUN/out/implement-L-N.md`, save it as
    `RUN/rounds/L-N/answers.json`, and `S/state.py P answers --layer L --round N --file …`. Missing
    answers are reported and stay open; they are never dropped. `facts_learned` go to the spec as
@@ -204,8 +207,8 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    `guards` gate fails on any guarded change on the branch nobody accepted.
 4. **Check and record.** `S/layer_checks.py --protocol P --layer L --round N` (with `--chains
    <chain>` while the layer answers a chain the final gates found red), then
-   `S/state.py P round --layer L --head $(git -C <worktree> rev-parse HEAD) --checks green|red
-   --checks-file RUN/rounds/L-N/checks.json`. The protocol-testing step runs `range --report`;
+   `S/state.py P round --layer L --head $(git -C <worktree> rev-parse HEAD)
+   --checks-file RUN/rounds/L-N/checks.json` (the file says green or red). The protocol-testing step runs `range --report`;
    `checks.json` carries each failed check of that report (`state.components`, `balances`,
    `sim.ladder`, `exec.ladder`, `limits.*` …) per component and direction. Each failed check
    becomes a ledger finding (rule `check:<step>[:<check>]`) that the implementer answers like a
@@ -224,8 +227,10 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    The report's path is the last line of the output; the sidecar is beside it
    (`<report>.findings.json`). Copy both into `RUN/reviews/`.
    `S/state.py P ingest-review --layer L --round N --sidecar <sidecar>`. It refuses a sidecar of
-   another commit than the round's, records one whose passes did not all run as partial (it does
-   not count as the round's review: run the review again), and ignores a sidecar it already has.
+   another commit than the round's, records one that left out a core pass (chunk passes,
+   simplification, verification) as incomplete (it does not count as the round's review: run the
+   review again; the parts a review leaves out by design, such as the integration pass at
+   `partial`, do not count against it), and ignores a sidecar it already has.
 6. **Next.** `S/state.py P next --layer L` returns:
    - `continue`: the next round;
    - `clean`: mark `build:L` done and start the next layer;
@@ -259,20 +264,16 @@ the ledger's findings (the existing file), never review transcripts.
    A layer with a new `blocking` finding gets more rounds (step 9, with `next --extra-rounds` up to
    `budgets.toml` `final.extra_rounds`), then this stage runs again; past that, it escalates.
    Findings below blocking stay in the ledger and the PR lists them.
-2. **Gates.** `S/final_gates.py --protocol P --round <attempt>`: every layer clean (its stop rules
-   now, not its last stop), no guarded change a person did not accept, all checks once more with
-   protocol-testing on every chain (with the mutation score once G10 lands), one test per mutation
-   surface (G5), proxies unchanged since the spec (a beacon proxy's implementation is read through
-   its beacon), the venue's own quotes as the spec records them and the same from the Tycho router
-   (`venue-quotes`), a simulation test against those quotes (`venue-quote-test`), the watched code
-   and getters unchanged (`watch`), the branch containing the base's tip (`base-current`: behind by
-   any commit fails; rebase, rerun the layer checks and these gates), sibling PRs that predict the
-   same test executor address, the new executor's runtime bytecode fixture registered on every chain
-   so protocol-testing executes through it (no `skip_execution` in the package), and the strict yaml
-   (`harness: strict`, a `balance_lens`, every direction's limit declared). A failing gate: fix it
-   with an implement round of its layer when it is code (a chain's protocol-testing: rounds with
-   `--chains <chain>`), an amendment when the venue changed (below), a person's decision otherwise.
-   `off` gates are listed as not verified, not failed.
+2. **Gates.** `S/final_gates.py --protocol P --round <attempt>`; its docstring lists each gate. A
+   failing gate is fixed by:
+   - an implement round of its layer, when it is code (a chain's protocol-testing: rounds with
+     `--chains <chain>`);
+   - a rebase, when `base-current` fails (behind by any commit), then the layer checks and these
+     gates again;
+   - an amendment, when the venue changed (proxies, `watch`, `venue-quotes`; below);
+   - a person's decision, otherwise.
+
+   `off` gates are listed in the PR as not verified, not failed.
 
 **Splitting the PR.** When a person decides to split the branch into stacked PRs, cut them from the
 gated branch, never by hand: `S/split.py --protocol P --branch <b> --onto <ref> --paths …` for each
@@ -381,7 +382,7 @@ caps are placeholders until shadow runs measure spend (`--status` shows it per s
 | `scripts/spec_render.py` | `spec.json` → `SPEC.md`, with `--check` |
 | `scripts/final_gates.py` | final gates, `--recheck` |
 | `scripts/onchain.py` | the venue read again: quotes (also from the router), watched code and getters, a quote's read set |
-| `scripts/worktree.py` | the run's worktree, on `origin/main` plus the strict test suite while it is unmerged |
+| `scripts/worktree.py` | the run's worktree on `origin/main`, its submodules and linked `.env` files |
 | `scripts/pr_body.py` | the PR description (`--shadow` holds the ledger back) |
 | `scripts/test_state.py` | tests of the ledger, stop rules, guards and spec validation |
 | `.claude/agents/tycho-researcher.md`, `tycho-implementer.md` | the agents' definitions |

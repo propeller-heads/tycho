@@ -15,8 +15,10 @@ with the reason. The role and the run come from the environment `run_agent.py` s
 - reviewer: writes only under `.claude/reviews/` and the run directory; reads GitHub (`gh api`
   GET only), never writes to it.
 
-No role writes the run's own records (`PROTECTED_RUN_FILES`: the ledger, the intake, the role
-settings, the layer checks' results): those are the orchestrator's and the person's.
+No role writes the run's own records (`schema.PROTECTED_RUN_FILES`: the ledger, the intake, the
+role settings, the layer checks' results) or runs the scripts that change them: those are the
+orchestrator's and the person's. What this hook cannot see (a script file, a heredoc), run_agent.py
+catches by comparing the records before and after the session.
 
 Any error in the guard denies the call: Claude Code lets a call through when a hook fails with an
 exit code other than 2, so a crash must never be the way past it. Bash writes are recognised by
@@ -37,15 +39,17 @@ import schema  # noqa: E402
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
-# The run directory's records no agent writes.
-PROTECTED_RUN_FILES = ("ledger.jsonl", "intake.json", "settings", "rounds", "final_gates.json", "env.json", "prompts")
+PROTECTED_RUN_FILES = schema.PROTECTED_RUN_FILES
+# The run's own scripts that change its state are the orchestrator's: an agent never records a
+# round, a review, a decision or a gate. (Reading: `state.py P status|open-findings|remaining|resume`.)
+ORCHESTRATOR_ONLY = re.compile(r"\b(state\.py\b(?![^;&|\n]*\b(status|open-findings|remaining|resume)\b)|(layer_checks|final_gates|run_agent|split|worktree|pr_body)\.py\b)")
 
 # A push, however the git command is spelled (`git -C x push`, `env git push`).
 GIT_PUSH = re.compile(r"\bgit\b[^;&|\n]*\bpush\b")
 GH_WRITE = re.compile(r"\bgh\s+(pr|issue|release|repo|label|workflow|run|gist|secret|variable)\s+(create|merge|comment|edit|review|close|reopen|delete|ready|lock|unlock|transfer|fork|archive|rename|set|cancel|rerun|enable|disable)\b")
 GH_API = re.compile(r"\bgh\s+api\b(?P<args>[^;&|\n]*)")
 # `gh api` sends a POST with any of these, unless a method is named.
-GH_API_BODY = re.compile(r"(^|\s)(-f|-F|--field|--raw-field|--input)(\s|=|$)")
+GH_API_BODY = re.compile(r"(^|\s)(-[A-Za-z]*[fF]\S*|--field|--raw-field|--input)(\s|=|$)")
 GH_API_METHOD = re.compile(r"(^|\s)(-X|--method)(\s+|=)?(?P<m>[A-Za-z]+)")
 
 ROLE_BASH = {
@@ -57,17 +61,22 @@ ROLE_BASH = {
         (GH_API, "researchers read GitHub with `gh pr view|list|diff`, `gh search` and `gh repo view`"),
     ),
     "reviewer": (
-        (re.compile(r"\bgit\s+(commit|rebase|reset|checkout\s+-[bB]|branch\s+-[dD]|tag|merge|cherry-pick|revert)\b"), "a review changes no history"),
+        (re.compile(r"\bgit\b[^;&|\n]*\s(commit|rebase|reset|tag|merge|cherry-pick|revert|update-ref|push)\b"), "a review changes no history"),
+        (re.compile(r"\bgit\b[^;&|\n]*\s(checkout\s+-[bB]|switch\s+-[cC]|branch\s+(-[a-zA-Z]*[dDfmMcC]|--(delete|force|move|copy)))"), "a review changes no branch"),
+        (re.compile(r"\bgit\b[^;&|\n]*\sworktree\s+(move|prune|lock|unlock|repair)\b"), "a review only adds and removes its own worktree"),
     ),
 }
 
 # Commands whose arguments are written. `last` writes only its last argument (the destination).
 WRITERS = {"tee": "all", "rm": "all", "truncate": "all", "touch": "all", "mkdir": "all", "rmdir": "all", "shred": "all",
            "mv": "last", "cp": "last", "install": "last", "ln": "last", "rsync": "last"}
-REDIRECTS = (">", ">>", "&>", "&>>", ">|", "1>", "2>", "1>>", "2>>")
 INTERPRETERS = ("python", "python3", "perl", "ruby", "node")
 WRITE_CALL = re.compile(r"""open\s*\([^)]*['"][wax+]|\.write_(text|bytes)\s*\(|\b(shutil|os)\.(copy\w*|move|rename|replace|remove|unlink)\s*\(|>\s*['"]|writeFileSync|appendFileSync|File\.write""")
 STRING_LITERAL = re.compile(r"""(['"])((?:(?!\1)[^\\]|\\.)*)\1""")
+# The calls in inline interpreter code whose string arguments are paths it writes (or names a path
+# it writes to, as `Path('x').write_text`): only those literals are write targets, so a sidecar
+# that merely mentions a file path is not one.
+PATH_CALL = re.compile(r"""\b(open|Path|copy\w*|move|rename|replace|unlink|remove|writeFileSync|appendFileSync|File\.write)\s*\(([^()]*)\)""")
 
 
 def deny(reason: str) -> None:
@@ -128,6 +137,8 @@ def guarded_yaml_lines(old: str, new: str) -> list:
 
 
 def write_roots(role: str, worktree: Path, run: Path, repo: Path) -> list:
+    """Where a role writes. Every role may use the temp dirs (`/tmp`, `$TMPDIR`; the tests name
+    another with TYCHO_INTEGRATE_TMP_ROOTS, since their trees live in the temp dir)."""
     tmp = [Path(p) for p in os.environ.get("TYCHO_INTEGRATE_TMP_ROOTS", f"/tmp:{os.environ.get('TMPDIR', '/tmp')}").split(":") if p]
     if role == "implementer":
         return [worktree, *tmp]
@@ -173,7 +184,9 @@ def check_edit(role: str, tool: str, inp: dict, worktree: Path, run: Path, repo:
             deny(f"{rel} is guarded; only the new integration's wiring may be added to it, nothing else changed: {bad}")
         return
     if schema.INTEGRATION_YAML_RE.search(rel):
-        lines = guarded_yaml_lines(*edited_text(tool, inp))
+        # The whole file's lines, before and after: an edit of part of a line (`strict` to
+        # `legacy`) changes a guarded line its own strings do not show.
+        lines = guarded_yaml_lines(*(resulting_file(tool, inp) or edited_text(tool, inp)))
         if lines:
             deny(f"the edit changes test-relaxing lines {lines} in {rel}; relaxing a test is a person's decision (class relax-test)")
 
@@ -232,11 +245,14 @@ def write_targets(tokens: list) -> list:
     elif verb.rstrip("0123456789.") in INTERPRETERS:
         code = next((args[j + 1] for j, a in enumerate(args[:-1]) if a in ("-c", "-e", "-E")), "")
         if code and WRITE_CALL.search(code):
-            out += [(lit, f"{verb} code") for _, lit in STRING_LITERAL.findall(code) if lit and " " not in lit and ("/" in lit or "." in lit)]
+            for call in PATH_CALL.finditer(code):
+                out += [(lit, f"{verb} code") for _, lit in STRING_LITERAL.findall(call.group(2)) if lit and " " not in lit and ("/" in lit or "." in lit)]
     return out
 
 
 def check_bash(role: str, command: str, cwd: Path, worktree: Path, run: Path, repo: Path) -> None:
+    if ORCHESTRATOR_ONLY.search(command):
+        deny("the run's state-changing scripts are the orchestrator's: report what you found instead")
     if GIT_PUSH.search(command):
         deny("pushing is the person's step (Gate 3)")
     if GH_WRITE.search(command):
@@ -249,6 +265,12 @@ def check_bash(role: str, command: str, cwd: Path, worktree: Path, run: Path, re
     for rx, why in ROLE_BASH.get(role, ()):
         if rx.search(command):
             deny(why)
+    if role == "reviewer":
+        # tycho-review removes the worktree it made, under .claude/reviews/; never another one.
+        for m in re.finditer(r"\bworktree\s+remove\b((?:\s+-\S+)*)\s+(\S+)", command):
+            target = Path(m.group(2)).expanduser()
+            if not inside(target if target.is_absolute() else cwd / target, repo / ".claude" / "reviews"):
+                deny(f"a review removes only its own worktree under .claude/reviews/, not {m.group(2)}")
     for tokens in segments(command):
         if tokens[0] == "cd" and len(tokens) > 1:
             # Later relative paths resolve from here (a `cd` in a subshell is followed too: stricter).

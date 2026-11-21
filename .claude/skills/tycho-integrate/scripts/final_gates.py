@@ -36,6 +36,7 @@ EIP1967_BEACON_SLOT = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582
 IMPLEMENTATION_SELECTOR = "0x5c60da1b"  # implementation(): what a beacon answers
 ROUTER_TEST_SETUP = "crates/tycho-execution/contracts/test/TychoRouterTestSetup.sol"
 EXECUTION_RS = "protocols/testing/src/execution.rs"
+SKIP_EXECUTION = schema.yaml_key_re("skip_execution")
 
 
 def git(tree: Path, *args) -> str:
@@ -99,10 +100,10 @@ def gate_guards(run: Path, tree: Path) -> dict:
     except subprocess.CalledProcessError as e:
         return gate("guards", "fail", f"no merge base with origin/{schema.BASE}: {e}")
     st = ledger.State(ledger.read_events(run))
-    open_ = [v for v in ledger.check_guards(tree, base, "HEAD") if v["path"] not in st.accepted_guards]
+    open_ = [v for v in ledger.check_guards(tree, base, "HEAD") if ledger.guard_key(v) not in st.accepted_guards]
     if open_:
         return gate("guards", "fail", "guarded changes no person accepted: " + "; ".join(f"{v['path']} ({v['commit']}): {v['why']}" for v in open_[:10]), violations=open_)
-    accepted = sorted(st.accepted_guards)
+    accepted = sorted({p for p, _ in st.accepted_guards})
     return gate("guards", "pass", "no guarded change" + (f" beyond those a person accepted: {accepted}" if accepted else ""))
 
 
@@ -147,7 +148,7 @@ def proxy_drift(spec: dict) -> list:
     for p in spec.get("proxies", []):
         url = schema.rpc_url(p["chain"])
         if not url:
-            rows.append({**p, "status": "unread", "detail": f"no {' or '.join(schema.rpc_vars(p['chain']))}"})
+            rows.append({**p, "status": "unread", "detail": schema.no_rpc(p["chain"])})
             continue
         try:
             slot = (p.get("slot") or (EIP1967_BEACON_SLOT if p.get("beacon") else EIP1967_IMPL_SLOT)).lower()
@@ -194,23 +195,43 @@ def gate_venue_quotes(spec: dict, tree: Path, facts: set) -> dict:
     return gate("venue-quotes", "pass", f"{len(rows)} venue quotes hold at their blocks, from the router too", quotes=rows)
 
 
-def gate_venue_quote_test(spec: dict, tree: Path) -> dict:
-    """The simulation layer tests the implementation against the venue's own quotes, to the wei: a
-    test the branch adds that names each venue quote's block (`implement.md`, venue-quote test).
-    Exact simulation-vs-execution cannot show an under-quote: the router keeps the surplus."""
+def quote_words(result: str) -> set:
+    """The ways a test may write a venue quote's result: each nonzero 32-byte word of the raw
+    return, in decimal (as Rust and Solidity tests assert amounts) or as hex digits."""
+    hexpart = (result or "")[2:] if (result or "").startswith("0x") else (result or "")
+    out = set()
+    for i in range(0, len(hexpart), 64):
+        word = hexpart[i:i + 64]
+        if word and int(word, 16):
+            out |= {str(int(word, 16)), f"{int(word, 16):_}", word.lstrip("0").lower()}
+    return out
+
+
+def gate_venue_quote_test(spec: dict, tree: Path, layers: list) -> dict:
+    """The simulation layer tests the implementation against the venue's own quotes, to the wei
+    (`implement.md`, venue-quote test): a test file the branch changes names each quote's block and
+    asserts its result. Exact simulation-vs-execution cannot show an under-quote: the router keeps
+    the surplus. A textual check: it finds the test, a reviewer reads it."""
+    if "simulation" not in layers:
+        return gate("venue-quote-test", "n/a", "the route builds no simulation layer")
+    quotes = spec.get("venue_quotes", [])
+    if not quotes:
+        return gate("venue-quote-test", "fail", "the spec records no venue quote to test against")
     try:
         changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
     except subprocess.CalledProcessError as e:
         return gate("venue-quote-test", "fail", f"cannot diff against origin/{schema.BASE}: {e}")
-    tests = [p for p in changed if p.startswith(("crates/tycho-simulation/", "protocols/adapter-integration/")) and (tree / p).is_file()]
-    text = "\n".join((tree / p).read_text(errors="replace") for p in tests)
-    blocks = sorted({str(q["block"]) for q in spec.get("venue_quotes", [])})
-    missing = [b for b in blocks if b not in text and f"{int(b):_}" not in text]
-    if not blocks:
-        return gate("venue-quote-test", "fail", "the spec records no venue quote to test against")
+    texts = [(tree / p).read_text(errors="replace") for p in changed
+             if p.startswith(("crates/tycho-simulation/", "protocols/adapter-integration/")) and (tree / p).is_file()]
+    tests = "\n".join(t for t in texts if re.search(r"#\[(tokio::)?test\b|function\s+test", t))
+    missing = []
+    for q in quotes:
+        block = str(q["block"])
+        if not (block in tests or f"{int(block):_}" in tests) or not any(w in tests.lower() for w in quote_words(q.get("result", ""))):
+            missing.append(q.get("id") or block)
     if missing:
-        return gate("venue-quote-test", "fail", f"no simulation test names the venue quotes' blocks {missing}")
-    return gate("venue-quote-test", "pass", f"the simulation tests name every venue quote block ({', '.join(blocks)})")
+        return gate("venue-quote-test", "fail", f"no simulation test names the block and asserts the result of venue quotes {missing}")
+    return gate("venue-quote-test", "pass", f"simulation tests name the block and assert the result of all {len(quotes)} venue quotes")
 
 
 def gate_watch(spec: dict) -> dict:
@@ -284,7 +305,7 @@ def gate_executor_fixture(tree: Path, system: str, chains: list, yamls: list) ->
     a missing deployment is never a reason to skip it (`integration-test-skip-flags`)."""
     if not system:
         return gate("executor-fixture", "fail", "decisions.json names no protocol_system")
-    skips = [str(p.relative_to(tree)) for p in yamls if re.search(r"(^|[{,\s-])[\"']?skip_execution[\"']?\s*:", p.read_text(), re.M)]
+    skips = [str(p.relative_to(tree)) for p in yamls if SKIP_EXECUTION.search(p.read_text())]
     if skips:
         return gate("executor-fixture", "fail", f"skip_execution in {skips}: execution runs through the fixture; a skip needs a person's decision with hard evidence")
     problems, found = [], []
@@ -358,7 +379,7 @@ def main() -> None:
         gate_mutation_surfaces(spec, yamls, caps),
         gate_proxies(spec),
         gate_venue_quotes(spec, tree, {f["id"] for f in spec.get("facts", [])}),
-        gate_venue_quote_test(spec, tree),
+        gate_venue_quote_test(spec, tree, ledger.route_layers(run)),
         gate_watch(spec),
         gate_base_current(tree),
         gate_sibling_executors(tree),

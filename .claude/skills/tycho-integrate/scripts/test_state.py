@@ -13,10 +13,16 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import envcheck  # noqa: E402
 import final_gates  # noqa: E402
 import layer_checks  # noqa: E402
+import onchain  # noqa: E402
+import prompt  # noqa: E402
+import run_agent  # noqa: E402
 import schema  # noqa: E402
+import split  # noqa: E402
 import state as ledger  # noqa: E402
+from unittest import mock  # noqa: E402
 
 GUARD = Path(__file__).resolve().parent / "guard.py"
 BUDGETS = ledger.load_budgets()
@@ -260,7 +266,10 @@ class Replay(RunCase):
             ledger.append(self.run, {"t": "round", "layer": "indexing"})
 
 
-class Guards(unittest.TestCase):
+class GitTree(unittest.TestCase):
+    """A temporary git repository with a strict test yaml and protocols/testing's executor table,
+    and the guard hook run against it."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.tree = Path(self.tmp.name) / "tree"
@@ -293,25 +302,8 @@ class Guards(unittest.TestCase):
         self.git("add", rel)
         self.git("commit", "-qm", msg)
 
-    def test_guarded_path_and_relaxed_yaml_line_are_violations(self):
-        self.commit(".claude/knowledge/indexing.md", "weaker rule")
-        self.commit("pkg/integration_test.tycho.yaml", "harness: strict\nskip_balance_check: true\ntests: []\n")
-        self.commit("pkg/src/lib.rs", "fn main() {}")
-        found = ledger.check_guards(self.tree, self.base, "HEAD")
-        self.assertEqual(sorted(v["path"] for v in found), [".claude/knowledge/indexing.md", "pkg/integration_test.tycho.yaml"])
-
     EXECUTION_RS = "protocols/testing/src/execution.rs"
     MAPPING = 'const FOO_BYTECODE_JSON: &str = include_str!("../fixtures/Foo.runtime.json");\n    map.insert("foo", FOO_BYTECODE_JSON);\n'
-
-    def test_executor_fixture_lines_are_the_one_allowed_harness_change(self):
-        self.commit(self.EXECUTION_RS, "fn mapping() {\n}\n")
-        base = self.git("rev-parse", "HEAD").strip()
-        self.commit(self.EXECUTION_RS, "fn mapping() {\n" + self.MAPPING + "}\n")
-        self.assertEqual(ledger.check_guards(self.tree, base, "HEAD"), [])
-        self.commit(self.EXECUTION_RS, "fn mapping() {\n" + self.MAPPING + "    let strict = false;\n}\n")
-        found = ledger.check_guards(self.tree, base, "HEAD")
-        self.assertEqual(len(found), 1)
-        self.assertIn("let strict = false", found[0]["why"])
 
     REGISTRY_RS = "protocols/testing/src/state_registry.rs"
     REGISTRY = (
@@ -325,6 +317,36 @@ class Guards(unittest.TestCase):
         '        "foo" => stream_builder.exchange_with_decoder_context::<FooState>(\n'
         "            protocol_system,\n            tvl_filter,\n            None,\n            decoder_context,\n        ),\n"
     )
+
+    def hook(self, role, tool, tool_input, env_drop=()):
+        # The test tree lives in the temp dir, which a role may write: name another as the temp root.
+        env = {**os.environ, "TYCHO_INTEGRATE_GUARD": role, "TYCHO_INTEGRATE_WORKTREE": str(self.tree), "TYCHO_INTEGRATE_RUN": str(Path(self.tmp.name) / "run"),
+               "TYCHO_INTEGRATE_REPO": str(self.tree), "TYCHO_INTEGRATE_TMP_ROOTS": str(Path(self.tmp.name) / "scratch")}
+        for k in env_drop:
+            env.pop(k)
+        proc = subprocess.run([sys.executable, "-I", str(GUARD)], input=json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": str(self.tree)}), capture_output=True, text=True, env=env)
+        # A crashing guard lets the call through in Claude Code, so a crash is never "allow" here.
+        self.assertEqual((proc.returncode, proc.stderr), (0, ""), "the guard crashed")
+        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] if proc.stdout.strip() else "allow"
+
+
+class Guards(GitTree):
+    def test_guarded_path_and_relaxed_yaml_line_are_violations(self):
+        self.commit(".claude/knowledge/indexing.md", "weaker rule")
+        self.commit("pkg/integration_test.tycho.yaml", "harness: strict\nskip_balance_check: true\ntests: []\n")
+        self.commit("pkg/src/lib.rs", "fn main() {}")
+        found = ledger.check_guards(self.tree, self.base, "HEAD")
+        self.assertEqual(sorted(v["path"] for v in found), [".claude/knowledge/indexing.md", "pkg/integration_test.tycho.yaml"])
+
+    def test_executor_fixture_lines_are_the_one_allowed_harness_change(self):
+        self.commit(self.EXECUTION_RS, "fn mapping() {\n}\n")
+        base = self.git("rev-parse", "HEAD").strip()
+        self.commit(self.EXECUTION_RS, "fn mapping() {\n" + self.MAPPING + "}\n")
+        self.assertEqual(ledger.check_guards(self.tree, base, "HEAD"), [])
+        self.commit(self.EXECUTION_RS, "fn mapping() {\n" + self.MAPPING + "    let strict = false;\n}\n")
+        found = ledger.check_guards(self.tree, base, "HEAD")
+        self.assertEqual(len(found), 1)
+        self.assertIn("let strict = false", found[0]["why"])
 
     def test_a_new_decoder_arm_and_its_import_are_allowed_in_the_registry(self):
         self.commit(self.REGISTRY_RS, self.REGISTRY)
@@ -356,17 +378,6 @@ class Guards(unittest.TestCase):
         self.assertTrue(schema.guarded_yaml_changes([], ["        kind: under_cap"]))
         self.assertEqual(schema.guarded_yaml_changes(["limits: {kind: hard}"], ["limits: {kind: hard}"]), [])
 
-    def hook(self, role, tool, tool_input, env_drop=()):
-        # The test tree lives in the temp dir, which a role may write: name another as the temp root.
-        env = {**os.environ, "TYCHO_INTEGRATE_GUARD": role, "TYCHO_INTEGRATE_WORKTREE": str(self.tree), "TYCHO_INTEGRATE_RUN": str(Path(self.tmp.name) / "run"),
-               "TYCHO_INTEGRATE_REPO": str(self.tree), "TYCHO_INTEGRATE_TMP_ROOTS": str(Path(self.tmp.name) / "scratch")}
-        for k in env_drop:
-            env.pop(k)
-        proc = subprocess.run([sys.executable, "-I", str(GUARD)], input=json.dumps({"tool_name": tool, "tool_input": tool_input, "cwd": str(self.tree)}), capture_output=True, text=True, env=env)
-        # A crashing guard lets the call through in Claude Code, so a crash is never "allow" here.
-        self.assertEqual((proc.returncode, proc.stderr), (0, ""), "the guard crashed")
-        return json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] if proc.stdout.strip() else "allow"
-
     def test_hook_denies_knowledge_edits_and_test_relaxing_lines(self):
         self.assertEqual(self.hook("implementer", "Edit", {"file_path": str(self.tree / ".claude/knowledge/x.md"), "old_string": "a", "new_string": "b"}), "deny")
         yaml = str(self.tree / "pkg/integration_test.tycho.yaml")
@@ -390,8 +401,8 @@ class Guards(unittest.TestCase):
         self.assertEqual(self.hook("researcher", "Write", {"file_path": str(Path(self.tmp.name) / "run/spec.json"), "content": "{}"}), "allow")
 
 
-class GuardHoles(Guards):
-    """The ways past the guard the review of #1852 found."""
+class GuardHoles(GitTree):
+    """Writes, pushes and GitHub calls the guard denies however they are spelled."""
 
     def run_dir(self):
         return Path(self.tmp.name) / "run"
@@ -438,11 +449,146 @@ class GuardHoles(Guards):
         self.git("commit", "-qm", "drop the executor table")
         self.assertEqual([v["why"] for v in ledger.check_guards(self.tree, self.base, "HEAD")], ["deletes a guarded file"])
 
+    def test_the_read_set_names_only_agreed_attributes(self):
+        spec = {"read_set": [{"address": "0xp", "slots": [], "tracked_by": "attribute `reserves`"}]}
+        dec = {"agreements": {"protocol_system": "foo", "component_id": "x", "attributes": [{"name": "fee"}]}, "paths": {"package": "p"}}
+        self.assertTrue(any("reserves" in e for e in schema.validate_decisions(dec, spec)))
+        dec["agreements"]["attributes"].append({"name": "reserves"})
+        self.assertEqual(schema.validate_decisions(dec, spec), [])
+
     def test_decision_values_cannot_carry_a_command(self):
         dec = {"agreements": {"protocol_system": "foo", "component_id": "x"}, "paths": {"package": "x; touch /tmp/pwned; echo"}}
         self.assertTrue(any("paths.package" in e for e in schema.validate_decisions(dec, {})))
         dec["paths"]["package"] = "ethereum-foo"
         self.assertEqual(schema.validate_decisions(dec, {}), [])
+
+
+class GuardHolesMore(GitTree):
+    def test_agents_do_not_run_the_runs_state_changing_scripts(self):
+        for role in ("implementer", "researcher", "reviewer"):
+            self.assertEqual(self.hook(role, "Bash", {"command": "python3 -I .claude/skills/tycho-integrate/scripts/state.py Foo decide --id Q1 --choice x --waive"}), "deny")
+        self.assertEqual(self.hook("researcher", "Bash", {"command": "python3 -I .claude/skills/tycho-integrate/scripts/state.py Foo status"}), "allow")
+
+    def test_attached_field_flags_make_gh_api_a_write(self):
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "gh api repos/a/b/issues/1/comments -fbody=x"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "gh api repos/a/b/pulls/1 --jq .title"}), "allow")
+
+    def test_a_review_touches_no_branch_and_only_its_own_worktree(self):
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": "git branch -f main HEAD~3"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"git worktree remove --force {self.tree}/../integrate-foo"}), "deny")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"git worktree remove --force {self.tree}/.claude/reviews/r/worktree"}), "allow")
+        self.assertEqual(self.hook("reviewer", "Bash", {"command": f"python3 -c \"from pathlib import Path; Path('{self.tree}/.claude/reviews/r.json').write_text('scripts/guard.py')\""}), "allow")
+
+    def test_part_of_a_guarded_yaml_line_cannot_be_edited(self):
+        yaml = str(self.tree / "pkg/integration_test.tycho.yaml")
+        self.assertEqual(self.hook("implementer", "Edit", {"file_path": yaml, "old_string": "strict", "new_string": "legacy"}), "deny")
+
+    def test_a_new_system_may_join_an_existing_decoder_arm(self):
+        arm = '"a" | "b" => stream_builder.exchange_with_decoder_context::<S>(protocol_system, tvl_filter, None, decoder_context),'
+        self.assertEqual(schema._state_registry_change(arm, arm.replace('"b" =>', '"b" | "fork" =>')), [])
+        self.assertTrue(schema._state_registry_change(arm, arm.replace('"b" =>', '"b" | "a" =>')))
+
+
+class RunRecords(unittest.TestCase):
+    def test_records_an_agent_changed_are_put_back(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as saved:
+            run = Path(d)
+            (run / "ledger.jsonl").write_text("{}\n")
+            (run / "spec.json").write_text("{}")
+            before = schema.protected_digest(run)
+            Path(saved, "ledger.jsonl").write_text("{}\n")
+            (run / "ledger.jsonl").write_text("{}\nforged\n")
+            (run / "spec.json").write_text('{"changed": true}')  # the researcher's own file
+            (run / "rounds").mkdir()
+            (run / "rounds" / "x.json").write_text("{}")
+            self.assertEqual(run_agent.restore_protected(run, Path(saved), before), ["ledger.jsonl", "rounds/x.json"])
+            self.assertEqual((run / "ledger.jsonl").read_text(), "{}\n")
+            self.assertFalse((run / "rounds" / "x.json").exists())
+
+
+class VenueQuotes(unittest.TestCase):
+    SPEC = {"venue_quotes": [{"id": "V1", "chain": "ethereum", "block": 1, "to": "0xv", "data": "0x", "result": "0x05"}]}
+
+    def quotes(self, router_error):
+        def rpc(url, method, params, timeout=20):
+            if params[0].get("from"):
+                raise RuntimeError(router_error)
+            return "0x05"
+        with mock.patch.object(schema, "rpc_url", return_value="http://node"), mock.patch.object(onchain, "router", return_value="0xr"), \
+                mock.patch.object(envcheck, "rpc", side_effect=rpc):
+            return onchain.check_quotes(self.SPEC, Path("."))[0]["status"]
+
+    def test_only_a_revert_from_the_router_is_caller_dependent(self):
+        self.assertEqual(self.quotes("execution reverted: not whitelisted"), "caller-dependent")
+        self.assertEqual(self.quotes("daily request count exceeded, request rate limited"), "unread")
+
+
+class FinalGates(GitTree):
+    def setUp(self):
+        super().setUp()
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+
+    def test_the_venue_quote_test_names_the_block_and_asserts_the_result(self):
+        spec = {"venue_quotes": [{"id": "V1", "block": 21000000, "result": "0x" + f"{12345:064x}"}]}
+        test = "crates/tycho-simulation/src/evm/protocol/foo/state.rs"
+        self.commit(test, "#[test]\nfn quotes_like_the_venue() { at_block(21_000_000); }\n")
+        self.assertEqual(final_gates.gate_venue_quote_test(spec, self.tree, ["simulation"])["status"], "fail")
+        self.commit(test, "#[test]\nfn quotes_like_the_venue() { at_block(21_000_000); assert_eq!(out, 12345); }\n")
+        self.assertEqual(final_gates.gate_venue_quote_test(spec, self.tree, ["simulation"])["status"], "pass")
+        self.assertEqual(final_gates.gate_venue_quote_test(spec, self.tree, ["execution"])["status"], "n/a")
+
+    def test_an_accepted_guarded_change_covers_that_change_only(self):
+        run = Path(self.tmp.name) / "run"
+        run.mkdir()
+        ledger.ledger_path(run).touch()
+        self.commit("protocols/testing/src/lib.rs", "weaker")
+        found = ledger.check_guards(self.tree, self.base, "HEAD")
+        ledger.append(run, {"t": "guard_violation", "layer": "indexing", "round": 1, "paths": found})
+        ledger.append(run, {"t": "decision_needed", "id": "Q1", "class": "relax-test", "question": "?", "layer": "indexing", "escalation": "guard"})
+        ledger.append(run, {"t": "decision", "id": "Q1", "choice": "accept", "by": "person", "accept_guard": True})
+        self.assertEqual(final_gates.gate_guards(run, self.tree)["status"], "pass")
+        self.commit(self.EXECUTION_RS, "gone")
+        self.assertEqual(final_gates.gate_guards(run, self.tree)["status"], "fail")
+
+    def test_a_split_keeps_the_copy_commit_before_its_adaptation(self):
+        self.git("checkout", "-qb", "integrate/foo")
+        self.commit("ix/copy.rs", "upstream\n", msg="copy verbatim")
+        self.commit("ix/copy.rs", "upstream\nadapted\n", msg="adapt")
+        self.commit("sim/s.rs", "s\n", msg="simulation")
+        self.git("checkout", "-q", self.base)
+        target = Path(self.tmp.name) / "pr-ix"
+        self.git("worktree", "add", "-q", "-b", "pr/ix", str(target), self.base)
+        split.replay(target, "integrate/foo", self.base, ["ix"])
+        log = subprocess.run(["git", "-C", str(target), "log", "--format=%s", f"{self.base}..HEAD"], capture_output=True, text=True).stdout.split("\n")
+        self.assertEqual([m for m in log if m], ["adapt", "copy verbatim"])
+
+
+class ReviewLevel(GitTree):
+    def test_full_on_first_rounds_disputes_and_quote_path_changes(self):
+        first = self.git("rev-parse", "HEAD").strip()
+        self.commit("docs/a.md", "x")
+        docs = self.git("rev-parse", "HEAD").strip()
+        self.commit("crates/tycho-simulation/src/evm/protocol/foo/state.rs", "x")
+        quote = self.git("rev-parse", "HEAD").strip()
+        st = ledger.State([{"t": "round", "layer": "simulation", "n": 1, "head": first, "checks": "green"}])
+        self.assertEqual(prompt.review_level(st, "simulation", 1, self.tree), "full")
+        st._apply({"t": "round", "layer": "simulation", "n": 2, "head": docs, "checks": "green"})
+        self.assertEqual(prompt.review_level(st, "simulation", 2, self.tree), "partial")
+        st._apply({"t": "round", "layer": "simulation", "n": 3, "head": quote, "checks": "green"})
+        self.assertEqual(prompt.review_level(st, "simulation", 3, self.tree), "full")
+
+
+class Retry(unittest.TestCase):
+    def test_a_step_the_environment_fails_twice_is_infra(self):
+        infra = {"name": "s", "status": "fail", "detail": "429", "infra": "rpc rate limit"}
+        with mock.patch.object(layer_checks, "RETRY_PAUSE_S", 0), mock.patch.object(layer_checks, "run_once", side_effect=[infra, dict(infra)]):
+            self.assertEqual(layer_checks.run_with_retry({}, {}, Path("."), Path("."), "s", "ethereum", None)["status"], "infra")
+        with mock.patch.object(layer_checks, "RETRY_PAUSE_S", 0), mock.patch.object(layer_checks, "run_once", side_effect=[infra, {"name": "s", "status": "pass"}]):
+            self.assertEqual(layer_checks.run_with_retry({}, {}, Path("."), Path("."), "s", "ethereum", None)["status"], "pass")
+        code = {"name": "s", "status": "fail", "detail": "assertion failed"}
+        with mock.patch.object(layer_checks, "run_once", side_effect=[code]) as once:
+            self.assertEqual(layer_checks.run_with_retry({}, {}, Path("."), Path("."), "s", "ethereum", None)["status"], "fail")
+            self.assertEqual(once.call_count, 1)
 
 
 class SpecValidation(unittest.TestCase):
@@ -499,6 +645,12 @@ class ResumeAndReviewIdentity(RunCase):
         ledger.record_round(self.run, self.state(), "indexing", "abc", "green", None)
         self.assertEqual(self.state().rounds["indexing"][-1]["checks"], "green")
 
+    def test_a_round_after_a_review_at_the_same_head_is_a_new_round(self):
+        ledger.record_round(self.run, self.state(), "indexing", "abc", "green", None)
+        self.review(1)
+        ledger.record_round(self.run, self.state(), "indexing", "abc", "green", None)
+        self.assertEqual([r["n"] for r in self.state().rounds["indexing"]], [1, 2])
+
     def test_ingesting_a_sidecar_twice_counts_one_review(self):
         for _ in range(2):
             n = self.round()
@@ -513,7 +665,14 @@ class ResumeAndReviewIdentity(RunCase):
         with self.assertRaises(SystemExit):
             ledger.ingest_review(self.run, "indexing", n, self.sidecar({"head": "bbbb", "findings": []}))
         ledger.ingest_review(self.run, "indexing", n, self.sidecar({"not_run": ["every pass"], "findings": []}))
-        self.assertEqual(self.next(), {"action": "continue", "reason": "the last round's review did not run every pass"})
+        self.assertEqual(self.next(), {"action": "continue", "reason": "the last round's review left out a core pass"})
+
+    def test_parts_a_review_leaves_out_by_design_do_not_make_it_incomplete(self):
+        n = self.round()
+        not_run = ["integration pass: level partial", "execution verifier (pass `full`)", "ast-grep: no sgconfig.yml at the base",
+                   "chunk passes on 3 files: unchanged since abc123"]
+        ledger.ingest_review(self.run, "indexing", n, self.sidecar({"not_run": not_run, "findings": []}))
+        self.assertEqual(self.next()["action"], "clean")
 
     def test_a_finding_without_a_severity_is_refused(self):
         n = self.round()
@@ -558,12 +717,12 @@ class RunStop(RunCase):
 class FailedChecks(RunCase):
     def checks(self, failing):
         path = Path(self.tmp.name) / f"checks{len(self.state().rounds['indexing'])}.json"
-        steps = [{"name": "protocol-testing", "status": "fail", "checks": [{"test": "t", "check": c, "outcome": "fail", "detail": "x"} for c in failing]}] if failing else []
-        path.write_text(json.dumps({"steps": steps}))
+        steps = [{"name": "protocol-testing", "status": "fail", "checks": [{"test": "t", "check": c, "outcome": "fail", "detail": "x"} for c in failing]}] if failing else [{"name": "protocol-testing", "status": "pass"}]
+        path.write_text(json.dumps({"green": not failing, "steps": steps}))
         return path
 
     def test_a_failed_check_is_a_finding_a_dispute_can_settle(self):
-        ledger.record_round(self.run, self.state(), "indexing", "h1", "red", self.checks(["balances"]))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", None, self.checks(["balances"]))
         [f] = self.state().open_findings("indexing")
         self.assertEqual(f["rule"], "check:protocol-testing:balances")
         self.review(1)
@@ -573,9 +732,16 @@ class FailedChecks(RunCase):
         self.assertEqual(self.next()["action"], "clean")
 
     def test_a_check_that_passes_again_closes_its_finding(self):
-        ledger.record_round(self.run, self.state(), "indexing", "h1", "red", self.checks(["balances"]))
-        ledger.record_round(self.run, self.state(), "indexing", "h2", "green", self.checks([]))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", None, self.checks(["balances"]))
+        ledger.record_round(self.run, self.state(), "indexing", "h2", None, self.checks([]))
         self.assertEqual(self.state().open_findings("indexing"), [])
+
+    def test_a_check_that_did_not_run_keeps_its_finding(self):
+        ledger.record_round(self.run, self.state(), "indexing", "h1", None, self.checks(["balances"]))
+        infra = Path(self.tmp.name) / "infra.json"
+        infra.write_text(json.dumps({"green": False, "steps": [{"name": "protocol-testing", "status": "infra", "infra": "rpc", "detail": "x"}]}))
+        ledger.record_round(self.run, self.state(), "indexing", "h2", None, infra)
+        self.assertEqual(len(self.state().open_findings("indexing")), 1)
 
 
 class Environment(RunCase):
@@ -588,8 +754,8 @@ class Environment(RunCase):
         self.assertEqual((result["reason"], result["class"]), ("infra", "outside-repo"))
         self.assertIn("substreams token", result["question"])
         # fixed and rerun at the same head: the same round, and the layer goes on
-        checks.write_text(json.dumps({"steps": []}))
-        ledger.record_round(self.run, self.state(), "indexing", "h1", "green", checks)
+        checks.write_text(json.dumps({"green": True, "steps": [{"name": "protocol-testing", "status": "pass"}]}))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", None, checks)
         self.assertEqual(len(self.state().rounds["indexing"]), 1)
         self.assertEqual(self.next()["reason"], "not reviewed")
 

@@ -131,7 +131,12 @@ GUARDED_YAML_KEYS = (
 ALLOWED_NEW_YAML_LINES = ("harness: strict",)
 # A guarded key anywhere on the line: block (`  - skip_execution: true`), flow
 # (`- {id: "0x..", skip_execution: true}`) or quoted (`"skip_execution": true`).
-GUARDED_YAML_RE = re.compile(r"(^|[{,\s-])[\"']?(" + "|".join(GUARDED_YAML_KEYS) + r")[\"']?\s*:")
+def yaml_key_re(*keys) -> re.Pattern:
+    """A yaml key anywhere on a line: block, flow or quoted."""
+    return re.compile(r"(^|[{,\s-])[\"']?(" + "|".join(keys) + r")[\"']?\s*:", re.M)
+
+
+GUARDED_YAML_RE = yaml_key_re(*GUARDED_YAML_KEYS)
 # An `under_cap` limit gives up capacity below the venue's bound: a quantified trade-off.
 UNDER_CAP_RE = re.compile(r"\bunder_cap\b")
 # A declared limit kind. Writing one is the implementer's work, from the contract; changing or
@@ -222,15 +227,19 @@ _REGISTRY_ARM = re.compile(
     r'"[a-z0-9_:]+"(?:\|"[a-z0-9_:]+")*=>stream_builder\.exchange_with_decoder_context::<[A-Za-z0-9_:<>]+>'
     r"\(protocol_system,tvl_filter,None,decoder_context,?\),"
 )
+_ARM_ALTERNATIVE = re.compile(r'\|"[a-z0-9_:]+"(?=[|=])')
 _SIM_IMPORT = re.compile(r"usetycho_simulation::\{.*?\};", re.S)
 
 
 def _state_registry_change(old: str, new: str) -> list:
     """protocols/testing's decoder registry: a new protocol system gets a decoder arm, and its state
     type may be imported. Nothing else may change: existing arms, the default arm and the TVL filter
-    stay as they are."""
+    stay as they are; an existing arm may gain a new system's name."""
     o, n = rust_compact(old), rust_compact(new)
     n = _strip_new(n, o, _REGISTRY_ARM)
+    # A fork's system added to an existing arm (`"a" | "b" | "new" =>`), as protocols/testing does
+    # for clones of one decoder: the new name only, never one that exists.
+    n = _strip_new(n, o, _ARM_ALTERNATIVE)
     o_imp, n_imp = _SIM_IMPORT.search(o), _SIM_IMPORT.search(n)
     if o_imp and n_imp:
         # An import only names a type; its tokens may grow, none may go.
@@ -287,19 +296,27 @@ EVENT_FIELDS = {
     "amendment": ("fact", "evidence"),
     "guard_violation": ("layer", "round", "paths"),
     "stop": ("reason",),
+    # An agent session changed the run's records; run_agent.py restored them (`paths`).
+    "tamper": ("label", "paths"),
     # A comment from the person's blind review of a shadow-mode PR: what the pipeline let through.
     "escape": ("comment", "severity", "cause"),  # layer-scoped when it carries `layer`, run-scoped otherwise
 }
 
 
-# The git-ignored env files the tests read, from the person's checkout. worktree.py links them into
-# the run's worktree; the scripts load them (the shell's own variables win). protocols/testing's
-# runner reads its own `.env` from its directory, so the scripts must see it too.
-ENV_FILES = ("docker/.env", ".env", "protocols/testing/.env")
+# The git-ignored env files from the person's checkout. The scripts load ENV_FILES (the shell's own
+# variables win). worktree.py links LINKED_ENV_FILES into the run's worktree: protocols/testing's
+# runner reads its own `.env` there, but the scripts do not load it, since its `RPC_URL` is
+# whichever chain the person last tested, not Ethereum's.
+ENV_FILES = ("docker/.env", ".env")
+LINKED_ENV_FILES = (*ENV_FILES, "protocols/testing/.env")
 
 
-def load_env_files() -> list:
-    """Loads ENV_FILES into the environment; the names it set."""
+_FROM_ENV_FILES = set()
+
+
+def load_env_files(refresh: bool = False) -> list:
+    """Loads ENV_FILES into the environment; the names it set. The shell's own variables win; with
+    `refresh`, values an earlier load took from the files are read again (a renewed token)."""
     loaded = []
     for rel in ENV_FILES:
         path = repo_root() / rel
@@ -311,8 +328,9 @@ def load_env_files() -> list:
                 continue
             key, _, value = line.removeprefix("export ").partition("=")
             key, value = key.strip(), value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and (key not in os.environ or (refresh and key in _FROM_ENV_FILES)):
                 os.environ[key] = value
+                _FROM_ENV_FILES.add(key)
                 loaded.append(key)
     return loaded
 
@@ -325,14 +343,19 @@ def rpc_vars(chain: str) -> list:
     return names.get(chain, [f"{chain.upper()}_RPC_URL"])
 
 
+def no_rpc(chain: str) -> str:
+    """What to set when a chain has no RPC."""
+    return f"no RPC for {chain}: set {' or '.join(rpc_vars(chain))} (an archive node)"
+
+
 def rpc_url(chain: str):
     """The chain's RPC URL from the environment (after `load_env_files`), or None."""
     return next((os.environ[n] for n in rpc_vars(chain) if os.environ.get(n)), None)
 
 
-def git(*args, cwd=None, check=True) -> subprocess.CompletedProcess:
+def git(*args, cwd=None, check=True, input=None) -> subprocess.CompletedProcess:
     """One git command, its output captured as text."""
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check)
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check, input=input)
 
 
 def repo_root() -> Path:
@@ -371,6 +394,24 @@ def worktree_dir(protocol: str) -> Path:
 
 def branch(protocol: str) -> str:
     return f"integrate/{slug(protocol)}"
+
+
+# The run directory's records no agent writes: the orchestrator's and the person's. guard.py denies
+# the writes it can see; run_agent.py snapshots these around every agent session and restores any
+# it changed, which catches every other way of writing them.
+PROTECTED_RUN_FILES = ("ledger.jsonl", "intake.json", "settings", "rounds", "final_gates.json", "env.json", "prompts")
+
+
+def protected_digest(run: Path) -> dict:
+    """{relative path: sha256} of every file under PROTECTED_RUN_FILES."""
+    import hashlib
+    out = {}
+    for name in PROTECTED_RUN_FILES:
+        root = run / name
+        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else []
+        for f in files:
+            out[str(f.relative_to(run))] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
 
 
 # The branch a run builds on and its PR targets.
@@ -570,6 +611,13 @@ def validate_decisions(doc: dict, spec: dict) -> list:
     for key in ("protocol_system", "component_id"):
         if not agreements.get(key):
             errors.append(f"decisions.agreements: `{key}` is required")
+    # The read set's attribute claims hold against the agreements: a slot said to be tracked by an
+    # attribute is tracked by one the layers agreed on.
+    names = {a.get("name") for a in agreements.get("attributes") or []}
+    for r in spec.get("read_set") or []:
+        m = re.search(r"attribute\s+`?([A-Za-z0-9_]+)`?", r.get("tracked_by") or "")
+        if m and m.group(1) not in names:
+            errors.append(f"decisions.agreements.attributes: the spec's read set says `{m.group(1)}` tracks {r.get('address')}, but no agreed attribute has that name")
     paths = doc.get("paths") or {}
     if not paths.get("package"):
         errors.append("decisions.paths: `package` (the Substreams package directory name) is required")
