@@ -56,6 +56,19 @@ pub enum HandlerAfterSwapAnswer {
     Fails,
 }
 
+/// What [`ExtensionTestHook::check_swap_outcome`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeCheckAnswer {
+    /// `Ok(())`: the trait's default.
+    Accepts,
+    /// `InvalidInput` for a swap that leaves part of its input unfilled.
+    RefusesUnfilledInput,
+    /// `InvalidInput` for a swap that ends below this sqrt price.
+    RefusesBelow(U256),
+    /// `RecoverableError`, as a hook that cannot check would.
+    Fails,
+}
+
 /// A hook with no permissions and no swap behaviour of its own, that answers the extension points
 /// per its fields. The defaults leave every extension point at the trait's default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +77,8 @@ pub struct ExtensionTestHook {
     pub spot_fees: SpotFeesAnswer,
     /// What `max_amount_in` answers, in either direction.
     pub max_amount_in: Option<U256>,
-    /// `check_swap_outcome` refuses a swap that ends below this sqrt price.
-    pub refuse_outcome_below: Option<U256>,
-    /// `check_swap_outcome` refuses a swap that leaves part of its input unfilled.
-    pub refuse_unfilled_input: bool,
-    /// `check_swap_outcome` fails with a `RecoverableError`, as a hook that cannot check would.
-    pub fail_outcome_check: bool,
+    /// What `check_swap_outcome` answers.
+    pub outcome_check: OutcomeCheckAnswer,
     /// What `swaps_from_empty_range` answers.
     pub swaps_from_empty_range: bool,
     /// What `handler_after_swap` answers.
@@ -82,9 +91,7 @@ impl Default for ExtensionTestHook {
             address: Address::ZERO,
             spot_fees: SpotFeesAnswer::NoFees,
             max_amount_in: None,
-            refuse_outcome_below: None,
-            refuse_unfilled_input: false,
-            fail_outcome_check: false,
+            outcome_check: OutcomeCheckAnswer::Accepts,
             swaps_from_empty_range: false,
             handler_after_swap: HandlerAfterSwapAnswer::Keep,
         }
@@ -140,17 +147,19 @@ impl HookHandler for ExtensionTestHook {
     }
 
     fn check_swap_outcome(&self, _: bool, outcome: &SwapOutcome) -> Result<(), SimulationError> {
-        if self.fail_outcome_check {
-            return Err(SimulationError::RecoverableError("the hook cannot check".into()));
-        }
-        if self.refuse_unfilled_input && !outcome.amount_unfilled.is_zero() {
-            return Err(SimulationError::InvalidInput("part of the input is unfilled".into(), None));
-        }
-        match self.refuse_outcome_below {
-            Some(floor) if outcome.sqrt_price_x96 < floor => {
+        match self.outcome_check {
+            OutcomeCheckAnswer::Fails => {
+                Err(SimulationError::RecoverableError("the hook cannot check".into()))
+            }
+            OutcomeCheckAnswer::RefusesUnfilledInput if !outcome.amount_unfilled.is_zero() => {
+                Err(SimulationError::InvalidInput("part of the input is unfilled".into(), None))
+            }
+            OutcomeCheckAnswer::RefusesBelow(floor) if outcome.sqrt_price_x96 < floor => {
                 Err(SimulationError::InvalidInput("the swap ends below the floor".into(), None))
             }
-            _ => Ok(()),
+            OutcomeCheckAnswer::Accepts |
+            OutcomeCheckAnswer::RefusesUnfilledInput |
+            OutcomeCheckAnswer::RefusesBelow(_) => Ok(()),
         }
     }
 
@@ -212,9 +221,10 @@ impl HookHandlerCreator for ExtensionTestHookCreator {
 /// The chain the decoder tests register their test hook on.
 pub const TEST_HOOK_CHAIN: Chain = Chain::Ethereum;
 
-/// The context and parameters of an exact-input swap of 1000 units of `currency_0`, for a test of
-/// a hook's `handler_after_swap`.
-pub fn swap_context_and_params() -> (StateContext, SwapParams) {
+/// A hook whose swaps write none of its own storage answers `handler_after_swap` with `None`, the
+/// trait's default, for an exact-input swap of 1000 units of `currency_0`. Panics if `hook`
+/// answers anything else.
+pub fn assert_handler_after_swap_keeps_the_hook(hook: &dyn HookHandler) {
     let context = StateContext {
         currency_0: Address::repeat_byte(1),
         currency_1: Address::repeat_byte(2),
@@ -228,13 +238,6 @@ pub fn swap_context_and_params() -> (StateContext, SwapParams) {
         amount_specified: I256::try_from(-1_000).unwrap(),
         sqrt_price_limit: U256::ZERO,
     };
-    (context, swap_params)
-}
-
-/// A hook whose swaps write none of its own storage answers `handler_after_swap` with `None`, the
-/// trait's default. Panics if `hook` answers anything else.
-pub fn assert_handler_after_swap_keeps_the_hook(hook: &dyn HookHandler) {
-    let (context, swap_params) = swap_context_and_params();
 
     let next = hook
         .handler_after_swap(&context, &swap_params)

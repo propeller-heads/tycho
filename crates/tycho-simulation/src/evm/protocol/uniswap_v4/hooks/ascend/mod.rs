@@ -95,11 +95,10 @@ struct Bid {
 pub struct AscendPoolState {
     /// The swap fee in pips, below 1e6.
     fee_pips: u32,
-    token_is_currency0: bool,
     start_tick: i32,
     observation: Observation,
     bid: Bid,
-    /// The launch curve of `start_tick` and the orientation, built once with the state.
+    /// The launch curve of `start_tick` and the orientation, which it also holds.
     curve: Curve,
 }
 
@@ -113,6 +112,23 @@ impl AscendPoolState {
         observation: Observation,
         bid: Bid,
     ) -> Result<Self, InvalidSnapshotError> {
+        let curve = Curve::try_new(token_is_currency0, start_tick).map_err(|e| {
+            InvalidSnapshotError::ValueError(format!(
+                "{START_TICK_ATTRIBUTE} = {start_tick} has no launch curve: {e}"
+            ))
+        })?;
+        Self::with_curve(fee_pips, start_tick, observation, bid, curve)
+    }
+
+    /// A state on `curve`, which must be the curve of `start_tick`, with the same checks as
+    /// [`Self::try_new`] on the other parts.
+    fn with_curve(
+        fee_pips: u32,
+        start_tick: i32,
+        observation: Observation,
+        bid: Bid,
+        curve: Curve,
+    ) -> Result<Self, InvalidSnapshotError> {
         if fee_pips >= FEE_PIPS_DENOMINATOR {
             return Err(InvalidSnapshotError::ValueError(format!(
                 "{FEE_PIPS_ATTRIBUTE} = {fee_pips} is not a fee below 1e6 pips"
@@ -123,12 +139,12 @@ impl AscendPoolState {
                 "{EMA_SQRT_PRICE_ATTRIBUTE} is 0, which no observation leaves"
             )));
         }
-        let curve = Curve::try_new(token_is_currency0, start_tick).map_err(|e| {
-            InvalidSnapshotError::ValueError(format!(
-                "{START_TICK_ATTRIBUTE} = {start_tick} has no launch curve: {e}"
-            ))
-        })?;
-        Ok(Self { fee_pips, token_is_currency0, start_tick, observation, bid, curve })
+        Ok(Self { fee_pips, start_tick, observation, bid, curve })
+    }
+
+    /// Whether the launched token is `currency0`.
+    fn token_is_currency0(&self) -> bool {
+        self.curve.token_is_currency0
     }
 
     /// Reads every `ascend_*` attribute out of `attributes`.
@@ -174,53 +190,57 @@ impl AscendPoolState {
         }
         let obs = base.map(|b| b.observation);
         let bid = base.map(|b| b.bid);
-        Self::try_new(
-            field(attributes, FEE_PIPS_ATTRIBUTE, pips, base.map(|b| b.fee_pips))?,
-            field(
+        let fee_pips = field(attributes, FEE_PIPS_ATTRIBUTE, pips, base.map(|b| b.fee_pips))?;
+        let token_is_currency0 = field(
+            attributes,
+            TOKEN_IS_CURRENCY0_ATTRIBUTE,
+            flag,
+            base.map(|b| b.token_is_currency0()),
+        )?;
+        let start_tick = field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.start_tick))?;
+        let observation = Observation {
+            ema: field(attributes, EMA_SQRT_PRICE_ATTRIBUTE, uint160, obs.map(|o| o.ema))?,
+            updated_at: field(
                 attributes,
-                TOKEN_IS_CURRENCY0_ATTRIBUTE,
-                flag,
-                base.map(|b| b.token_is_currency0),
+                EMA_UPDATED_AT_ATTRIBUTE,
+                uint64,
+                obs.map(|o| o.updated_at),
             )?,
-            field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.start_tick))?,
-            Observation {
-                ema: field(attributes, EMA_SQRT_PRICE_ATTRIBUTE, uint160, obs.map(|o| o.ema))?,
-                updated_at: field(
-                    attributes,
-                    EMA_UPDATED_AT_ATTRIBUTE,
-                    seconds,
-                    obs.map(|o| o.updated_at),
-                )?,
-                tick: field(attributes, OBSERVED_TICK_ATTRIBUTE, tick, obs.map(|o| o.tick))?,
-                discount: field(attributes, DISCOUNT_ATTRIBUTE, discount, obs.map(|o| o.discount))?,
-            },
-            Bid {
-                inventory: field(
-                    attributes,
-                    BID_INVENTORY_ATTRIBUTE,
-                    uint256,
-                    bid.map(|b| b.inventory),
-                )?,
-                filled: field(
-                    attributes,
-                    BID_FILLED_IN_WINDOW_ATTRIBUTE,
-                    uint256,
-                    bid.map(|b| b.filled),
-                )?,
-                window_start: field(
-                    attributes,
-                    BID_WINDOW_START_ATTRIBUTE,
-                    seconds,
-                    bid.map(|b| b.window_start),
-                )?,
-                max_clip: field(
-                    attributes,
-                    BID_MAX_CLIP_ATTRIBUTE,
-                    uint128,
-                    bid.map(|b| b.max_clip),
-                )?,
-            },
-        )
+            tick: field(attributes, OBSERVED_TICK_ATTRIBUTE, tick, obs.map(|o| o.tick))?,
+            discount: field(attributes, DISCOUNT_ATTRIBUTE, discount, obs.map(|o| o.discount))?,
+        };
+        let bid = Bid {
+            inventory: field(
+                attributes,
+                BID_INVENTORY_ATTRIBUTE,
+                uint256,
+                bid.map(|b| b.inventory),
+            )?,
+            filled: field(
+                attributes,
+                BID_FILLED_IN_WINDOW_ATTRIBUTE,
+                uint256,
+                bid.map(|b| b.filled),
+            )?,
+            window_start: field(
+                attributes,
+                BID_WINDOW_START_ATTRIBUTE,
+                uint64,
+                bid.map(|b| b.window_start),
+            )?,
+            max_clip: field(attributes, BID_MAX_CLIP_ATTRIBUTE, uint128, bid.map(|b| b.max_clip))?,
+        };
+        // The curve depends on the orientation and the start tick alone: a delta that leaves both
+        // as they were keeps the base's, whose construction is three tick-to-price conversions.
+        match base {
+            Some(base)
+                if base.token_is_currency0() == token_is_currency0 &&
+                    base.start_tick == start_tick =>
+            {
+                Self::with_curve(fee_pips, start_tick, observation, bid, base.curve)
+            }
+            _ => Self::try_new(fee_pips, token_is_currency0, start_tick, observation, bid),
+        }
     }
 }
 
@@ -239,15 +259,17 @@ fn fixed<const N: usize>(
     })
 }
 
-/// Unix seconds: 8 big-endian bytes.
-fn seconds(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
+/// An 8-byte big-endian `uint64`: the indexer's format for the timestamps, the fee and the
+/// discount.
+fn uint64(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
     Ok(u64::from_be_bytes(fixed(name, value, "a big-endian u64")?))
 }
 
-/// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`.
-/// [`AscendPoolState::try_new`] checks that it is below 100%.
+/// A fee in pips, which the hook stores as a `uint24`, in the indexer's `uint64` format.
+/// [`AscendPoolState::with_curve`] checks that it is below 100%; the hook's own bounds on a fee
+/// are not known (its source is unverified), so any fee below that decodes, 0 included.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let pips = seconds(name, value)?;
+    let pips = uint64(name, value)?;
     u32::try_from(pips).map_err(|_overflow| {
         InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a fee in pips"))
     })
@@ -256,7 +278,7 @@ fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
 /// The discount `d`: 8 big-endian bytes of a value below 2^32, which the hook stores as a
 /// `uint32`.
 fn discount(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let discount = seconds(name, value)?;
+    let discount = uint64(name, value)?;
     u32::try_from(discount).map_err(|_overflow| {
         InvalidSnapshotError::ValueError(format!("{name} = {discount} does not fit a uint32"))
     })

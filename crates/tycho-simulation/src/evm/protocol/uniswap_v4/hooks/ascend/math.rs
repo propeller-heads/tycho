@@ -3,7 +3,10 @@
 //! library have no proxy and no `delegatecall`, so the constants below are fixed for good.
 //!
 //! The library function `0x15821c64` is pure: the tests replay its outputs, read with `eth_call`
-//! on Elysium at block 8660000.
+//! on Elysium at block 8660000. Besides the exits its arithmetic implies, the function returns no
+//! fill in two cases that only those `eth_call`s show: when the pool's price is past the curve
+//! end on the far side from the fill price, and when it is exactly at the curve end (nothing is
+//! left to fill). `size_fill` reproduces both.
 //!
 //! The errors this module raises are [`SimulationError::InvalidInput`] and mean the same as a
 //! revert of the hook: this one swap cannot be served, as when a checked operation of the
@@ -163,8 +166,11 @@ impl Curve {
 /// / a`, with the prices in either order.
 ///
 /// The shared `get_amount0_delta(.., round_up = false)` divides the rounded-up product instead,
-/// where v4 floors it, so it can come out one unit above v4's; this one is local until that is
-/// fixed in its own change. The rounded-up case is the shared function's.
+/// where v4 floors it, so it can come out one unit above v4's. Changing the shared function would
+/// change every Uniswap v3 and v4 quote, so this copy stays local. A test pins a case where the
+/// two differ (and that this one matches a big-integer reference), so that fixing the shared
+/// function fails it and calls for this copy's removal. The rounded-up case is the shared
+/// function's.
 pub(super) fn amount0_delta_down(
     a: U256,
     b: U256,
@@ -306,13 +312,16 @@ fn tokens_for_capped_quote(curve: &Curve, x0: U256, cap: U256) -> Result<U256, S
         let d_sqrt = (cap << 96usize) / liquidity;
         let scaled = mul_div_floor(scaled_liquidity, d_sqrt, x0)?;
         // `x0 - d_sqrt` is positive: the cap is below the quote the pool pays out over the whole
-        // band, which is `liquidity * x0 / 2^96` at most.
-        Ok(scaled / sub(x0, d_sqrt, "the capped fill's price move")?)
+        // band, which is `liquidity * x0 / 2^96` at most. The check guards the division.
+        let remaining_price = sub(x0, d_sqrt, "the capped fill's price move")?;
+        if remaining_price.is_zero() {
+            return Err(refuse("the capped fill reaches a price of 0"));
+        }
+        Ok(scaled / remaining_price)
     } else {
         let capped_inverse =
             sub(scaled_liquidity.div_ceil(x0), cap, "the capped fill's inverse price")?;
-        // `capped_inverse` is positive for the same reason, so the division below is defined; the
-        // check only guards it.
+        // `capped_inverse` is positive for the same reason; the check guards the division.
         if capped_inverse.is_zero() {
             return Err(refuse("the capped fill reaches an infinite price"));
         }

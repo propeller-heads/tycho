@@ -352,6 +352,9 @@ impl UniswapV4State {
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
     ) -> Result<SwapResults, SimulationError> {
+        // v4-core's `Pool.swap` returns the zero delta at once on a zero amount, before its price
+        // checks and its loop, which is what a hook that took the whole input (a bid fill)
+        // leaves the pool leg with.
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
                 amount_calculated: I256::ZERO,
@@ -1041,12 +1044,11 @@ impl ProtocolSim for UniswapV4State {
         // the next swap of a route from the state it leaves. It is taken here, while the context
         // and the swap's parameters are still ours, and a refusal further on drops it with the
         // swap.
-        let next_hook = match &self.hook {
-            Some(hook) => hook
-                .handler_after_swap(&state_context, &swap_params)
-                .map_err(|e| hook_call_error("HandlerAfterSwap", e))?,
-            None => None,
-        };
+        let next_hook = self
+            .hook
+            .as_ref()
+            .map_or(Ok(None), |hook| hook.handler_after_swap(&state_context, &swap_params))
+            .map_err(|e| hook_call_error("HandlerAfterSwap", e))?;
 
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
@@ -1517,7 +1519,10 @@ mod tests {
                         WithGasEstimate,
                     },
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
-                    test_hook::{ExtensionTestHook, HandlerAfterSwapAnswer, SpotFeesAnswer},
+                    test_hook::{
+                        ExtensionTestHook, HandlerAfterSwapAnswer, OutcomeCheckAnswer,
+                        SpotFeesAnswer,
+                    },
                 },
                 utils::uniswap::{
                     lp_fee,
@@ -3391,7 +3396,7 @@ mod tests {
     ) {
         let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
         pool.set_hook_handler(Box::new(ExtensionTestHook {
-            refuse_outcome_below: Some(floor),
+            outcome_check: OutcomeCheckAnswer::RefusesBelow(floor),
             ..Default::default()
         }));
         let (token_in, token_out) = basic_v4_test_pool_tokens(true);
@@ -3415,7 +3420,7 @@ mod tests {
     fn test_get_amount_out_reports_a_failing_outcome_check_as_fatal() {
         let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
         pool.set_hook_handler(Box::new(ExtensionTestHook {
-            fail_outcome_check: true,
+            outcome_check: OutcomeCheckAnswer::Fails,
             ..Default::default()
         }));
         let (token_in, token_out) = basic_v4_test_pool_tokens(true);
@@ -4144,7 +4149,11 @@ mod tests {
         .unwrap();
         pool.set_hook_handler(Box::new(ExtensionTestHook {
             swaps_from_empty_range: true,
-            refuse_unfilled_input: refuse_unfilled,
+            outcome_check: if refuse_unfilled {
+                OutcomeCheckAnswer::RefusesUnfilledInput
+            } else {
+                OutcomeCheckAnswer::Accepts
+            },
             ..Default::default()
         }));
         // The position holds about 0.03 of token Y, so this input cannot fill.
