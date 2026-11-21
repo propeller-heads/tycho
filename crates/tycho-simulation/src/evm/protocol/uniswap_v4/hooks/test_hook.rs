@@ -4,7 +4,7 @@
 
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, I256, U256};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::{token::Token, Chain},
@@ -22,10 +22,10 @@ use crate::{
             hook_handler_creator::{HookCreationParams, HookHandlerCreator},
             models::{
                 AfterSwapDelta, AfterSwapParameters, BeforeSwapOutput, BeforeSwapParameters,
-                HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
+                HookSpotFees, StateContext, SwapOutcome, SwapParams, WithGasEstimate,
             },
         },
-        state::UniswapV4State,
+        state::{UniswapV4Fees, UniswapV4State},
     },
     protocol::errors::InvalidSnapshotError,
 };
@@ -38,6 +38,19 @@ pub enum SpotFeesAnswer {
     /// `Ok(Some(..))`.
     Fees(HookSpotFees),
     /// `InvalidInput`: the hook refuses the pool's current terms.
+    Refuses,
+    /// `FatalError`: the hook cannot answer.
+    Fails,
+}
+
+/// What [`ExtensionTestHook::handler_after_swap`] answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerAfterSwapAnswer {
+    /// `Ok(None)`: the swap leaves the hook as it is, the trait's default.
+    Keep,
+    /// `Ok(Some(..))`: the hook of the same kind at this address.
+    ReplaceWithAddress(Address),
+    /// `InvalidInput`: the hook refuses the swap.
     Refuses,
     /// `FatalError`: the hook cannot answer.
     Fails,
@@ -59,6 +72,8 @@ pub struct ExtensionTestHook {
     pub fail_outcome_check: bool,
     /// What `swaps_from_empty_range` answers.
     pub swaps_from_empty_range: bool,
+    /// What `handler_after_swap` answers.
+    pub handler_after_swap: HandlerAfterSwapAnswer,
 }
 
 impl Default for ExtensionTestHook {
@@ -71,6 +86,7 @@ impl Default for ExtensionTestHook {
             refuse_unfilled_input: false,
             fail_outcome_check: false,
             swaps_from_empty_range: false,
+            handler_after_swap: HandlerAfterSwapAnswer::Keep,
         }
     }
 }
@@ -138,6 +154,27 @@ impl HookHandler for ExtensionTestHook {
         }
     }
 
+    fn handler_after_swap(
+        &self,
+        _: &StateContext,
+        _: &SwapParams,
+    ) -> Result<Option<Box<dyn HookHandler>>, SimulationError> {
+        match self.handler_after_swap {
+            HandlerAfterSwapAnswer::Keep => Ok(None),
+            HandlerAfterSwapAnswer::ReplaceWithAddress(address) => Ok(Some(Box::new(Self {
+                address,
+                handler_after_swap: HandlerAfterSwapAnswer::Keep,
+                ..self.clone()
+            }))),
+            HandlerAfterSwapAnswer::Refuses => {
+                Err(SimulationError::InvalidInput("the hook refuses the swap".into(), None))
+            }
+            HandlerAfterSwapAnswer::Fails => {
+                Err(SimulationError::FatalError("the hook cannot answer".into()))
+            }
+        }
+    }
+
     fn delta_transition(
         &mut self,
         _: ProtocolStateDelta,
@@ -175,35 +212,44 @@ impl HookHandlerCreator for ExtensionTestHookCreator {
 /// The chain the decoder tests register their test hook on.
 pub const TEST_HOOK_CHAIN: Chain = Chain::Ethereum;
 
+/// The context and parameters of an exact-input swap of 1000 units of `currency_0`, for a test of
+/// a hook's `handler_after_swap`.
+pub fn swap_context_and_params() -> (StateContext, SwapParams) {
+    let context = StateContext {
+        currency_0: Address::repeat_byte(1),
+        currency_1: Address::repeat_byte(2),
+        fees: UniswapV4Fees::new(0, 0, 3000),
+        tick_spacing: 60,
+        sqrt_price_x96: U256::from(1u64) << 96,
+        tick: 0,
+    };
+    let swap_params = SwapParams {
+        zero_for_one: true,
+        amount_specified: I256::try_from(-1_000).unwrap(),
+        sqrt_price_limit: U256::ZERO,
+    };
+    (context, swap_params)
+}
+
+/// A hook whose swaps write none of its own storage answers `handler_after_swap` with `None`, the
+/// trait's default. Panics if `hook` answers anything else.
+pub fn assert_handler_after_swap_keeps_the_hook(hook: &dyn HookHandler) {
+    let (context, swap_params) = swap_context_and_params();
+
+    let next = hook
+        .handler_after_swap(&context, &swap_params)
+        .unwrap();
+
+    assert!(next.is_none());
+}
+
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::I256;
-
     use super::*;
-    use crate::evm::protocol::uniswap_v4::{hooks::models::StateContext, state::UniswapV4Fees};
 
     /// A hook that does not override `handler_after_swap` leaves its handler as it is.
     #[test]
     fn test_handler_after_swap_defaults_to_keeping_the_hook() {
-        let hook = ExtensionTestHook::default();
-        let context = StateContext {
-            currency_0: Address::repeat_byte(1),
-            currency_1: Address::repeat_byte(2),
-            fees: UniswapV4Fees::new(0, 0, 3000),
-            tick_spacing: 60,
-            sqrt_price_x96: U256::from(1u64) << 96,
-            tick: 0,
-        };
-        let swap_params = SwapParams {
-            zero_for_one: true,
-            amount_specified: I256::try_from(-1_000).unwrap(),
-            sqrt_price_limit: U256::ZERO,
-        };
-
-        let next = hook
-            .handler_after_swap(&context, &swap_params)
-            .unwrap();
-
-        assert!(next.is_none());
+        assert_handler_after_swap_keeps_the_hook(&ExtensionTestHook::default());
     }
 }

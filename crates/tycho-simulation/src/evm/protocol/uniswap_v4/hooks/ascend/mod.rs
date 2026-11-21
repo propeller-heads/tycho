@@ -64,17 +64,6 @@ const POOL_ATTRIBUTES: [&str; 11] = [
 /// The smallest and largest `int24`: a stored tick is one.
 const INT24_MIN: i32 = -(1 << 23);
 const INT24_MAX: i32 = (1 << 23) - 1;
-/// 2^32, one past the largest `uint32` the hook stores `d` in. The discount's fixed point is
-/// built on it too.
-const UINT32_LIMIT: u64 = 1 << 32;
-
-/// `value` as a `uint32`, if it fits one.
-fn to_uint32(value: U256) -> Option<u64> {
-    u64::try_from(value)
-        .ok()
-        .filter(|value| *value < UINT32_LIMIT)
-}
-
 /// What the hook keeps for one pool's price observation (`PoolData` word 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Observation {
@@ -85,7 +74,7 @@ struct Observation {
     /// `observedTick`.
     tick: i32,
     /// `discount`, a `uint32`.
-    discount: u64,
+    discount: u32,
 }
 
 /// What the hook keeps for one pool's bid (`Bid` words 0 to 2).
@@ -117,7 +106,7 @@ pub struct AscendPoolState {
 impl AscendPoolState {
     /// A state whose parts the hook could have stored: the fee below 100%, an EMA above 0 and a
     /// start tick whose launch curve exists.
-    fn new(
+    fn try_new(
         fee_pips: u32,
         token_is_currency0: bool,
         start_tick: i32,
@@ -185,7 +174,7 @@ impl AscendPoolState {
         }
         let obs = base.map(|b| b.observation);
         let bid = base.map(|b| b.bid);
-        Self::new(
+        Self::try_new(
             field(attributes, FEE_PIPS_ATTRIBUTE, pips, base.map(|b| b.fee_pips))?,
             field(
                 attributes,
@@ -199,7 +188,7 @@ impl AscendPoolState {
                 updated_at: field(
                     attributes,
                     EMA_UPDATED_AT_ATTRIBUTE,
-                    u64_be,
+                    seconds,
                     obs.map(|o| o.updated_at),
                 )?,
                 tick: field(attributes, OBSERVED_TICK_ATTRIBUTE, tick, obs.map(|o| o.tick))?,
@@ -221,7 +210,7 @@ impl AscendPoolState {
                 window_start: field(
                     attributes,
                     BID_WINDOW_START_ATTRIBUTE,
-                    u64_be,
+                    seconds,
                     bid.map(|b| b.window_start),
                 )?,
                 max_clip: field(
@@ -235,24 +224,30 @@ impl AscendPoolState {
     }
 }
 
-fn wrong_width(name: &str, value: &Bytes, what: &str) -> InvalidSnapshotError {
-    InvalidSnapshotError::ValueError(format!(
-        "{name} is {} bytes ({value}), not {what}",
-        value.len()
-    ))
+/// The `N` bytes of the attribute `name`, whose value must be exactly that wide; `what` names the
+/// type the width stands for.
+fn fixed<const N: usize>(
+    name: &str,
+    value: &Bytes,
+    what: &str,
+) -> Result<[u8; N], InvalidSnapshotError> {
+    <[u8; N]>::try_from(value.as_ref()).map_err(|_wrong_width| {
+        InvalidSnapshotError::ValueError(format!(
+            "{name} is {} bytes ({value}), not the {N} bytes of {what}",
+            value.len()
+        ))
+    })
 }
 
-/// An 8-byte big-endian `u64`.
-fn u64_be(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
-    let bytes = <[u8; 8]>::try_from(value.as_ref())
-        .map_err(|_wrong_width| wrong_width(name, value, "an 8-byte big-endian u64"))?;
-    Ok(u64::from_be_bytes(bytes))
+/// Unix seconds: 8 big-endian bytes.
+fn seconds(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
+    Ok(u64::from_be_bytes(fixed(name, value, "a big-endian u64")?))
 }
 
-/// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`. [`AscendPoolState::new`]
-/// checks that it is below 100%.
+/// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`.
+/// [`AscendPoolState::try_new`] checks that it is below 100%.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let pips = u64_be(name, value)?;
+    let pips = seconds(name, value)?;
     u32::try_from(pips).map_err(|_overflow| {
         InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a fee in pips"))
     })
@@ -260,9 +255,9 @@ fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
 
 /// The discount `d`: 8 big-endian bytes of a value below 2^32, which the hook stores as a
 /// `uint32`.
-fn discount(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
-    let discount = u64_be(name, value)?;
-    to_uint32(U256::from(discount)).ok_or_else(|| {
+fn discount(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
+    let discount = seconds(name, value)?;
+    u32::try_from(discount).map_err(|_overflow| {
         InvalidSnapshotError::ValueError(format!("{name} = {discount} does not fit a uint32"))
     })
 }
@@ -280,9 +275,7 @@ fn flag(name: &str, value: &Bytes) -> Result<bool, InvalidSnapshotError> {
 
 /// A 4-byte big-endian two's-complement `int24`, sign-extended to 32 bits.
 fn tick(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
-    let bytes = <[u8; 4]>::try_from(value.as_ref())
-        .map_err(|_wrong_width| wrong_width(name, value, "a 4-byte big-endian i32"))?;
-    let tick = i32::from_be_bytes(bytes);
+    let tick = i32::from_be_bytes(fixed(name, value, "a big-endian i32")?);
     if !(INT24_MIN..=INT24_MAX).contains(&tick) {
         return Err(InvalidSnapshotError::ValueError(format!(
             "{name} = {tick} does not fit an int24"
@@ -293,25 +286,17 @@ fn tick(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
 
 /// A 20-byte big-endian `uint160`.
 fn uint160(name: &str, value: &Bytes) -> Result<U256, InvalidSnapshotError> {
-    if value.len() != 20 {
-        return Err(wrong_width(name, value, "a 20-byte big-endian uint160"));
-    }
-    Ok(U256::from_be_slice(value))
+    Ok(U256::from_be_slice(&fixed::<20>(name, value, "a big-endian uint160")?))
 }
 
 /// A 16-byte big-endian `uint128`.
 fn uint128(name: &str, value: &Bytes) -> Result<u128, InvalidSnapshotError> {
-    let bytes = <[u8; 16]>::try_from(value.as_ref())
-        .map_err(|_wrong_width| wrong_width(name, value, "a 16-byte big-endian uint128"))?;
-    Ok(u128::from_be_bytes(bytes))
+    Ok(u128::from_be_bytes(fixed(name, value, "a big-endian uint128")?))
 }
 
 /// A 32-byte big-endian `uint256`.
 fn uint256(name: &str, value: &Bytes) -> Result<U256, InvalidSnapshotError> {
-    if value.len() != 32 {
-        return Err(wrong_width(name, value, "a 32-byte big-endian uint256"));
-    }
-    Ok(U256::from_be_slice(value))
+    Ok(U256::from_be_bytes(fixed::<32>(name, value, "a big-endian uint256")?))
 }
 
 #[cfg(test)]

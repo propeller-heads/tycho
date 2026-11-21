@@ -5,15 +5,17 @@
 //! The library function `0x15821c64` is pure: the tests replay its outputs, read with `eth_call`
 //! on Elysium at block 8660000.
 //!
-//! Every error here is [`SimulationError::InvalidInput`] and means the same as a revert of the
-//! hook: this one swap cannot be served, as when a checked operation of the contract overflows.
-//! Faults of the pool itself (a curve the contract could not have produced, an EMA of 0) are
-//! refused earlier, when the state is decoded.
+//! The errors this module raises are [`SimulationError::InvalidInput`] and mean the same as a
+//! revert of the hook: this one swap cannot be served, as when a checked operation of the
+//! contract overflows. Faults of the pool itself (a curve the contract could not have produced, an
+//! EMA of 0) are refused earlier, when the state is decoded; the errors of the shared Uniswap
+//! functions (a price of 0, an overflow of the pool's own price range) are faults of the pool and
+//! pass through as they are.
 
-use alloy::primitives::U256;
+use alloy::primitives::{uint, U256};
 use tycho_common::simulation::errors::SimulationError;
 
-use super::{Observation, UINT32_LIMIT};
+use super::Observation;
 use crate::evm::protocol::utils::{
     solidity_math::{mul_div, mul_div_rounding_up},
     uniswap::{
@@ -27,7 +29,7 @@ const CURVE_WIDTH_TICKS: i32 = 200_000;
 /// One tick spacing: a pool opens, and the fill price is bounded, this far outside the position.
 const TICK_SPACING: i32 = 200;
 /// The tokens every launch seeds the position with: 1e27.
-pub(super) const LAUNCH_SUPPLY: U256 = U256::from_limbs([0x9fd0_803c_e800_0000, 0x033b_2e3c, 0, 0]);
+const LAUNCH_SUPPLY: U256 = uint!(1_000_000_000_000_000_000_000_000_000_U256);
 /// The EMA moves in steps of at most this many seconds.
 const EMA_STEP_SECONDS: u64 = 600;
 /// The EMA takes at most this many steps.
@@ -41,11 +43,12 @@ const BAND_DENOMINATOR: u64 = 20_000;
 pub(super) const WINDOW_SECONDS: u64 = 600;
 /// `type(int128).max`, the largest input the hook treats as a fill candidate and the largest
 /// amount a v4 `BalanceDelta` carries.
-pub(super) const INT128_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
+pub(super) const INT128_MAX: U256 = uint!(170_141_183_460_469_231_731_687_303_715_884_105_727_U256);
 
-/// One in the discount's fixed point: `d` is a share of it.
-const Q32: U256 = U256::from_limbs([UINT32_LIMIT, 0, 0, 0]);
-const Q96: U256 = U256::from_limbs([0, 1 << 32, 0, 0]);
+/// One in the discount's fixed point (2^32): `d` is a share of it.
+const Q32: U256 = uint!(4_294_967_296_U256);
+/// One in a square-root price's fixed point (2^96).
+const Q96: U256 = uint!(79_228_162_514_264_337_593_543_950_336_U256);
 
 /// Refuses the swap the contract's arithmetic would revert on, or no router can settle.
 pub(super) fn refuse(reason: impl Into<String>) -> SimulationError {
@@ -215,7 +218,7 @@ pub(super) fn observe(
             break;
         }
         let step = remaining.min(EMA_STEP_SECONDS);
-        let distance = if spot > ema { spot - ema } else { ema - spot };
+        let distance = spot.abs_diff(ema);
         let moved = mul_div_floor(distance, U256::from(step), U256::from(step + EMA_STEP_SECONDS))?;
         ema = if spot > ema { ema + moved } else { ema - moved };
         remaining -= step;
@@ -233,8 +236,8 @@ pub(super) fn observe(
     } else {
         mul_div_floor(kept, ema, old_ema)?
     };
-    let discount = if anchored >= Q32 { U256::ZERO } else { Q32 - anchored };
-    let discount = super::to_uint32(discount).ok_or_else(|| {
+    let discount = Q32.saturating_sub(anchored);
+    let discount = u32::try_from(discount).map_err(|_overflow| {
         refuse(format!("the re-anchored discount {discount} does not fit uint32"))
     })?;
     Ok(Observation { ema, updated_at: now, tick, discount })
@@ -243,14 +246,12 @@ pub(super) fn observe(
 /// The fill price X after the observation: `max(floor(ema * (2^32 - d) / 2^32), bound)` when the
 /// token is `currency0`, `min(ceil(ema * 2^32 / (2^32 - d)), bound)` otherwise, where `bound` is
 /// the start-side bound.
-pub(super) fn fill_price(curve: &Curve, ema: U256, discount: u64) -> Result<U256, SimulationError> {
-    let kept = sub(Q32, U256::from(discount), "the discount")?;
+pub(super) fn fill_price(curve: &Curve, ema: U256, discount: u32) -> Result<U256, SimulationError> {
+    // A `uint32` discount is below 2^32, so `kept` is at least 1.
+    let kept = Q32 - U256::from(discount);
     if curve.token_is_currency0 {
         Ok(mul_div_floor(ema, kept, Q32)?.max(curve.start_side_bound))
     } else {
-        if kept.is_zero() {
-            return Err(refuse("the discount is 2^32"));
-        }
         Ok(mul_div_ceil(ema, Q32, kept)?.min(curve.start_side_bound))
     }
 }
@@ -260,7 +261,7 @@ pub(super) fn fill_price(curve: &Curve, ema: U256, discount: u64) -> Result<U256
 pub(super) struct Fill {
     pub(super) tokens_in: U256,
     pub(super) quote_out: U256,
-    pub(super) discount: u64,
+    pub(super) discount: u32,
 }
 
 /// What the library's fill sizing reads besides the curve: the pool's spot, the fill price and
@@ -304,10 +305,14 @@ fn tokens_for_capped_quote(curve: &Curve, x0: U256, cap: U256) -> Result<U256, S
     if curve.token_is_currency0 {
         let d_sqrt = (cap << 96usize) / liquidity;
         let scaled = mul_div_floor(scaled_liquidity, d_sqrt, x0)?;
+        // `x0 - d_sqrt` is positive: the cap is below the quote the pool pays out over the whole
+        // band, which is `liquidity * x0 / 2^96` at most.
         Ok(scaled / sub(x0, d_sqrt, "the capped fill's price move")?)
     } else {
         let capped_inverse =
             sub(scaled_liquidity.div_ceil(x0), cap, "the capped fill's inverse price")?;
+        // `capped_inverse` is positive for the same reason, so the division below is defined; the
+        // check only guards it.
         if capped_inverse.is_zero() {
             return Err(refuse("the capped fill reaches an infinite price"));
         }
@@ -339,12 +344,16 @@ pub(super) fn size_fill(
         return Ok(None);
     }
 
-    // T: the token amount that brings the spot to X (plus one), E = A - T the rest, and Qmax.
+    // `to_fill_price`: the tokens that bring the spot to the fill price (plus one), which the
+    // swap's input must exceed; `x0`: the price the fill starts at; `qmax`: the most quote one
+    // fill pays out. The tokens that remain are the input less `to_fill_price`.
     let (x0, to_fill_price, qmax) = if tokens_is_0 {
         let t = if spot > x {
-            get_amount0_delta(x, spot, curve.liquidity, true)
-                .map_err(|e| refuse(format!("the tokens to the fill price: {e}")))? +
-                U256::from(1)
+            add(
+                get_amount0_delta(x, spot, curve.liquidity, true)?,
+                U256::ONE,
+                "the tokens to the fill price",
+            )?
         } else {
             U256::ZERO
         };
@@ -353,9 +362,11 @@ pub(super) fn size_fill(
         (x0, t, qmax)
     } else {
         let t = if x > spot {
-            get_amount1_delta(spot, x, curve.liquidity, true)
-                .map_err(|e| refuse(format!("the tokens to the fill price: {e}")))? +
-                U256::from(1)
+            add(
+                get_amount1_delta(spot, x, curve.liquidity, true)?,
+                U256::ONE,
+                "the tokens to the fill price",
+            )?
         } else {
             U256::ZERO
         };
@@ -377,13 +388,13 @@ pub(super) fn size_fill(
     let cap = (per_window - filled)
         .min(inventory)
         .min(INT128_MAX);
-    if cap <= U256::from(1) {
+    if cap <= U256::ONE {
         return Ok(None);
     }
-    let cap = cap - U256::from(1);
+    let cap = cap - U256::ONE;
 
-    // E = min(E, V): V is what the curve takes between X0 and its end. With the spot on the far
-    // side of the curve end the library returns no fill, in both orientations (read with
+    // The tokens are at most what the curve takes between `x0` and its end. With the spot on the
+    // far side of the curve end the library returns no fill, in both orientations (read with
     // `eth_call` at block 8660000 for a spot 1 unit and 0.1% beyond the end).
     let to_curve_end = if tokens_is_0 {
         if x0 < curve.curve_end {
@@ -397,8 +408,14 @@ pub(super) fn size_fill(
         mul_div_floor(liquidity, curve.curve_end - x0, Q96)?
     };
     tokens_in = tokens_in.min(to_curve_end);
+    // A spot exactly at the curve end leaves nothing to fill. The library returns no fill there
+    // (`eth_call` at block 8660000, token0 spot equal to the end, fill price above it), where the
+    // arithmetic below would round the fill's end price to the price it starts at or above it.
+    if tokens_in.is_zero() {
+        return Ok(None);
+    }
 
-    // The end price Xe for `tokens_in` and the quote q it pays out.
+    // The price the fill ends at for `tokens_in`, and the quote it pays out.
     let (mut end_price, mut quote) = end_price_and_quote(curve, x0, tokens_in)?;
     if quote > cap {
         tokens_in = tokens_for_capped_quote(curve, x0, cap)?;
@@ -414,7 +431,8 @@ pub(super) fn size_fill(
         mul_div_floor(ema, Q32, end_price)?
     };
     let discount = sub(Q32, ratio, "the new discount")?;
-    let discount = super::to_uint32(discount)
-        .ok_or_else(|| refuse(format!("the fill's discount {discount} does not fit uint32")))?;
-    Ok(Some(Fill { tokens_in, quote_out: quote + U256::from(1), discount }))
+    let discount = u32::try_from(discount).map_err(|_overflow| {
+        refuse(format!("the fill's discount {discount} does not fit uint32"))
+    })?;
+    Ok(Some(Fill { tokens_in, quote_out: add(quote, U256::ONE, "the fill's quote")?, discount }))
 }

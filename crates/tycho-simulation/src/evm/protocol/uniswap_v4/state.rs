@@ -1517,7 +1517,7 @@ mod tests {
                         WithGasEstimate,
                     },
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
-                    test_hook::{ExtensionTestHook, SpotFeesAnswer},
+                    test_hook::{ExtensionTestHook, HandlerAfterSwapAnswer, SpotFeesAnswer},
                 },
                 utils::uniswap::{
                     lp_fee,
@@ -3428,6 +3428,89 @@ mod tests {
                 if msg.starts_with("CheckSwapOutcome hook simulation failed")),
             "{result:?}"
         );
+    }
+
+    /// The address of the hook `handler_after_swap` installed in a quote's returned state.
+    fn hook_address_of(state: &dyn ProtocolSim) -> Address {
+        state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .and_then(|state| state.hook.as_ref())
+            .expect("a hooked pool")
+            .address()
+    }
+
+    /// The hook `handler_after_swap` returns is the one the state a quote returns carries, the
+    /// quote is the hookless one, and the state quoted from keeps its own hook.
+    #[test]
+    fn test_get_amount_out_installs_the_hook_after_the_swap() {
+        let installed = Address::repeat_byte(7);
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let hookless = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("the hookless swap");
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            handler_after_swap: HandlerAfterSwapAnswer::ReplaceWithAddress(installed),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(amount_in, &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(hook_address_of(quote.new_state.as_ref()), installed);
+        assert_eq!(hook_address_of(&pool), Address::ZERO);
+        assert_eq!(quote.amount, hookless.amount);
+        assert_eq!(quote.gas, hookless.gas);
+    }
+
+    /// A hook that answers `None` stays in the returned state.
+    #[test]
+    fn test_get_amount_out_keeps_the_hook_that_answers_none() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            address: Address::repeat_byte(3),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(hook_address_of(quote.new_state.as_ref()), Address::repeat_byte(3));
+    }
+
+    /// A refusal of `handler_after_swap` reaches the caller as `InvalidInput`, and any other
+    /// error as `FatalError`, as for the other hook calls.
+    #[rstest]
+    #[case::refusal_passes_through(HandlerAfterSwapAnswer::Refuses, true)]
+    #[case::other_failure_is_fatal(HandlerAfterSwapAnswer::Fails, false)]
+    fn test_get_amount_out_maps_a_handler_after_swap_error_by_kind(
+        #[case] answer: HandlerAfterSwapAnswer,
+        #[case] expect_invalid_input: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            handler_after_swap: answer,
+            ..Default::default()
+        }));
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if expect_invalid_input => {
+                assert_eq!(msg, "the hook refuses the swap");
+            }
+            Err(SimulationError::FatalError(msg)) if !expect_invalid_input => {
+                assert!(msg.starts_with("HandlerAfterSwap hook simulation failed"), "{msg}");
+            }
+            other => panic!("expected the {answer:?} answer by kind, got {other:?}"),
+        }
     }
 
     fn pool_target_price_params() -> QueryPoolSwapParams {

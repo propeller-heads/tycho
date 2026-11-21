@@ -36,8 +36,7 @@ for any protocol indexed by Tycho.
     Unichain, Pons V2 is the native handler for Robinhood, PancakeSwap Infinity's
     `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC, and Montra's
     `LaunchHook` (`montra/`, `uniswap_v4_hooks` pools of the with-hooks package's Elysium
-    manifest) is a native handler on Elysium, as is the Ascend launchpad hook (`ascend/`, the
-    same manifest's `ascend_*` attributes: a fee, an EMA observation and a bid that fills sells).
+    manifest) is a native handler on Elysium, as is the Ascend launchpad hook (`ascend/`).
     A handler can price itself without simulation
     through the optional `HookHandler` methods `spot_fees`, `max_amount_in`, `check_swap_outcome`
     and `swaps_from_empty_range`; their contracts, and which of them must be answered together,

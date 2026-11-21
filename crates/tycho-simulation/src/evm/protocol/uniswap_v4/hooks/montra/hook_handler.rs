@@ -136,7 +136,9 @@ pub(crate) const MONTRA_HOOK_DISPATCH_GAS: u64 = 2_680;
 ///
 /// The returned states keep the hook's terms as they were: the stage machine (graduation, the LP
 /// line crossing and its hold) advances from the `PoolConfig` write each swap makes, which the
-/// indexer publishes, and at a fixed block timestamp no stage change alters a later quote.
+/// indexer publishes, and at a fixed block timestamp no stage change alters a later quote. So
+/// the handler keeps the default `handler_after_swap` (`None`), which installs no new hook in the
+/// state a quote returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MontraHookHandler {
     address: Address,

@@ -226,6 +226,12 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// are those from before the swap. It runs once the pool swapped and `check_swap_outcome`
     /// accepted the result, before `after_swap`; a swap refused later returns its error and drops
     /// the handler. `None` keeps the hook as it is, which is the default.
+    ///
+    /// The handlers that keep the default write no storage of their own on a swap, and each has
+    /// a test that pins it: Angstrom (its fees are the controller's), Pons V2 (the pool's terms),
+    /// CLAlpha (a function of the block timestamp), Montra (its stage advances from the indexed
+    /// `PoolConfig` write) and the generic VM handler (which reads the hook's storage from the
+    /// database).
     fn handler_after_swap(
         &self,
         _context: &StateContext,

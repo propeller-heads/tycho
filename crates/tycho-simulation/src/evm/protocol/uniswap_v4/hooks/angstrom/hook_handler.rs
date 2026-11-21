@@ -209,6 +209,16 @@ mod tests {
         state::UniswapV4Fees,
     };
 
+    /// A swap writes none of Angstrom's own storage: its fees are set by the controller.
+    #[test]
+    fn test_handler_after_swap_keeps_the_hook() {
+        let fees = AngstromFees { unlock: U24::from(338), protocol_unlock: U24::from(112) };
+        let hook =
+            AngstromHookHandler::new(Address::repeat_byte(1), Address::repeat_byte(2), fees, false);
+
+        crate::evm::protocol::uniswap_v4::hooks::test_hook::assert_handler_after_swap_keeps_the_hook(&hook);
+    }
+
     #[test]
     fn test_before_swap() {
         // Case taken from tx 0xa9a8c90060e4d5e8bac9ad06eaf706d87d36cb4d11fd2d705f6a37b84918765d
