@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use tycho_common::models::{
     blockchain::{BlockAggregatedChanges, DCIUpdate},
     protocol::ProtocolComponent,
@@ -160,6 +160,9 @@ pub struct ComponentTracker<R: RPCClient> {
     /// Derived from tracked components. We need this if subscribed to a vm extractor because
     /// updates are emitted on a contract level instead of a component level.
     pub contracts: HashSet<Address>,
+    /// Ids of the components the server reported as paused and nothing has unpaused since:
+    /// neither a block nor the pause check after a restart. The tracker does not track them.
+    paused: HashSet<ComponentId>,
     /// Client to retrieve necessary protocol components from the rpc.
     rpc_client: R,
 }
@@ -177,6 +180,7 @@ where
             contracts: Default::default(),
             rpc_client: rpc,
             entrypoints: Default::default(),
+            paused: Default::default(),
         }
     }
 
@@ -201,10 +205,13 @@ where
             paginated_params = paginated_params.with_tvl_gt(tvl);
         }
 
-        self.components = self
+        let (components, paused) = self
             .rpc_client
             .get_protocol_components_paginated(paginated_params)
             .await?
+            .into_parts();
+        self.record_paused(paused);
+        self.components = components
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
@@ -287,7 +294,7 @@ where
             return Ok(());
         }
 
-        let components = self
+        let (components, paused) = self
             .rpc_client
             .get_protocol_components(
                 crate::rpc::ProtocolComponentsParams::new(
@@ -302,6 +309,10 @@ where
                 ),
             )
             .await?
+            .into_data()
+            .into_parts();
+        self.record_paused(paused);
+        let components = components
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();
@@ -414,6 +425,151 @@ where
             .collect()
     }
 
+    /// Records the ids a components response reported as paused, so the tracker does not track
+    /// them until they are unpaused.
+    pub(crate) fn record_paused(&mut self, paused: HashSet<ComponentId>) {
+        if !paused.is_empty() {
+            self.log_paused(&paused, "Recorded paused components");
+        }
+        self.paused.extend(paused);
+    }
+
+    /// Asks the server which components are paused now, and records the answer. Call it after
+    /// missing blocks, since their pause and unpause events are lost.
+    ///
+    /// Asks about every tracked component and every component recorded as paused. Returns the
+    /// ids that were recorded as paused and no longer are.
+    pub(crate) async fn refresh_paused(&mut self) -> Result<HashSet<ComponentId>, RPCError> {
+        let mut ids: HashSet<ComponentId> = self
+            .components
+            .keys()
+            .cloned()
+            .collect();
+        ids.extend(self.paused.iter().cloned());
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let params = ProtocolComponentsPaginatedParams::new(
+            self.chain,
+            self.protocol_system.as_str(),
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(ids.into_iter().collect());
+        let (not_paused, paused) = self
+            .rpc_client
+            .get_protocol_components_paginated(params)
+            .await?
+            .into_parts();
+
+        let unpaused: HashSet<ComponentId> = not_paused
+            .into_iter()
+            .map(|component| component.id)
+            .filter(|id| self.paused.contains(id))
+            .collect();
+        for id in &unpaused {
+            self.paused.remove(id);
+        }
+        self.record_paused(paused);
+        Ok(unpaused)
+    }
+
+    /// Returns the components of `unpaused` that are not tracked and pass the filter. With a TVL
+    /// filter, asks the server which of them are above the add threshold, and records the ones it
+    /// reports as paused.
+    pub(crate) async fn unpaused_to_track(
+        &mut self,
+        unpaused: &HashSet<ComponentId>,
+    ) -> Result<Vec<ComponentId>, RPCError> {
+        let untracked: Vec<ComponentId> = unpaused
+            .iter()
+            .filter(|id| !self.components.contains_key(*id) && !self.paused.contains(*id))
+            .cloned()
+            .collect();
+        if untracked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let add_tvl = match &self.filter.variant {
+            ComponentFilterVariant::Ids(ids) => {
+                return Ok(untracked
+                    .into_iter()
+                    .filter(|id| ids.contains(&id.to_lowercase()))
+                    .collect());
+            }
+            ComponentFilterVariant::MinimumTVLRange { range: (_, add_tvl), .. } => *add_tvl,
+        };
+        let params = ProtocolComponentsPaginatedParams::new(
+            self.chain,
+            self.protocol_system.as_str(),
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(untracked)
+        .with_tvl_gt(add_tvl);
+        let (above_add_tvl, paused) = self
+            .rpc_client
+            .get_protocol_components_paginated(params)
+            .await?
+            .into_parts();
+        self.record_paused(paused);
+        Ok(above_add_tvl
+            .into_iter()
+            .map(|component| component.id)
+            .filter(|id| !self.filter.is_blocklisted(id))
+            .collect())
+    }
+
+    /// Records the components a block pauses, and removes the ones it unpauses.
+    pub(crate) fn record_pause_events(&mut self, deltas: &BlockAggregatedChanges) {
+        for id in &deltas.unpaused_components {
+            self.paused.remove(id);
+        }
+        self.paused
+            .extend(deltas.paused_components.iter().cloned());
+    }
+
+    /// Removes the paused components from `components`, logs them, and returns their ids.
+    pub(crate) fn drop_paused_from(
+        &self,
+        components: &mut HashMap<ComponentId, ProtocolComponent>,
+    ) -> Vec<ComponentId> {
+        let dropped: Vec<ComponentId> = components
+            .keys()
+            .filter(|id| self.paused.contains(*id))
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            self.log_paused(&dropped, "Dropping paused components");
+        }
+        for id in &dropped {
+            components.remove(id);
+        }
+        dropped
+    }
+
+    /// Stops tracking the tracked components that are paused, logs them, and returns them.
+    pub(crate) fn stop_tracking_paused(&mut self) -> HashMap<ComponentId, ProtocolComponent> {
+        let paused: Vec<ComponentId> = self
+            .paused
+            .iter()
+            .filter(|id| self.components.contains_key(*id))
+            .cloned()
+            .collect();
+        if paused.is_empty() {
+            return HashMap::new();
+        }
+        self.log_paused(&paused, "Stopped tracking paused components");
+        self.stop_tracking(&paused)
+    }
+
+    /// Logs `message` with the paused `components`. With an id filter, the user asked for these
+    /// components by id, so it logs at info. With a TVL filter, pauses are routine, so it logs at
+    /// debug.
+    fn log_paused(&self, components: &impl std::fmt::Debug, message: &str) {
+        match &self.filter.variant {
+            ComponentFilterVariant::Ids(_) => info!(?components, "{message}"),
+            ComponentFilterVariant::MinimumTVLRange { .. } => debug!(?components, "{message}"),
+        }
+    }
+
     pub fn get_tracked_component_ids(&self) -> Vec<ComponentId> {
         self.components
             .keys()
@@ -421,14 +577,27 @@ where
             .collect()
     }
 
-    /// Given BlockAggregatedChanges, filter out components that are no longer relevant and return
-    /// the components that need to be added or removed.
+    /// Records the block's pauses and unpauses, then returns the components to start and stop
+    /// tracking after the block, as `(to_add, to_remove)`, following the client's filter. With an
+    /// id filter, a block only adds back components it unpauses.
+    ///
+    /// Pauses override the filter. `to_remove` holds every component the block pauses. `to_add`
+    /// leaves out every component that is still paused.
     pub fn filter_updated_components(
-        &self,
+        &mut self,
         deltas: &BlockAggregatedChanges,
     ) -> (Vec<ComponentId>, Vec<ComponentId>) {
-        match &self.filter.variant {
-            ComponentFilterVariant::Ids(_) => (Default::default(), Default::default()),
+        self.record_pause_events(deltas);
+        let (mut to_add, mut to_remove) = match &self.filter.variant {
+            ComponentFilterVariant::Ids(ids) => {
+                let to_add = deltas
+                    .unpaused_components
+                    .iter()
+                    .filter(|id| ids.contains(&id.to_lowercase()))
+                    .cloned()
+                    .collect();
+                (to_add, Vec::new())
+            }
             ComponentFilterVariant::MinimumTVLRange { range: (remove_tvl, add_tvl), .. } => {
                 let (mut to_add, mut to_remove): (Vec<_>, Vec<_>) = deltas
                     .component_tvl
@@ -449,7 +618,13 @@ where
 
                 (to_add, to_remove)
             }
-        }
+        };
+
+        to_add.retain(|id| !self.paused.contains(id));
+        to_remove.retain(|id| !deltas.paused_components.contains(id));
+        to_remove.extend(deltas.paused_components.iter().cloned());
+
+        (to_add, to_remove)
     }
 }
 
@@ -458,7 +633,7 @@ mod test {
     use tycho_common::Bytes;
 
     use super::*;
-    use crate::rpc::MockRPCClient;
+    use crate::rpc::{none_paused, ComponentsWithPauses, MockRPCClient};
 
     fn with_mocked_rpc() -> ComponentTracker<MockRPCClient> {
         let rpc = MockRPCClient::new();
@@ -489,7 +664,7 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components_paginated()
-            .returning(move |_| Ok(vec![model_for_mock.clone()]));
+            .returning(move |_| Ok(none_paused(vec![model_for_mock.clone()])));
 
         tracker
             .initialise_components()
@@ -517,7 +692,9 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components()
-            .returning(move |_| Ok(crate::rpc::Page::new(vec![model_for_mock.clone()], 1, 0, 100)));
+            .returning(move |_| {
+                Ok(crate::rpc::Page::new(none_paused(vec![model_for_mock.clone()]), 1, 0, 100))
+            });
 
         tracker
             .start_tracking(&components_arg)
@@ -594,7 +771,7 @@ mod test {
         tracker
             .rpc_client
             .expect_get_protocol_components_paginated()
-            .returning(move |_| Ok(vec![model_component.clone()]));
+            .returning(move |_| Ok(none_paused(vec![model_component.clone()])));
 
         tracker
             .initialise_components()
@@ -642,5 +819,254 @@ mod test {
             "Non-blocklisted component should be in to_add"
         );
         assert!(to_remove.is_empty());
+    }
+
+    fn ids_filter() -> ComponentFilter {
+        ComponentFilter::Ids(vec!["pool".to_string(), "active".to_string()])
+    }
+
+    fn tvl_filter() -> ComponentFilter {
+        ComponentFilter::with_tvl_range(5.0, 10.0)
+    }
+
+    fn new_tracker(filter: ComponentFilter, tracked: &[&str]) -> ComponentTracker<MockRPCClient> {
+        let mut tracker =
+            ComponentTracker::new(Chain::Ethereum, "uniswap-v2", filter, MockRPCClient::new());
+        for id in tracked {
+            let component = ProtocolComponent { id: (*id).to_string(), ..Default::default() };
+            tracker
+                .components
+                .insert((*id).to_string(), component);
+        }
+        tracker
+    }
+
+    fn block_changes(
+        paused: &[&str],
+        unpaused: &[&str],
+        tvl: &[(&str, f64)],
+    ) -> BlockAggregatedChanges {
+        let ids = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (*id).to_string())
+                .collect()
+        };
+        BlockAggregatedChanges {
+            paused_components: ids(paused),
+            unpaused_components: ids(unpaused),
+            component_tvl: tvl
+                .iter()
+                .map(|(id, tvl)| ((*id).to_string(), *tvl))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::ids(ids_filter())]
+    #[case::tvl(tvl_filter())]
+    fn test_filter_updated_paused(#[case] filter: ComponentFilter) {
+        let mut tracker = new_tracker(filter, &["pool"]);
+
+        let (to_add, to_remove) =
+            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
+
+        assert!(to_add.is_empty());
+        assert_eq!(to_remove, vec!["pool".to_string()]);
+    }
+
+    /// "pool" was paused by an earlier block; `changes` unpauses a component.
+    #[rstest::rstest]
+    #[case::ids(ids_filter(), block_changes(&[], &["pool"], &[]), &["pool"])]
+    #[case::mixed_case_id(ids_filter(), block_changes(&[], &["Pool"], &[]), &["Pool"])]
+    #[case::not_in_ids(ids_filter(), block_changes(&[], &["other_pool"], &[]), &[])]
+    #[case::above_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 20.0)]), &["pool"])]
+    #[case::below_tvl(tvl_filter(), block_changes(&[], &["pool"], &[("pool", 7.0)]), &[])]
+    #[case::no_tvl(tvl_filter(), block_changes(&[], &["pool"], &[]), &[])]
+    fn test_filter_updated_unpaused(
+        #[case] filter: ComponentFilter,
+        #[case] changes: BlockAggregatedChanges,
+        #[case] expected_add: &[&str],
+    ) {
+        let mut tracker = new_tracker(filter, &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+
+        let (to_add, to_remove) = tracker.filter_updated_components(&changes);
+
+        assert_eq!(to_add, expected_add);
+        assert!(to_remove.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::above_add_tvl(20.0)]
+    #[case::below_remove_tvl(1.0)]
+    fn test_filter_updated_tvl_and_pause_in_one_block(#[case] tvl: f64) {
+        let mut tracker = new_tracker(tvl_filter(), &["pool"]);
+
+        let (to_add, to_remove) =
+            tracker.filter_updated_components(&block_changes(&["pool"], &[], &[("pool", tvl)]));
+
+        assert!(to_add.is_empty());
+        assert_eq!(to_remove, vec!["pool".to_string()]);
+    }
+
+    #[test]
+    fn test_filter_updated_paused_in_earlier_block() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
+
+        let (to_add, _) =
+            tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
+
+        assert!(to_add.is_empty());
+    }
+
+    #[test]
+    fn test_filter_updated_unpaused_in_earlier_block() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.filter_updated_components(&block_changes(&["pool"], &[], &[]));
+        tracker.filter_updated_components(&block_changes(&[], &["pool"], &[]));
+
+        let (to_add, _) =
+            tracker.filter_updated_components(&block_changes(&[], &[], &[("pool", 20.0)]));
+
+        assert_eq!(to_add, vec!["pool".to_string()]);
+    }
+
+    #[rstest::rstest]
+    #[case::ids(ids_filter())]
+    #[case::tvl(tvl_filter())]
+    #[tokio::test]
+    async fn test_initialise_skips_paused(#[case] filter: ComponentFilter) {
+        let mut tracker = new_tracker(filter, &[]);
+        let paused = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        let active = ProtocolComponent { id: "active".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .returning(move |_| {
+                Ok(ComponentsWithPauses::new(
+                    vec![paused.clone(), active.clone()],
+                    HashSet::from(["pool".to_string()]),
+                ))
+            });
+
+        tracker
+            .initialise_components()
+            .await
+            .expect("initialise components");
+
+        assert_eq!(tracker.get_tracked_component_ids(), vec!["active".to_string()]);
+        assert!(tracker.paused.contains("pool"));
+    }
+
+    #[tokio::test]
+    async fn test_start_tracking_skips_paused() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        let paused = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components()
+            .returning(move |_| {
+                Ok(crate::rpc::Page::new(
+                    ComponentsWithPauses::new(
+                        vec![paused.clone()],
+                        HashSet::from(["pool".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let pool = "pool".to_string();
+
+        tracker
+            .start_tracking(&[&pool])
+            .await
+            .expect("start tracking");
+
+        assert!(tracker.components.is_empty());
+        assert!(tracker.paused.contains("pool"));
+    }
+
+    /// With a TVL filter, a paused component is not tracked, so the refresh asks about it only
+    /// because it is recorded as paused.
+    #[tokio::test]
+    async fn test_refresh_paused_untracked_pool() {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+        let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .returning(move |_| Ok(none_paused(vec![pool.clone()])));
+
+        let unpaused = tracker
+            .refresh_paused()
+            .await
+            .expect("refresh paused");
+
+        assert_eq!(unpaused, HashSet::from(["pool".to_string()]));
+        assert!(!tracker.paused.contains("pool"));
+    }
+
+    #[rstest::rstest]
+    #[case::in_ids(&["Pool"], &[], &["Pool"])]
+    #[case::not_in_ids(&["other"], &[], &[])]
+    #[case::tracked(&["active"], &["active"], &[])]
+    #[tokio::test]
+    async fn test_unpaused_to_track_ids(
+        #[case] unpaused: &[&str],
+        #[case] tracked: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let mut tracker = new_tracker(ids_filter(), tracked);
+        let unpaused = unpaused
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+
+        let to_track = tracker
+            .unpaused_to_track(&unpaused)
+            .await
+            .expect("unpaused to track");
+
+        assert_eq!(to_track, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::above_add_tvl(false, &["pool"])]
+    #[case::still_paused(true, &[])]
+    #[tokio::test]
+    async fn test_unpaused_to_track_tvl(#[case] server_paused: bool, #[case] expected: &[&str]) {
+        let mut tracker = new_tracker(tvl_filter(), &[]);
+        let expected_params = ProtocolComponentsPaginatedParams::new(
+            Chain::Ethereum,
+            "uniswap-v2",
+            RPC_CLIENT_CONCURRENCY,
+        )
+        .with_component_ids(vec!["pool".to_string()])
+        .with_tvl_gt(10.0);
+        tracker
+            .rpc_client
+            .expect_get_protocol_components_paginated()
+            .withf(move |params| params == &expected_params)
+            .returning(move |_| {
+                let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                let paused = if server_paused {
+                    HashSet::from(["pool".to_string()])
+                } else {
+                    HashSet::new()
+                };
+                Ok(ComponentsWithPauses::new(vec![pool], paused))
+            });
+
+        let to_track = tracker
+            .unpaused_to_track(&HashSet::from(["pool".to_string()]))
+            .await
+            .expect("unpaused to track");
+
+        assert_eq!(to_track, expected);
+        assert_eq!(tracker.paused.contains("pool"), server_paused);
     }
 }
