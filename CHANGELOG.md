@@ -1,3 +1,17 @@
+## [0.534.0](https://github.com/propeller-heads/tycho/compare/0.533.0...0.534.0) (2026-11-21)
+
+
+### Features
+
+* **tycho-test:** drop oracle_overwrites from the next-block simulation ([7800d43](https://github.com/propeller-heads/tycho/commit/7800d433fa3311d30e002f6e06fbbce752392ec8))
+* **tycho-test:** drop oracle_overwrites, narrow the account merge ([6828d6d](https://github.com/propeller-heads/tycho/commit/6828d6d6544c73961714d158840f73a770f8349a)), closes [#1673](https://github.com/propeller-heads/tycho/issues/1673) [#1673](https://github.com/propeller-heads/tycho/issues/1673)
+
+
+### Bug Fixes
+
+* **tycho-test:** fail a simulation whose account overwrites are unsupported ([6f60970](https://github.com/propeller-heads/tycho/commit/6f60970e9e341a1807cb7a036c36a4e2e6afc411))
+* **tycho-test:** warn on unsupported account overwrite fields ([e54fc90](https://github.com/propeller-heads/tycho/commit/e54fc906a9a71415d23aad46fc54cbe083c3800a))
+
 ## [0.533.0](https://github.com/propeller-heads/tycho/compare/0.532.2...0.533.0) (2026-11-20)
 
 
