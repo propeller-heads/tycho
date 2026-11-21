@@ -956,6 +956,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethereum-algebra-integral"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ethabi 18.0.0",
+ "getrandom 0.2.17",
+ "hex-literal 0.4.1",
+ "rstest",
+ "substreams 0.5.22",
+ "substreams-ethereum 0.9.13",
+ "tycho-substreams 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "ethereum-ambient"
 version = "0.6.1"
 dependencies = [
