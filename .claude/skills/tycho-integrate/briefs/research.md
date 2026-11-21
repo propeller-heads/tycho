@@ -61,8 +61,9 @@ Each answer is one or more facts (below). Mark the facts every layer depends on 
    - **hybrid**: the math ports, but the state it reads is too complex to track independently, so
      indexing stays VM-shaped and the quote reads that state through the VM (Fluid V1, Balancer
      V3, Curve); name that state in `vm_reads`;
-   - **vm**: neither ports (many contracts, upgradeable math, assembly). A VM quote is about 1000x
-     slower than native and some solvers skip VM venues, so say what that costs this venue;
+   - **vm**: neither ports (many contracts, upgradeable math, assembly). A VM quote runs the
+     venue's bytecode in revm for every call, orders of magnitude slower than native math, and some
+     solvers skip VM venues: say what that costs this venue;
    - **not worth integrating**: the venue's reachable volume or TVL does not justify the kind it
      needs. Say so with the numbers; the person decides at Gate 1.
    Write the choice as one fact (section `summary`, `critical`) with these reasons and the

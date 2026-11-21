@@ -60,6 +60,14 @@ def call(url: str, to: str, data: str, block, sender=None) -> str:
     return envcheck.rpc(url, "eth_call", [tx(to, data, sender), block_tag(block)], timeout=60)
 
 
+def quote_holds(row: dict, spec: dict) -> bool:
+    """A replayed quote is fine: as recorded, or caller-dependent where a spec fact states it."""
+    if row["status"] == "same":
+        return True
+    fact = next((q.get("caller_fact") for q in spec.get("venue_quotes", []) if q.get("id") == row.get("id")), None)
+    return row["status"] == "caller-dependent" and fact in {f.get("id") for f in spec.get("facts", [])}
+
+
 def check_quotes(spec: dict, tree: Path) -> list:
     """Each `venue_quotes` entry ({chain, block, to, data, result}) again at its block, anonymous
     and from the chain's Tycho router."""
@@ -161,9 +169,14 @@ def main() -> None:
     if not args.protocol:
         raise SystemExit(f"{args.cmd} needs --protocol")
     spec = schema.load_json(schema.run_dir(args.protocol) / "spec.json")
-    rows = check_quotes(spec, schema.worktree_dir(args.protocol)) if args.cmd == "quotes" else check_watch(spec)
+    if args.cmd == "quotes":
+        rows = check_quotes(spec, schema.worktree_dir(args.protocol))
+        ok = all(quote_holds(r, spec) for r in rows)
+    else:
+        rows = check_watch(spec)
+        ok = all(r["status"] == "same" for r in rows)
     print(json.dumps(rows, indent=2))
-    sys.exit(0 if all(r["status"] == "same" for r in rows) else 1)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

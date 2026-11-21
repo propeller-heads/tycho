@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_caps  # noqa: E402
+import layer_checks  # noqa: E402
 import schema  # noqa: E402
 import state as ledger  # noqa: E402
 
@@ -105,6 +106,19 @@ ATTRIBUTE_MAPPING = re.compile(r"^[+-].*\battribute", re.I | re.M)
 QUOTE_PATH = re.compile(r"^(crates/tycho-simulation/src/evm/protocol/.*/(state|decoder|vm|math|quote|swap)[^/]*\.rs|protocols/adapter-integration/evm/src/.*\.sol)$")
 
 
+def layer_commands(layer: str) -> str:
+    """The layer's steps from checks.toml, as the implementer runs them: one line each, with its
+    directory, the kinds it runs for, and its command (placeholders as checks.toml names them)."""
+    lines = []
+    for step in layer_checks.load_steps():
+        if layer not in step.get("layers", []) or step.get("requires"):
+            continue
+        when = step.get("when")
+        only = f" (only for {', '.join(when)})" if isinstance(when, list) else f" (when {when[5:]} exists)" if when else ""
+        lines.append(f"- `{step['name']}`{only}, from `{step.get('cwd', '.')}`: `{step['cmd']}`")
+    return "\n".join(lines) + "\n\nPlaceholders are decisions.json `paths` (`{package}`, `{sim_module}`, ...) and the run's chain."
+
+
 def review_level(st, layer: str, round_n: int, tree: Path) -> str:
     """The tycho-review level of a round's review. `full` adds the on-chain integration pass and the
     execution verifier: on a layer's first round (the design meets the chain); when the round
@@ -164,8 +178,13 @@ def main() -> None:
         "level": review_level(st, args.layer, args.round, tree),
         "extra": Path(args.extra_file).read_text() if args.extra_file else "(none)",
     }
+    values["commands"] = layer_commands(args.layer) if args.layer else ""
+    # The review briefs share their closing notes; `{{extra}}` inside them is filled below.
+    values["review_notes"] = (schema.skill_dir() / "briefs" / "review-notes.md").read_text().replace("{{extra}}", values["extra"])
     for item in args.set:
         k, _, v = item.partition("=")
+        if k in values:
+            raise SystemExit(f"--set {k}: computed by prompt.py; only placeholders it does not compute (existing, since) are set")
         values[k] = v
 
     text = (schema.skill_dir() / "briefs" / f"{args.brief}.md").read_text()

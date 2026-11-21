@@ -5,7 +5,8 @@
     final_gates.py --protocol P --recheck        the venue against the spec: proxies, watched code and
                                                  getters, venue quotes (`onchain.py`)
 
-Gates: every layer clean by its stop rules now; no guarded change a person did not accept; all
+Gates: every layer clean by its stop rules now, with the ledger at the branch's head; no guarded
+change a person did not accept; every fact signed at Gate 1 unchanged or amended; all
 checks once more (checks.toml, layer `final`: protocol-testing on every chain, and the mutation score
 when G10 has landed); one test per spec mutation surface (G5); every proxy's implementation at the
 latest block equals the spec's; the venue's quotes as recorded and from the Tycho router; a
@@ -43,27 +44,23 @@ def git(tree: Path, *args) -> str:
     return schema.git("-C", str(tree), *args).stdout
 
 
-def integration_yamls(tree: Path, package: str) -> list:
-    """The package's integration test yamls. A package is not always a top-level directory: a nested
-    one (`ethereum-uniswap-v4/with-hooks`, cargo package `ethereum-uniswap-v4-with-hooks`) keeps its
-    yaml beside its manifest, and a clone's yaml sits in its base package's directory. So the
-    candidates are the package's own directory, every directory whose path with `/` as `-` is the
-    package, and, when none of those holds a yaml, the yamls the branch itself adds or changes."""
+def changed_files(tree: Path):
+    """The files the branch changes against `origin/main`; None when the diff cannot be taken."""
+    try:
+        return git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def integration_yamls(tree: Path, package: str, changed: list) -> list:
+    """The package's integration test yamls: in its directories (`schema.package_dirs`), and, when
+    none holds one (a clone's yaml sits in its base package's directory), the yamls the branch
+    itself adds or changes."""
     root = tree / "protocols/substreams"
-    found = set()
-    if package:
-        found.update((root / package).glob("integration_test*.tycho.yaml"))
-        for path in root.rglob("integration_test*.tycho.yaml"):
-            rel = path.parent.relative_to(root)
-            if "target" not in rel.parts and str(rel).replace("/", "-") == package:
-                found.add(path)
+    found = {y for d in (schema.package_dirs(root, package) if package else []) for y in d.glob("integration_test*.tycho.yaml")}
     if found:
         return sorted(found)
-    try:
-        changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
-    except subprocess.CalledProcessError:
-        changed = []
-    for rel in changed:
+    for rel in changed or []:
         if rel.startswith("protocols/substreams/") and schema.INTEGRATION_YAML_RE.search(rel) and (tree / rel).exists():
             found.add(tree / rel)
     return sorted(found)
@@ -81,6 +78,10 @@ def gate_layers_clean(run: Path) -> dict:
     amendment or a red round after a clean stop reopens the layer."""
     st = ledger.State(ledger.read_events(run))
     layers = ledger.route_layers(run)
+    head = git(schema.worktree_dir_of_run(run), "rev-parse", "HEAD").strip() if schema.worktree_dir_of_run(run).exists() else ""
+    if head and st.branch_head and not ledger.same_commit(head, st.branch_head):
+        return gate("layers-clean", "fail", f"the branch is at {head[:10]}, the ledger's last round or rebase at {st.branch_head[:10]}: "
+                    "record the rebase (`state.py P rebase --head <head>`) or the round that made it")
     now = {l: ledger.next_step(st, l) for l in layers}
     # A layer a person closed (a cap or no-progress answer that grants nothing) counts as done.
     not_clean = {l: r["reason"] for l, r in now.items() if r["action"] not in ("clean", "closed")}
@@ -107,6 +108,20 @@ def gate_guards(run: Path, tree: Path) -> dict:
     return gate("guards", "pass", "no guarded change" + (f" beyond those a person accepted: {accepted}" if accepted else ""))
 
 
+def gate_signed_facts(run: Path, spec: dict) -> dict:
+    """Every fact signed at Gate 1 still says what the person signed, unless an amendment changed it
+    (which went back to the person)."""
+    st = ledger.State(ledger.read_events(run))
+    amended = {a["fact"] for a in st.amendments}
+    now = {f.get("id"): schema.fact_digest(f) for f in spec.get("facts", [])}
+    changed = sorted(f for f, d in st.signed_digests.items() if f not in amended and now.get(f) != d)
+    if not st.signed_digests:
+        return gate("signed-facts", "fail", "Gate 1 recorded no fact digests (`state.py P sign-spec`)")
+    if changed:
+        return gate("signed-facts", "fail", f"signed facts changed without an amendment: {changed}")
+    return gate("signed-facts", "pass", f"{len(st.signed_digests)} signed facts unchanged or amended")
+
+
 def gate_checks(protocol: str, n: int) -> dict:
     proc = subprocess.run([sys.executable, "-I", str(Path(__file__).parent / "layer_checks.py"), "--protocol", protocol, "--layer", "final", "--round", str(n)], capture_output=True, text=True)
     last = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "{}"
@@ -118,7 +133,7 @@ def gate_checks(protocol: str, n: int) -> dict:
     lines = [l for l in proc.stdout.strip().splitlines()[:-1] if l]
     failing = [l for l in lines if not l.startswith(("pass", "n/a", "off"))]
     # Lead with what failed, so a one-line summary never shows only the first passing step.
-    detail = "; ".join(failing) if failing else ("every step passed" if green else proc.stdout.strip()[-2000:])
+    detail = "; ".join(failing) if failing else ("every step passed" if green else (proc.stdout.strip() or proc.stderr.strip() or f"layer_checks.py exited {proc.returncode}")[-2000:])
     return gate("checks", "pass" if green else "fail", detail, steps=lines, file=info.get("file"))
 
 
@@ -188,8 +203,7 @@ def gate_venue_quotes(spec: dict, tree: Path, facts: set) -> dict:
     rows = onchain.check_quotes(spec, tree)
     if not rows:
         return gate("venue-quotes", "fail", "the spec records no venue quote (`venue_quotes`)")
-    bad = [r for r in rows if r["status"] != "same" and not (r["status"] == "caller-dependent" and next(
-        (q.get("caller_fact") for q in spec["venue_quotes"] if q.get("id") == r.get("id")), None) in facts)]
+    bad = [r for r in rows if not onchain.quote_holds(r, spec)]
     if bad:
         return gate("venue-quotes", "fail", "; ".join(f"{r.get('id')}: {r['status']}: {r.get('detail', '')}" for r in bad[:5]), quotes=rows)
     return gate("venue-quotes", "pass", f"{len(rows)} venue quotes hold at their blocks, from the router too", quotes=rows)
@@ -207,7 +221,7 @@ def quote_words(result: str) -> set:
     return out
 
 
-def gate_venue_quote_test(spec: dict, tree: Path, layers: list) -> dict:
+def gate_venue_quote_test(spec: dict, tree: Path, layers: list, changed) -> dict:
     """The simulation layer tests the implementation against the venue's own quotes, to the wei
     (`implement.md`, venue-quote test): a test file the branch changes names each quote's block and
     asserts its result. Exact simulation-vs-execution cannot show an under-quote: the router keeps
@@ -217,10 +231,8 @@ def gate_venue_quote_test(spec: dict, tree: Path, layers: list) -> dict:
     quotes = spec.get("venue_quotes", [])
     if not quotes:
         return gate("venue-quote-test", "fail", "the spec records no venue quote to test against")
-    try:
-        changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
-    except subprocess.CalledProcessError as e:
-        return gate("venue-quote-test", "fail", f"cannot diff against origin/{schema.BASE}: {e}")
+    if changed is None:
+        return gate("venue-quote-test", "fail", f"cannot diff against origin/{schema.BASE}")
     texts = [(tree / p).read_text(errors="replace") for p in changed
              if p.startswith(("crates/tycho-simulation/", "protocols/adapter-integration/")) and (tree / p).is_file()]
     tests = "\n".join(t for t in texts if re.search(r"#\[(tokio::)?test\b|function\s+test", t))
@@ -269,8 +281,9 @@ def gate_base_current(tree: Path) -> dict:
     return gate("base-current", "fail", detail, behind=behind, overlap=overlap[:20])
 
 
-def gate_sibling_executors(tree: Path) -> dict:
-    changed = git(tree, "diff", "--name-only", f"origin/{schema.BASE}...HEAD").split()
+def gate_sibling_executors(tree: Path, changed) -> dict:
+    if changed is None:
+        return gate("sibling-executor-address", "fail", f"cannot diff against origin/{schema.BASE}")
     if ROUTER_TEST_SETUP not in changed:
         return gate("sibling-executor-address", "n/a", "TychoRouterTestSetup unchanged")
     try:
@@ -353,40 +366,41 @@ def main() -> None:
     run = schema.run_dir(args.protocol)
     tree = schema.worktree_dir(args.protocol)
     spec = schema.load_json(run / "spec.json")
-    dec = schema.load_json(run / "decisions.json") if (run / "decisions.json").exists() else {}
+    dec = schema.load_json_or(run / "decisions.json", {})
     _, chains = schema.run_chains(run)
     system = (dec.get("agreements") or {}).get("protocol_system", "")
+    changed = changed_files(tree)
     # Every chain's package and test package: a clone's yaml sits under its own name.
-    names = set()
-    for key in ("package", "test_package"):
-        v = (dec.get("paths") or {}).get(key)
-        names.update(v.values() if isinstance(v, dict) else [v] if v else [])
-    yamls = sorted({y for name in names for y in integration_yamls(tree, name)} or set(integration_yamls(tree, "")))
+    yamls = sorted({y for name in schema.package_names(dec) for y in integration_yamls(tree, name, changed)} or set(integration_yamls(tree, "", changed)))
 
     if args.recheck:
         # After the PR opens (and after merge, until the integration is retired): the venue as the
         # spec describes it, re-read.
         rows = {"proxies": proxy_drift(spec), "watch": onchain.check_watch(spec), "quotes": onchain.check_quotes(spec, tree)}
         print(json.dumps(rows, indent=2))
-        sys.exit(1 if any(r["status"] != "same" for group in rows.values() for r in group) else 0)
+        ok = all(r["status"] == "same" for r in rows["proxies"] + rows["watch"]) and all(onchain.quote_holds(r, spec) for r in rows["quotes"])
+        sys.exit(0 if ok else 1)
 
     caps = harness_caps.detect(tree)
 
     gates = [
         gate_layers_clean(run),
         gate_guards(run, tree),
+        gate_signed_facts(run, spec),
         gate_checks(args.protocol, args.round),
         gate_mutation_surfaces(spec, yamls, caps),
         gate_proxies(spec),
         gate_venue_quotes(spec, tree, {f["id"] for f in spec.get("facts", [])}),
-        gate_venue_quote_test(spec, tree, ledger.route_layers(run)),
+        gate_venue_quote_test(spec, tree, ledger.route_layers(run), changed),
         gate_watch(spec),
         gate_base_current(tree),
-        gate_sibling_executors(tree),
+        gate_sibling_executors(tree, changed),
         gate_executor_fixture(tree, system, chains, yamls),
         gate_strict_yamls(yamls, tree),
     ]
     off = [{"gap": g, **info} for g, info in caps.items() if not info["on"]]
+    # `warn` passes: it names something a person should know (an open sibling PR, a `gh` failure
+    # listing them) that this branch cannot fix; the PR lists it under "For a person".
     report = {"head": git(tree, "rev-parse", "HEAD").strip(), "gates": gates, "off": off, "passed": all(g["status"] in ("pass", "n/a", "off", "warn") for g in gates)}
     schema.write_json(run / "final_gates.json", report)
     for g in gates:

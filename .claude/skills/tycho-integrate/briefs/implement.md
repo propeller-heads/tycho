@@ -131,25 +131,22 @@ in your answers, never in a committed handover file (`docs-at-the-right-scope`).
 
 ## Checks
 
-Run the layer's checks until green before you finish. The orchestrator runs them again
-(`checks.toml`) and records that run:
+Run the layer's checks until green before you finish, with the same script and steps
+(`checks.toml`) the orchestrator records afterwards, into the temp dir:
 
-- Substreams: `cargo +"$RUST_NIGHTLY" fmt`, `cargo clippy -p <package> --all-targets -- -D warnings`,
-  `cargo test -p <package>`, `cargo build --target wasm32-unknown-unknown --release -p <package>`
-  (from `protocols/substreams`; the harness packs this WASM but does not build it).
-- Simulation: `cargo nextest run -p tycho-simulation --all-features -E 'test(/<module>/)'` and
-  clippy, or `forge test --match-contract <Adapter> -j 1` (rate-limited RPCs fail parallel fork
-  tests with timeouts that look like logic errors).
-- Execution: encoder nextest, `forge test --match-contract <Executor>`, the router test, and
-  `forge test --match-contract RuntimeBytecodeFixtures`, from `crates/tycho-execution/contracts`.
-- The protocol-testing range run, `cargo run --release -- range --package <package> --chain <chain>
-  --report <file>` from `protocols/testing` (`protocols/testing/README.md`): the report lists every
-  check's outcome per component and direction, and the run fails listing every failed check. It
-  needs `tycho-indexer` on PATH
-  (`cargo build --release -p tycho-indexer`, then `target/release` on PATH), a Postgres of its own
-  (`DB_HOST_PORT=<free port> docker compose up db -d` in `protocols/testing`, with `DATABASE_URL`
-  and `TYCHO_SERVER_PORT` to match), and one indexer per database at a time. Never pipe a build or
-  test into `tail` without `set -o pipefail`.
+```bash
+python3 -I {{skill}}/scripts/layer_checks.py --protocol "{{protocol}}" --layer {{layer}} --scratch [--only <step>,...]
+```
+
+It builds what the harness needs, starts its own Postgres and indexer, and judges the
+protocol-testing report as the round will. The steps it runs for this layer:
+
+{{commands}}
+
+Run single commands yourself as they are written there, from their directory; a command prefixed
+with variable assignments (`FOO=1 cmd`), `export` or `set` is refused in this session, so leave the
+harness to the script. Forge fork tests run with `-j 1`: rate-limited RPCs fail parallel fork tests
+with timeouts that look like logic errors.
 
 Harness gates on this tree:
 
@@ -158,6 +155,12 @@ Harness gates on this tree:
 DCI on this run's chains:
 
 {{dci}}
+
+## Notes from the orchestrator
+
+A person's decisions on this layer are in the findings above. Anything else:
+
+{{extra}}
 
 ## Finish
 

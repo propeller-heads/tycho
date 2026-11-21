@@ -50,9 +50,27 @@ the person grants them).
 
 On every invocation, after `--status`/`--recheck`/`--pr-review` dispatch: if `RUN/ledger.jsonl`
 exists, `S/state.py P resume` names the stage to continue; pick up there. A run stopped by a
-budget, a crash or a compaction loses nothing the ledger holds. Before each stage append
+budget, a crash or a compaction loses nothing the ledger holds. A new run starts with
+`S/state.py P init`, before its first stage. Before each stage append
 `{"t":"stage","stage":"<stage>","status":"started"}` and after it `"done"`
 (`S/state.py P append '<json>'`).
+
+## Agent calls
+
+Every agent runs through `S/run_agent.py`, whose exit code says what to do next, wherever it is
+called:
+
+- 0: use the output.
+- 2: the session ended with an error: read the output file and rerun it once; failing again, ask the
+  person (class `outside-repo`).
+- 3: no budget was left, nothing started: `next` escalates the cap (step 9.6).
+- 4: the session changed what it may not (the run's records, the repository's branches, the
+  person's checkout); `run_agent.py` restored what it could and recorded a `tamper` event. Discard
+  its output; `next` asks the person whether to rerun it.
+- 5: the session hit its budget part way; its commits, if any, are in the worktree. Treat it as a
+  round that finished: record what it left (steps 9.2–9.4).
+
+Every session's spend is in the ledger, whatever its exit.
 
 ## Stages
 
@@ -86,7 +104,7 @@ venue already integrated. No grilling: research verifies every value as a lead.
 every chain, and a chain they find red reopens the layer for rounds that test it beside the primary
 (step 9, `layer_checks.py --chains <chain>`). `S/envcheck.py --protocol P` validates the intake.
 
-`S/state.py P init` first. Intake is never edited afterwards; anything learned later is a spec
+Intake is never edited afterwards; anything learned later is a spec
 amendment. Run `envcheck.py --protocol P` again now that the chains and credentials are known.
 
 ### 3. Worktree (`worktree`)
@@ -99,7 +117,9 @@ It cuts `.claude/worktrees/integrate-<slug>` on branch `integrate/<slug>` from `
 its submodules, and links the git-ignored `.env` files from the person's checkout, which is never
 touched. Record the stage in the ledger (`{"t":"stage","stage":"worktree","status":"done"}`).
 
-**Classify.** Before research, sort the venue into one of four cases:
+### 3a. Classify (`classify`)
+
+Before research, sort the venue into one of four cases:
 
 ```bash
 S/prompt.py --protocol P --brief classify --out RUN/prompts/classify.md
@@ -133,20 +153,25 @@ contested becomes `contested` with an open risk. Then `spec_render.py --check` a
 
 ### 6. Gate 1: the spec (`gate1`)
 
-Show the person `RUN/SPEC.md` (its path and a summary: route, contracts, how a swap works,
-the coverage (what share of the venue's TVL or volume the integration serves, and what it leaves
-out), the gas of one swap, any caller-dependent pricing, the critical facts, open risks, which
-harness gates are off, and per chain whether DCI is available and which dependencies need it). Ask the simulation kind as a question of its own:
-native, hybrid or vm as research chose it, the other kinds with their costs from the kind fact, or
-not worth integrating (the run stops: `{"t":"stage","stage":"gate1","status":"stopped"}`). Then
-ask: approve the spec, or correct it. A different kind or any correction goes to the `amend` brief
-and the spec is rendered and shown again. On approval:
+Show the person `RUN/SPEC.md`, its path and a summary of:
+
+- the route, the contracts and how a swap works;
+- the coverage: what share of the venue's TVL or volume the integration serves, and what it leaves out;
+- the gas of one swap, and any caller-dependent pricing;
+- the critical facts and the open risks;
+- which harness gates are off, and per chain whether DCI is available and which dependencies need it.
+
+Ask the simulation kind as a question of its own: native, hybrid or vm as research chose it, the
+other kinds with their costs from the kind fact, or not worth integrating (the run stops:
+`{"t":"stage","stage":"gate1","status":"stopped"}`). Then ask: approve the spec, or correct it. A
+different kind or any correction goes to the `amend` brief and the spec is rendered and shown again. On approval:
 
 ```bash
-S/state.py P append '{"t":"gate","gate":1,"status":"approved","facts":[<every fact id>]}'
+S/state.py P sign-spec
 ```
 
-The listed facts are signed: an amendment to one of them goes back to the person.
+Every fact is signed with what it says: an amendment to one goes back to the person, and the final
+`signed-facts` gate fails on one that changed without an amendment.
 
 ### 7. Decision record (`decide`, `decide-review`)
 
@@ -155,8 +180,8 @@ S/prompt.py --protocol P --brief decide --out RUN/prompts/decide.md
 S/run_agent.py --protocol P --label decide --role researcher --agent tycho-researcher --cwd <worktree> --prompt-file RUN/prompts/decide.md --out RUN/out/decide.md
 ```
 
-Validate it (`python3 -I -c` with `schema.validate_decisions`, or read it against the brief's
-shape) and fix gaps by sending them back. Then the review of the record, from a fresh context:
+Validate it with `S/state.py P validate` (intake, spec and decisions, each against its schema;
+`layer_checks.py` validates the decisions again before any command) and send the gaps back. Then the review of the record, from a fresh context:
 
 ```bash
 S/prompt.py --protocol P --brief review-decisions --out RUN/prompts/review-decisions.md
@@ -189,19 +214,17 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
 1. **Implement.**
    ```bash
    S/prompt.py --protocol P --brief implement --layer L --round N --out RUN/prompts/implement-L-N.md
-   BASE=$(git -C <worktree> rev-parse HEAD)
+   ROUND_BASE=$(git -C <worktree> rev-parse HEAD)
    S/run_agent.py --protocol P --label implement:L:N --role implementer --agent tycho-implementer \
      --layer L --cwd <worktree> --prompt-file RUN/prompts/implement-L-N.md --out RUN/out/implement-L-N.md
    ```
-   Exit 3 means no budget is left: go to step 6 (`next` escalates). Exit 4 means the session changed
-   the run's records (the ledger, the intake, the role settings, round results); `run_agent.py`
-   restored them and recorded a `tamper` event: discard the session's output and go to step 6,
-   where `next` asks the person.
+   Exit codes as in "Agent calls". A person's decisions on the layer reach the implementer in its
+   findings file; anything else for it goes in `--extra-file`.
 2. **Answers.** Take the JSON at the end of `RUN/out/implement-L-N.md`, save it as
    `RUN/rounds/L-N/answers.json`, and `S/state.py P answers --layer L --round N --file …`. Missing
    answers are reported and stay open; they are never dropped. `facts_learned` go to the spec as
    amendments (below).
-3. **Guards.** `S/state.py P check-guards --worktree <worktree> --from $BASE --layer L --round N --record`.
+3. **Guards.** `S/state.py P check-guards --worktree <worktree> --from $ROUND_BASE --layer L --round N --record`.
    It covers the round's commits and the worktree's uncommitted changes. When the person answers
    the guard escalation by accepting the change, record it with `decide --accept-guard`; the final
    `guards` gate fails on any guarded change on the branch nobody accepted.
@@ -243,9 +266,10 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
      round runs for it;
    - `stopped`: the person stopped the run at the integration's dollar cap; mark the stage
      `stopped` and end;
-   - `escalate`: ask the person the decision it opened (its `decision` id; `state.py P status`
-     shows the question), with what the ledger shows: the open findings, the disputes and both
-     sides' evidence, the spend. Record the answer with `decide`, then continue the loop. The
+   - `escalate`: ask the person the decision it opened (its `decision` id, or `decisions` for
+     decisions already open; `state.py P status` shows the question), with what the ledger shows: the open findings, the disputes and both
+     sides' evidence, the spend. Record the answer with `decide`, then continue the loop; the next
+     implementer and reviewer see the answer in their findings file. The
      answer resets progress, oscillation and dispute counting for the layer from that round on.
 
 The rounds' review findings are the review's: never edit, merge or drop one. The implementer sees
@@ -261,15 +285,16 @@ the ledger's findings (the existing file), never review transcripts.
    ```
    (`--layer auto` reviews each built layer at its last round, and assigns each finding a layer by
    its file, from `.claude/knowledge/paths.toml`; a file of no built layer goes to the route's last.)
-   A layer with a new `blocking` finding gets more rounds (step 9, with `next --extra-rounds` up to
-   `budgets.toml` `final.extra_rounds`), then this stage runs again; past that, it escalates.
-   Findings below blocking stay in the ledger and the PR lists them.
+   A layer with a new `blocking` finding gets more rounds (step 9; `next` allows `budgets.toml`
+   `final.extra_rounds` more), then this stage runs again; past that, it escalates. Findings below
+   blocking stay in the ledger and the PR lists them: they hold no layer.
 2. **Gates.** `S/final_gates.py --protocol P --round <attempt>`; its docstring lists each gate. A
    failing gate is fixed by:
    - an implement round of its layer, when it is code (a chain's protocol-testing: rounds with
      `--chains <chain>`);
-   - a rebase, when `base-current` fails (behind by any commit), then the layer checks and these
-     gates again;
+   - a rebase, when `base-current` fails (behind by any commit): rebase the worktree onto
+     `origin/main`, `S/state.py P rebase --head $(git -C <worktree> rev-parse HEAD)` (reviews of the
+     old head stop counting), then the final review, the layer checks and these gates again;
    - an amendment, when the venue changed (proxies, `watch`, `venue-quotes`; below);
    - a person's decision, otherwise.
 
@@ -284,7 +309,7 @@ and the final review checked.
 ### 11. Gate 3: push and PR (`gate3`, `pr`)
 
 ```bash
-S/pr_body.py --protocol P --shadow
+S/pr_body.py --protocol P            # shadow mode; --no-shadow once the person drops it
 ```
 
 Show the person `RUN/PR.md` (read any `STALE:` line `pr_body.py` printed: the description names
@@ -297,8 +322,8 @@ git -C <worktree> push -u origin integrate/<slug>
 gh pr create --head integrate/<slug> --base main --title "feat: integrate <protocol> as <protocol_system>" --body-file <PR.md plus this session's attribution lines>
 ```
 
-Shadow mode is the default until the escape rate earns more (the person decides when to drop
-`--shadow`): the decisions and the ledger are held back in `RUN/PR-held.md` until the person has
+Shadow mode is the default until the escape rate shows the pipeline's reviews catch what a
+person's would (the person decides when to pass `--no-shadow`): the decisions and the ledger are held back in `RUN/PR-held.md` until the person has
 reviewed the PR blind. Then offer to schedule `--recheck` with `/loop` while the PR is open, and
 after it merges until the integration's first release is live: venues upgrade and swap config
 after merge too, often with no event.
@@ -311,8 +336,11 @@ found by the final gates or `--recheck`) becomes an amendment, never an intake e
 1. `amend` brief with what changed (`--extra-file`); the researcher appends it to `amendments`
    with evidence. `spec_render.py --check`.
 2. `S/state.py P amend --fact S<n> --evidence '…' --new '…' --source chain|person`. It names the
-   decisions that cite the fact and the layers those decisions shaped.
-3. `needs_person: true` (the fact was signed at Gate 1): ask the person before anything reruns.
+   decisions that cite the fact and the layers those decisions shaped, and reopens those layers:
+   `next` says `continue` for each until a round runs after the amendment, and the final gates
+   fail until then.
+3. A fact signed at Gate 1 (`needs_person: true`): `amend` opened a decision (`decision`); `next`
+   escalates it before anything reruns. Ask the person.
 4. Reopened decisions go back through `decide` for those decisions; each affected layer gets
    `{"t":"stage","stage":"build:L","status":"started"}` and more rounds, in layer order.
 
@@ -375,7 +403,7 @@ caps are placeholders until shadow runs measure spend (`--status` shows it per s
 | `scripts/schema.py` | the shapes of intake, spec, decisions and ledger events; paths; guards |
 | `scripts/state.py` | ledger, stop rules, review ingestion, guards, amendments, status, resume |
 | `scripts/run_agent.py` | the one headless `claude -p` wrapper: budget cap, cost into the ledger |
-| `scripts/guard.py` | `PreToolUse` hook of the run's agents (`settings/<role>.json`) |
+| `scripts/guard.py` | `PreToolUse` hook of the run's agents (`settings/<role>.json`). The settings' `Read(**/.env)` deny keeps secrets out of transcripts by accident; it is not isolation (agents get the `.env` values in their environment) |
 | `scripts/envcheck.py` | the environment check |
 | `scripts/harness_caps.py` | which hardening gaps (G1–G13) the harness supports |
 | `scripts/layer_checks.py`, `checks.toml` | each layer's checks, run in the worktree |
@@ -383,7 +411,8 @@ caps are placeholders until shadow runs measure spend (`--status` shows it per s
 | `scripts/final_gates.py` | final gates, `--recheck` |
 | `scripts/onchain.py` | the venue read again: quotes (also from the router), watched code and getters, a quote's read set |
 | `scripts/worktree.py` | the run's worktree on `origin/main`, its submodules and linked `.env` files |
-| `scripts/pr_body.py` | the PR description (`--shadow` holds the ledger back) |
-| `scripts/test_state.py` | tests of the ledger, stop rules, guards and spec validation |
+| `scripts/pr_body.py` | the PR description (shadow mode holds the ledger back; `--no-shadow`) |
+| `scripts/split.py` | stacked PR branches cut from the gated branch, keeping its commits |
+| `scripts/test_state.py` | the scripts' tests |
 | `.claude/agents/tycho-researcher.md`, `tycho-implementer.md` | the agents' definitions |
 | `RUN/` (gitignored) | `intake.json`, `spec.json`, `SPEC.md`, `decisions.json`, `ledger.jsonl`, `rounds/`, `reviews/`, `prompts/`, `out/`, `final_gates.json`, `PR.md` |

@@ -13,8 +13,9 @@ plus any chain `--chains` names (a chain the final gates found red); `--layer fi
 every chain. The other steps run once.
 
 Infrastructure: a failed step whose log shows the environment failing (RPC limits or TLS, an
-expired Substreams token, Docker, a full disk, a timeout) is run once more after the environment is
-checked again. Still failing that way, it is `infra`: never handed to the implementer as a code
+expired Substreams token, Docker, a full disk, a timeout that the log explains) is run once more,
+after the env files are read again (a renewed token) and a pause; a harness run checks its RPC
+and token again as it starts. Still failing that way, it is `infra`: never handed to the implementer as a code
 failure, and the stop rules ask the person about the named cause. It is not rerun at the base
 branch: the integration's package and tests do not exist there.
 """
@@ -23,9 +24,9 @@ import argparse
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -62,20 +63,20 @@ def placeholders(run: Path, tree: Path, chain: str) -> dict:
     chain to string (a package or test package per chain)."""
     values = {"tree": str(tree), "chain": chain}
     dec_path, spec_path = run / "decisions.json", run / "spec.json"
+    spec = schema.load_json(spec_path) if spec_path.exists() else {}
     if dec_path.exists():
         dec = schema.load_json(dec_path)
-        # Checked again here: decisions.json may change after it was validated.
-        unsafe = schema.unsafe_values(dec)
-        if unsafe:
-            raise SystemExit(f"decisions.json has values that cannot go into a command: {unsafe}")
+        # Validated here, where its values go into commands, whatever the orchestrator did before.
+        errors = schema.validate_decisions(dec, spec)
+        if errors:
+            raise SystemExit("decisions.json: " + "; ".join(errors))
         for k, v in (dec.get("paths") or {}).items():
             v = v.get(chain) if isinstance(v, dict) else v
             if isinstance(v, str):
                 values[k] = v
         values.setdefault("protocol_system", (dec.get("agreements") or {}).get("protocol_system", ""))
     values.setdefault("test_package", values.get("package", ""))
-    if spec_path.exists():
-        values["kind"] = schema.load_json(spec_path).get("kind", "")
+    values["kind"] = spec.get("kind", "")
     return values
 
 
@@ -119,6 +120,8 @@ def judge_report(path: Path, patterns, exit_code: int) -> tuple:
     skipped = [pick(r) for r in own if r.get("outcome") == "skipped" and r.get("reason")]
     if not own:
         return "fail", f"exit {exit_code}, and the report has none of this layer's checks ({len(results)} results)", [], skipped, later
+    if len(skipped) == len(own):
+        return "fail", f"exit {exit_code}, and every one of this layer's {len(own)} checks was skipped: nothing was tested", [], skipped, later
     if bad:
         return "fail", f"exit {exit_code}; {len(bad)} of this layer's checks failed", bad, skipped, later
     if exit_code != 0 and not later:
@@ -127,12 +130,16 @@ def judge_report(path: Path, patterns, exit_code: int) -> tuple:
     return "pass", f"{len(own)} checks of this layer passed{note}", [], skipped, later
 
 
+# Above the harness's defaults (Postgres 5431, the indexer 4242), so a run never takes the ports a
+# person's own harness uses.
+DB_PORT_FROM, SERVER_PORT_FROM = 5440, 4250
+
+
 def free_port(start: int) -> int:
-    for port in range(start, start + 200):
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", port)) != 0:
-                return port
-    raise SystemExit(f"no free port from {start}")
+    port = next((p for p in range(start, start + 200) if envcheck.port_free(p)), None)
+    if port is None:
+        raise SystemExit(f"no free port from {start}")
+    return port
 
 
 class Harness:
@@ -141,8 +148,8 @@ class Harness:
 
     def __init__(self, tree: Path, project: str, logdir: Path, chain: str):
         self.tree, self.project, self.logdir, self.chain = tree, project, logdir, chain
-        self.db_port = free_port(5440)
-        self.server_port = free_port(4250)
+        self.db_port = free_port(DB_PORT_FROM)
+        self.server_port = free_port(SERVER_PORT_FROM)
         self.env = None
 
     def up(self) -> tuple:
@@ -180,25 +187,33 @@ class Harness:
         subprocess.run(["docker", "compose", "-p", self.project, "down"], cwd=self.tree / "protocols/testing", capture_output=True)
 
 
-def applies(step: dict, layer: str, values: dict, caps: dict, tree: Path) -> tuple:
-    """(runs, why not)."""
+def applies(step: dict, layer: str, values: dict, caps: dict, tree: Path, route: list) -> tuple:
+    """(status, detail): status `run`, or why the step does not run (`n/a`, `off`, `fail`), or None
+    for a step of another layer, which is not listed. The final run runs the steps of the layers the
+    route builds."""
     layers = step.get("layers", [])
     if layer != "final" and layer not in layers:
-        return False, None
-    if layer == "final" and not layers:
-        return False, None
+        return None, None
+    if layer == "final" and not set(layers) & set(route):
+        return None, None
     when = step.get("when")
-    if isinstance(when, list) and values.get("kind") not in when:
-        return False, f"n/a: {values.get('kind') or 'unknown'} integration"
+    if isinstance(when, list):
+        if values.get("kind") not in schema.SIM_KINDS:
+            return "fail", f"spec.json's kind {values.get('kind')!r} is not one of {schema.SIM_KINDS}"
+        if values["kind"] not in when:
+            return "n/a", f"{values['kind']} integration"
     if isinstance(when, str) and when.startswith("file:") and not (tree / when[5:]).exists():
-        return False, f"n/a: no {when[5:]} in the tree"
+        return "n/a", f"no {when[5:]} in the tree"
     gap = step.get("requires")
     if gap and not caps.get(gap, {}).get("on"):
-        return False, f"off: {caps.get(gap, {}).get('reason', gap + ' unknown')}"
-    missing = [k for k in step.get("needs", []) if not values.get(k)]
+        return "off", caps.get(gap, {}).get("reason", gap + " unknown")
+    missing = sorted({k for k in step.get("needs", []) + PLACEHOLDER.findall(step["cmd"]) if k != "report" and not values.get(k)})
     if missing:
-        return False, f"fail: decisions.json paths lack {missing}"
-    return True, None
+        return "fail", f"decisions.json paths lack {missing}"
+    return "run", None
+
+
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
 
 def run_step(step: dict, values: dict, tree: Path, outdir: Path, name: str, env, layer: str) -> dict:
@@ -280,14 +295,20 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--protocol", required=True)
     p.add_argument("--layer", required=True, choices=(*schema.LAYERS, "final"))
-    p.add_argument("--round", type=int, required=True)
+    p.add_argument("--round", type=int, help="the round the results are for (not with --scratch)")
+    p.add_argument("--scratch", action="store_true", help="the implementer's own run: results under the temp dir, nothing recorded")
     p.add_argument("--only", help="comma-separated step names")
     p.add_argument("--chains", help="comma-separated chains to run the harness on besides the primary; `all` for every chain")
     args = p.parse_args()
+    if (args.round is None) == (not args.scratch):
+        raise SystemExit("give --round (a recorded run) or --scratch (an implementer's own run), not both")
 
     run = schema.run_dir(args.protocol)
     tree = schema.worktree_dir(args.protocol)
-    outdir = run / "rounds" / f"{args.layer}-{args.round}"
+    if args.scratch:
+        outdir = Path(tempfile.gettempdir()) / f"tycho-integrate-{schema.slug(args.protocol)}" / args.layer
+    else:
+        outdir = run / "rounds" / f"{args.layer}-{args.round}"
     outdir.mkdir(parents=True, exist_ok=True)
     steps = load_steps()
     schema.load_env_files()
@@ -297,6 +318,8 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"chains {unknown} are not the run's ({every})")
     harness_chains = [primary] + [c for c in every if c in extra and c != primary]
+    values_of = {chain: placeholders(run, tree, chain) for chain in harness_chains}
+    route = state_route(run)
     caps = harness_caps.detect(tree)
     only = set(args.only.split(",")) if args.only else None
 
@@ -306,19 +329,20 @@ def main() -> None:
             continue
         ran = set()
         for chain in harness_chains:
-            values = placeholders(run, tree, chain)
+            values = values_of[chain]
+            name = step["name"] if chain == primary else f"{step['name']}@{chain}"
+            status, detail = applies(step, args.layer, values, caps, tree, route)
+            if status is None:
+                continue
             # A step runs once per distinct command: the harness on each chain, another step once
             # per chain whose package differs. A chain's run is named `<step>@<chain>`, except the
             # primary's, so a failure keeps its name from round to round.
-            key = step["cmd"].format(**values, report="")
+            key = (status, step["cmd"].format_map({**values, "report": ""}) if status == "run" else detail)
             if key in ran:
                 continue
             ran.add(key)
-            name = step["name"] if chain == primary else f"{step['name']}@{chain}"
-            runs, why = applies(step, args.layer, values, caps, tree)
-            if not runs:
-                if why:
-                    results.append({"name": name, "status": why.split(":", 1)[0], "detail": why})
+            if status != "run":
+                results.append({"name": name, "status": status, "detail": f"{status}: {detail}"})
                 continue
             results.append(run_with_retry(step, values, tree, outdir, name, chain, args))
 
@@ -331,6 +355,13 @@ def main() -> None:
         print(f"{r['status']:5} {r['name']}: {r['detail']}")
     print(json.dumps({"green": green, "infra": [r["name"] for r in results if r["status"] == "infra"], "file": str(outdir / "checks.json")}))
     sys.exit(0 if green else 3 if only_infra else 1)
+
+
+def state_route(run: Path) -> list:
+    """The layers the run builds (its intake's route), every layer when it names none."""
+    intake = schema.load_json(run / "intake.json") if (run / "intake.json").exists() else {}
+    layers = (intake.get("route") or {}).get("layers") or []
+    return [l for l in schema.LAYERS if l in layers] or list(schema.LAYERS)
 
 
 if __name__ == "__main__":

@@ -29,10 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import schema  # noqa: E402
 
+# A run's worktree builds the indexer, the substreams WASM and the test crates in release mode,
+# about 30 GB, and the harness's Postgres grows with the range.
 MIN_FREE_GB = 40
 HARNESS_PORTS = (5431, 4242)  # protocol-testing's Postgres and indexer defaults
 TOOLS = ("cargo", "forge", "cast", "anvil", "substreams", "docker", "gh", "claude", "git")
-# Files the tests read their environment from; a variable set in the shell wins.
 
 
 def rpc(url: str, method: str, params: list, timeout=20):
@@ -45,7 +46,8 @@ def rpc(url: str, method: str, params: list, timeout=20):
     return data.get("result")
 
 
-def storage_range_check(chain: str) -> str:
+def dci_check_name(chain: str) -> str:
+    """The name of the chain's DCI line in the results (`debug_storageRangeAt` served or not)."""
     return f"dci:{chain}"
 
 
@@ -59,6 +61,8 @@ def check_rpc(chain: str, contract) -> list:
         return [("rpc:" + chain, False, schema.no_rpc(chain))]
     try:
         head = int(rpc(url, "eth_blockNumber", []), 16)
+        # About a year back on Ethereum (12 s blocks): a full node prunes state long before that, so
+        # an answer means the node keeps history.
         old = max(head - 2_000_000, 1)
         rpc(url, "eth_getBalance", ["0x0000000000000000000000000000000000000000", hex(old)])
         results.append(("rpc:" + chain + ":historical", True, f"state at block {old} served"))
@@ -74,9 +78,9 @@ def check_rpc(chain: str, contract) -> list:
         target = contract or "0x0000000000000000000000000000000000000000"
         res = rpc(url, "debug_storageRangeAt", [block["hash"], 0, target, "0x" + "00" * 32, 1])
         ok = res is not None
-        results.append((storage_range_check(chain), ok, "debug_storageRangeAt served: DCI available" if ok else "debug_storageRangeAt returned null: no DCI on this chain"))
+        results.append((dci_check_name(chain), ok, "debug_storageRangeAt served: DCI available" if ok else "debug_storageRangeAt returned null: no DCI on this chain"))
     except Exception as e:  # noqa: BLE001
-        results.append((storage_range_check(chain), False, f"debug_storageRangeAt failed ({e}): no DCI on this chain"))
+        results.append((dci_check_name(chain), False, f"debug_storageRangeAt failed ({e}): no DCI on this chain"))
     return results
 
 
@@ -185,15 +189,15 @@ def main() -> None:
     # A busy port is not fatal: the harness runs pick free ports themselves. A node without
     # `debug_storageRangeAt` is not either: it means no DCI on that chain.
     advisory = {f"port:{p}" for p in HARNESS_PORTS}
-    info = {storage_range_check(c) for c in chains}
+    info = {dci_check_name(c) for c in chains}
     for name, ok, detail in checks:
         mark = "ok  " if ok else ("info" if name in info else "warn" if name in advisory else "MISS")
         print(f"{mark} {name}: {detail}")
     missing = [{"check": n, "fix": d} for n, ok, d in checks if not ok and n not in advisory | info]
     by_name = {n: (ok, d) for n, ok, d in checks}
     chain_caps = {
-        c: {"dci": by_name[storage_range_check(c)][0], "detail": by_name[storage_range_check(c)][1]}
-        for c in chains if storage_range_check(c) in by_name
+        c: {"dci": by_name[dci_check_name(c)][0], "detail": by_name[dci_check_name(c)][1]}
+        for c in chains if dci_check_name(c) in by_name
     }
     if args.protocol and schema.run_dir(args.protocol).exists():
         schema.write_json(schema.run_dir(args.protocol) / "env.json", {"chains": chain_caps})

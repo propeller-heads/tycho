@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Writes the PR description of a tycho-integrate run from its ledger, decisions and final gates.
 
-    pr_body.py --protocol P [--out <file>]     (default <run>/PR.md)
+    pr_body.py --protocol P [--out <file>] [--no-shadow]     (default <run>/PR.md, shadow mode)
 
 What it carries: the layers, the decision record and cross-layer agreements, a ledger summary per
 layer, the final gates (with the gates that were off and what turns them on), and
@@ -21,11 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import schema  # noqa: E402
 import state as ledger  # noqa: E402
 
+def first_line(text, width: int = 200) -> str:
+    return ((text or "").strip().splitlines() or ["(no detail)"])[0][:width]
+
+
 LAYER_TITLES = {"indexing": "Indexing (Substreams)", "simulation": "Simulation", "execution": "Execution"}
-
-
-def maybe(path: Path, default=None):
-    return schema.load_json(path) if path.exists() else default
 
 
 def layer_summary(st: ledger.State, layer: str) -> str:
@@ -70,11 +70,11 @@ def evidence(st, final: dict) -> list:
     venue's own quotes and the watched state as the gates read them, and the dispute log."""
     out = []
     checks_gate = next((g for g in final.get("gates", []) if g["name"] == "checks"), {})
-    checks = maybe(Path(checks_gate["file"]), {}) if checks_gate.get("file") else {}
+    checks = schema.load_json_or(Path(checks_gate["file"]), {}) if checks_gate.get("file") else {}
     for step in checks.get("steps", []):
         if not step.get("report"):
             continue
-        report = maybe(Path(step["report"]), {})
+        report = schema.load_json_or(Path(step["report"]), {})
         results = report.get("results", [])
         by = {}
         for r in results:
@@ -111,10 +111,10 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     until the person's blind review is done, then posted as a comment."""
     run = schema.run_dir(protocol)
     st = ledger.State(ledger.read_events(run))
-    intake = maybe(run / "intake.json", {})
-    spec = maybe(run / "spec.json", {})
-    dec = maybe(run / "decisions.json", {})
-    final = maybe(run / "final_gates.json", {"gates": [], "off": []})
+    intake = schema.load_json_or(run / "intake.json", {})
+    spec = schema.load_json_or(run / "spec.json", {})
+    dec = schema.load_json_or(run / "decisions.json", {})
+    final = schema.load_json_or(run / "final_gates.json", {"gates": [], "off": []})
     layers = ledger.route_layers(run)
     agreements = dec.get("agreements") or {}
     values = {**(dec.get("paths") or {}), "protocol_system": agreements.get("protocol_system")}
@@ -178,7 +178,7 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     for g in final.get("gates", []):
         # A passing gate is one word; the gate's detail (a command's output, a step list) belongs in
         # final_gates.json. Only a gate that did not pass says why.
-        why = f" — {g['detail'].splitlines()[0][:200]}" if g["status"] not in ("pass", "n/a") and g.get("detail") else ""
+        why = f" — {first_line(g.get('detail'))}" if g["status"] not in ("pass", "n/a") else ""
         out.append(f"- {g['name']}: **{g['status']}**{why}")
         for pr in g.get("prs", []):
             out.append(f"  - {pr}")
@@ -203,7 +203,7 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     person += [f"Open risk: {r}" for r in spec.get("open_risks", [])]
     for g in final.get("gates", []):
         if g["status"] in ("fail", "warn"):
-            person.append(f"Final gate `{g['name']}` is {g['status']}: {g['detail'].splitlines()[0][:200]}")
+            person.append(f"Final gate `{g['name']}` is {g['status']}: {first_line(g.get('detail'))}")
     out += ["", "## For a person", ""]
     out += [f"- {p}" for p in person] or ["- Nothing to decide."]
     out += ["", "Rollout, outside this PR:", ""]
@@ -228,17 +228,25 @@ def stale_references(protocol: str, body: str) -> list:
     problems = []
     if not tree.exists():
         return problems
-    dec = maybe(run / "decisions.json", {})
-    for key in ("package", "test_package"):
-        value = (dec.get("paths") or {}).get(key)
-        for pkg in sorted(set(value.values())) if isinstance(value, dict) else [value] if value else []:
-            if not (tree / "protocols/substreams" / pkg).exists() and not (tree / "protocols/substreams" / pkg.replace("-", "/", 1)).exists():
-                problems.append(f"decisions.json {key} `{pkg}` is not under protocols/substreams in the worktree")
+    dec = schema.load_json_or(run / "decisions.json", {})
+    root = tree / "protocols/substreams"
+    clones = (tree / "protocols/testing/src/test_runner.rs").read_text(errors="replace") if (tree / "protocols/testing/src/test_runner.rs").exists() else ""
+    for pkg in schema.package_names(dec, ("package",)):
+        if not schema.package_dirs(root, pkg):
+            problems.append(f"decisions.json package `{pkg}` is not a package under protocols/substreams in the worktree")
+    for pkg in schema.package_names(dec, ("test_package",)):
+        # A test package is a package, or a clone of one that protocols/testing maps to its base.
+        if not schema.package_dirs(root, pkg) and f'"{pkg}"' not in clones:
+            problems.append(f"decisions.json test_package `{pkg}` is neither a package nor a clone in CLONE_TO_BASE_PROTOCOL")
     for rel in sorted(set(re.findall(r"protocols/substreams/[A-Za-z0-9_./-]+", body))):
         if "<" not in rel and not (tree / rel.rstrip(".")).exists():
             problems.append(f"the text names `{rel}`, which the branch does not have")
-    final = maybe(run / "final_gates.json", {})
+    final = schema.load_json_or(run / "final_gates.json", {})
     head = schema.git("-C", str(tree), "rev-parse", "HEAD", check=False).stdout.strip()
+    if not final:
+        problems.append("the final gates have not run: the Tests section is empty")
+    elif not final.get("passed"):
+        problems.append("the final gates did not pass")
     if final.get("head") and head and final["head"] != head:
         problems.append(f"final gates ran at {final['head'][:10]}, the branch is at {head[:10]}: rerun them")
     return problems
@@ -248,7 +256,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--protocol", required=True)
     p.add_argument("--out")
-    p.add_argument("--shadow", action="store_true", help="hold the decisions and ledger back for after the blind review (PR-held.md)")
+    p.add_argument("--no-shadow", dest="shadow", action="store_false",
+                   help="carry the decisions and ledger in the description; by default (shadow mode) they are held back in PR-held.md until the person's blind review")
     args = p.parse_args()
     run = schema.run_dir(args.protocol)
     out = Path(args.out) if args.out else run / "PR.md"

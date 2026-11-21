@@ -36,7 +36,6 @@
       "Bash(anvil:*)",
       "Bash(substreams:*)",
       "Bash(docker:*)",
-      "Bash(docker compose:*)",
       "Bash(ast-grep:*)",
       "Bash(bash .claude/scripts/run-nextest.sh:*)",
       "Bash(git submodule:*)",

@@ -5,6 +5,7 @@ of error strings; an empty list means the document is valid.
 """
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -18,7 +19,7 @@ LAYERS = ("indexing", "simulation", "execution")
 # Rust math; hybrid, native math over VM-indexed state; or a Solidity adapter run in the VM.
 SIM_KINDS = ("native", "hybrid", "vm")
 
-# Intake routes (assess-protocol's four cases). `integrated` stops the run.
+# Intake routes (the classify brief's four cases). `integrated` stops the run.
 ROUTES = ("new", "fork", "partial", "integrated")
 
 # The closed list of what a person decides (SKILL.md "What a person decides").
@@ -76,6 +77,7 @@ STAGES = (
     "envcheck",
     "intake",
     "worktree",
+    "classify",
     "research",
     "falsify",
     "gate1",
@@ -97,6 +99,8 @@ GUARDED_PATHS = (
     "protocols/testing/src/**",
     "crates/tycho-test/src/**",
     "scripts/checks/**",
+    "scripts/check-*",  # the checks checks.toml runs (check-licensing.sh)
+    "sgconfig.yml",
     ".github/**",
 )
 
@@ -296,6 +300,8 @@ EVENT_FIELDS = {
     "amendment": ("fact", "evidence"),
     "guard_violation": ("layer", "round", "paths"),
     "stop": ("reason",),
+    # The branch was rebased onto the moved base; every layer's last round is at `head` now.
+    "rebase": ("head",),
     # An agent session changed the run's records; run_agent.py restored them (`paths`).
     "tamper": ("label", "paths"),
     # A comment from the person's blind review of a shadow-mode PR: what the pipeline let through.
@@ -353,9 +359,20 @@ def rpc_url(chain: str):
     return next((os.environ[n] for n in rpc_vars(chain) if os.environ.get(n)), None)
 
 
+class GitError(subprocess.CalledProcessError):
+    """A failed git command whose message carries git's own reason (its stderr)."""
+
+    def __str__(self) -> str:
+        return f"git {' '.join(self.cmd[1:])} failed ({self.returncode}): {(self.stderr or '').strip()[-500:]}"
+
+
 def git(*args, cwd=None, check=True, input=None) -> subprocess.CompletedProcess:
-    """One git command, its output captured as text."""
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check, input=input)
+    """One git command, its output captured as text. A failure with `check` raises GitError, which
+    says why."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, input=input)
+    if check and proc.returncode != 0:
+        raise GitError(proc.returncode, ["git", *args], proc.stdout, proc.stderr)
+    return proc
 
 
 def repo_root() -> Path:
@@ -392,26 +409,96 @@ def worktree_dir(protocol: str) -> Path:
     return repo_root() / ".claude" / "worktrees" / f"integrate-{slug(protocol)}"
 
 
+def worktree_dir_of_run(run: Path) -> Path:
+    """The worktree of the run whose directory is `run`."""
+    return run.parent.parent / f"integrate-{run.name}"
+
+
 def branch(protocol: str) -> str:
     return f"integrate/{slug(protocol)}"
 
 
-# The run directory's records no agent writes: the orchestrator's and the person's. guard.py denies
-# the writes it can see; run_agent.py snapshots these around every agent session and restores any
-# it changed, which catches every other way of writing them.
-PROTECTED_RUN_FILES = ("ledger.jsonl", "intake.json", "settings", "rounds", "final_gates.json", "env.json", "prompts")
+# What an agent session may write in the run directory, by the brief it runs (its label's first
+# part). Everything else there is a record: the ledger, the intake, the role settings, prompts,
+# round results, and the spec, decisions and route once their own session is over. guard.py denies
+# the writes it can see; run_agent.py restores any record a session changed, whatever wrote it.
+AGENT_WRITES = {
+    "classify": ("route.json",),
+    "research": ("spec.json",),
+    "falsify": ("falsify.json",),
+    "amend": ("spec.json",),
+    "decide": ("decisions.json",),
+    "review-decisions": ("review-decisions.json",),
+}
+# Working space any session may write in the run directory: cloned references, fork scripts,
+# notes. Never a record.
+RUN_SCRATCH = ("refs", "fork", "scratch")
 
 
-def protected_digest(run: Path) -> dict:
-    """{relative path: sha256} of every file under PROTECTED_RUN_FILES."""
-    import hashlib
+def agent_may_write(label: str, rel: str) -> bool:
+    """Whether a session running `label` may write `rel` (a path relative to the run directory)."""
+    parts = Path(rel).parts
+    return bool(parts) and (parts[0] in RUN_SCRATCH or rel in AGENT_WRITES.get(label.split(":")[0], ()))
+
+
+def records_digest(run: Path, label: str) -> dict:
+    """{relative path: sha256} of every file in the run directory a session running `label` may not
+    write."""
     out = {}
-    for name in PROTECTED_RUN_FILES:
-        root = run / name
-        files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else []
-        for f in files:
-            out[str(f.relative_to(run))] = hashlib.sha256(f.read_bytes()).hexdigest()
+    for f in sorted(p for p in run.rglob("*") if p.is_file()):
+        rel = str(f.relative_to(run))
+        if not agent_may_write(label, rel):
+            out[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
     return out
+
+
+def checkout_digest(repo: Path, own_branch: str) -> dict:
+    """The person's checkout and the repository's branches, as a session must leave them: the
+    checkout's status, its diff and its untracked files' contents, and every branch but the run's
+    own (the implementer commits there). Git-ignored paths (`.claude/worktrees/`,
+    `.claude/reviews/`, `target/`) are not in it."""
+    status = git("-C", str(repo), "status", "--porcelain=v1", "-uall", check=False).stdout
+    diff = git("-C", str(repo), "diff", "HEAD", "--binary", check=False).stdout
+    untracked = [l[3:] for l in status.splitlines() if l.startswith("?? ")]
+    contents = {u: hashlib.sha256((repo / u).read_bytes()).hexdigest() for u in untracked if (repo / u).is_file()}
+    refs = {}
+    for line in git("-C", str(repo), "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", check=False).stdout.splitlines():
+        name, _, sha = line.partition(" ")
+        if name != f"refs/heads/{own_branch}":
+            refs[name] = sha
+    return {"status": status, "diff": hashlib.sha256(diff.encode()).hexdigest(), "untracked": contents, "refs": refs}
+
+
+def fact_digest(fact: dict) -> str:
+    """What a person signs of a fact at Gate 1: its claim, status and evidence."""
+    body = json.dumps({k: fact.get(k) for k in ("claim", "status", "evidence")}, sort_keys=True)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def package_dirs(root: Path, package: str) -> list:
+    """The directories of a Substreams package under `root` (protocols/substreams): its own name,
+    or a nested one whose path with `/` as `-` is the package (`ethereum-uniswap-v4/with-hooks` is
+    cargo package `ethereum-uniswap-v4-with-hooks`)."""
+    found = [root / package] if (root / package).is_dir() else []
+    for manifest in root.rglob("Cargo.toml"):
+        rel = manifest.parent.relative_to(root)
+        if "target" not in rel.parts and str(rel).replace("/", "-") == package and manifest.parent not in found:
+            found.append(manifest.parent)
+    return found
+
+
+def package_names(dec: dict, keys=("package", "test_package")) -> list:
+    """Every package name `decisions.json` `paths` gives under `keys`: one string, or one per chain."""
+    names = set()
+    for key in keys:
+        v = (dec.get("paths") or {}).get(key)
+        names.update(v.values() if isinstance(v, dict) else [v] if v else [])
+    return sorted(names)
+
+
+def load_json_or(path: Path, default):
+    """`path`'s JSON, or `default` when there is no such file."""
+    return load_json(path) if path.exists() else default
 
 
 # The branch a run builds on and its PR targets.
@@ -427,7 +514,9 @@ def run_chains(run: Path) -> tuple:
             doc = load_json(run / name)
             if doc.get("chains"):
                 break
-    chains = list(doc.get("chains") or ["ethereum"])
+    chains = list(doc.get("chains") or [])
+    if not chains:
+        raise SystemExit(f"{run}: no chains in intake.json or spec.json")
     primary = doc.get("primary_chain") or chains[0]
     return primary, [primary] + [c for c in chains if c != primary]
 

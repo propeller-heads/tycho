@@ -20,7 +20,9 @@ What holds for every job:
   methods and `.claude/knowledge/integration.md` § Baseline say how to establish each kind of
   fact; follow them and cite the method you used.
 - **Write only under the run directory** (`$TYCHO_INTEGRATE_RUN`): `spec.json`, fork setup scripts,
-  cloned reference repositories under `refs/`. Never edit the repository's code; a guard denies it.
+  cloned reference repositories under `RUN/refs/` (give `git clone` that destination). Never edit
+  the repository's code; a guard denies it, and a write it cannot see is undone or reported after
+  the session.
 - **Chain access** comes from `RPC_URL` (Ethereum) and `<CHAIN>_RPC_URL`. A tool that returns
   nothing where a known positive should appear is broken, not evidence of absence.
 - **Finish** with the JSON summary your brief asks for, as the last thing in your final message.

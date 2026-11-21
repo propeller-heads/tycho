@@ -9,9 +9,10 @@ lands in the ledger as a `spend` event.
     run_agent.py --protocol P --label implement:indexing:2 --role implementer \
         --agent tycho-implementer --layer indexing --cwd <worktree> --prompt-file F --out R
 
-Exit codes: 0 done, 2 the agent ended with an error, 3 no budget left (nothing was started), 4 the
-agent changed the run's records (the ledger, the intake, ...): they were restored and its output is
-not used.
+Exit codes: 0 done; 2 the agent ended with an error; 3 no budget left, nothing was started; 4 the
+agent changed what it may not (the run's records, the repository's branches: restored; the person's
+checkout: named), and its output is not used; 5 the session hit the budget part way (its commits,
+if any, are in the worktree). Every session that ran has its spend in the ledger.
 """
 
 import argparse
@@ -71,9 +72,9 @@ def render_settings(role: str, run: Path) -> Path:
     return path
 
 
-def restore_protected(run: Path, saved: Path, before: dict) -> list:
-    """Puts back every protected record an agent session changed, added or removed; their paths."""
-    after = schema.protected_digest(run)
+def restore_records(run: Path, saved: Path, before: dict, label: str) -> list:
+    """Puts back every run record a session changed, added or removed; their paths."""
+    after = schema.records_digest(run, label)
     changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
     for rel in changed:
         target = run / rel
@@ -82,6 +83,24 @@ def restore_protected(run: Path, saved: Path, before: dict) -> list:
             shutil.copy2(saved / rel, target)
         else:
             target.unlink(missing_ok=True)
+    return changed
+
+
+def restore_checkout(repo: Path, before: dict, after: dict) -> list:
+    """Branches a session moved go back; a change to the person's checkout (its files) cannot be
+    undone safely, so it is named. What changed, as paths."""
+    changed = []
+    for ref in sorted(set(before["refs"]) | set(after["refs"])):
+        if before["refs"].get(ref) != after["refs"].get(ref):
+            changed.append(f"branch {ref}")
+            if ref in before["refs"]:
+                schema.git("-C", str(repo), "update-ref", ref, before["refs"][ref], check=False)
+            else:
+                schema.git("-C", str(repo), "update-ref", "-d", ref, check=False)
+    if (before["status"], before["diff"], before["untracked"]) != (after["status"], after["diff"], after["untracked"]):
+        lines = set(before["status"].splitlines()) ^ set(after["status"].splitlines())
+        names = sorted({l[3:] for l in lines} | {u for u in set(before["untracked"]) | set(after["untracked"]) if before["untracked"].get(u) != after["untracked"].get(u)})
+        changed.append(f"the person's checkout {repo}: " + (", ".join(names[:10]) or "a tracked file changed further"))
     return changed
 
 
@@ -133,9 +152,16 @@ def main() -> None:
         "TYCHO_INTEGRATE_RUN": str(run),
         "TYCHO_INTEGRATE_WORKTREE": str(worktree),
         "TYCHO_INTEGRATE_REPO": str(schema.repo_root()),
+        "TYCHO_INTEGRATE_LABEL": args.label,
+        # No agent pushes: whatever runs git (a script, an interpreter), origin's push URL goes
+        # nowhere. Fetching is unaffected.
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "remote.origin.pushurl",
+        "GIT_CONFIG_VALUE_0": "/dev/null/tycho-integrate-agents-do-not-push",
     }
     prompt = Path(args.prompt_file).read_text()
-    before = schema.protected_digest(run)
+    repo, own = schema.repo_root(), schema.branch(args.protocol)
+    before, checkout_before = schema.records_digest(run, args.label), schema.checkout_digest(repo, own)
     with tempfile.TemporaryDirectory() as saved:
         for rel in before:
             dst = Path(saved) / rel
@@ -145,37 +171,41 @@ def main() -> None:
             proc = subprocess.run(cmd, input=prompt, capture_output=False, stdout=subprocess.PIPE, stderr=stderr, text=True, cwd=args.cwd, env=env)
             stderr.seek(0)
             err_text = stderr.read()
-        tampered = restore_protected(run, Path(saved), before)
-    if tampered:
-        # The session changed the run's records: they are back as they were, and the person hears
-        # of it. The call's output is not used.
-        ledger.append(run, {"t": "tamper", "label": args.label, "paths": tampered, **({"layer": args.layer} if args.layer else {})})
-        print(json.dumps({"label": args.label, "error": "the agent changed the run's records; they were restored", "paths": tampered}))
-        sys.exit(4)
+        tampered = restore_records(run, Path(saved), before, args.label)
+    tampered += restore_checkout(repo, checkout_before, schema.checkout_digest(repo, own))
 
     try:
         result = json.loads(proc.stdout)
     except json.JSONDecodeError:
         result = None
+    # The session's cost reaches the ledger whatever happened in it.
     spend = {"t": "spend", "label": args.label, "session": (result or {}).get("session_id"), "turns": (result or {}).get("num_turns")}
     if args.layer:
         spend["layer"] = args.layer
+    usd = float((result or {}).get("total_cost_usd") or 0.0)
     if result is None:
-        # A crashed or killed session reports no cost. Record that it ran, so the ledger shows the
-        # call; its real cost is not known (the caps undercount it).
-        ledger.append(run, {**spend, "usd": 0.0, "error": f"no JSON result (exit {proc.returncode})"})
+        # A crashed or killed session reports no cost; the call is on record, its cost unknown.
+        spend["error"] = f"no JSON result (exit {proc.returncode})"
+    ledger.append(run, {**spend, "usd": round(usd, 4)})
+
+    if tampered:
+        # The session changed what it may not: the run's records and the repository's branches are
+        # back as they were; a change to the person's checkout is named. The person hears of it
+        # (`next` escalates), and the session's output is not used.
+        ledger.append(run, {"t": "tamper", "label": args.label, "paths": tampered, **({"layer": args.layer} if args.layer else {})})
+        print(json.dumps({"label": args.label, "error": "the agent changed what it may not; see paths", "paths": tampered}))
+        sys.exit(4)
+    if result is None:
         out.write_text(proc.stdout + "\n" + err_text)
         print(json.dumps({"label": args.label, "error": "claude -p did not return JSON", "exit": proc.returncode, "out": args.out}))
         sys.exit(2)
 
-    usd = float(result.get("total_cost_usd") or 0.0)
-    ledger.append(run, {**spend, "usd": round(usd, 4)})
     out.write_text(result.get("result") or "")
     subtype = result.get("subtype", "")
     summary = {"label": args.label, "usd": usd, "subtype": subtype, "is_error": bool(result.get("is_error")), "out": args.out, "session": result.get("session_id")}
     print(json.dumps(summary))
     if "budget" in subtype:
-        sys.exit(3)
+        sys.exit(5)
     if result.get("is_error") or proc.returncode != 0:
         sys.exit(2)
 

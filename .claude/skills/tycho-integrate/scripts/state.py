@@ -18,8 +18,11 @@ rules are code here, not a judgement the model makes.
     state.py <protocol> remaining [--layer L]     USD left for the next agent call
     state.py <protocol> check-guards --worktree W --from A --to B [--layer L --round N --record]
     state.py <protocol> ask --class C --question '...' [--record D3] [--layer L]   open a question for a person
-    state.py <protocol> decide --id Q1 --choice '...' [--grant-rounds N --grant-usd X] [--close]
+    state.py <protocol> decide --id Q1 --choice '...' [--grant-rounds N --grant-usd X] [--close] [--accept-guard] [--waive] [--by who]
     state.py <protocol> amend --fact S3 --evidence '...' --new '...' [--source person|chain]
+    state.py <protocol> validate                  intake, spec and decisions against their schemas
+    state.py <protocol> sign-spec                 Gate 1 approved: record every fact and what it said
+    state.py <protocol> rebase --head H           the branch was rebased onto the moved base: reviews of the old head no longer count
 """
 
 import argparse
@@ -81,8 +84,9 @@ def load_budgets() -> dict:
 
 
 CAP_ESCALATIONS = ("round-cap", "usd-cap", "integration-usd-cap")
-# The run's own stop, not a layer's: the integration's dollar cap answered without more dollars.
-RUN = "run"
+# The key of what concerns the whole run, not one layer (the stop at the integration cap, a tamper by
+# a session of no layer).
+RUN_WIDE = "run"
 
 
 class State:
@@ -106,9 +110,12 @@ class State:
         # (an escalation answered without more rounds or dollars, and no round since).
         self.closed = {}
         self.signed_facts = set()
+        self.signed_digests = {}  # fact id -> fact_digest at Gate 1
         self.amendments = []
         self.escapes = []
         self.tampers = defaultdict(list)  # layer (or "run") -> sessions that changed the run's records
+        self.amended_at = {}  # layer -> its round count when a spec amendment reopened it
+        self.branch_head = ""  # the run branch's head as last recorded (a round or a rebase)
         # A person's answer to an escalation resets the layer's stop rules from that round on and
         # may grant more rounds or dollars.
         self.reset_round = defaultdict(int)
@@ -126,8 +133,10 @@ class State:
             self.gates[str(e["gate"])] = e["status"]
             if str(e["gate"]) == "1" and e["status"] == "approved":
                 self.signed_facts.update(e.get("facts", []))
+                self.signed_digests.update(e.get("digests", {}))
         elif t == "round":
             # A round recorded again at the same number (a rerun at the same head) replaces it.
+            self.branch_head = e["head"]
             rounds = self.rounds[e["layer"]]
             if rounds and rounds[-1]["n"] == e["n"]:
                 rounds[-1] = e
@@ -173,6 +182,9 @@ class State:
                     "answers": [],
                     "verdicts": [],
                     "fingerprint": fingerprint(e),
+                    # From the final review or a person's PR review: below blocking it is listed
+                    # in the PR, never a reason for another round.
+                    "final": bool(e.get("final")),
                 }
             else:
                 if e.get("reopened"):
@@ -199,6 +211,7 @@ class State:
                 "finding": e.get("finding"),
                 "layer": e.get("layer"),
                 "escalation": e.get("escalation"),
+                "layers": e.get("layers", []),
                 "resolved": False,
                 "choice": None,
             }
@@ -215,14 +228,15 @@ class State:
             if d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "open"
             if d.get("escalation") == "tamper":
-                self.tampers.pop(d.get("layer") or RUN, None)  # the person has heard of it
+                self.tampers.pop(d.get("layer") or RUN_WIDE, None)  # the person has heard of it
+                self.tampers.pop(RUN_WIDE, None)
             if e.get("waive") and d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "waived"
             layer = d.get("layer")
             if d.get("escalation") == "integration-usd-cap":
                 self.grant_usd_total += float(e.get("grant_usd", 0))
                 if not float(e.get("grant_usd", 0)):
-                    self.closed[RUN] = e["id"]
+                    self.closed[RUN_WIDE] = e["id"]
             elif d.get("escalation") and layer:
                 self.reset_round[layer] = len(self.rounds[layer])
                 self.grant_rounds[layer] += int(e.get("grant_rounds", 0))
@@ -246,16 +260,29 @@ class State:
                 self.closed.pop(e.get("layer", "run"), None)
         elif t == "amendment":
             self.amendments.append(e)
+            # The layers built on the fact rebuild: none is clean until a round runs after it.
+            for lay in e.get("layers", []):
+                self.amended_at[lay] = len(self.rounds[lay])
+                self.stops.pop(lay, None)
+                self.closed.pop(lay, None)
+        elif t == "rebase":
+            self.branch_head = e["head"]
+            # The branch moved onto a newer base: each layer's last round is now at the new head,
+            # and its review, of the old one, no longer counts.
+            for lay, rounds in self.rounds.items():
+                if rounds:
+                    rounds[-1] = {**rounds[-1], "head": e["head"], "rebased_from": rounds[-1]["head"]}
+                    self.stops.pop(lay, None)
         elif t == "escape":
             self.escapes.append(e)
         elif t == "tamper":
-            self.tampers[e.get("layer", RUN)].append(e)
+            self.tampers[e.get("layer", RUN_WIDE)].append(e)
 
     def open_findings(self, layer: str) -> list:
         return [f for f in self.findings.values() if f["layer"] == layer and f["status"] in ("open", "decision")]
 
     def open_decisions(self, layer=None) -> list:
-        return [d for d in self.decisions.values() if not d["resolved"] and (layer is None or d.get("layer") == layer)]
+        return [d for d in self.decisions.values() if not d["resolved"] and (layer is None or d.get("layer") == layer or layer in d.get("layers", []))]
 
     def next_finding_id(self) -> str:
         return f"F{_next_number(self.findings, 'F')}"
@@ -302,7 +329,7 @@ def remaining_usd(state: State, layer=None) -> float:
     return max(left, 0.0)
 
 
-def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
+def next_step(state: State, layer: str) -> dict:
     """The stop rules. Returns {"action": "continue" | "clean" | "closed" | "stopped" | "escalate",
     "reason": ...}. `stopped`: a person stopped the whole run.
 
@@ -312,27 +339,32 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
     Order matters: an open decision and a guard violation go to a person before anything else;
     caps are checked before progress so a run never spends past them. Progress, oscillation and
     disputes count only the rounds after the person's last answer to an escalation of this layer.
+    Findings of the final review (or a person's PR review) below blocking do not hold a layer: the
+    PR lists them. A blocking one gives the layer `budgets.toml` `final.extra_rounds` more rounds.
     """
     budgets = load_budgets()
     since = state.reset_round[layer]
     rounds = state.rounds[layer]
     reviews = state.reviews[layer]
     open_now = state.open_findings(layer)
+    holding = [f for f in open_now if not (f["final"] and f["severity"] != "blocking")]
+    final_blocking = any(f["final"] and f["severity"] == "blocking" for f in state.findings.values() if f["layer"] == layer)
+    extra_rounds = budgets["final"]["extra_rounds"] if final_blocking else 0
 
     # A person closed the layer after it stopped (an escalation answered with no more rounds or
     # dollars) and nothing ran since: it stays closed, `next` never re-escalates it.
-    if RUN in state.closed:
-        return {"action": "stopped", "reason": "run-stopped", "decision": state.closed[RUN]}
+    if RUN_WIDE in state.closed:
+        return {"action": "stopped", "reason": "run-stopped", "decision": state.closed[RUN_WIDE]}
     if layer in state.closed:
         return {"action": "closed", "reason": "closed", "decision": state.closed[layer], "open_findings": [f["id"] for f in open_now]}
 
     if state.open_decisions(layer):
         return {"action": "escalate", "reason": "decision-needed", "decisions": [d["id"] for d in state.open_decisions(layer)]}
-    tampered = state.tampers[layer]
+    tampered = state.tampers[layer] + state.tampers[RUN_WIDE]
     if tampered:
         return {"action": "escalate", "reason": "tamper", "class": "outside-repo", "sessions": [t["label"] for t in tampered],
-                "question": f"An agent session ({', '.join(t['label'] for t in tampered)}) changed the run's records "
-                            f"({', '.join(p for t in tampered for p in t['paths'])}); they were restored and its output was not used. Rerun it, or stop?"}
+                "question": f"An agent session ({', '.join(t['label'] for t in tampered)}) changed what it may not "
+                            f"({', '.join(p for t in tampered for p in t['paths'])}); the run's records and branches were restored, and its output was not used. Rerun it, or stop?"}
     guard = [g for g in state.guard_violations[layer] if g["round"] > since]
     if guard:
         return {"action": "escalate", "reason": "guard", "class": "relax-test", "paths": guard[-1]["paths"]}
@@ -344,10 +376,18 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
                 "question": "The environment failed, not the code: " + "; ".join(f"{i['step']}: {i['cause']} ({i['detail']})" for i in infra)
                 + ". Fix it (renew the token, free the disk, restore the RPC or Docker) and rerun the round's checks, or stop?"}
 
+    amended = layer in state.amended_at and len(rounds) <= state.amended_at[layer]
     last_green = bool(rounds) and checks_accepted(state, layer, rounds[-1])
-    # A review counts for the round only if it reviewed that round's commit with its core passes run.
-    reviewed_last = bool(reviews) and bool(rounds) and reviews[-1]["n"] == rounds[-1]["n"] and not reviews[-1].get("incomplete")
-    if rounds and last_green and reviewed_last and not open_now:
+    # A review counts for the round only if it reviewed that round's commit (its head now: a rebase
+    # moves it) with its core passes run.
+    # A whole-branch review (the final review, a person's PR review) covers every layer's last round
+    # while it is of the branch's current head; a later round or a rebase makes it stale.
+    last_review = reviews[-1] if reviews else {}
+    reviewed_head = last_review.get("head") or (rounds[-1]["head"] if rounds else "")
+    reviewed_last = (bool(rounds) and last_review.get("n") == rounds[-1]["n"] and not last_review.get("incomplete")
+                     and (same_commit(reviewed_head, rounds[-1]["head"])
+                          or (last_review.get("whole_branch") and same_commit(reviewed_head, state.branch_head))))
+    if rounds and last_green and reviewed_last and not holding and not amended:
         return {"action": "clean", "reason": "clean"}
 
     if integration_cap(state) - state.spend_total < MIN_CALL_USD:
@@ -371,7 +411,9 @@ def next_step(state: State, layer: str, extra_rounds: int = 0) -> dict:
     if len(counts) >= 3 and counts[-1] >= counts[-3]:
         return {"action": "escalate", "reason": "no-progress", "class": "not-converged", "open": counts[-3:]}
 
-    if not last_green:
+    if amended:
+        why = "a spec amendment reopened the layer: a round rebuilds it on the changed fact"
+    elif not last_green:
         why = "checks red"
     elif not reviewed_last:
         why = "the last round's review left out a core pass" if reviews and reviews[-1].get("incomplete") and reviews[-1]["n"] == rounds[-1]["n"] else "not reviewed"
@@ -480,13 +522,27 @@ EARLIER_STATUS = {"fixed": "fixed", "disproven": "refuted", "open": "open", "def
 # parts a review may leave out by design (the integration pass and the execution verifier at
 # `partial`, tools the base lacks, files unchanged since a `--since` report); those do not make it
 # incomplete.
-CORE_NOT_RUN = re.compile(r"\b(chunk|pass(es)?\b|simplif|verif|every|all)", re.I)
-OPTIONAL_NOT_RUN = re.compile(r"integration pass|execution verifier|not at base|not set up|tools? missing|unchanged since|ast-grep|dylint|review-only lint|harness|ci\b", re.I)
+CORE_NOT_RUN = re.compile(r"(chunk|pass(es)? ?\d|simplif|verification|verifiers?\b(?! execution)|spec pass|every pass|all passes|the review)", re.I)
+OPTIONAL_NOT_RUN = re.compile(r"(integration pass|execution verifier|ast-grep|dylint|review-only lint|tools?\b|deterministic|the harness|harness|ci\b|run_checks|lint)", re.I)
 
 
 def core_not_run(not_run: list) -> list:
-    """The `not_run` entries that leave a review short of reviewing the round."""
-    return [x for x in not_run if CORE_NOT_RUN.search(str(x)) and not OPTIONAL_NOT_RUN.search(str(x))]
+    """The `not_run` entries that leave a review short of reviewing the round: an entry about a core
+    part, by what it starts with (tycho-review names the part first). Files unchanged since an
+    earlier report are carried over, not skipped."""
+    out = []
+    for x in map(str, not_run):
+        x = x.strip()
+        if re.search(r"unchanged since", x, re.I):
+            continue
+        if CORE_NOT_RUN.match(x) or (not OPTIONAL_NOT_RUN.match(x) and re.search(r"\b(chunk|simplif|verif)", x, re.I)):
+            out.append(x)
+    return out
+
+
+def same_commit(a: str, b: str) -> bool:
+    """Two commit ids that name the same commit (one may be abbreviated)."""
+    return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a))
 
 
 def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
@@ -507,7 +563,7 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
     if layer != "auto" and n is not None and n != rounds[layer]["n"]:
         raise SystemExit(f"round {n} is not {layer}'s last round ({rounds[layer]['n']}): a review is of the last round")
     # The commit reviewed: the layer's last round, or for `auto` the branch's latest round.
-    expect = rounds[layer]["head"] if layer != "auto" else next(e for e in reversed(state.events) if e["t"] == "round" and e["layer"] in targets)["head"]
+    expect = rounds[layer]["head"] if layer != "auto" else next(e for e in reversed(state.events) if e["t"] == "rebase" or (e["t"] == "round" and e["layer"] in targets))["head"]
     head = sidecar.get("head") or ""
     if not head or not (expect.startswith(head) or head.startswith(expect)):
         raise SystemExit(f"the sidecar reviewed {head or 'no recorded commit'}, not the round's {expect}")
@@ -531,8 +587,10 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
         if fid not in state.findings:
             # An id the ledger does not know (E<n> from an --existing file without ids): match by
             # file and claim, never by position.
-            fid = next((f["id"] for f in state.findings.values()
-                        if e.get("file") and f["file"] == e.get("file") and norm(f["claim"]) == norm(e.get("claim"))), None)
+            candidates = [f["id"] for f in state.findings.values()
+                          if e.get("file") and f["file"] == e.get("file") and norm(f["claim"]) == norm(e.get("claim"))]
+            # Two ledger findings that read the same: reported as unmatched, never guessed.
+            fid = candidates[0] if len(candidates) == 1 else None
             if fid is None:
                 unmatched.append(e.get("id"))
                 continue
@@ -540,6 +598,7 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
         append(run, {"t": "verdict", "id": fid, "status": status, "by": "review", "round": n_of.get(state.findings[fid]["layer"], 0), "evidence": e.get("evidence", "")})
 
     state = State(read_events(run))
+    claimed = set()  # ledger ids this review's findings already matched
     for f in sidecar.get("findings", []):
         if f.get("pre_existing"):
             skipped_pre += 1
@@ -557,15 +616,21 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
             "evidence": f.get("evidence", ""),
             "round": n_of[flayer],
         }
+        if layer == "auto":
+            event["final"] = True
         known = state.findings.get(f.get("earlier_id")) or by_print.get(fingerprint(event))
+        if known is not None and known["id"] in claimed:
+            known = None  # the same rule, file and code at another place in this review: a finding of its own
         if known is None:
             event["id"] = state.next_finding_id()
         elif known["status"] in ("fixed", "refuted"):
             event["id"] = known["id"]
             event["reopened"] = True
         else:
+            claimed.add(known["id"])
             continue  # a finding the ledger already holds open needs no new event: its verdict came above
         state._apply(append(run, event))
+        claimed.add(event["id"])
         by_print[fingerprint(event)] = state.findings[event["id"]]
         (reopened if event.get("reopened") else added).append(event["id"])
 
@@ -573,6 +638,8 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
     missing = core_not_run(not_run)
     for lay in targets:
         review = {"t": "review", "layer": lay, "n": n_of[lay], "report": report, "head": head, "open": len(state.open_findings(lay))}
+        if layer == "auto":
+            review["whole_branch"] = True
         if not_run:
             review["not_run"] = not_run
         if missing:
@@ -656,7 +723,9 @@ def record_round(run: Path, state: State, layer: str, head: str, checks, checks_
     disputed with evidence the review verifies, or a decision for a person (`decide --waive`
     accepts the failure). A check that passes again closes its finding."""
     last = state.rounds[layer][-1] if state.rounds[layer] else None
-    rerun = last and last["head"] == head and not any(r["n"] == last["n"] for r in state.reviews[layer])
+    # A rerun: the same head, before its review, or after an environment failure (which no
+    # implementer round answers; its review still holds for the same code).
+    rerun = last and last["head"] == head and (last.get("infra") or not any(r["n"] == last["n"] for r in state.reviews[layer]))
     n = last["n"] if rerun else len(state.rounds[layer]) + 1
     data = schema.load_json(Path(checks_file)) if checks_file else {}
     if checks_file:
@@ -723,6 +792,18 @@ def answers_file(state: State, layer: str) -> str:
         decision = next((d for d in state.decisions.values() if d.get("finding") == f["id"] and d["resolved"]), None)
         if decision:
             lines.append(f"- decided by a person ({decision['id']}): {decision['choice']}")
+        lines.append("")
+    decided = [d for d in state.decisions.values() if d["resolved"] and not d.get("finding")
+               and (d.get("layer") == layer or layer in d.get("layers", []))]
+    if decided:
+        lines += ["## A person's decisions for this layer", "",
+                  "Apply each; a later round that undoes one reopens the question.", ""]
+        lines += [f"- {d['id']} ({d.get('escalation') or d.get('class')}): {d['question']} → **{d['choice']}**" for d in decided]
+        lines.append("")
+    amended = [a for a in state.amendments if layer in a.get("layers", [])]
+    if amended:
+        lines += ["## Spec amendments this layer rebuilds on", ""]
+        lines += [f"- {a['fact']}: {a.get('new', '')} ({a.get('evidence', '')})" for a in amended]
         lines.append("")
     return "\n".join(lines)
 
@@ -801,7 +882,7 @@ def amend(run: Path, fact: str, evidence: str, new: str, source: str) -> dict:
                 reopened.append(d["id"])
                 layers.update(d.get("layers", []))
     needs_person = fact in state.signed_facts
-    append(run, {
+    amendment = append(run, {
         "t": "amendment",
         "fact": fact,
         "evidence": evidence,
@@ -811,11 +892,32 @@ def amend(run: Path, fact: str, evidence: str, new: str, source: str) -> dict:
         "layers": sorted(layers),
         "needs_person": needs_person,
     })
-    return {"reopens": reopened, "layers": sorted(layers), "needs_person": needs_person}
+    question = None
+    if needs_person:
+        # A signed fact changed: the reopened layers wait for the person before anything reruns.
+        question = state.next_decision_id()
+        append(run, {"t": "decision_needed", "id": question, "class": "spec-unknown", "layers": sorted(layers),
+                     "layer": sorted(layers)[0] if layers else None, "amendment": amendment["ts"],
+                     "question": f"Fact {fact}, signed at Gate 1, changed: {new} ({evidence}). It reopens {reopened or 'no decision'} "
+                                 f"and the layers {sorted(layers) or 'none'}. Accept the change, or correct it?"})
+    return {"reopens": reopened, "layers": sorted(layers), "needs_person": needs_person, "decision": question}
 
 
 # ---------------------------------------------------------------------------------------------
 # Status and resume
+
+
+def validate_run(run: Path) -> list:
+    """Every error of the run's intake, spec and decisions that exist, each against its schema."""
+    errors = []
+    intake, spec, dec = (schema.load_json_or(run / n, None) for n in ("intake.json", "spec.json", "decisions.json"))
+    if intake is not None:
+        errors += schema.validate_intake(intake)
+    if spec is not None:
+        errors += schema.validate_spec(spec)
+    if dec is not None:
+        errors += schema.validate_decisions(dec, spec or {})
+    return errors
 
 
 def route_layers(run: Path) -> list:
@@ -828,8 +930,10 @@ def route_layers(run: Path) -> list:
 
 
 def resume_point(run: Path, state: State) -> dict:
-    if RUN in state.closed:
-        return {"stage": "stopped", "status": "stopped", "decision": state.closed[RUN]}
+    if RUN_WIDE in state.closed:
+        return {"stage": "stopped", "status": "stopped", "decision": state.closed[RUN_WIDE]}
+    if state.tampers[RUN_WIDE]:
+        return {"stage": "tamper", "status": "a session changed what it may not: `next` asks the person", "sessions": [t["label"] for t in state.tampers[RUN_WIDE]]}
     layers = route_layers(run)
     for stage in schema.STAGES:
         if stage.startswith("build:") and stage.split(":", 1)[1] not in layers:
@@ -850,7 +954,7 @@ def status_text(run: Path, state: State) -> str:
     out = [f"Run: {run}", f"Resume at: {json.dumps(resume_point(run, state))}"]
     out.append("Stages: " + ", ".join(f"{s}={state.stages[s]}" for s in schema.STAGES if s in state.stages))
     out.append("Gates: " + (", ".join(f"{g}={s}" for g, s in sorted(state.gates.items())) or "none yet"))
-    out.append(f"Spend: ${state.spend_total:.2f} of ${budgets['integration']['usd']}")
+    out.append(f"Spend: ${state.spend_total:.2f} of ${integration_cap(state):.2f}")
     for label, usd in sorted(state.spend_label.items()):
         out.append(f"  {label}: ${usd:.2f}")
     for layer in route_layers(run):
@@ -859,7 +963,7 @@ def status_text(run: Path, state: State) -> str:
         opened = state.open_findings(layer)
         by_sev = {s: sum(1 for f in opened if f["severity"] == s) for s in SEVERITIES}
         out.append(
-            f"{layer}: {len(rounds)}/{budgets['layer']['rounds']} rounds, ${state.spend_layer[layer]:.2f}/${budgets['layer']['usd']}, "
+            f"{layer}: {len(rounds)}/{budgets['layer']['rounds'] + state.grant_rounds[layer]} rounds, ${state.spend_layer[layer]:.2f}/${layer_cap(state, layer):.2f}, "
             f"open {len(opened)} {by_sev}, open after each review {counts}, stop: {state.stops.get(layer, '-')}"
         )
     if state.open_decisions():
@@ -871,6 +975,8 @@ def status_text(run: Path, state: State) -> str:
         for e in state.escapes:
             by[(e["severity"], e["cause"])] = by.get((e["severity"], e["cause"]), 0) + 1
         out.append("Escapes from the blind review: " + ", ".join(f"{s}/{c}: {n}" for (s, c), n in sorted(by.items())))
+    for lay, sessions in state.tampers.items():
+        out.append(f"Changed by an agent ({lay}): " + "; ".join(f"{t['label']}: {', '.join(t['paths'])}" for t in sessions))
     for a in state.amendments:
         out.append(f"Amendment of {a['fact']}: reopens {a.get('reopens')} layers {a.get('layers')} needs person: {a.get('needs_person')}")
     return "\n".join(out)
@@ -908,7 +1014,6 @@ def main() -> None:
     a.add_argument("--out", required=True)
     a = sub.add_parser("next")
     a.add_argument("--layer", required=True, choices=schema.LAYERS)
-    a.add_argument("--extra-rounds", type=int, default=0)
     a = sub.add_parser("remaining")
     a.add_argument("--layer", choices=schema.LAYERS)
     a = sub.add_parser("check-guards")
@@ -933,6 +1038,10 @@ def main() -> None:
     a.add_argument("--close", action="store_true", help="the answer ends the layer's loop (a cap answered without grants closes it already)")
     a.add_argument("--accept-guard", action="store_true", help="the answer to a guard escalation accepts the guarded change")
     a.add_argument("--waive", action="store_true", help="the answer to a failing check's decision accepts the failure")
+    sub.add_parser("validate")
+    sub.add_parser("sign-spec")
+    a = sub.add_parser("rebase")
+    a.add_argument("--head", required=True, help="the branch's head after the rebase onto the moved base")
     a = sub.add_parser("amend")
     a.add_argument("--fact", required=True)
     a.add_argument("--evidence", required=True)
@@ -976,7 +1085,7 @@ def main() -> None:
         Path(args.out).write_text(answers_file(state, args.layer))
         print(args.out)
     elif args.cmd == "next":
-        result = next_step(state, args.layer, args.extra_rounds)
+        result = next_step(state, args.layer)
         if result["action"] in ("clean", "escalate") and state.stops.get(args.layer) != result["reason"]:
             append(run, {"t": "stop", "layer": args.layer, "reason": result["reason"]})
         if result["action"] == "escalate" and result["reason"] != "decision-needed":
@@ -1015,6 +1124,18 @@ def main() -> None:
         if args.waive:
             event["waive"] = True
         print(json.dumps(append(run, event)))
+    elif args.cmd == "sign-spec":
+        # Gate 1 approved: every fact, with what it said, so a later change shows.
+        facts = schema.load_json(run / "spec.json").get("facts", [])
+        print(json.dumps(append(run, {"t": "gate", "gate": 1, "status": "approved", "facts": [f["id"] for f in facts],
+                                      "digests": {f["id"]: schema.fact_digest(f) for f in facts}})))
+    elif args.cmd == "validate":
+        errors = validate_run(run)
+        print("\n".join(errors) or "intake, spec and decisions are valid")
+        if errors:
+            sys.exit(1)
+    elif args.cmd == "rebase":
+        print(json.dumps(append(run, {"t": "rebase", "head": args.head})))
     elif args.cmd == "amend":
         print(json.dumps(amend(run, args.fact, args.evidence, args.new, args.source), indent=2))
 
