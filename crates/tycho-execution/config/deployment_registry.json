@@ -75,7 +75,8 @@
         "aero_basic": "0x9929EE6e01C0d599C4b791c6D6093293b05Ea91C",
         "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
         "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458",
-        "subsidy": "0x38eD3945e574Ff7C390fa03F16d0dF554a37D789"
+        "subsidy": "0x38eD3945e574Ff7C390fa03F16d0dF554a37D789",
+        "rfq:euclid": "0xdF9317B0b37Ac12C5B7e6cbA0189b5A26bD971b0"
       },
       "superseded": [{
         "status": "superseded",

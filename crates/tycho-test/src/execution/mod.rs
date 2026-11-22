@@ -4,10 +4,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{
-        map::{AddressHashMap, B256HashMap},
-        Address, B256, U256,
-    },
+    primitives::{map::AddressHashMap, Address, U256},
     rpc::types::{state::AccountOverride, Block},
     sol_types::SolValue,
 };
@@ -53,14 +50,14 @@ const MAX_CONCURRENT_BATCHES: usize = 4;
 /// `router_overwrites_data` decides which contracts are simulated as deployed and which are
 /// overwritten — see [`RouterOverwritesData`]; its default simulates everything as deployed.
 ///
-/// `oracle_overwrites` are storage slots applied to every simulation, merged per account after
-/// the balance, allowance, router and FermiSwap/BopAMM overwrites. An Angstrom hook's overwrites
-/// come after them and replace that account's entry whole. Each input's own
-/// [`account_overwrites`](TychoExecutionInput::account_overwrites) are applied last, to that
+/// The balance, allowance, router and FermiSwap/BopAMM overwrites apply first; an Angstrom hook's
+/// overwrites come after them and replace that account's entry whole. Each input's own
+/// [`account_overwrites`](TychoExecutionInput::account_overwrites) are merged in last, to that
 /// simulation only. An empty `execution_info` returns no results.
 ///
 /// # Errors
-/// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`. An `Err`
+/// Per-simulation failures are reported as `TychoExecutionResult::Failed`/`Revert`; an input whose
+/// `account_overwrites` set an unsupported field is `Failed` without being simulated. An `Err`
 /// signals that the whole batch could not be simulated; its overwrites and metadata are always
 /// `None`.
 pub async fn simulate_swap_transaction(
@@ -68,14 +65,12 @@ pub async fn simulate_swap_transaction(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
-    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
 ) -> SwapSimulationResult {
     simulate_swap_transaction_on(
         rpc_tools,
         execution_info,
         block,
         router_overwrites_data,
-        oracle_overwrites,
         SimulationBase::AfterBlock,
     )
     .await
@@ -91,14 +86,12 @@ pub async fn simulate_swap_transaction_before_block(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
-    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
 ) -> SwapSimulationResult {
     simulate_swap_transaction_on(
         rpc_tools,
         execution_info,
         block,
         router_overwrites_data,
-        oracle_overwrites,
         SimulationBase::BeforeBlock,
     )
     .await
@@ -115,7 +108,6 @@ pub async fn simulate_swap_transaction_next_block(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
-    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
     block_time_secs: u64,
 ) -> SwapSimulationResult {
     simulate_swap_transaction_on(
@@ -123,7 +115,6 @@ pub async fn simulate_swap_transaction_next_block(
         execution_info,
         block,
         router_overwrites_data,
-        oracle_overwrites,
         SimulationBase::NextBlock { block_time_secs },
     )
     .await
@@ -142,7 +133,6 @@ async fn simulate_swap_transaction_on(
     execution_info: HashMap<String, TychoExecutionInput>,
     block: &Block,
     router_overwrites_data: RouterOverwritesData,
-    oracle_overwrites: Option<AddressHashMap<B256HashMap<B256>>>,
     base: SimulationBase,
 ) -> SwapSimulationResult {
     let mut inputs: HashMap<String, SimulationInput> = HashMap::new();
@@ -222,7 +212,7 @@ async fn simulate_swap_transaction_on(
 
         let token_in = info.solution.token_in();
         let sells_native = token_in == &Bytes::zero(20);
-        let (mut state_overwrites, metadata) = match token_slots.get(token_in) {
+        let (user_overwrites, metadata) = match token_slots.get(token_in) {
             None if sells_native => (
                 encoding::setup_native_user_overwrites(info.solution.amount_in()),
                 tenderly::OverwriteMetadata::new(),
@@ -243,18 +233,8 @@ async fn simulate_swap_transaction_on(
                 continue;
             }
         };
-        state_overwrites.extend(router_overwrites.clone());
-        if let Some(ref fermiswap_overwrites) = fermiswap_overwrites {
-            state_overwrites.extend(fermiswap_overwrites.clone());
-        }
-        if let Some(ref bopamm_overwrites) = bopamm_overwrites {
-            state_overwrites.extend(bopamm_overwrites.clone());
-        }
-        if let Some(ref oracle_overwrites) = oracle_overwrites {
-            merge_storage_overwrites(&mut state_overwrites, oracle_overwrites);
-        }
-
         // Add protocol-specific overwrites for Angstrom hooks
+        let mut angstrom_overwrites = None;
         if let Some(first_swap) = info.solution.swaps().first() {
             if let Some(hook_identifier) = first_swap
                 .component()
@@ -268,18 +248,33 @@ async fn simulate_swap_transaction_on(
                                 .map_err(|e| {
                                     (miette!("Invalid Angstrom address: {e}"), None, None)
                                 })?;
-                        let angstrom_overwrites = encoding::setup_angstrom_overwrites(
+                        angstrom_overwrites = Some(encoding::setup_angstrom_overwrites(
                             angstrom_address,
                             block.header.number,
-                        );
-                        state_overwrites.extend(angstrom_overwrites);
+                        ));
                     }
                 }
             }
         }
-        if let Some(ref account_overwrites) = info.account_overwrites {
-            merge_account_overwrites(&mut state_overwrites, account_overwrites);
-        }
+        let state_overwrites = match state_overwrites(
+            user_overwrites,
+            [
+                Some(&router_overwrites),
+                fermiswap_overwrites.as_ref(),
+                bopamm_overwrites.as_ref(),
+                angstrom_overwrites.as_ref(),
+            ]
+            .into_iter()
+            .flatten(),
+            info.account_overwrites.as_ref(),
+        ) {
+            Ok(state_overwrites) => state_overwrites,
+            Err(error_msg) => {
+                tycho_execution_results
+                    .insert(simulation_id.clone(), TychoExecutionResult::Failed { error_msg });
+                continue;
+            }
+        };
 
         inputs.insert(
             simulation_id.clone(),
@@ -433,48 +428,64 @@ fn split_into_batches(
     batches
 }
 
-/// Adds `storage` to one simulation's overwrites, slot by slot.
-fn merge_storage_overwrites(
-    overwrites: &mut AddressHashMap<AccountOverride>,
-    storage: &AddressHashMap<B256HashMap<B256>>,
-) {
-    for (address, slots) in storage {
-        overwrites
-            .entry(*address)
-            .or_default()
-            .state_diff
-            .get_or_insert_with(Default::default)
-            .extend(
-                slots
-                    .iter()
-                    .map(|(slot, value)| (*slot, *value)),
-            );
+/// One simulation's state overwrites: `user`'s, then each map of `earlier` in order, each replacing
+/// the accounts set before it, then the simulation's own `accounts`, merged in last as
+/// [`merge_account_overwrites`] does.
+///
+/// # Errors
+/// The message of [`merge_account_overwrites`]'s error.
+fn state_overwrites<'a>(
+    user: AddressHashMap<AccountOverride>,
+    earlier: impl IntoIterator<Item = &'a AddressHashMap<AccountOverride>>,
+    accounts: Option<&AddressHashMap<AccountOverride>>,
+) -> Result<AddressHashMap<AccountOverride>, String> {
+    let mut overwrites = user;
+    for earlier_overwrites in earlier {
+        overwrites.extend(earlier_overwrites.clone());
     }
+    if let Some(accounts) = accounts {
+        merge_account_overwrites(&mut overwrites, accounts)?;
+    }
+    Ok(overwrites)
 }
 
-/// Adds `accounts` to one simulation's overwrites. An account's balance, nonce, code and full
-/// storage (`state`) replace the ones set before, and its `state_diff` slots merge in slot by slot.
+/// Merges `accounts` into one simulation's overwrites by the rules of
+/// [`TychoExecutionInput::account_overwrites`].
+///
+/// # Errors
+/// A message naming the account, when an account sets `code`, `state` or `move_precompile_to`:
+/// pAMM simulation overrides set none of them, and merging them needs rules this function does not
+/// have. `overwrites` is left unchanged then.
 fn merge_account_overwrites(
     overwrites: &mut AddressHashMap<AccountOverride>,
     accounts: &AddressHashMap<AccountOverride>,
-) {
+) -> Result<(), String> {
     for (address, account) in accounts {
+        let AccountOverride { code, state, move_precompile_to, .. } = account;
+        if code.is_some() || state.is_some() || move_precompile_to.is_some() {
+            return Err(format!(
+                "Account overwrite of {address} sets code, state or move_precompile_to, which are \
+                 not supported"
+            ));
+        }
+    }
+    for (address, account) in accounts {
+        let AccountOverride {
+            balance,
+            nonce,
+            state_diff,
+            code: _,
+            state: _,
+            move_precompile_to: _,
+        } = account;
         let merged = overwrites.entry(*address).or_default();
-        if account.balance.is_some() {
-            merged.balance = account.balance;
+        if balance.is_some() {
+            merged.balance = *balance;
         }
-        if account.nonce.is_some() {
-            merged.nonce = account.nonce;
+        if nonce.is_some() {
+            merged.nonce = *nonce;
         }
-        if account.code.is_some() {
-            merged.code = account.code.clone();
-        }
-        if account.state.is_some() {
-            // A full storage replaces every slot set before it.
-            merged.state = account.state.clone();
-            merged.state_diff = None;
-        }
-        if let Some(state_diff) = &account.state_diff {
+        if let Some(state_diff) = state_diff {
             merged
                 .state_diff
                 .get_or_insert_with(Default::default)
@@ -485,6 +496,7 @@ fn merge_account_overwrites(
                 );
         }
     }
+    Ok(())
 }
 
 fn collect_fermiswap_pairs(
@@ -552,7 +564,7 @@ mod tests {
 
     use alloy::{
         eips::BlockNumberOrTag,
-        primitives::{address, b256},
+        primitives::{address, b256, B256},
         rpc::types::{BlockId, BlockOverrides, TransactionRequest},
     };
     use alloy_rpc_types_trace::geth::GethDebugTracingCallOptions;
@@ -566,24 +578,6 @@ mod tests {
     const OTHER_LANE: B256 =
         b256!("0000000000000000000000000000000000000000000000000000000000000002");
     const VALUE: B256 = b256!("00000000000000000000000000000000000000000000000000000000000000ff");
-
-    #[test]
-    fn an_account_with_another_slot_overwritten() {
-        let mut overwrites = AddressHashMap::default();
-        overwrites
-            .insert(REGISTRY, AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]));
-        let storage =
-            AddressHashMap::from_iter([(REGISTRY, B256HashMap::from_iter([(OTHER_LANE, VALUE)]))]);
-
-        merge_storage_overwrites(&mut overwrites, &storage);
-
-        let state_diff = overwrites[&REGISTRY]
-            .state_diff
-            .as_ref()
-            .expect("state diff is set");
-        assert_eq!(state_diff.get(&LANE), Some(&VALUE));
-        assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
-    }
 
     /// A simulation's own account replaces the balance and nonce set before it, and adds its
     /// slots to the ones set before it.
@@ -604,7 +598,7 @@ mod tests {
                 .with_state_diff(vec![(OTHER_LANE, VALUE)]),
         )]);
 
-        merge_account_overwrites(&mut overwrites, &accounts);
+        merge_account_overwrites(&mut overwrites, &accounts).expect("only supported fields");
 
         let merged = &overwrites[&REGISTRY];
         assert_eq!((merged.balance, merged.nonce), (Some(U256::from(2)), Some(2)));
@@ -628,46 +622,57 @@ mod tests {
             AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
         )]);
 
-        merge_account_overwrites(&mut overwrites, &accounts);
+        merge_account_overwrites(&mut overwrites, &accounts).expect("only supported fields");
 
         assert_eq!(overwrites[&REGISTRY].balance, Some(U256::from(1)));
     }
 
-    /// A simulation's own full storage replaces the slots set before it.
+    /// A simulation's own account is applied after the registry lanes read from the chain, so its
+    /// slot wins where both set one, and the registry's other slots stay.
     #[test]
-    fn an_input_account_with_full_storage_replaces_the_slots_set_before() {
-        let mut overwrites = AddressHashMap::from_iter([(
+    fn an_input_account_overrides_the_registry_lanes() {
+        let user = AddressHashMap::default();
+        let registry = AddressHashMap::from_iter([(
+            REGISTRY,
+            AccountOverride::default()
+                .with_state_diff(vec![(LANE, B256::ZERO), (OTHER_LANE, VALUE)]),
+        )]);
+        let accounts = AddressHashMap::from_iter([(
             REGISTRY,
             AccountOverride::default().with_state_diff(vec![(LANE, VALUE)]),
         )]);
-        let storage = B256HashMap::from_iter([(OTHER_LANE, VALUE)]);
+
+        let overwrites =
+            state_overwrites(user, [&registry], Some(&accounts)).expect("only supported fields");
+
+        let state_diff = overwrites[&REGISTRY]
+            .state_diff
+            .as_ref()
+            .expect("state diff is set");
+        assert_eq!(state_diff.get(&LANE), Some(&VALUE));
+        assert_eq!(state_diff.get(&OTHER_LANE), Some(&VALUE));
+    }
+
+    /// A simulation's own account that sets code is refused, and the overwrites set before it
+    /// stay as they were.
+    #[test]
+    fn an_input_account_with_code_is_refused() {
+        let before = AccountOverride::default().with_balance(U256::from(1));
+        let mut overwrites = AddressHashMap::from_iter([(REGISTRY, before.clone())]);
         let accounts = AddressHashMap::from_iter([(
             REGISTRY,
-            AccountOverride { state: Some(storage.clone()), ..Default::default() },
+            AccountOverride::default()
+                .with_balance(U256::from(2))
+                .with_code(vec![0x60, 0x01]),
         )]);
 
-        merge_account_overwrites(&mut overwrites, &accounts);
+        let error = merge_account_overwrites(&mut overwrites, &accounts)
+            .expect_err("code is not supported");
 
-        let merged = &overwrites[&REGISTRY];
-        assert_eq!((merged.state.as_ref(), merged.state_diff.as_ref()), (Some(&storage), None));
+        assert!(error.contains(&REGISTRY.to_string()), "error names the account: {error}");
+        assert_eq!(overwrites[&REGISTRY], before);
     }
 
-    #[test]
-    fn an_account_with_no_overwrites() {
-        let mut overwrites = AddressHashMap::default();
-        let storage =
-            AddressHashMap::from_iter([(REGISTRY, B256HashMap::from_iter([(LANE, VALUE)]))]);
-
-        merge_storage_overwrites(&mut overwrites, &storage);
-
-        assert_eq!(
-            overwrites[&REGISTRY]
-                .state_diff
-                .as_ref()
-                .and_then(|slots| slots.get(&LANE)),
-            Some(&VALUE)
-        );
-    }
     fn simulation_inputs(n: usize) -> HashMap<String, SimulationInput> {
         (0..n)
             .map(|i| {
