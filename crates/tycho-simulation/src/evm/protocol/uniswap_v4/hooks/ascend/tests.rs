@@ -2051,3 +2051,192 @@ fn test_each_path_costs_the_gas_measured_on_chain(
     // 1,689 is the lower median of the four transactions' own PoolManager overhead.
     assert_eq!(hook_of(&pool).pool_manager_call_overhead(), 1_689);
 }
+
+/// A token of the real swaps below, at its real Elysium address.
+fn token_at(address: &str) -> Token {
+    Token::new(
+        &Bytes::from_str(address).expect("an address"),
+        "T",
+        18,
+        0,
+        &[Some(10_000)],
+        Chain::Elysium,
+        100,
+    )
+}
+
+/// The hook words and the price of one pool the instant before a real swap, as read from Elysium
+/// with `eth_getStorageAt` at the block before the swap (the PoolManager's slot0 at
+/// keccak(poolId, 6), the hook's PoolData words 2 and 3 and Bid words 0 to 2), and the timestamp
+/// of the swap's own block. Every pool started at tick -168600 with the launch liquidity, which
+/// the PoolManager's liquidity word at keccak(poolId, 6) + 3 confirmed on each of the four.
+struct ChainState {
+    token_is_currency0: bool,
+    fee_pips: u32,
+    sqrt_price: &'static str,
+    tick: i32,
+    ema: &'static str,
+    ema_updated_at: u64,
+    observed_tick: i32,
+    discount: u32,
+    inventory: &'static str,
+    filled: &'static str,
+    window_start: u64,
+    max_clip: u128,
+    swap_block_timestamp: u64,
+}
+
+/// Quotes a real swap on the state the chain held just before it: what the trader would receive
+/// for `amount_in` of `token_in`.
+fn quote_chain_swap(
+    chain: &ChainState,
+    token_in: &str,
+    token_out: &str,
+    amount_in: &str,
+) -> BigUint {
+    let state = pool_state(
+        chain.token_is_currency0,
+        chain.fee_pips,
+        observation(u(chain.ema), chain.ema_updated_at, chain.observed_tick, chain.discount),
+        Bid {
+            inventory: u(chain.inventory),
+            filled: u(chain.filled),
+            window_start: chain.window_start,
+            max_clip: chain.max_clip,
+        },
+    );
+    let pool = pool(state, u(chain.sqrt_price), chain.tick, chain.swap_block_timestamp);
+    pool.get_amount_out(big(amount_in), &token_at(token_in), &token_at(token_out))
+        .expect("the swap the chain settled")
+        .amount
+}
+
+const QUOTE_TOKEN: &str = "0xba876237b0f021a6c6d852d6c26e107997cc5e81";
+
+/// The buy of transaction 0xe607911e... (block 8365605): 67545513342823285 raw units of quote
+/// into pool 0xa138... (the launched token is currency1, fee 1%) paid 3095426913806548396391
+/// raw units of the token. The state is the one at block 8365604.
+#[test]
+fn test_the_real_buy_of_block_8365605_quotes_what_the_chain_paid() {
+    let chain = ChainState {
+        token_is_currency0: false,
+        fee_pips: 10_000,
+        sqrt_price: "17046621566962139112998883225325",
+        tick: 107_432,
+        ema: "17085784019734129912562702400420",
+        ema_updated_at: 1_795_115_699,
+        observed_tick: 107_439,
+        discount: 24_914_504,
+        inventory: "1",
+        filled: "100855758202931709",
+        window_start: 1_795_102_826,
+        max_clip: 11_862_044_423_356_365_469,
+        swap_block_timestamp: 1_795_115_724,
+    };
+
+    let out = quote_chain_swap(
+        &chain,
+        QUOTE_TOKEN,
+        "0xc75f783646739542c1e3680fd64424a0c4088d69",
+        "67545513342823285",
+    );
+
+    assert_eq!(out, big("3095426913806548396391"));
+}
+
+/// The sell of transaction 0xfc0a9737... (block 8365306) on the same pool: 54254357347547482959
+/// raw units of the token paid 1157967377186068 raw units of quote. The bid holds 1 unit of
+/// quote and the stored observed tick (107451) is one below the pool's (107452), so the hook
+/// fills nothing and the AMM's output less the 1% fee is paid. The state is the one at block
+/// 8365305.
+#[test]
+fn test_the_real_sell_without_a_fill_of_block_8365306_quotes_what_the_chain_paid() {
+    let chain = ChainState {
+        token_is_currency0: false,
+        fee_pips: 10_000,
+        sqrt_price: "17063419976435549609351934167077",
+        tick: 107_452,
+        ema: "17087038351741979698894234667038",
+        ema_updated_at: 1_795_115_666,
+        observed_tick: 107_451,
+        discount: 24_619_835,
+        inventory: "1",
+        filled: "100855758202931709",
+        window_start: 1_795_102_826,
+        max_clip: 11_862_044_423_356_365_469,
+        swap_block_timestamp: 1_795_115_667,
+    };
+
+    let out = quote_chain_swap(
+        &chain,
+        "0xc75f783646739542c1e3680fd64424a0c4088d69",
+        QUOTE_TOKEN,
+        "54254357347547482959",
+    );
+
+    assert_eq!(out, big("1157967377186068"));
+}
+
+/// The sell of transaction 0xd2cce086... (block 8351072) on pool 0xc0be... (the launched token is
+/// currency0, fee 1%): 5488508576537824572920531 raw units of the token paid 55046848802575745640
+/// raw units of quote, 0xd1067f45eda23a of it from a bid fill that left 1 unit of the
+/// inventory. The state is the one at block 8351071, last observed 969 s before the swap's
+/// block, so the fill depends on that block's timestamp.
+#[test]
+fn test_the_real_fill_of_block_8351072_quotes_what_the_chain_paid() {
+    let chain = ChainState {
+        token_is_currency0: true,
+        fee_pips: 10_000,
+        sqrt_price: "262446428426916609831050000",
+        tick: -114_207,
+        ema: "262428976457584592784190568",
+        ema_updated_at: 1_795_112_640,
+        observed_tick: -114_208,
+        discount: 45_871_853,
+        inventory: "58835413836341819",
+        filled: "45903045785268993",
+        window_start: 1_795_057_476,
+        max_clip: 11_862_044_423_356_365_469,
+        swap_block_timestamp: 1_795_113_609,
+    };
+
+    let out = quote_chain_swap(
+        &chain,
+        "0x8df4f39d592de2aaee15838b265c2392d19a4128",
+        QUOTE_TOKEN,
+        "5488508576537824572920531",
+    );
+
+    assert_eq!(out, big("55046848802575745640"));
+}
+
+/// The fill of transaction 0x22de467d... (block 8350326) on the mirrored pool 0x37a9... (the
+/// launched token is currency1, fee 2%): 10407358261468789814437414 raw units of the token paid
+/// 226771144826141240567 raw units of quote. The state is the one at block 8350325.
+#[test]
+fn test_the_real_mirrored_fill_of_block_8350326_quotes_what_the_chain_paid() {
+    let chain = ChainState {
+        token_is_currency0: false,
+        fee_pips: 20_000,
+        sqrt_price: "15022007281697289604796549426400",
+        tick: 104_904,
+        ema: "15004746514433361125146405163812",
+        ema_updated_at: 1_795_112_527,
+        observed_tick: 104_884,
+        discount: 91_427_704,
+        inventory: "189785977084469053",
+        filled: "936239546818708979",
+        window_start: 1_795_058_182,
+        max_clip: 11_862_044_423_356_365_469,
+        swap_block_timestamp: 1_795_113_532,
+    };
+
+    let out = quote_chain_swap(
+        &chain,
+        "0xf0394d1e25be152c9746791f5da3b287743f0e52",
+        QUOTE_TOKEN,
+        "10407358261468789814437414",
+    );
+
+    assert_eq!(out, big("226771144826141240567"));
+}
