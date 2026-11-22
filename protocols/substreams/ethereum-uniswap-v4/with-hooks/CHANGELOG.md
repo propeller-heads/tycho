@@ -8,7 +8,8 @@
   required, refuses the zero address, and may not share a hook with `montra_hooks`.
 - `map_montra_pools_created` creates a pool for each `Initialize` of a listed Montra or Ascend
   hook.
-- `store_montra_slots` takes one param, `ascend_hooks`, and keeps five keys per Ascend pool (`PoolData` words 2 and 3, `Bid` words 0 to 2), valued with word indexes 7 to 11.
+- `store_montra_slots` takes one param, `ascend_hooks`, and keeps five keys per Ascend pool
+  (`PoolData` words 2 and 3, `Bid` words 0 to 2), valued with word indexes 7 to 11.
 - `map_montra_enriched_block_changes` decodes those words into the `ascend_*` state attributes
   (fee, orientation, start tick, EMA, observation time, observed tick, discount, bid inventory,
   filled in window, window start, max clip), created with the pool and updated by every write to

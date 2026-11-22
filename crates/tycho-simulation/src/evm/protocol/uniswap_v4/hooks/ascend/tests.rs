@@ -100,7 +100,19 @@ fn pool_state(
 /// A pool with start tick -168600 and the price at `spot` (tick `tick`), the hook quoting at
 /// `timestamp`. The position is the pool's single one, with the launch liquidity.
 fn pool(state: AscendPoolState, spot: U256, tick: i32, timestamp: u64) -> UniswapV4State {
-    let liquidity = state.curve.liquidity;
+    pool_scaled(state, spot, tick, timestamp, 1)
+}
+
+/// [`pool`] with the position's liquidity `scale` times the launch liquidity, which the hook's
+/// own curve does not follow: a pool whose walk to the curve end exceeds what a sell can take.
+fn pool_scaled(
+    state: AscendPoolState,
+    spot: U256,
+    tick: i32,
+    timestamp: u64,
+    scale: u128,
+) -> UniswapV4State {
+    let liquidity = state.curve.liquidity * scale;
     let net = i128::try_from(liquidity).expect("fits");
     let (lower, upper) = if state.token_is_currency0() {
         (state.start_tick, state.start_tick + 200_000)
@@ -1283,6 +1295,40 @@ fn test_limits_settle_and_one_more_unit_is_refused(
     let pool = funded_pool(token_is_currency0, 20_000, inventory);
 
     assert_limit_is_exact(&pool, token_is_currency0, !is_sell);
+}
+
+/// A sell limit clamped at `type(int128).max`. The position holds 1e14 times the launch
+/// liquidity (about 2.2e37, below `i128::MAX`), so the walk to the curve end is about 5e38 tokens,
+/// above the clamp of about 1.7e38: the limit is `INT128_MAX` itself, the plan at the limit is the
+/// saturated plan (`max_amount_in` plans the same input twice), and the AMM leg takes the input
+/// less the fill's tokens, a partial walk that settles. One unit more is refused as above the
+/// int128 bound.
+#[rstest]
+#[case::token0(true)]
+#[case::mirrored(false)]
+fn test_a_sell_limit_clamped_at_int128_max_settles_and_one_more_unit_is_refused(
+    #[case] token_is_currency0: bool,
+) {
+    let funded = funded_pool(token_is_currency0, 20_000, PLENTY);
+    let hook = hook_of(&funded);
+    let (spot, tick) = funded.price_and_tick();
+    let pool = pool_scaled(hook.state, spot, tick, TS, 100_000_000_000_000);
+    let (launched, quote) = tokens(token_is_currency0);
+
+    let (max_in, max_out) = pool
+        .get_limits(launched.address.clone(), quote.address.clone())
+        .unwrap();
+
+    assert_eq!(max_in, big(INT128_MAX_DECIMAL), "the limit is the clamp");
+    // The bid fills part of the input, so the output is not the AMM's alone.
+    let amm = sell_through_the_amm_less_the_fee(&pool, INT128_MAX_DECIMAL);
+    assert_ne!(max_out, amm, "the clamped sell fills from the bid");
+    let at = pool
+        .get_amount_out(max_in.clone(), &launched, &quote)
+        .unwrap();
+    assert_eq!(at.amount, max_out, "the output at the clamp");
+    let past = pool.get_amount_out(&max_in + 1u32, &launched, &quote);
+    assert!(matches!(past, Err(SimulationError::InvalidInput(..))), "{:?}", past.map(|r| r.amount));
 }
 
 /// A pool at its start price: a buy fits the whole position, from the empty range.

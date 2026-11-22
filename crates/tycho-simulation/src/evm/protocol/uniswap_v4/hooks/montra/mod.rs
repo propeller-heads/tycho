@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
+use super::launchpad::{field, flag, tick_i32 as tick, u64_be};
 use crate::protocol::errors::InvalidSnapshotError;
 
 /// `PoolConfig.totalFeePips`: the fee a sell pays, and a buy once its anti-snipe window is over.
@@ -156,18 +157,6 @@ impl MontraPoolConfig {
         attributes: &HashMap<String, Bytes>,
         base: Option<&Self>,
     ) -> Result<Self, InvalidSnapshotError> {
-        fn field<T>(
-            attributes: &HashMap<String, Bytes>,
-            name: &str,
-            decode: impl FnOnce(&str, &Bytes) -> Result<T, InvalidSnapshotError>,
-            base: Option<T>,
-        ) -> Result<T, InvalidSnapshotError> {
-            match (attributes.get(name), base) {
-                (Some(value), _) => decode(name, value),
-                (None, Some(base)) => Ok(base),
-                (None, None) => Err(InvalidSnapshotError::MissingAttribute(name.to_string())),
-            }
-        }
         let mut config = Self {
             total_fee_pips: field(
                 attributes,
@@ -399,17 +388,6 @@ pub fn decode_paused(value: &Bytes) -> bool {
     !matches!(value.as_ref(), [] | [0])
 }
 
-/// An 8-byte big-endian `u64`.
-fn u64_be(name: &str, value: &Bytes) -> Result<u64, InvalidSnapshotError> {
-    let bytes = <[u8; 8]>::try_from(value.as_ref()).map_err(|_wrong_width| {
-        InvalidSnapshotError::ValueError(format!(
-            "{name} is {} bytes ({value}), not an 8-byte big-endian u64",
-            value.len()
-        ))
-    })?;
-    Ok(u64::from_be_bytes(bytes))
-}
-
 /// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
     let pips = u64_be(name, value)?;
@@ -419,17 +397,6 @@ fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
         .ok_or_else(|| {
             InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a uint24"))
         })
-}
-
-/// A one-byte boolean, `0` or `1`.
-fn flag(name: &str, value: &Bytes) -> Result<bool, InvalidSnapshotError> {
-    match value.as_ref() {
-        [0] => Ok(false),
-        [1] => Ok(true),
-        _ => Err(InvalidSnapshotError::ValueError(format!(
-            "{name} is {value}, not a one-byte 0 or 1"
-        ))),
-    }
 }
 
 /// A one-byte stage, one of [`Stage`]'s variants.
@@ -444,17 +411,6 @@ fn stage(_name: &str, value: &Bytes) -> Result<Stage, InvalidSnapshotError> {
             "{STAGE_ATTRIBUTE} is {value}, not one byte naming a stage"
         ))),
     }
-}
-
-/// A 4-byte big-endian two's-complement tick.
-fn tick(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
-    let bytes = <[u8; 4]>::try_from(value.as_ref()).map_err(|_wrong_width| {
-        InvalidSnapshotError::ValueError(format!(
-            "{name} is {} bytes ({value}), not a 4-byte big-endian i32",
-            value.len()
-        ))
-    })?;
-    Ok(i32::from_be_bytes(bytes))
 }
 
 #[cfg(test)]

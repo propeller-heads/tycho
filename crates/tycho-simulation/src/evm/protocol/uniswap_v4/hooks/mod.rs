@@ -17,6 +17,7 @@ pub mod ascend;
 pub mod generic_vm_hook_handler;
 pub mod hook_handler;
 pub mod hook_handler_creator;
+mod launchpad;
 pub mod models;
 pub mod montra;
 pub mod pancakeswap_clalpha;

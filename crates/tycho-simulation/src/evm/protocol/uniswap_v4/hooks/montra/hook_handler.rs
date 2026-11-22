@@ -11,7 +11,10 @@ use tycho_common::{
     Bytes,
 };
 
-use super::{decode_paused, MontraPoolConfig, PAUSED_ATTRIBUTE, POOL_CONFIG_ATTRIBUTES};
+use super::{
+    super::launchpad::INT128_MAX, decode_paused, MontraPoolConfig, PAUSED_ATTRIBUTE,
+    POOL_CONFIG_ATTRIBUTES,
+};
 use crate::evm::protocol::{
     uniswap_v4::{
         hooks::{
@@ -41,10 +44,6 @@ pub const MONTRA_HOOK_ELYSIUM: Address = address!("6b1216a40b65c83e9c9e18a562c44
 /// The immutable `lpLineHold()` of [`MONTRA_HOOK_ELYSIUM`]: the seconds the price must hold past
 /// the LP line, in total, before the LP fee switches on. 600 at block 6002000.
 pub(crate) const MONTRA_LP_LINE_HOLD_SECONDS_ELYSIUM: u64 = 600;
-
-/// The largest amount a v4 `BalanceDelta` can carry, `type(int128).max`. A larger input
-/// overflows the pool manager's int128 deltas and the swap reverts.
-const INT128_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
 
 /// Gas of the hook's `beforeSwap` on a buy, the call frame alone: the lower median over the 261
 /// buys of `tests/assets/hooks/montra/replay.json` (one window per 500,000 blocks from 588510 to

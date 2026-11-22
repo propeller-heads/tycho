@@ -19,7 +19,7 @@
 use alloy::primitives::{uint, U256};
 use tycho_common::simulation::errors::SimulationError;
 
-use super::Observation;
+use super::{super::launchpad::INT128_MAX, Observation};
 use crate::evm::protocol::utils::{
     solidity_math::{mul_div, mul_div_rounding_up},
     uniswap::{
@@ -45,9 +45,6 @@ const BAND_NUMERATOR: u64 = 500;
 const BAND_DENOMINATOR: u64 = 20_000;
 /// A bid window lasts this many seconds.
 pub(super) const WINDOW_SECONDS: u64 = 600;
-/// `type(int128).max`, the largest input the hook treats as a fill candidate and the largest
-/// amount a v4 `BalanceDelta` carries.
-pub(super) const INT128_MAX: U256 = uint!(170_141_183_460_469_231_731_687_303_715_884_105_727_U256);
 
 /// One in the discount's fixed point (2^32): `d` is a share of it.
 const Q32: U256 = uint!(4_294_967_296_U256);
@@ -236,7 +233,8 @@ pub(super) fn observe(
         U256::from(dt) + U256::from(DECAY_SECONDS),
     )?;
     // (4) re-anchor the bid price to the new EMA, flooring `d` at 0 when it would go negative.
-    let kept = sub(Q32, decayed, "the decayed discount")?;
+    // `decayed = ceil(d * 600 / (dt + 600))` is at most `d`, which is below 2^32.
+    let kept = sub_invariant(Q32, decayed, "the decayed discount")?;
     let anchored = if curve.token_is_currency0 {
         mul_div_floor(kept, old_ema, ema)?
     } else {
@@ -308,6 +306,13 @@ fn end_price_and_quote(
 /// not hold, which no swap causes.
 fn broken_invariant(what: &str) -> SimulationError {
     SimulationError::FatalError(format!("ascend hook: {what}"))
+}
+
+/// `a - b` where the arithmetic keeps `a >= b` whatever the swap: an underflow is a fault of the
+/// model (a `FatalError`), not a refused input, unlike [`sub`]. `what` names the quantity.
+pub(super) fn sub_invariant(a: U256, b: U256, what: &str) -> Result<U256, SimulationError> {
+    a.checked_sub(b)
+        .ok_or_else(|| broken_invariant(&format!("{what}: {a} - {b} underflows")))
 }
 
 /// The tokens of a fill whose quote is capped at `cap`, inverting [`end_price_and_quote`].

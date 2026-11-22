@@ -12,9 +12,10 @@ use tycho_common::{
 };
 
 use super::{
+    super::launchpad::INT128_MAX,
     math::{
-        add, fill_price, mul_div_ceil, mul_div_floor, observe, refuse, size_fill, sub, Fill,
-        FillRequest, INT128_MAX, WINDOW_SECONDS,
+        add, fill_price, mul_div_ceil, mul_div_floor, observe, refuse, size_fill, sub_invariant,
+        Fill, FillRequest, WINDOW_SECONDS,
     },
     AscendPoolState, Bid, Observation, POOL_ATTRIBUTES,
 };
@@ -208,7 +209,8 @@ impl SwapPlan {
 
 /// What `fill` pays the swapper: its quote less the fill fee.
 fn fill_net(fill: &Fill, fee_pips: u32) -> Result<U256, SimulationError> {
-    sub(fill.quote_out, fee_floor(fill.quote_out, fee_pips)?, "the fill's net")
+    // The fee is a share below 1e6 of `quote_out`.
+    sub_invariant(fill.quote_out, fee_floor(fill.quote_out, fee_pips)?, "the fill's net")
 }
 
 /// `floor(amount * fee_pips / 1e6)`.
@@ -344,7 +346,9 @@ impl AscendHookHandler {
             match fill {
                 Some(fill) => {
                     observation.discount = fill.discount;
-                    bid.inventory = sub(bid.inventory, fill.quote_out, "the bid inventory")?;
+                    // `size_fill` caps a fill's quote at the inventory.
+                    bid.inventory =
+                        sub_invariant(bid.inventory, fill.quote_out, "the bid inventory")?;
                     bid.filled = add(filled, fill.quote_out, "the bid's filled amount")?;
                     if window_reset {
                         bid.window_start = now;
@@ -373,7 +377,7 @@ impl AscendHookHandler {
             SwapPath::SellNotConsidered | SwapPath::SellDeclined => U256::ZERO,
         };
         let fee = fee_ceil(amm_out, fee_pips)?;
-        let amm_net = sub(amm_out, fee, "the pool's output net of the fee")?;
+        let amm_net = sub_invariant(amm_out, fee, "the pool's output net of the fee")?;
         let swapper_output = add(filled_net, amm_net, "the swapper's output")?;
         Ok(SettledOutput { fee, swapper_output })
     }
