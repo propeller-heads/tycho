@@ -10,18 +10,20 @@ with the reason. The role and the run come from the environment `run_agent.py` s
   changed limit kind); no push and no GitHub. The guarded files it may extend are
   protocols/testing's wiring for a new integration (`schema.GUARDED_PATH_EDITS`): the executor's
   fixture and mapping, the decoder arm, and a config-only fork's base package.
-- researcher: writes only under the run directory (spec, fork scripts, cloned references); reads
-  GitHub, never writes to it.
+- researcher: writes only under the run directory, and there only what its brief produces (the
+  route for classify, the spec for research and amend, `falsify.json`, the decisions for decide)
+  and the scratch directories; reads GitHub, never writes to it.
 - reviewer: writes only under `.claude/reviews/` and the run directory; reads GitHub (`gh api`
   GET only), never writes to it.
 
 In the run directory a session writes only what its brief produces (`schema.AGENT_WRITES`: the
 spec for research, the decisions for decide, ...) and the scratch directories; the rest are the
-orchestrator's and the person's records. No role runs the scripts that change them. What this hook cannot see (a script file, a heredoc), run_agent.py
-catches by comparing the records before and after the session.
+orchestrator's and the person's records. No role runs the scripts that change them. What this hook cannot see (a script file, a heredoc,
+a container), run_agent.py catches after the session for the run's records (restored), branch and
+worktree (named); a write into the person's checkout by such means is not caught.
 
 Any error in the guard denies the call: Claude Code lets a call through when a hook fails with an
-exit code other than 2 (https://docs.claude.com/en/docs/claude-code/hooks, "Hook output"), so a
+exit code other than 2 (https://code.claude.com/docs/en/hooks, "Exit code output"), so a
 crash must never be the way past it. Bash writes are recognised by
 their shape (redirections, writing commands, an inline interpreter that opens a file for writing);
 a determined command can still get past that, so `state.py check-guards` checks every round's
@@ -43,7 +45,8 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 # The run's scripts that change its state are the orchestrator's: an agent never records a round, a
 # review, a decision or a gate. Agents may read the ledger (these `state.py` commands) and run the
 # layer's checks into a scratch directory (`layer_checks.py --scratch`).
-ORCHESTRATOR_SCRIPTS = ("state.py", "layer_checks.py", "final_gates.py", "run_agent.py", "split.py", "worktree.py", "pr_body.py")
+ORCHESTRATOR_SCRIPTS = ("state.py", "layer_checks.py", "final_gates.py", "run_agent.py", "split.py", "worktree.py", "pr_body.py",
+                        "spec_render.py", "envcheck.py", "prompt.py")
 STATE_READS = ("status", "resume", "open-findings", "remaining")
 
 GH_WRITE = re.compile(r"\bgh\s+(pr|issue|release|repo|label|workflow|run|gist|secret|variable)\s+(create|merge|comment|edit|review|close|reopen|delete|ready|lock|unlock|transfer|fork|archive|rename|set|cancel|rerun|enable|disable)\b")
@@ -160,7 +163,8 @@ def write_roots(role: str, worktree: Path, run: Path, repo: Path) -> list:
 
 def check_target(role: str, path: Path, worktree: Path, run: Path, repo: Path, how: str, label: str = "") -> None:
     """Denies a write to `path` the role may not make."""
-    if str(path).startswith("/dev/"):
+    resolved = path.resolve()
+    if str(resolved) in ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty") or str(resolved).startswith(("/dev/fd/", "/proc/self/fd/")):
         return
     if inside(path, run):
         rel = str(path.resolve().relative_to(run.resolve()))
@@ -294,18 +298,29 @@ def git_subcommand(args: list) -> tuple:
     return (args[i], args[i + 1:]) if i < len(args) else ("", [])
 
 
-def git_dir_of(args: list, cwd: Path) -> Path:
-    """The checkout a git command works on: `-C <dir>` (each one relative to the last), else cwd."""
-    where, i = cwd, 1
+def git_dir_of(args: list, cwd: Path, env_dirs: dict = None) -> Path:
+    """The checkout a git command works on: `--work-tree`/`GIT_WORK_TREE`, else `--git-dir`/
+    `GIT_DIR`'s checkout, else `-C <dir>` (each relative to the last), else cwd."""
+    where, i, git_dir, work_tree = cwd, 1, (env_dirs or {}).get("GIT_DIR"), (env_dirs or {}).get("GIT_WORK_TREE")
     while i < len(args) and args[i].startswith("-"):
-        if args[i] == "-C" and i + 1 < len(args):
-            nxt = Path(args[i + 1]).expanduser()
-            where = nxt if nxt.is_absolute() else where / nxt
-        i += 2 if args[i] in GIT_GLOBAL_WITH_VALUE else 1
+        a = args[i]
+        value = args[i + 1] if i + 1 < len(args) else ""
+        if a == "-C":
+            where = target_path(value, where)
+        elif a.startswith("--git-dir"):
+            git_dir = a.split("=", 1)[1] if "=" in a else value
+        elif a.startswith("--work-tree"):
+            work_tree = a.split("=", 1)[1] if "=" in a else value
+        i += 2 if a in GIT_GLOBAL_WITH_VALUE else 1
+    if work_tree:
+        return target_path(work_tree, where)
+    if git_dir:
+        d = target_path(git_dir, where)
+        return d.parent if d.name == ".git" else d
     return where
 
 
-def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo: Path, label: str) -> list:
+def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo: Path, label: str, env_dirs: dict = None) -> list:
     """Denies a git command the role may not run; the paths it writes, as (target, how)."""
     sub, rest = git_subcommand(args)
     if sub == "push":
@@ -320,7 +335,7 @@ def check_git(role: str, args: list, cwd: Path, worktree: Path, run: Path, repo:
                   (sub == "symbolic-ref" and len(positional) <= 1)
         if not reading:
             deny(f"`git {sub}` changes a checkout; a {role} only reads")
-    target_dir = git_dir_of(args, cwd)
+    target_dir = git_dir_of(args, cwd, env_dirs)
     if role == "implementer" and sub not in GIT_READ_ONLY and not inside(target_dir, worktree):
         deny(f"an implementer's git writes only to its worktree, not {target_dir}")
     if sub == "submodule" and "foreach" in rest:
@@ -363,6 +378,7 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
     """(target, how) for each path one simple command writes; denies a command whose writes the
     guard cannot see (a shell or interpreter running another command, `find -exec`, awk output)."""
     args, out = split_redirections(tokens)
+    env_dirs = {m.group(1): m.group(2) for a in args for m in [re.fullmatch(r"(GIT_DIR|GIT_WORK_TREE)=(.*)", a)] if m}
     args = unwrap(args)
     if not args:
         return out
@@ -378,7 +394,9 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
     if verb in SHELLS and "-c" in args[1:]:
         return out + nested(args[args.index("-c") + 1] if args.index("-c") + 1 < len(args) else "")
     if verb == "git":
-        return out + check_git(role, args, cwd, worktree, run, repo, label)
+        return out + check_git(role, args, cwd, worktree, run, repo, label, env_dirs)
+    if verb in ("docker", "podman") and len(args) > 1 and args[1] in ("run", "exec", "cp", "create", "build", "compose") and not (args[1] == "compose" and set(args[2:3]) <= {"ps", "logs", "config", "ls", "images"}):
+        deny(f"`{verb} {args[1]}` can write anywhere the guard cannot see; the harness's containers are layer_checks.py's")
     if verb == "find":
         starts = [a for a in args[1:] if not a.startswith(("-", "(", "!"))][:1] or ["."]
         if "-delete" in args:
@@ -416,6 +434,10 @@ def write_targets(tokens: list, role: str = "", cwd: Path = Path("."), worktree:
         return out + [(a[3:], "dd") for a in args[1:] if a.startswith("of=")]
     if WRITERS.get(verb) == "all":
         return out + [(a, verb) for a in rest]
+    target_dir = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-t", "--target-directory")), None) or \
+        next((a.split("=", 1)[1] for a in args if a.startswith("--target-directory=")), None)
+    if WRITERS.get(verb) == "last" and target_dir:
+        return out + [(target_dir, f"{verb} -t")]
     if WRITERS.get(verb) == "last" and rest:
         return out + [(rest[-1], verb)]
     if verb.rstrip("0123456789.") in ("perl", "ruby") and any(re.fullmatch(r"-[a-zA-Z]*i\S*", a) for a in args[1:]):
@@ -441,7 +463,21 @@ def check_script(name: str, args: list) -> None:
         return
     if name == "layer_checks.py" and "--scratch" in args:
         return
+    if name == "spec_render.py" and "--check" in args:
+        return  # validates the spec, writes nothing
+    if name == "envcheck.py" and "--protocol" not in args:
+        return  # checks the environment, records nothing
     deny(f"`{name}` with these arguments is the orchestrator's: report what you found instead")
+
+
+def target_path(target: str, cwd: Path) -> Path:
+    """A write target as a path: `~` and `$VAR` expanded from this hook's environment, which is the
+    agent's. A target still holding `$`, a backtick or a glob cannot be told, and is denied."""
+    expanded = os.path.expandvars(os.path.expanduser(target))
+    if re.search(r"[$`*?\[]", expanded):
+        deny(f"a write to {target!r}: the guard cannot tell where that is; name the path")
+    path = Path(expanded)
+    return path if path.is_absolute() else cwd / path
 
 
 def check_bash(role: str, command: str, cwd: Path, worktree: Path, run: Path, repo: Path, label: str = "") -> None:
@@ -458,11 +494,10 @@ def check_bash(role: str, command: str, cwd: Path, worktree: Path, run: Path, re
     for tokens in segments(command):
         if tokens[0] == "cd" and len(tokens) > 1:
             # Later relative paths resolve from here (a `cd` in a subshell is followed too: stricter).
-            cwd = Path(tokens[1]).expanduser() if Path(tokens[1]).expanduser().is_absolute() else cwd / tokens[1]
+            cwd = target_path(tokens[1], cwd)
             continue
         for target, how in write_targets(tokens, role, cwd, worktree, run, repo, label):
-            path = Path(target).expanduser()
-            check_target(role, path if path.is_absolute() else cwd / path, worktree, run, repo, how, label)
+            check_target(role, target_path(target, cwd), worktree, run, repo, how, label)
 
 
 def main() -> None:

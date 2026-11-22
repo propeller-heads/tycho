@@ -20,7 +20,7 @@ What changed, and why:
   fact you still cannot settle becomes `contested` and goes into `open_risks`.
 - Before Gate 1 (corrections, refutations), edit the facts in place.
 - After Gate 1, never edit a signed fact in place: append to `amendments`
-  (`{"n": <next>, "fact_id": "S3", "old": "…", "new": "…", "evidence": "…", "source": "person | chain"}`)
+  (`{"n": <next>, "fact": "S3", "old": "…", "new": "…", "evidence": "…", "source": "person | chain"}`)
   and update the fact's claim and evidence. Each amendment is one fact.
 - An amendment of the spec's `kind_fact` changes `kind` (and `vm_reads`) with it: the kind picks
   the checks every layer runs.

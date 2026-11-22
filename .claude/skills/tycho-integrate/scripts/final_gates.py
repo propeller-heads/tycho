@@ -73,12 +73,12 @@ def gate(name: str, status: str, detail: str, **extra) -> dict:
 # ---------------------------------------------------------------------------------------------
 
 
-def gate_layers_clean(run: Path) -> dict:
+def gate_layers_clean(run: Path, tree: Path = None) -> dict:
     """Each layer's stop rules now, not its last recorded stop: a finding from the final review, an
     amendment or a red round after a clean stop reopens the layer."""
     st = ledger.State(ledger.read_events(run))
     layers = ledger.route_layers(run)
-    head = git(schema.worktree_dir_of_run(run), "rev-parse", "HEAD").strip() if schema.worktree_dir_of_run(run).exists() else ""
+    head = git(tree, "rev-parse", "HEAD").strip() if tree and tree.exists() else ""
     if head and st.branch_head and not ledger.same_commit(head, st.branch_head):
         return gate("layers-clean", "fail", f"the branch is at {head[:10]}, the ledger's last round or rebase at {st.branch_head[:10]}: "
                     "record the rebase (`state.py P rebase --head <head>`) or the round that made it")
@@ -104,7 +104,7 @@ def gate_guards(run: Path, tree: Path) -> dict:
     open_ = [v for v in ledger.check_guards(tree, base, "HEAD") if ledger.guard_key(v) not in st.accepted_guards]
     if open_:
         return gate("guards", "fail", "guarded changes no person accepted: " + "; ".join(f"{v['path']} ({v['commit']}): {v['why']}" for v in open_[:10]), violations=open_)
-    accepted = sorted({p for p, _ in st.accepted_guards})
+    accepted = sorted({key[0] for key in st.accepted_guards})
     return gate("guards", "pass", "no guarded change" + (f" beyond those a person accepted: {accepted}" if accepted else ""))
 
 
@@ -112,14 +112,18 @@ def gate_signed_facts(run: Path, spec: dict) -> dict:
     """Every fact signed at Gate 1 still says what the person signed, unless an amendment changed it
     (which went back to the person)."""
     st = ledger.State(ledger.read_events(run))
-    amended = {a["fact"] for a in st.amendments}
+    # What each fact should say: as signed, or as its last amendment left it.
+    expected = dict(st.signed_digests)
+    for a in st.amendments:
+        if a.get("digest"):
+            expected[a["fact"]] = a["digest"]
     now = {f.get("id"): schema.fact_digest(f) for f in spec.get("facts", [])}
-    changed = sorted(f for f, d in st.signed_digests.items() if f not in amended and now.get(f) != d)
+    changed = sorted(f for f, d in expected.items() if now.get(f) != d)
     if not st.signed_digests:
         return gate("signed-facts", "fail", "Gate 1 recorded no fact digests (`state.py P sign-spec`)")
     if changed:
         return gate("signed-facts", "fail", f"signed facts changed without an amendment: {changed}")
-    return gate("signed-facts", "pass", f"{len(st.signed_digests)} signed facts unchanged or amended")
+    return gate("signed-facts", "pass", f"{len(st.signed_digests)} signed facts say what was signed or last amended")
 
 
 def gate_checks(protocol: str, n: int) -> dict:
@@ -197,7 +201,7 @@ def gate_proxies(spec: dict) -> dict:
     return gate("proxies", "pass", f"{len(rows)} proxies unchanged", proxies=rows)
 
 
-def gate_venue_quotes(spec: dict, tree: Path, facts: set) -> dict:
+def gate_venue_quotes(spec: dict, tree: Path) -> dict:
     """The spec's venue quotes hold at their blocks, and the venue quotes the Tycho router the same
     as anyone, unless the spec states the difference as a fact (`caller_fact`)."""
     rows = onchain.check_quotes(spec, tree)
@@ -216,7 +220,8 @@ def quote_words(result: str) -> set:
     out = set()
     for i in range(0, len(hexpart), 64):
         word = hexpart[i:i + 64]
-        if word and int(word, 16):
+        # A small word (an ABI offset, a length, a flag) names nothing a test could not say by chance.
+        if word and int(word, 16) >= 10_000:
             out |= {str(int(word, 16)), f"{int(word, 16):_}", word.lstrip("0").lower()}
     return out
 
@@ -235,11 +240,13 @@ def gate_venue_quote_test(spec: dict, tree: Path, layers: list, changed) -> dict
         return gate("venue-quote-test", "fail", f"cannot diff against origin/{schema.BASE}")
     texts = [(tree / p).read_text(errors="replace") for p in changed
              if p.startswith(("crates/tycho-simulation/", "protocols/adapter-integration/")) and (tree / p).is_file()]
-    tests = "\n".join(t for t in texts if re.search(r"#\[(tokio::)?test\b|function\s+test", t))
+    # Each test body on its own: the block and the result must be named in the same test.
+    bodies = [b for t in texts for b in re.split(r"(?=#\[(?:tokio::)?test\b|\bfunction\s+test)", t)[1:]]
     missing = []
     for q in quotes:
         block = str(q["block"])
-        if not (block in tests or f"{int(block):_}" in tests) or not any(w in tests.lower() for w in quote_words(q.get("result", ""))):
+        words = quote_words(q.get("result", ""))
+        if not any((block in b or f"{int(block):_}" in b) and any(w in b.lower() for w in words) for b in bodies):
             missing.append(q.get("id") or block)
     if missing:
         return gate("venue-quote-test", "fail", f"no simulation test names the block and asserts the result of venue quotes {missing}")
@@ -375,22 +382,21 @@ def main() -> None:
 
     if args.recheck:
         # After the PR opens (and after merge, until the integration is retired): the venue as the
-        # spec describes it, re-read.
-        rows = {"proxies": proxy_drift(spec), "watch": onchain.check_watch(spec), "quotes": onchain.check_quotes(spec, tree)}
-        print(json.dumps(rows, indent=2))
-        ok = all(r["status"] == "same" for r in rows["proxies"] + rows["watch"]) and all(onchain.quote_holds(r, spec) for r in rows["quotes"])
-        sys.exit(0 if ok else 1)
+        # spec describes it, re-read, judged by the same gates.
+        gates = [gate_proxies(spec), gate_watch(spec), gate_venue_quotes(spec, tree)]
+        print(json.dumps(gates, indent=2))
+        sys.exit(0 if all(g["status"] == "pass" for g in gates) else 1)
 
     caps = harness_caps.detect(tree)
 
     gates = [
-        gate_layers_clean(run),
+        gate_layers_clean(run, tree),
         gate_guards(run, tree),
         gate_signed_facts(run, spec),
         gate_checks(args.protocol, args.round),
         gate_mutation_surfaces(spec, yamls, caps),
         gate_proxies(spec),
-        gate_venue_quotes(spec, tree, {f["id"] for f in spec.get("facts", [])}),
+        gate_venue_quotes(spec, tree),
         gate_venue_quote_test(spec, tree, ledger.route_layers(run), changed),
         gate_watch(spec),
         gate_base_current(tree),

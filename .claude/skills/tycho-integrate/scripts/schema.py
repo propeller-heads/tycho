@@ -70,7 +70,9 @@ SPEC_SECTIONS = (
     "differences",
 )
 
-EVIDENCE_KINDS = ("tx", "block", "command", "source", "trace")
+# `person`: what a person said, its `ref` the decision (Q<n>) or gate that recorded it; for what the
+# chain cannot answer (the team's intent, off-chain behaviour).
+EVIDENCE_KINDS = ("tx", "block", "command", "source", "trace", "person")
 
 # Stages in run order. `build:<layer>` runs only for the layers the route builds.
 STAGES = (
@@ -409,11 +411,6 @@ def worktree_dir(protocol: str) -> Path:
     return repo_root() / ".claude" / "worktrees" / f"integrate-{slug(protocol)}"
 
 
-def worktree_dir_of_run(run: Path) -> Path:
-    """The worktree of the run whose directory is `run`."""
-    return run.parent.parent / f"integrate-{run.name}"
-
-
 def branch(protocol: str) -> str:
     return f"integrate/{slug(protocol)}"
 
@@ -452,27 +449,36 @@ def records_digest(run: Path, label: str) -> dict:
     return out
 
 
-def checkout_digest(repo: Path, own_branch: str) -> dict:
-    """The person's checkout and the repository's branches, as a session must leave them: the
-    checkout's status, its diff and its untracked files' contents, and every branch but the run's
-    own (the implementer commits there). Git-ignored paths (`.claude/worktrees/`,
-    `.claude/reviews/`, `target/`) are not in it."""
-    status = git("-C", str(repo), "status", "--porcelain=v1", "-uall", check=False).stdout
-    diff = git("-C", str(repo), "diff", "HEAD", "--binary", check=False).stdout
-    untracked = [l[3:] for l in status.splitlines() if l.startswith("?? ")]
-    contents = {u: hashlib.sha256((repo / u).read_bytes()).hexdigest() for u in untracked if (repo / u).is_file()}
+def run_digest(repo: Path, worktree: Path, own_branch: str) -> dict:
+    """What a session's run owns besides its records, and what it does not: the run's branch, the
+    run's worktree (status, diff and untracked files), and every other branch, which is the person's
+    and is only reported, never compared as the session's."""
+    def tree_state(tree: Path) -> str:
+        if not tree.exists():
+            return ""
+        status = git("-C", str(tree), "status", "--porcelain=v1", "-uall", check=False).stdout
+        diff = git("-C", str(tree), "diff", "HEAD", "--binary", check=False).stdout
+        untracked = [l[3:] for l in status.splitlines() if l.startswith("?? ")]
+        body = status + diff + "".join(hashlib.sha256((tree / u).read_bytes()).hexdigest() for u in untracked if (tree / u).is_file())
+        return hashlib.sha256(body.encode()).hexdigest()
     refs = {}
     for line in git("-C", str(repo), "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", check=False).stdout.splitlines():
         name, _, sha = line.partition(" ")
-        if name != f"refs/heads/{own_branch}":
-            refs[name] = sha
-    return {"status": status, "diff": hashlib.sha256(diff.encode()).hexdigest(), "untracked": contents, "refs": refs}
+        refs[name] = sha
+    own = f"refs/heads/{own_branch}"
+    return {"branch": refs.pop(own, None), "worktree": tree_state(worktree), "status": git("-C", str(worktree), "status", "--porcelain=v1", "-uall", check=False).stdout if worktree.exists() else "", "others": refs}
 
 
 def fact_digest(fact: dict) -> str:
     """What a person signs of a fact at Gate 1: its claim, status and evidence."""
     body = json.dumps({k: fact.get(k) for k in ("claim", "status", "evidence")}, sort_keys=True)
     return hashlib.sha256(body.encode()).hexdigest()
+
+
+def route_layers(run: Path) -> list:
+    """The layers the run builds: its intake's route, every layer when it names none."""
+    route = (load_json_or(run / "intake.json", {}).get("route") or {})
+    return [l for l in LAYERS if l in (route.get("layers") or LAYERS)]
 
 
 def package_dirs(root: Path, package: str) -> list:

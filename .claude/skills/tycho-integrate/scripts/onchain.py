@@ -169,14 +169,12 @@ def main() -> None:
     if not args.protocol:
         raise SystemExit(f"{args.cmd} needs --protocol")
     spec = schema.load_json(schema.run_dir(args.protocol) / "spec.json")
-    if args.cmd == "quotes":
-        rows = check_quotes(spec, schema.worktree_dir(args.protocol))
-        ok = all(quote_holds(r, spec) for r in rows)
-    else:
-        rows = check_watch(spec)
-        ok = all(r["status"] == "same" for r in rows)
-    print(json.dumps(rows, indent=2))
-    sys.exit(0 if ok else 1)
+    # The same judgement as the final gates (`final_gates.gate_venue_quotes`, `gate_watch`).
+    import final_gates  # noqa: E402 - final_gates imports this module
+    tree = schema.worktree_dir(args.protocol)
+    result = final_gates.gate_venue_quotes(spec, tree) if args.cmd == "quotes" else final_gates.gate_watch(spec)
+    print(json.dumps(result, indent=2))
+    sys.exit(0 if result["status"] == "pass" else 1)
 
 
 if __name__ == "__main__":

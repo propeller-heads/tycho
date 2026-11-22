@@ -3,15 +3,15 @@
 
 Every agent of the run goes through here: research, falsify, decide, each implement round, each
 review and the final review. The call gets the smaller of the layer's and the integration's
-remaining budget as `--max-budget-usd`, so no call spends past a cap, and its `total_cost_usd`
-lands in the ledger as a `spend` event.
+remaining budget as `--max-budget-usd` (checked between turns, so a session may overshoot by its
+last turn: exit 5), and its `total_cost_usd` lands in the ledger as a `spend` event.
 
     run_agent.py --protocol P --label implement:indexing:2 --role implementer \
         --agent tycho-implementer --layer indexing --cwd <worktree> --prompt-file F --out R
 
 Exit codes: 0 done; 2 the agent ended with an error; 3 no budget left, nothing was started; 4 the
-agent changed what it may not (the run's records, the repository's branches: restored; the person's
-checkout: named), and its output is not used; 5 the session hit the budget part way (its commits,
+agent changed what it may not (the run's records: restored; the run's branch or worktree outside an
+implement session: named), and its output is not used; 5 the session hit the budget part way (its commits,
 if any, are in the worktree). Every session that ran has its spend in the ledger.
 """
 
@@ -86,22 +86,20 @@ def restore_records(run: Path, saved: Path, before: dict, label: str) -> list:
     return changed
 
 
-def restore_checkout(repo: Path, before: dict, after: dict) -> list:
-    """Branches a session moved go back; a change to the person's checkout (its files) cannot be
-    undone safely, so it is named. What changed, as paths."""
-    changed = []
-    for ref in sorted(set(before["refs"]) | set(after["refs"])):
-        if before["refs"].get(ref) != after["refs"].get(ref):
-            changed.append(f"branch {ref}")
-            if ref in before["refs"]:
-                schema.git("-C", str(repo), "update-ref", ref, before["refs"][ref], check=False)
-            else:
-                schema.git("-C", str(repo), "update-ref", "-d", ref, check=False)
-    if (before["status"], before["diff"], before["untracked"]) != (after["status"], after["diff"], after["untracked"]):
+def compare_run(before: dict, after: dict, label: str, branch: str) -> tuple:
+    """(what the session changed that it may not, other branches that moved). Only an implement
+    session moves the run's branch or changes its worktree; nothing is reset, since the person may
+    be working beside the run: a change is named, and the person decides. Other branches are the
+    person's: their moves are reported, never held against the session."""
+    implementing = label.startswith("implement:")
+    tampered = []
+    if not implementing and before["branch"] != after["branch"]:
+        tampered.append(f"branch {branch} moved ({(before['branch'] or 'none')[:10]} -> {(after['branch'] or 'none')[:10]})")
+    if not implementing and before["worktree"] != after["worktree"]:
         lines = set(before["status"].splitlines()) ^ set(after["status"].splitlines())
-        names = sorted({l[3:] for l in lines} | {u for u in set(before["untracked"]) | set(after["untracked"]) if before["untracked"].get(u) != after["untracked"].get(u)})
-        changed.append(f"the person's checkout {repo}: " + (", ".join(names[:10]) or "a tracked file changed further"))
-    return changed
+        tampered.append("the run's worktree: " + (", ".join(sorted({l[3:] for l in lines})[:10]) or "a tracked file changed further"))
+    moved = sorted(r for r in set(before["others"]) | set(after["others"]) if before["others"].get(r) != after["others"].get(r))
+    return tampered, moved
 
 
 def main() -> None:
@@ -144,8 +142,8 @@ def main() -> None:
     if args.model:
         cmd += ["--model", args.model]
 
-    worktree = schema.worktree_dir(args.protocol)
     schema.load_env_files()  # a headless session sees the repo's .env (RPC URLs), not only the shell's
+    worktree = schema.worktree_dir(args.protocol)
     env = {
         **os.environ,
         "TYCHO_INTEGRATE_GUARD": args.role,
@@ -161,7 +159,7 @@ def main() -> None:
     }
     prompt = Path(args.prompt_file).read_text()
     repo, own = schema.repo_root(), schema.branch(args.protocol)
-    before, checkout_before = schema.records_digest(run, args.label), schema.checkout_digest(repo, own)
+    before, run_before = schema.records_digest(run, args.label), schema.run_digest(repo, worktree, own)
     with tempfile.TemporaryDirectory() as saved:
         for rel in before:
             dst = Path(saved) / rel
@@ -172,7 +170,8 @@ def main() -> None:
             stderr.seek(0)
             err_text = stderr.read()
         tampered = restore_records(run, Path(saved), before, args.label)
-    tampered += restore_checkout(repo, checkout_before, schema.checkout_digest(repo, own))
+    beyond, moved = compare_run(run_before, schema.run_digest(repo, worktree, own), args.label, own)
+    tampered += beyond
 
     try:
         result = json.loads(proc.stdout)
@@ -184,8 +183,12 @@ def main() -> None:
         spend["layer"] = args.layer
     usd = float((result or {}).get("total_cost_usd") or 0.0)
     if result is None:
-        # A crashed or killed session reports no cost; the call is on record, its cost unknown.
-        spend["error"] = f"no JSON result (exit {proc.returncode})"
+        # A crashed or killed session reports no cost: charge what it was allowed, so the caps never
+        # undercount.
+        usd = budget
+        spend["error"] = f"no JSON result (exit {proc.returncode}); charged its budget"
+    if moved:
+        spend["branches_moved"] = moved  # the person's, reported only
     ledger.append(run, {**spend, "usd": round(usd, 4)})
 
     if tampered:
@@ -193,7 +196,7 @@ def main() -> None:
         # back as they were; a change to the person's checkout is named. The person hears of it
         # (`next` escalates), and the session's output is not used.
         ledger.append(run, {"t": "tamper", "label": args.label, "paths": tampered, **({"layer": args.layer} if args.layer else {})})
-        print(json.dumps({"label": args.label, "error": "the agent changed what it may not; see paths", "paths": tampered}))
+        print(json.dumps({"label": args.label, "error": "the agent changed what it may not; see paths", "paths": tampered, "branches_moved": moved}))
         sys.exit(4)
     if result is None:
         out.write_text(proc.stdout + "\n" + err_text)
@@ -202,7 +205,7 @@ def main() -> None:
 
     out.write_text(result.get("result") or "")
     subtype = result.get("subtype", "")
-    summary = {"label": args.label, "usd": usd, "subtype": subtype, "is_error": bool(result.get("is_error")), "out": args.out, "session": result.get("session_id")}
+    summary = {"label": args.label, "usd": usd, "branches_moved": moved, "subtype": subtype, "is_error": bool(result.get("is_error")), "out": args.out, "session": result.get("session_id")}
     print(json.dumps(summary))
     if "budget" in subtype:
         sys.exit(5)

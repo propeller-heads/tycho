@@ -36,7 +36,7 @@ def main() -> None:
             git("worktree", "add", str(tree), branch, cwd=repo)
         else:
             git("worktree", "add", "-b", branch, str(tree), f"origin/{schema.BASE}", cwd=repo)
-    # On every call, so a rerun completes an update that failed (no network) and forge's `lib/` is there.
+    # On every call, so a rerun completes an update that failed part way and forge's `lib/` is there.
     git("submodule", "update", "--init", "--recursive", cwd=tree)
 
     for rel in schema.LINKED_ENV_FILES:

@@ -179,7 +179,7 @@ DCI on this run's chains:
   "read_set": [{"chain": "ethereum", "address": "0x…", "slots": ["0x…"], "tracked_by": "attribute `reserves` | VM storage", "why_untracked": "immutable after deploy"}],
   "gas": {"swap_gas_used": 0, "evidence": "0x… (tx)", "router_overhead": "from the sibling's router test, if known"},
   "coverage": {"served": 0, "total": 0, "unit": "tvl_usd | volume_usd_30d", "source": "…", "per_chain": {"ethereum": [0, 0]}},
-  "proxies": [{"chain": "ethereum", "proxy": "0x…", "implementation": "0x…", "slot": "0x3608…bbc"}]  (a beacon proxy: "slot": "0xa3f0…d50", the beacon slot; the gate then asks the beacon for `implementation()`),
+  "proxies": [{"chain": "ethereum", "proxy": "0x…", "implementation": "0x…", "slot": "0x3608…bbc (EIP-1967; a beacon proxy: 0xa3f0…d50, the beacon slot, and the gate asks the beacon for implementation())"}],
   "test_range": {"chain": "ethereum", "start_block": 0, "stop_block": 0, "why": "counts per floor item"},
   "fork_setup": {"script": null, "why": ""},
   "sibling": {"protocol_system": "…", "why": "…", "differences": ["…"]},

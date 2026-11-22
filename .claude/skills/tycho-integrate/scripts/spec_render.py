@@ -3,8 +3,9 @@
 
     spec_render.py --protocol P [--check]
 
-`--check` validates the spec first and exits 2 on any error, naming each: a critical fact without
-evidence stops the run. SPEC.md is generated, never edited, so the person and the pipeline read
+It validates the spec and exits 2 on any error, naming each (a critical fact without evidence
+stops the run); SPEC.md is written either way, the errors first. `--check` validates only and
+writes nothing, so an agent may run it. SPEC.md is generated, never edited, so the person and the pipeline read
 the same facts.
 """
 
@@ -236,26 +237,29 @@ def render(spec: dict, intake: dict, env: dict = None) -> str:
     if spec.get("amendments"):
         out.append("## Amendments")
         out.append("")
-        out += table(["#", "fact", "was", "now", "evidence", "source"], [[a.get("n", i + 1), a.get("fact_id", ""), a.get("old", ""), a.get("new", ""), a.get("evidence", ""), a.get("source", "")] for i, a in enumerate(spec["amendments"])])
+        out += table(["#", "fact", "was", "now", "evidence", "source"], [[a.get("n", i + 1), a.get("fact") or a.get("fact_id", ""), a.get("old", ""), a.get("new", ""), a.get("evidence", ""), a.get("source", "")] for i, a in enumerate(spec["amendments"])])
     return "\n".join(out).rstrip() + "\n"
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--protocol", required=True)
-    p.add_argument("--check", action="store_true")
+    p.add_argument("--check", action="store_true", help="validate only and write nothing (an agent may run it)")
     args = p.parse_args()
     run = schema.run_dir(args.protocol)
     spec = schema.load_json(run / "spec.json")
-    if args.check:
-        errors = schema.validate_spec(spec)
+    errors = schema.validate_spec(spec)
+    if not args.check:
+        # Rendered whatever the errors, so the falsifier and the person always read the current
+        # spec; the errors lead it.
+        text = render(spec, schema.load_json_or(run / "intake.json", {}), schema.load_json_or(run / "env.json", {}))
         if errors:
-            print("\n".join(errors))
-            sys.exit(2)
-    intake = schema.load_json(run / "intake.json") if (run / "intake.json").exists() else {}
-    env = schema.load_json(run / "env.json") if (run / "env.json").exists() else {}
-    (run / "SPEC.md").write_text(render(spec, intake, env))
-    print(run / "SPEC.md")
+            text = "> **Not valid yet:**\n" + "".join(f"> - {e}\n" for e in errors) + "\n" + text
+        (run / "SPEC.md").write_text(text)
+        print(run / "SPEC.md")
+    if errors:
+        print("\n".join(errors))
+        sys.exit(2)
 
 
 if __name__ == "__main__":

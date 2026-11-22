@@ -562,7 +562,7 @@ class FinalGates(GitTree):
         self.commit("protocols/testing/src/lib.rs", "weaker")
         found = ledger.check_guards(self.tree, self.base, "HEAD")
         ledger.append(run, {"t": "guard_violation", "layer": "indexing", "round": 1, "paths": found})
-        ledger.append(run, {"t": "decision_needed", "id": "Q1", "class": "relax-test", "question": "?", "layer": "indexing", "escalation": "guard"})
+        ledger.append(run, {"t": "decision_needed", "id": "Q1", "class": "relax-test", "question": "?", "layer": "indexing", "escalation": "guard", "detail": {"paths": found}})
         ledger.append(run, {"t": "decision", "id": "Q1", "choice": "accept", "by": "person", "accept_guard": True})
         self.assertEqual(final_gates.gate_guards(run, self.tree)["status"], "pass")
         self.commit(self.EXECUTION_RS, "gone")
@@ -882,7 +882,7 @@ class ReviewFindings(RunCase):
         (self.run / "decisions.json").write_text(json.dumps({"decisions": [{"id": "D1", "facts": ["S3"], "layers": ["indexing"]}]}))
         self.review(self.round())
         self.assertEqual(self.next()["action"], "clean")
-        self.add(t="gate", gate=1, status="approved", facts=["S3"])
+        self.add(t="gate", gate=1, status="approved", facts=["S3"], digests={"S3": "d"})
         result = ledger.amend(self.run, "S3", "cast call", "fee is 25 bps", "chain")
         self.assertEqual((result["layers"], result["needs_person"]), (["indexing"], True))
         # a signed fact: the person first
@@ -977,8 +977,10 @@ class SignedFacts(RunCase):
         self.assertEqual(final_gates.gate_signed_facts(self.run, spec)["status"], "pass")
         spec["facts"][0]["claim"] = "fee is 5 bps"
         self.assertEqual(final_gates.gate_signed_facts(self.run, spec)["status"], "fail")
-        self.add(t="amendment", fact="S1", evidence="cast call", new="fee is 5 bps")
+        self.add(t="amendment", fact="S1", evidence="cast call", new="fee is 5 bps", digest=schema.fact_digest(spec["facts"][0]))
         self.assertEqual(final_gates.gate_signed_facts(self.run, spec)["status"], "pass")
+        spec["facts"][0]["claim"] = "fee is 99 bps"  # changed again, never recorded
+        self.assertEqual(final_gates.gate_signed_facts(self.run, spec)["status"], "fail")
 
 
 class VerifierFindings(RunCase):
@@ -1052,6 +1054,154 @@ class GuardVerifierForms(GitTree):
                 self.assertEqual(self.hook(role, "Bash", {"command": command.format(repo=self.tree, tree=self.tree, run=run)}, label=label), want)
 
 
+class FreshReviewLedger(RunCase):
+    """What the third full review found in the ledger."""
+
+    def test_rerunning_answers_records_nothing_twice(self):
+        self.finding("F1")
+        path = self.answers([{"id": "F1", "kind": "dispute", "evidence": "cast call"}, {"id": "F9", "kind": "fix"}])
+        ledger.record_answers(self.run, "indexing", 1, path)
+        path = self.answers([{"id": "F1", "kind": "dispute", "evidence": "cast call"}])
+        ledger.record_answers(self.run, "indexing", 1, path)
+        self.assertEqual(len(self.state().findings["F1"]["answers"]), 1)
+
+    def test_a_decided_decision_and_a_negative_grant_are_refused(self):
+        self.add(**{"t": "decision_needed", "id": "Q1", "class": "not-converged", "question": "?", "layer": "indexing", "escalation": "round-cap"})
+        with mock.patch.object(schema, "run_dir", return_value=self.run):
+            for argv, refused in ((["Foo", "decide", "--id", "Q1", "--choice", "x", "--grant-rounds", "-1"], True),
+                                  (["Foo", "decide", "--id", "Q1", "--choice", "more", "--grant-rounds", "2"], False),
+                                  (["Foo", "decide", "--id", "Q1", "--choice", "more", "--grant-rounds", "2"], True)):
+                with mock.patch.object(sys, "argv", ["state.py", *argv]), mock.patch("builtins.print"):
+                    if refused:
+                        with self.assertRaises(SystemExit):
+                            ledger.main()
+                    else:
+                        ledger.main()
+        self.assertEqual(self.state().grant_rounds["indexing"], 2)
+
+    def test_the_run_wide_cap_escalates_after_a_session_of_no_layer(self):
+        self.review(self.round())
+        self.add(t="spend", label="final-review", usd=BUDGETS["integration"]["usd"])
+        self.assertEqual(self.next()["action"], "clean")
+        self.assertEqual(ledger.next_run_step(self.state())["reason"], "integration-usd-cap")
+
+    def test_findings_re_listed_by_later_reviews_keep_their_ids(self):
+        same = {"rule": "r", "file": "src/a.rs", "quote": ".unwrap_or_default()", "claim": "c"}
+        for _ in range(3):
+            n = self.round()
+            ledger.ingest_review(self.run, "indexing", n, self.sidecar({"findings": [{**same, "lines": "10-10"}, {**same, "lines": "80-80"}]}))
+        self.assertEqual(sorted(self.state().findings), ["F1", "F2"])
+
+    def test_a_check_closes_when_its_step_ran_even_if_another_check_failed(self):
+        path = Path(self.tmp.name) / "c.json"
+        failing = lambda checks: {"green": False, "steps": [{"name": "protocol-testing", "status": "fail", "report": "r.json",
+                                                             "checks": [{"test": "t", "check": c, "outcome": "fail"} for c in checks]}]}
+        path.write_text(json.dumps(failing(["balances", "sim.ladder"])))
+        ledger.record_round(self.run, self.state(), "indexing", "h1", None, path)
+        path.write_text(json.dumps(failing(["sim.ladder"])))
+        ledger.record_round(self.run, self.state(), "indexing", "h2", None, path)
+        self.assertEqual([f["rule"] for f in self.state().open_findings("indexing")], ["check:protocol-testing:sim.ladder"])
+
+    def test_more_wordings_of_a_skipped_core_pass(self):
+        self.assertEqual(len(ledger.core_not_run(["pass-4: agent crashed", "Integration pass and chunk pass 2 skipped"])), 2)
+        self.assertEqual(ledger.core_not_run(["execution verifier (pass `full`)", "integration passes: none"]), [])
+
+    def test_a_sidecar_that_does_not_say_what_the_ledger_needs_is_refused(self):
+        n = self.round()
+        with self.assertRaises(SystemExit):
+            ledger.ingest_review(self.run, "indexing", n, self.sidecar({"earlier": [{"id": "E1", "status": "refuted"}], "findings": []}))
+        with self.assertRaises(SystemExit):
+            ledger.ingest_review(self.run, "indexing", n, self.sidecar({"findings": [{"file": "f", "claim": "c"}]}))
+
+
+class FreshReviewGuards(GitTree):
+    CASES = [
+        ("implementer", "echo x > /dev/..//{repo}/../CLAUDE.md", "deny"),
+        ("implementer", "echo x > $TYCHO_INTEGRATE_REPO/../CLAUDE.md", "deny"),
+        ("implementer", "cd $TYCHO_INTEGRATE_REPO/.. && rm -rf knowledge", "deny"),
+        ("implementer", "echo x > $UNSET_THING/x", "deny"),
+        ("implementer", "git --git-dir={repo}/../other/.git --work-tree={repo}/../other commit -am x", "deny"),
+        ("implementer", "GIT_WORK_TREE={repo}/../other git add -A", "deny"),
+        ("implementer", "mv -t {repo}/../crates /x/a", "deny"),
+        ("implementer", "docker run -v /:/h alpine sh -c 'echo x > /h/etc/x'", "deny"),
+        ("implementer", "cargo test 2>&1 > /dev/null", "allow"),
+        ("researcher", "python3 -I s/scripts/spec_render.py --protocol foo --check", "allow"),
+        ("researcher", "python3 -I s/scripts/spec_render.py --protocol foo", "deny"),
+        ("researcher", "python3 -I s/scripts/envcheck.py --protocol foo", "deny"),
+    ]
+
+    def test_each_form(self):
+        for role, command, want in self.CASES:
+            with self.subTest(role=role, command=command):
+                self.assertEqual(self.hook(role, "Bash", {"command": command.format(repo=self.tree)}), want)
+        self.assertEqual(self.hook("researcher", "Write", {"file_path": f"/dev/..//{self.tree}/src/x.rs", "content": ""}, label="research"), "deny")
+
+    def test_a_change_in_a_merge_commit_is_seen(self):
+        self.git("checkout", "-qb", "side")
+        self.commit("pkg/side.rs", "side")
+        self.git("checkout", "-q", "-")
+        self.commit("pkg/main.rs", "main")
+        self.git("merge", "-q", "--no-commit", "side")
+        knowledge = self.tree / ".claude/knowledge/indexing.md"
+        knowledge.parent.mkdir(parents=True)
+        knowledge.write_text("weaker")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "merge")
+        self.assertIn(".claude/knowledge/indexing.md", [v["path"] for v in ledger.check_guards(self.tree, self.base, "HEAD")])
+
+    def test_check_guards_refuses_a_missing_start(self):
+        with self.assertRaises(SystemExit):
+            ledger.check_guards(self.tree, "", "HEAD")
+
+    def test_an_accepted_guard_change_accepts_only_what_its_escalation_named(self):
+        run = Path(self.tmp.name) / "run"
+        run.mkdir()
+        ledger.ledger_path(run).touch()
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        self.commit(".claude/knowledge/indexing.md", "weaker")
+        first = ledger.check_guards(self.tree, self.base, "HEAD")
+        ledger.append(run, {"t": "guard_violation", "layer": "indexing", "round": 1, "paths": first})
+        ledger.append(run, {"t": "decision_needed", "id": "Q1", "class": "relax-test", "question": "?", "layer": "indexing", "escalation": "guard", "detail": {"paths": first}})
+        ledger.append(run, {"t": "decision", "id": "Q1", "choice": "revert it", "by": "person"})
+        mid = self.git("rev-parse", "HEAD").strip()
+        self.commit("protocols/testing/src/lib.rs", "x")
+        second = ledger.check_guards(self.tree, mid, "HEAD")
+        ledger.append(run, {"t": "guard_violation", "layer": "indexing", "round": 2, "paths": second})
+        ledger.append(run, {"t": "decision_needed", "id": "Q2", "class": "relax-test", "question": "?", "layer": "indexing", "escalation": "guard", "detail": {"paths": second}})
+        ledger.append(run, {"t": "decision", "id": "Q2", "choice": "accept", "by": "person", "accept_guard": True})
+        gate = final_gates.gate_guards(run, self.tree)
+        self.assertEqual(gate["status"], "fail")
+        self.assertIn(".claude/knowledge/indexing.md", gate["detail"])
+        self.assertNotIn("lib.rs", gate["detail"])
+
+
+class FreshReviewGates(GitTree):
+    def setUp(self):
+        super().setUp()
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+
+    def test_the_venue_quote_test_ties_block_and_result_in_one_test(self):
+        spec = {"venue_quotes": [{"id": "V1", "block": 21000000, "result": "0x" + f"{0x20:064x}" + f"{123456:064x}"}]}
+        test = "crates/tycho-simulation/src/evm/protocol/foo/state.rs"
+        self.commit(test, "#[test]\nfn a() { at_block(21_000_000); }\n#[test]\nfn b() { assert_eq!(out, 123456); }\n")
+        self.assertEqual(final_gates.gate_venue_quote_test(spec, self.tree, ["simulation"], final_gates.changed_files(self.tree))["status"], "fail")
+        self.commit(test, "#[test]\nfn a() { at_block(21_000_000); assert_eq!(out, 123456); }\n")
+        self.assertEqual(final_gates.gate_venue_quote_test(spec, self.tree, ["simulation"], final_gates.changed_files(self.tree))["status"], "pass")
+
+
+class SpecRenderCheck(unittest.TestCase):
+    def test_check_writes_nothing_and_a_person_is_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d)
+            spec = {"protocol": "Foo", "kind": "native", "kind_fact": "S1", "chains": ["ethereum"], **SpecValidation.READINGS,
+                    "facts": [{"id": "S1", "section": "swap", "claim": "the team keeps fees", "critical": True, "evidence": [{"kind": "person", "ref": "Q3"}]}]}
+            (run / "spec.json").write_text(json.dumps(spec))
+            import spec_render
+            with mock.patch.object(schema, "run_dir", return_value=run), mock.patch.object(sys, "argv", ["spec_render.py", "--protocol", "Foo", "--check"]), mock.patch("builtins.print"):
+                spec_render.main()
+            self.assertFalse((run / "SPEC.md").exists())
+
+
 class LayerChecksSteps(unittest.TestCase):
     STEP = {"name": "adapter-test", "layers": ["simulation"], "when": ["vm"], "cmd": "forge test --match-contract {adapter}"}
 
@@ -1115,17 +1265,27 @@ class GuardBashForms(GitTree):
 
 
 class Checkout(GitTree):
-    def test_a_moved_branch_is_put_back_and_a_changed_file_named(self):
-        before = schema.checkout_digest(self.tree, "integrate/foo")
-        self.git("branch", "side")
+    def test_the_persons_work_is_reported_never_reset_or_held_against_a_session(self):
+        self.git("branch", "integrate/foo")
+        repo, tree = self.tree, self.tree
+        before = schema.run_digest(repo, tree, "integrate/foo")
+        self.git("branch", "person-work")
+        self.commit("pkg/mine.rs", "the person's commit")
+        after = schema.run_digest(repo, tree, "integrate/foo")
+        tampered, moved = run_agent.compare_run(before, after, "implement:indexing:1", "integrate/foo")
+        self.assertEqual(tampered, [])
+        self.assertIn("refs/heads/person-work", moved)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").strip(), self.base)  # nothing was reset
+
+    def test_only_an_implement_session_moves_the_runs_branch_or_worktree(self):
+        self.git("checkout", "-qb", "integrate/foo")
+        before = schema.run_digest(self.tree, self.tree, "integrate/foo")
         self.commit("pkg/x.rs", "x")
-        after = schema.checkout_digest(self.tree, "integrate/foo")
-        # the default branch moved (the commit) and `side` appeared
-        changed = run_agent.restore_checkout(self.tree, before, after)
-        self.assertTrue(any("side" in c for c in changed))
-        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
-        (self.tree / "pkg/integration_test.tycho.yaml").write_text("changed")
-        self.assertTrue(any("checkout" in c for c in run_agent.restore_checkout(self.tree, before, schema.checkout_digest(self.tree, "integrate/foo"))))
+        (self.tree / "pkg/left.rs").write_text("uncommitted")
+        after = schema.run_digest(self.tree, self.tree, "integrate/foo")
+        self.assertEqual(run_agent.compare_run(before, after, "implement:indexing:1", "integrate/foo")[0], [])
+        tampered, _ = run_agent.compare_run(before, after, "research", "integrate/foo")
+        self.assertTrue(any("integrate/foo moved" in t for t in tampered) and any("worktree" in t for t in tampered))
 
     def test_worktree_reattaches_the_runs_branch(self):
         origin = Path(self.tmp.name) / "origin.git"

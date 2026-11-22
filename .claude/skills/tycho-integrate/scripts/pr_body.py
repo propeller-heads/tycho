@@ -39,14 +39,13 @@ def layer_summary(st: ledger.State, layer: str) -> str:
     )
 
 
-def rollout(values: dict, spec: dict, new_executor: bool) -> list:
+def rollout(dec: dict, spec: dict, layers: list) -> list:
     chains = ", ".join(spec.get("chains", []))
-    package = values.get("package", "<package>")
-    package = ", ".join(sorted(set(package.values()))) if isinstance(package, dict) else package
-    items = [
-        f"Release the `{package}` spkg (`protocols/substreams/release.sh`) and add its `extractors.yaml` entry; a later spkg bump forces a re-sync.",
-    ]
-    if new_executor:
+    items = []
+    if "indexing" in layers:
+        package = ", ".join(schema.package_names(dec, ("package",))) or "<package>"
+        items.append(f"Release the `{package}` spkg (`protocols/substreams/release.sh`) and add its `extractors.yaml` entry; a later spkg bump forces a re-sync.")
+    if "execution" in layers:
         items += [
             f"Deploy the executor on {chains} and register it with TychoRouter (timelocked role). Until then protocol-testing executes through its runtime bytecode fixture.",
             "After the deployment: add its address to `crates/tycho-execution/config/executor_addresses.json`, and its address-to-protocol row to "
@@ -117,9 +116,7 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     final = schema.load_json_or(run / "final_gates.json", {"gates": [], "off": []})
     layers = ledger.route_layers(run)
     agreements = dec.get("agreements") or {}
-    values = {**(dec.get("paths") or {}), "protocol_system": agreements.get("protocol_system")}
     route = intake.get("route") or {"kind": "new"}
-    new_executor = "execution" in layers
 
     kind = spec.get("kind", "?")
     open_findings = [f for l in layers for f in st.open_findings(l)]
@@ -188,18 +185,21 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     out += ["", "### Not verified", "", "Nothing in this PR shows these; a person runs them, or they wait for the harness:", ""]
     out += [f"- {o['what']} ({o['gap']}: {o['reason']})" for o in final.get("off", [])]
     out += [f"- {d}" for d in NOT_RUN_BY_THE_SKILL]
-    out += ["", "### What CI will not guard", "",
-            "- The `src/evm/**` simulation tests are excluded from PR CI (`not test(evm)`); this run ran the module's tests locally.",
-            "- Protocol tests run on `pull_request_target` for changed packages only, and a fork PR's run waits for approval."]
+    out += ["", "### What CI will not guard", ""]
+    if "simulation" in layers and kind in ("native", "hybrid"):
+        out.append("- The `src/evm/**` simulation tests are excluded from PR CI (`not test(evm)`); this run ran the module's tests locally (`simulation-test`).")
+    out.append("- Protocol tests run on `pull_request_target` for changed packages only, and a fork PR's run waits for approval.")
 
     # The per-call spend is the run's bookkeeping, not what the PR does: it goes beside the PR text.
     spend = ["# Spend", ""] + [f"- {label}: ${usd:.2f}" for label, usd in sorted(st.spend_label.items())] + [f"- total: ${st.spend_total:.2f}"]
     (run / "PR-spend.md").write_text("\n".join(spend) + "\n")
 
-    person = [f"**{d['id']}** [{d['class']}] {d['question']}" for d in st.open_decisions()]
-    person += [f"Blocking finding {f['id']} still open in {f['layer']}"
-               + (f" (closed by {closed[f['layer']]} without converging)" if f["layer"] in closed else "")
-               + f": `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in blocking]
+    # The decisions and the ledger's open findings: in shadow mode they wait for the blind review.
+    ledger_items = [f"**{d['id']}** [{d['class']}] {d['question']}" for d in st.open_decisions()]
+    ledger_items += [f"Blocking finding {f['id']} still open in {f['layer']}"
+                     + (f" (closed by {closed[f['layer']]} without converging)" if f["layer"] in closed else "")
+                     + f": `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in blocking]
+    person = [] if shadow else list(ledger_items)
     person += [f"Open risk: {r}" for r in spec.get("open_risks", [])]
     for g in final.get("gates", []):
         if g["status"] in ("fail", "warn"):
@@ -207,11 +207,13 @@ def render(protocol: str, shadow: bool = False) -> tuple:
     out += ["", "## For a person", ""]
     out += [f"- {p}" for p in person] or ["- Nothing to decide."]
     out += ["", "Rollout, outside this PR:", ""]
-    out += [f"- {r}" for r in rollout(values, spec, new_executor)]
+    out += [f"- {r}" for r in rollout(dec, spec, layers)]
     lesser = [f for f in open_findings if f["severity"] != "blocking"]
-    if lesser:
-        out += ["", "Review findings still open, below blocking:", ""]
-        out += [f"- [{f['severity']}] `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in lesser]
+    lesser_lines = [f"- [{f['severity']}] `{f['rule']}` at `{f['file']}`: {f['claim']}" for f in lesser]
+    if shadow:
+        held += ["", "## Open decisions and findings", ""] + [f"- {p}" for p in ledger_items] + lesser_lines
+    elif lesser:
+        out += ["", "Review findings still open, below blocking:", ""] + lesser_lines
     if shadow:
         out += ["", "Shadow mode: the decision record and the review ledger are held back until a person has reviewed this PR blind."]
     held_text = "# Decision record and review ledger\n" + "\n".join(held).rstrip() + "\n" if shadow else ""

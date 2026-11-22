@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Runs a layer's checks (checks.toml) in the run's worktree and writes the results.
 
-    layer_checks.py --protocol P --layer indexing|simulation|execution|final --round N [--chains a,b]
+    layer_checks.py --protocol P --layer indexing|simulation|execution|final --round N [--chains a,b] [--only s,...]
+    layer_checks.py --protocol P --layer L --scratch [--only s,...]      an implementer's own run, recorded nowhere
 
 Results go to `<run>/rounds/<layer>-<n>/checks.json` (one entry per step: pass, fail, infra, off
 with the gap that turns it on, or n/a) with a log per step beside it. Exit 0 when every step that
@@ -24,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -146,8 +148,8 @@ class Harness:
     """A protocol-testing environment of the run's own: a Postgres on a free port, an indexer port,
     and `tycho-indexer` on PATH (the harness runs it by name)."""
 
-    def __init__(self, tree: Path, project: str, logdir: Path, chain: str):
-        self.tree, self.project, self.logdir, self.chain = tree, project, logdir, chain
+    def __init__(self, tree: Path, project: str, logdir: Path, chain: str, timeout_min: int):
+        self.tree, self.project, self.logdir, self.chain, self.timeout_min = tree, project, logdir, chain, timeout_min
         self.db_port = free_port(DB_PORT_FROM)
         self.server_port = free_port(SERVER_PORT_FROM)
         self.env = None
@@ -162,7 +164,8 @@ class Harness:
             envcheck.rpc(rpc, "eth_blockNumber", [])
         except Exception as e:  # noqa: BLE001 - any failure here is the node's
             return False, f"the {self.chain} RPC does not answer: {e}", "rpc"
-        name, ok, detail = envcheck.check_substreams_token(hours=2)
+        # Valid for the longest harness step (checks.toml `timeout_min`), and the retry after it.
+        name, ok, detail = envcheck.check_substreams_token(hours=2 * self.timeout_min / 60)
         if not ok:
             return False, f"{name}: {detail}", "substreams token"
         log = self.logdir / "harness-setup.log"
@@ -228,9 +231,22 @@ def run_step(step: dict, values: dict, tree: Path, outdir: Path, name: str, env,
     proc = None
     try:
         with open(log, "w") as out:
-            proc = subprocess.run(["bash", "-o", "pipefail", "-c", cmd], cwd=tree / step.get("cwd", "."), env=env, stdout=out, stderr=subprocess.STDOUT, timeout=timeout * 60)
+            # A session of its own, so a timeout ends the whole pipeline (cargo, the indexer it starts),
+            # not only bash.
+            proc = subprocess.Popen(["bash", "-o", "pipefail", "-c", cmd], cwd=tree / step.get("cwd", "."), env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.wait(timeout=timeout * 60)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                raise
         status, detail = ("pass" if proc.returncode == 0 else "fail"), f"exit {proc.returncode}"
     except subprocess.TimeoutExpired:
+        proc = None
         status, detail = "fail", f"timed out after {timeout} min"
     result = {"name": name, "cmd": cmd, "log": str(log), "seconds": round(time.time() - started)}
     checks = []
@@ -255,7 +271,7 @@ def run_once(step: dict, values: dict, tree: Path, outdir: Path, name: str, chai
     try:
         env = None
         if step.get("harness"):
-            harness = Harness(tree, f"tycho-integrate-{schema.slug(args.protocol)}-{chain}", outdir, chain)
+            harness = Harness(tree, f"tycho-integrate-{schema.slug(args.protocol)}-{chain}", outdir, chain, step.get("timeout_min", 20))
             ok, detail, cause = harness.up()
             if not ok:
                 return {"name": name, "status": "fail", "detail": detail, **({"infra": cause} if cause else {})}
@@ -320,7 +336,7 @@ def main() -> None:
         raise SystemExit(f"chains {unknown} are not the run's ({every})")
     harness_chains = [primary] + [c for c in every if c in extra and c != primary]
     values_of = {chain: placeholders(run, tree, chain) for chain in harness_chains}
-    route = state_route(run)
+    route = schema.route_layers(run)
     caps = harness_caps.detect(tree)
     only = set(args.only.split(",")) if args.only else None
 
@@ -356,13 +372,6 @@ def main() -> None:
         print(f"{r['status']:5} {r['name']}: {r['detail']}")
     print(json.dumps({"green": green, "infra": [r["name"] for r in results if r["status"] == "infra"], "file": str(outdir / "checks.json")}))
     sys.exit(0 if green else 3 if only_infra else 1)
-
-
-def state_route(run: Path) -> list:
-    """The layers the run builds (its intake's route), every layer when it names none."""
-    intake = schema.load_json(run / "intake.json") if (run / "intake.json").exists() else {}
-    layers = (intake.get("route") or {}).get("layers") or []
-    return [l for l in schema.LAYERS if l in layers] or list(schema.LAYERS)
 
 
 if __name__ == "__main__":

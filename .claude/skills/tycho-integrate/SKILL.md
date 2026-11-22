@@ -63,12 +63,19 @@ called:
 - 0: use the output.
 - 2: the session ended with an error: read the output file and rerun it once; failing again, ask the
   person (class `outside-repo`).
-- 3: no budget was left, nothing started: `next` escalates the cap (step 9.6).
-- 4: the session changed what it may not (the run's records, the repository's branches, the
-  person's checkout); `run_agent.py` restored what it could and recorded a `tamper` event. Discard
-  its output; `next` asks the person whether to rerun it.
-- 5: the session hit its budget part way; its commits, if any, are in the worktree. Treat it as a
-  round that finished: record what it left (steps 9.2–9.4).
+- 3: no budget was left, nothing started. For a layer's session, `S/state.py P next --layer L`
+  escalates its cap (step 9.6); for a session of no layer (classify, research, falsify, decide,
+  review-decisions, the final review), `S/state.py P next` (no `--layer`) escalates the run's cap.
+- 4: the session changed what it may not: the run's records (restored), or, outside an implement
+  session, the run's branch or worktree (named, never reset). A `tamper` event is recorded. Discard
+  its output; `next` (with or without `--layer`, as for exit 3) asks the person whether to rerun it.
+- 5: the session hit its budget part way. An implement round: its commits, if any, are in the
+  worktree; record what it left (steps 9.2–9.4). Any other session: its output is incomplete, so
+  ask the person for budget (`next` as for exit 3), then rerun it.
+
+Every session's spend is in the ledger, whatever its exit (a session that crashed is charged its
+whole budget). Branches outside the run that moved during a session are the person's: `run_agent.py`
+lists them (`branches_moved`) and does nothing else, so the person can keep working while a run goes.
 
 Every session's spend is in the ledger, whatever its exit.
 
@@ -138,10 +145,10 @@ builds only `route.layers`. `new`: all three.
 S/prompt.py --protocol P --brief research --out RUN/prompts/research.md
 S/run_agent.py --protocol P --label research --role researcher --agent tycho-researcher \
   --cwd <worktree> --prompt-file RUN/prompts/research.md --out RUN/out/research.md
-S/spec_render.py --protocol P --check
+S/spec_render.py --protocol P
 ```
 
-A failing `--check` lists the facts to settle: send them back with the `amend` brief
+An exit 2 lists the facts to settle (SPEC.md is written either way, the errors first): send them back with the `amend` brief
 (`--extra-file` naming each) once; still failing, the critical unknowns are decisions of class
 `spec-unknown` for the person. `questions_for_person` in the agent's summary are too.
 
@@ -149,7 +156,7 @@ A failing `--check` lists the facts to settle: send them back with the `amend` b
 
 Same call with `--brief falsify --label falsify`. For each `refuted` fact in `RUN/falsify.json`,
 one `amend` call (`--extra-file` with the falsifier's results) redoes it. Anything still
-contested becomes `contested` with an open risk. Then `spec_render.py --check` again.
+contested becomes `contested` with an open risk. Then `spec_render.py --protocol P` again.
 
 ### 6. Gate 1: the spec (`gate1`)
 
@@ -214,7 +221,6 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
 1. **Implement.**
    ```bash
    S/prompt.py --protocol P --brief implement --layer L --round N --out RUN/prompts/implement-L-N.md
-   ROUND_BASE=$(git -C <worktree> rev-parse HEAD)
    S/run_agent.py --protocol P --label implement:L:N --role implementer --agent tycho-implementer \
      --layer L --cwd <worktree> --prompt-file RUN/prompts/implement-L-N.md --out RUN/out/implement-L-N.md
    ```
@@ -224,7 +230,8 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
    `RUN/rounds/L-N/answers.json`, and `S/state.py P answers --layer L --round N --file …`. Missing
    answers are reported and stay open; they are never dropped. `facts_learned` go to the spec as
    amendments (below).
-3. **Guards.** `S/state.py P check-guards --worktree <worktree> --from $ROUND_BASE --layer L --round N --record`.
+3. **Guards.** `S/state.py P check-guards --worktree <worktree> --layer L --round N --record` (from
+   the layer's previous round's head, which the ledger has; `--from` names another commit).
    It covers the round's commits and the worktree's uncommitted changes. When the person answers
    the guard escalation by accepting the change, record it with `decide --accept-guard`; the final
    `guards` gate fails on any guarded change on the branch nobody accepted.
@@ -262,8 +269,9 @@ round of layer `L`, number `N` (`N` = rounds so far + 1):
      in the PR and the `layers-clean` gate passes it, naming the decision;
    - `escalate` with reason `infra`: the environment failed, not the code (`layer_checks.py`
      named the cause and ran the step twice). Ask the person with the question it opened; once the
-     environment is fixed, rerun step 4 at the same head, which replaces the round. No implementer
-     round runs for it;
+     environment is fixed, first rerun step 4 at the same head (it replaces the round), then record
+     the answer with `decide` (in that order: before the rerun, `next` would ask again). No
+     implementer round runs for it;
    - `stopped`: the person stopped the run at the integration's dollar cap; mark the stage
      `stopped` and end;
    - `escalate`: ask the person the decision it opened (its `decision` id, or `decisions` for
@@ -334,7 +342,7 @@ Anything learned after Gate 1 (a person, an implementer's `facts_learned`, a con
 found by the final gates or `--recheck`) becomes an amendment, never an intake edit:
 
 1. `amend` brief with what changed (`--extra-file`); the researcher appends it to `amendments`
-   with evidence. `spec_render.py --check`.
+   with evidence. `spec_render.py --protocol P`.
 2. `S/state.py P amend --fact S<n> --evidence '…' --new '…' --source chain|person`. It names the
    decisions that cite the fact and the layers those decisions shaped, and reopens those layers:
    `next` says `continue` for each until a round runs after the amendment, and the final gates
@@ -407,7 +415,7 @@ caps are placeholders until shadow runs measure spend (`--status` shows it per s
 | `scripts/envcheck.py` | the environment check |
 | `scripts/harness_caps.py` | which hardening gaps (G1–G13) the harness supports |
 | `scripts/layer_checks.py`, `checks.toml` | each layer's checks, run in the worktree |
-| `scripts/spec_render.py` | `spec.json` → `SPEC.md`, with `--check` |
+| `scripts/spec_render.py` | `spec.json` → `SPEC.md` and its validation (`--check`: validation only, for agents) |
 | `scripts/final_gates.py` | final gates, `--recheck` |
 | `scripts/onchain.py` | the venue read again: quotes (also from the router), watched code and getters, a quote's read set |
 | `scripts/worktree.py` | the run's worktree on `origin/main`, its submodules and linked `.env` files |

@@ -42,9 +42,6 @@ Questions every integration answers (more as the venue needs):
   (`no-precedent` or `quantified-tradeoff`, with the markets it drops). All of these rules are in
   `.claude/knowledge/indexing.md` § DCI.
 
-DCI on this run's chains:
-
-{{dci}}
 - **Balances**: the source per component kind, from the spec's `balance_source`, and the
   `balance_lens` that reads it (a stock lens, or the venue's own and what it calls).
 - **Re-simulation**: which changes mark a component updated (`contract-manual-updates-mark-every-change`
@@ -77,11 +74,16 @@ The strings and encodings every layer must use identically, fixed here and nowhe
 
 ## Paths
 
+DCI on this run's chains:
+
+{{dci}}
+
 The names the layer checks run with (`checks.toml` placeholders): `package` (Substreams package
 directory, `<chain>-<protocol>`), `sim_module` (nextest filter for a native module), `adapter`
 (VM adapter contract), `executor` (executor contract), `encoder` (nextest filter for the swap
 encoder), `router_test` (TychoRouter integration test contract). Follow the naming of the nearest
-sibling on main. Leave out what this route does not build.
+sibling on main. `package` is always named (a route without indexing tests the sibling's package);
+leave out the others for a layer the route does not build.
 
 ## decisions.json
 

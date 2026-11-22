@@ -27,6 +27,7 @@ rules are code here, not a judgement the model makes.
 
 import argparse
 import datetime
+import hashlib
 import json
 import re
 import sys
@@ -109,7 +110,6 @@ class State:
         # layer -> the decision id by which a person closed a layer that stopped without converging
         # (an escalation answered without more rounds or dollars, and no round since).
         self.closed = {}
-        self.signed_facts = set()
         self.signed_digests = {}  # fact id -> fact_digest at Gate 1
         self.amendments = []
         self.escapes = []
@@ -132,7 +132,6 @@ class State:
         elif t == "gate":
             self.gates[str(e["gate"])] = e["status"]
             if str(e["gate"]) == "1" and e["status"] == "approved":
-                self.signed_facts.update(e.get("facts", []))
                 self.signed_digests.update(e.get("digests", {}))
         elif t == "round":
             # A round recorded again at the same number (a rerun at the same head) replaces it.
@@ -212,6 +211,7 @@ class State:
                 "layer": e.get("layer"),
                 "escalation": e.get("escalation"),
                 "layers": e.get("layers", []),
+                "detail": e.get("detail") or {},
                 "resolved": False,
                 "choice": None,
             }
@@ -222,8 +222,10 @@ class State:
             d["resolved"] = True
             d["choice"] = e["choice"]
             d["by"] = e["by"]
-            if e.get("accept_guard") and d.get("layer"):
-                self.accepted_guards.update(guard_key(v) for g in self.guard_violations[d["layer"]] for v in g["paths"])
+            if e.get("accept_guard"):
+                # Only the changes this escalation named: an earlier one the person refused, or a
+                # later change to the same file, is not accepted with them.
+                self.accepted_guards.update(guard_key(v) for v in d.get("detail", {}).get("paths", []))
             # The implementer applies the decision next round; the next review statuses the finding.
             if d.get("finding") in self.findings:
                 self.findings[d["finding"]]["status"] = "open"
@@ -255,9 +257,9 @@ class State:
         elif t == "guard_violation":
             self.guard_violations[e["layer"]].append(e)
         elif t == "stop":
-            self.stops[e.get("layer", "run")] = e["reason"]
+            self.stops[e.get("layer", RUN_WIDE)] = e["reason"]
             if e["reason"] == "clean":
-                self.closed.pop(e.get("layer", "run"), None)
+                self.closed.pop(e.get("layer", RUN_WIDE), None)
         elif t == "amendment":
             self.amendments.append(e)
             # The layers built on the fact rebuild: none is clean until a round runs after it.
@@ -297,11 +299,20 @@ def _next_number(ids, prefix: str) -> int:
     return max(nums, default=0) + 1
 
 
+# A finding's identity across rounds reads its quoted code, or the start of its claim when nothing
+# is quoted (a review rewords the rest of a claim between rounds); long quotes are cut so a
+# reformatted tail does not split one finding into two.
+FINGERPRINT_CLAIM_CHARS, FINGERPRINT_CHARS = 120, 200
+# An earlier finding without a ledger id matches a ledger finding of the same file whose claim
+# starts the same: the review restates claims, so only the opening is compared.
+EARLIER_CLAIM_CHARS = 60
+
+
 def fingerprint(f: dict) -> str:
     """Identity of a finding across rounds when a review does not carry the ledger id: the rule,
     the file and the quoted code (or the claim, when nothing is quoted)."""
-    text = f.get("quote") or f.get("claim", "")[:120]
-    text = re.sub(r"\s+", " ", text).strip()[:200]
+    text = f.get("quote") or f.get("claim", "")[:FINGERPRINT_CLAIM_CHARS]
+    text = re.sub(r"\s+", " ", text).strip()[:FINGERPRINT_CHARS]
     return f"{f.get('rule')}|{f.get('file')}|{text}"
 
 
@@ -327,6 +338,21 @@ def remaining_usd(state: State, layer=None) -> float:
     if layer:
         left = min(left, layer_cap(state, layer) - state.spend_layer[layer])
     return max(left, 0.0)
+
+
+def next_run_step(state: State) -> dict:
+    """The run-wide rules, for what no layer owns: after a session of no layer (research, decide,
+    the final review) and before Gate 3. A stop, a tamper, or the integration's dollar cap."""
+    if RUN_WIDE in state.closed:
+        return {"action": "stopped", "reason": "run-stopped", "decision": state.closed[RUN_WIDE]}
+    if state.tampers[RUN_WIDE]:
+        tampered = state.tampers[RUN_WIDE]
+        return {"action": "escalate", "reason": "tamper", "class": "outside-repo", "sessions": [t["label"] for t in tampered],
+                "question": f"An agent session ({', '.join(t['label'] for t in tampered)}) changed what it may not "
+                            f"({', '.join(p for t in tampered for p in t['paths'])}). Rerun it, or stop?"}
+    if integration_cap(state) - state.spend_total < MIN_CALL_USD:
+        return {"action": "escalate", "reason": "integration-usd-cap", "class": "not-converged"}
+    return {"action": "continue", "reason": "nothing run-wide is open"}
 
 
 def round_cap(state: State, layer: str) -> int:
@@ -472,6 +498,11 @@ def escalate(run: Path, state: State, layer, result: dict) -> str:
     return did
 
 
+def verdicts_after(f: dict, answer: dict) -> list:
+    """The verdicts on a finding from the review of the answer's round on: the first settles it."""
+    return [v for v in f["verdicts"] if v["round"] >= answer["round"]]
+
+
 def dispute_deadlock(f: dict, since: int = 0) -> bool:
     """The same finding disputed twice, and the review kept it open after each dispute: both sides'
     evidence holds, which usually means two rules conflict."""
@@ -479,7 +510,7 @@ def dispute_deadlock(f: dict, since: int = 0) -> bool:
     for answer in f["answers"]:
         if answer["kind"] != "dispute" or answer["round"] <= since:
             continue
-        later = [v for v in f["verdicts"] if v["round"] >= answer["round"]]
+        later = verdicts_after(f, answer)
         if later and later[0]["status"] == "open":
             held += 1
     return held >= 2
@@ -530,21 +561,23 @@ EARLIER_STATUS = {"fixed": "fixed", "disproven": "refuted", "open": "open", "def
 # parts a review may leave out by design (the integration pass and the execution verifier at
 # `partial`, tools the base lacks, files unchanged since a `--since` report); those do not make it
 # incomplete.
-CORE_NOT_RUN = re.compile(r"(chunk|pass(es)? ?\d|simplif|verification|verifiers?\b(?! execution)|spec pass|every pass|all passes|the review)", re.I)
-OPTIONAL_NOT_RUN = re.compile(r"(integration pass|execution verifier|ast-grep|dylint|review-only lint|tools?\b|deterministic|the harness|harness|ci\b|run_checks|lint)", re.I)
+CORE_NOT_RUN = re.compile(r"(chunk|pass(es)?[- ]?\d|simplif|verification|verifiers?\b|spec pass|every pass|all passes|the review)", re.I)
+# Parts a review may leave out by design; their names are removed before looking for a core part.
+OPTIONAL_NOT_RUN = re.compile(r"(integration pass(es)?|execution verifiers?)", re.I)
 
 
 def core_not_run(not_run: list) -> list:
-    """The `not_run` entries that leave a review short of reviewing the round: an entry about a core
-    part, by what it starts with (tycho-review names the part first). Files unchanged since an
-    earlier report are carried over, not skipped."""
+    """The `not_run` entries that leave a review short of reviewing the round: an entry that names a
+    core part (chunk passes, simplification, verification) anywhere, once the parts left out by
+    design (the integration pass, the execution verifier) are taken out of it. Files unchanged since
+    an earlier report are carried over, not skipped. tycho-review's `not_run` is free text, so this
+    reads it by its words; an entry that names no part at all (a missing tool) does not count."""
     out = []
     for x in map(str, not_run):
-        x = x.strip()
         if re.search(r"unchanged since", x, re.I):
             continue
-        if CORE_NOT_RUN.match(x) or (not OPTIONAL_NOT_RUN.match(x) and re.search(r"\b(chunk|simplif|verif)", x, re.I)):
-            out.append(x)
+        if CORE_NOT_RUN.search(OPTIONAL_NOT_RUN.sub("", x)):
+            out.append(x.strip())
     return out
 
 
@@ -573,7 +606,7 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
     # The commit reviewed: the layer's last round, or for `auto` the branch's latest round.
     expect = rounds[layer]["head"] if layer != "auto" else next(e for e in reversed(state.events) if e["t"] == "rebase" or (e["t"] == "round" and e["layer"] in targets))["head"]
     head = sidecar.get("head") or ""
-    if not head or not (expect.startswith(head) or head.startswith(expect)):
+    if not same_commit(head, expect):
         raise SystemExit(f"the sidecar reviewed {head or 'no recorded commit'}, not the round's {expect}")
     report = sidecar.get("report", str(sidecar_path))
     if all(any(r["n"] == rounds[l]["n"] and r.get("report") == report for r in state.reviews[l]) for l in targets):
@@ -583,11 +616,17 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
     if bad:
         raise SystemExit(f"findings without a severity in {SEVERITIES}: {bad}; fix the sidecar, a missing severity is never read as a lesser one")
     n_of = {l: rounds[l]["n"] for l in targets}
-    by_print = {f["fingerprint"]: f for f in state.findings.values()}
+    by_print = defaultdict(list)  # fingerprint -> the ledger findings that have it, oldest first
+    for f in state.findings.values():
+        by_print[f["fingerprint"]].append(f)
+    bad_earlier = [f"{e.get('id')}: status {e.get('status')!r}" for e in sidecar.get("earlier", []) if e.get("status") not in EARLIER_STATUS]
+    bad_fields = [f"finding {i}: no {k}" for i, f in enumerate(sidecar.get("findings", [])) if not f.get("pre_existing") for k in ("rule", "file", "claim") if not f.get(k)]
+    if bad_earlier or bad_fields:
+        raise SystemExit("the sidecar does not say what the ledger needs: " + "; ".join(bad_earlier + bad_fields))
     added, reopened, skipped_pre = [], [], 0
 
     def norm(text):
-        return re.sub(r"\s+", " ", text or "").strip().lower()[:60]
+        return re.sub(r"\s+", " ", text or "").strip().lower()[:EARLIER_CLAIM_CHARS]
 
     unmatched = []
     for e in sidecar.get("earlier", []):
@@ -602,7 +641,7 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
             if fid is None:
                 unmatched.append(e.get("id"))
                 continue
-        status = EARLIER_STATUS.get(e.get("status"), "open")
+        status = EARLIER_STATUS[e["status"]]
         append(run, {"t": "verdict", "id": fid, "status": status, "by": "review", "round": n_of.get(state.findings[fid]["layer"], 0), "evidence": e.get("evidence", "")})
 
     state = State(read_events(run))
@@ -615,9 +654,9 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
         event = {
             "t": "finding",
             "layer": flayer,
-            "rule": f.get("rule", "unknown"),
+            "rule": f["rule"],
             "severity": f["severity"],
-            "file": f.get("file", ""),
+            "file": f["file"],
             "lines": f.get("lines"),
             "quote": f.get("quote", ""),
             "claim": f.get("claim", ""),
@@ -626,9 +665,11 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
         }
         if layer == "auto":
             event["final"] = True
-        known = state.findings.get(f.get("earlier_id")) or by_print.get(fingerprint(event))
-        if known is not None and known["id"] in claimed:
-            known = None  # the same rule, file and code at another place in this review: a finding of its own
+        # The same rule, file and code may stand at several places: each match takes a ledger finding
+        # no other finding of this review took.
+        known = state.findings.get(f.get("earlier_id"))
+        if known is None or known["id"] in claimed:
+            known = next((k for k in by_print.get(fingerprint(event), []) if k["id"] not in claimed), None)
         if known is None:
             event["id"] = state.next_finding_id()
         elif known["status"] in ("fixed", "refuted"):
@@ -639,7 +680,8 @@ def ingest_review(run: Path, layer: str, n, sidecar_path: Path) -> dict:
             continue  # a finding the ledger already holds open needs no new event: its verdict came above
         state._apply(append(run, event))
         claimed.add(event["id"])
-        by_print[fingerprint(event)] = state.findings[event["id"]]
+        if not event.get("reopened"):
+            by_print[fingerprint(event)].append(state.findings[event["id"]])
         (reopened if event.get("reopened") else added).append(event["id"])
 
     not_run = sidecar.get("not_run") or []
@@ -669,6 +711,9 @@ def record_answers(run: Path, layer: str, n: int, answers_path: Path) -> dict:
         if fid not in open_ids:
             errors.append(f"{fid}: not an open finding of {layer}")
             continue
+        if any(x["round"] == n for x in state.findings[fid]["answers"]):
+            recorded.append(fid)  # recorded by an earlier run of this command: rerunning adds nothing
+            continue
         event = {"t": "answer", "id": fid, "round": n, "kind": a.get("kind"), "evidence": a.get("evidence", ""), "note": a.get("note", "")}
         if a.get("kind") == "decision":
             event["class"] = a.get("class")
@@ -694,9 +739,10 @@ def record_answers(run: Path, layer: str, n: int, answers_path: Path) -> dict:
 
 
 def guard_key(v: dict) -> tuple:
-    """A guarded change as a person accepts it: the file and what changed in it. A later, different
-    change to the same file is not accepted with it."""
-    return v["path"], v["why"]
+    """A guarded change as a person accepts it: the file, what was wrong, and the file's content
+    after the change. A later, different change to the same file is not accepted with it; the same
+    content after a rebase still is."""
+    return v["path"], v["why"], v.get("content", "")
 
 
 def check_key(rule: str, quote: str) -> str:
@@ -742,7 +788,9 @@ def record_round(run: Path, state: State, layer: str, head: str, checks, checks_
         raise SystemExit("a round needs --checks-file (or --checks green|red without one)")
     event = {"t": "round", "layer": layer, "n": n, "head": head, "checks": checks}
     failed = []
-    passed_steps = {s["name"] for s in data.get("steps", []) if s.get("status") == "pass"}
+    # Steps whose checks this round judged: passed, or failed with a report naming what failed (a
+    # check of such a step that is not named passed).
+    judged_steps = {s["name"] for s in data.get("steps", []) if s.get("status") == "pass" or (s.get("status") == "fail" and s.get("report"))}
     if checks_file:
         event["checks_file"] = str(checks_file)
         failed = failed_check_ids(data) if checks == "red" else []
@@ -767,7 +815,7 @@ def record_round(run: Path, state: State, layer: str, head: str, checks, checks_
     # A check finding is fixed only when its step ran and passed: a step that did not run this
     # round (`--only`, a chain left out, the environment failing) says nothing about it.
     for key, f in by_id.items():
-        if key not in failing and f["status"] in ("open", "decision") and f["rule"].split(":")[1] in passed_steps:
+        if key not in failing and f["status"] in ("open", "decision") and f["rule"].split(":")[1] in judged_steps:
             append(run, {"t": "verdict", "id": f["id"], "status": "fixed", "by": "checks", "round": n})
     return out
 
@@ -842,12 +890,21 @@ def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
                 added.append(line[1:])
         return removed, added
 
-    violations = []
-    for sha in git("rev-list", f"{rev_from}..{rev_to}").split():
+    if not rev_from or schema.git("-C", str(worktree), "rev-parse", "--verify", "-q", f"{rev_from}^{{commit}}", check=False).returncode:
+        raise SystemExit(f"check-guards: --from {rev_from!r} is not a commit")
+    violations, seen = [], set()
+    for sha in git("rev-list", "--no-merges", f"{rev_from}..{rev_to}").split():
         for path in git("diff-tree", "--no-commit-id", "--name-only", "-r", sha).split("\n"):
             if not path:
                 continue
+            seen.add(path)
             violations += guarded_change(sha[:10], path, show(f"{sha}^", path), show(sha, path), lambda: changed_lines(sha, path))
+    # A change made in a merge commit (its resolution) is in no single parent's diff: the range's
+    # whole diff shows it.
+    for path in git("diff", "--name-only", rev_from, rev_to).split("\n"):
+        if path and path not in seen:
+            old, new = show(rev_from, path), show(rev_to, path)
+            violations += guarded_change("a merge", path, old, new, lambda: schema.line_diff(old or "", new or ""))
     if rev_to == "HEAD":
         for line in git("status", "--porcelain", "--untracked-files=all", "--no-renames").splitlines():
             path = line[3:].strip().strip('"')
@@ -861,7 +918,13 @@ def check_guards(worktree: Path, rev_from: str, rev_to: str) -> list:
 
 
 def guarded_change(where: str, path: str, old, new, yaml_lines) -> list:
-    """The violations of one file's change from `old` to `new` (None: the file does not exist)."""
+    """The violations of one file's change from `old` to `new` (None: the file does not exist), each
+    with the digest of the content it leaves (`guard_key`)."""
+    content = hashlib.sha256((new if new is not None else "<deleted>").encode()).hexdigest()[:16]
+    return [{**v, "content": content} for v in _guarded_change(where, path, old, new, yaml_lines)]
+
+
+def _guarded_change(where: str, path: str, old, new, yaml_lines) -> list:
     if schema.guarded_path(path):
         if new is None:
             return [{"commit": where, "path": path, "why": "deletes a guarded file"}]
@@ -889,7 +952,9 @@ def amend(run: Path, fact: str, evidence: str, new: str, source: str) -> dict:
             if fact in d.get("facts", []):
                 reopened.append(d["id"])
                 layers.update(d.get("layers", []))
-    needs_person = fact in state.signed_facts
+    needs_person = fact in state.signed_digests
+    spec = schema.load_json_or(run / "spec.json", {})
+    now = next((schema.fact_digest(f) for f in spec.get("facts", []) if f.get("id") == fact), None)
     amendment = append(run, {
         "t": "amendment",
         "fact": fact,
@@ -899,6 +964,9 @@ def amend(run: Path, fact: str, evidence: str, new: str, source: str) -> dict:
         "reopens": reopened,
         "layers": sorted(layers),
         "needs_person": needs_person,
+        # What the fact says after the amendment (spec.json, which the amend brief edited first): the
+        # signed-facts gate compares the fact with this from now on.
+        "digest": now,
     })
     question = None
     if needs_person:
@@ -928,13 +996,7 @@ def validate_run(run: Path) -> list:
     return errors
 
 
-def route_layers(run: Path) -> list:
-    intake = run / "intake.json"
-    if intake.exists():
-        route = schema.load_json(intake).get("route") or {}
-        if route.get("layers"):
-            return [l for l in schema.LAYERS if l in route["layers"]]
-    return list(schema.LAYERS)
+route_layers = schema.route_layers
 
 
 def resume_point(run: Path, state: State) -> dict:
@@ -1020,12 +1082,12 @@ def main() -> None:
     a.add_argument("--layer", required=True, choices=schema.LAYERS)
     a.add_argument("--out", required=True)
     a = sub.add_parser("next")
-    a.add_argument("--layer", required=True, choices=schema.LAYERS)
+    a.add_argument("--layer", choices=schema.LAYERS, help="omit for the run-wide rules, after a session of no layer")
     a = sub.add_parser("remaining")
     a.add_argument("--layer", choices=schema.LAYERS)
     a = sub.add_parser("check-guards")
     a.add_argument("--worktree", required=True)
-    a.add_argument("--from", dest="rev_from", required=True)
+    a.add_argument("--from", dest="rev_from", help="the round's starting commit; default: the layer's previous round's head, else the merge base with origin/main")
     a.add_argument("--to", dest="rev_to", default="HEAD")
     a.add_argument("--layer", choices=schema.LAYERS)
     a.add_argument("--round", type=int)
@@ -1091,6 +1153,11 @@ def main() -> None:
     elif args.cmd == "answers-file":
         Path(args.out).write_text(answers_file(state, args.layer))
         print(args.out)
+    elif args.cmd == "next" and not args.layer:
+        result = next_run_step(state)
+        if result["action"] == "escalate":
+            result["decision"] = escalate(run, state, None, result)
+        print(json.dumps(result))
     elif args.cmd == "next":
         result = next_step(state, args.layer)
         if result["action"] in ("clean", "escalate") and state.stops.get(args.layer) != result["reason"]:
@@ -1101,7 +1168,12 @@ def main() -> None:
     elif args.cmd == "remaining":
         print(remaining_usd(state, args.layer))
     elif args.cmd == "check-guards":
-        violations = check_guards(Path(args.worktree), args.rev_from, args.rev_to)
+        rev_from = args.rev_from
+        if not rev_from:
+            # The previous round's head (a value a later shell does not have to carry).
+            prior = [r for r in state.rounds.get(args.layer, []) if args.round is None or r["n"] < args.round]
+            rev_from = prior[-1]["head"] if prior else schema.git("-C", args.worktree, "merge-base", f"origin/{schema.BASE}", "HEAD").stdout.strip()
+        violations = check_guards(Path(args.worktree), rev_from, args.rev_to)
         if violations and args.record:
             if not args.layer or args.round is None:
                 raise SystemExit("--record needs --layer and --round")
@@ -1119,6 +1191,10 @@ def main() -> None:
     elif args.cmd == "decide":
         if args.id not in state.decisions:
             raise SystemExit(f"no decision {args.id}")
+        if state.decisions[args.id]["resolved"]:
+            raise SystemExit(f"{args.id} is decided already ({state.decisions[args.id]['choice']!r}): ask again if the person changed their answer")
+        if args.grant_rounds < 0 or args.grant_usd < 0:
+            raise SystemExit("grants are not negative")
         event = {"t": "decision", "id": args.id, "choice": args.choice, "by": args.by}
         if args.grant_rounds:
             event["grant_rounds"] = args.grant_rounds
