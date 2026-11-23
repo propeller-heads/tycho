@@ -178,7 +178,8 @@ pub struct WsDeltasClient {
     uri: Uri,
     /// Authorization key for the websocket connection.
     auth_key: Option<String>,
-    /// Maximum amount of reconnects to try before giving up.
+    /// Maximum amount of consecutive failed connections before giving up. A connection that
+    /// receives a frame starts the count again.
     max_reconnects: u64,
     /// Duration to wait before attempting to reconnect
     retry_cooldown: Duration,
@@ -982,7 +983,19 @@ impl DeltasClient for WsDeltasClient {
                                     *guard = None;
                                     break; // break inner loop → reconnect
                                 }
-                                Ok(Some(msg)) => this.handle_msg(msg).await,
+                                Ok(Some(msg)) => {
+                                    // A connection that delivers frames is healthy, so a server
+                                    // that closes it later does not use up the reconnect budget.
+                                    // A read error or a close frame ends the connection, so it
+                                    // does not count.
+                                    if matches!(
+                                        msg,
+                                        Ok(ref frame) if !frame.is_close()
+                                    ) {
+                                        retry_count = 0;
+                                    }
+                                    this.handle_msg(msg).await
+                                }
                                 Ok(None) => {
                                     // This code should not be reachable since the stream
                                     // should return ConnectionClosed in the case above

@@ -58,6 +58,8 @@ TychoStreamBuilder (stream.rs)
    A synchronizer replaying blocks more than `max_missed_blocks` behind the tip is stale, whether it
    comes back from a gap or restarts behind the tip (a subscription to an extractor that is still
    syncing), so the replay never holds a round; it leaves stale once it is within that distance.
+5. `WsDeltasClient` reconnects up to `max_reconnects` consecutive failed connections. A connection
+   that receives a frame other than a close starts the count again.
 
 ## CLI
 
