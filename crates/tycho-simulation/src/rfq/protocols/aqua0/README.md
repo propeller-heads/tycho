@@ -92,7 +92,7 @@ Set the gas limit at least 30% above Tycho's gas estimate, or use `eth_estimateG
 transaction. The fill adds and removes its JIT ranges inside the swap, so it needs more gas while
 it runs than it is billed for after the refund. The recorded one-range fill on Arbitrum is
 estimated at about 758k gas and billed about 731k, but reverts with a gas limit below about 920k.
-A refund is at most a fifth of the gas used, so 30% covers fills with more ranges too.
+That was measured on a one-range fill, so for fills with more ranges `eth_estimateGas` is safer.
 
 - Chains: Base, Arbitrum, Polygon, Robinhood and Arc. Each has an `rfq:aqua0` entry in
   tycho-execution's `config/executor_addresses.json`.
