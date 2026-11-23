@@ -116,9 +116,8 @@ struct VersionWrites<R: VersionedRowNew> {
 
 /// Chains `changes` after the `stored` current rows of their keys, in the order they start.
 ///
-/// Fails with [`StorageError::Unexpected`] when an updated row is not of `instance` or a change
-/// does not start after the version it replaces, and with [`StorageError::NotFound`] when a
-/// deletion finds no version of its key.
+/// Fails on each failure that `write_versions` lists, except a missing history day: only the
+/// history insert finds that one.
 fn plan_writes<R: VersionedRowNew>(
     instance: InstanceId,
     stored: Vec<R>,
@@ -164,7 +163,11 @@ fn plan_writes<R: VersionedRowNew>(
                 Some(row)
             }
             VersionedChange::Delete { .. } if replaced.is_none() => {
-                return Err(StorageError::NotFound(R::ENTITY.to_owned(), format!("{key:?}")));
+                return Err(StorageError::Unexpected(format!(
+                    "{} {key:?}: a deletion at {version:?} finds no version to end in instance \
+                     {instance}",
+                    R::ENTITY
+                )));
             }
             VersionedChange::Delete { .. } => None,
         };
@@ -191,11 +194,11 @@ fn plan_writes<R: VersionedRowNew>(
 impl PostgresGatewayNew {
     /// Applies `changes` of `instance` to the current and history tables of the entity `R`.
     ///
-    /// The changes can come in any order: they apply in the order they start. Fails when an
-    /// updated row is not of `instance`, when a change does not start after the version it
-    /// replaces, when a deletion finds no version of its key, and when the history day of a
-    /// replaced version does not exist. On a failure, some rows can already be written; the
-    /// caller rolls back its transaction.
+    /// The changes can come in any order: they apply in the order they start. Fails with
+    /// [`StorageError::Unexpected`] when an updated row is not of `instance`, when a change does
+    /// not start after the version it replaces, when a deletion finds no version of its key, or
+    /// when the history day of a replaced version does not exist. On a failure, this method can
+    /// have written some rows already; the caller rolls back its transaction.
     pub(crate) async fn write_versions<R: VersionedRowNew>(
         &self,
         instance: InstanceId,
@@ -436,7 +439,10 @@ mod tests {
     fn test_deletion_of_a_key_without_version_fails() {
         let result = plan(vec![], vec![delete(1, 2, 0)]);
 
-        assert!(matches!(result, Err(StorageError::NotFound(..))));
+        assert!(matches!(
+            result,
+            Err(StorageError::Unexpected(msg)) if msg.contains("finds no version to end in instance 1")
+        ));
     }
 
     #[test]
