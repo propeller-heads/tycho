@@ -1,3 +1,12 @@
+## [0.537.3](https://github.com/propeller-heads/tycho/compare/0.537.2...0.537.3) (2026-11-23)
+
+
+### Bug Fixes
+
+* **client:** use the fast-chain timing for Base ([816087c](https://github.com/propeller-heads/tycho/commit/816087c9343b39b7f34d7f066a6ec240c7459bcf))
+* **common:** set the Base block time to 1 s ([d302a18](https://github.com/propeller-heads/tycho/commit/d302a1817d829f0ed975789f697d788274d415b6))
+* **indexer:** saturate the sync-progress block counts ([9fac7e5](https://github.com/propeller-heads/tycho/commit/9fac7e5490a54ab0dc3f06ec53e079067a4191a3))
+
 ## [0.537.2](https://github.com/propeller-heads/tycho/compare/0.537.1...0.537.2) (2026-11-23)
 
 
