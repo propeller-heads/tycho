@@ -307,7 +307,7 @@ class ProtocolComponentsParams(BaseModel):
 class ProtocolStateParams(BaseModel):
     include_balances: Optional[bool] = True
     protocol_ids: Optional[List[ProtocolId]] = Field(default=None)
-    protocol_system: Optional[str] = Field(default=None)
+    protocol_system: str
     version: Optional[VersionParams] = None
     pagination: Optional[PaginationParams] = None
 
