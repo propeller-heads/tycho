@@ -13,7 +13,7 @@ use tycho_common::storage::StorageError;
 
 use crate::postgres::{
     instance::{
-        orm::{NewProtocolState, NewProtocolStateHistory, ProtocolState},
+        orm::{NewProtocolState, NewProtocolStateHistory},
         schema::tycho::{protocol_state, protocol_state_history},
         write::versioning::VersionedRowNew,
         InstanceId,
@@ -66,7 +66,7 @@ impl VersionedRowNew for NewProtocolState {
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Self>, StorageError> {
         let (component_ids, names): (Vec<i64>, Vec<String>) = keys.iter().cloned().unzip();
-        let rows: Vec<ProtocolState> = sql_query(
+        sql_query(
             "SELECT ps.* FROM tycho.protocol_state ps \
              JOIN unnest($2::int8[], $3::text[]) AS k(component_id, attribute_name) \
              ON ps.protocol_component_id = k.component_id \
@@ -78,19 +78,9 @@ impl VersionedRowNew for NewProtocolState {
         .bind::<Array<Text>, _>(names)
         .load(conn)
         .await
-        .map_err(|err| storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| NewProtocolState {
-                instance_id: row.instance_id,
-                protocol_component_id: row.protocol_component_id,
-                attribute_name: row.attribute_name,
-                attribute_value: row.attribute_value,
-                previous_value: row.previous_value,
-                valid_from: row.valid_from,
-                tx_index: row.tx_index,
-            })
-            .collect())
+        .map_err(|err| {
+            storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None).into()
+        })
     }
 
     async fn upsert_current(
@@ -166,7 +156,9 @@ mod tests {
     use crate::postgres::{
         db_fixtures,
         instance::{
-            gateway::PostgresGatewayNew, origins::ChangeOrigin, orm::ProtocolStateHistory,
+            gateway::PostgresGatewayNew,
+            origins::ChangeOrigin,
+            orm::{ProtocolState, ProtocolStateHistory},
             write::versioning::VersionedChange,
         },
         testing::instance_test_connection,

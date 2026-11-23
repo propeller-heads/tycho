@@ -5,6 +5,9 @@
 //! those columns out. Link tables without such columns use one struct for both. History tables
 //! use one struct for both, except those that a writer fills (`New*History`).
 //!
+//! A writer also loads rows into a `New*` struct when it writes them again. `QueryableByName`
+//! reads the columns of the struct by name and ignores the other columns.
+//!
 //! Field order follows the column order of `schema.rs`, which `Queryable` relies on.
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -152,7 +155,7 @@ pub struct NewProtocolComponentHoldsToken {
     pub token_index: i16,
 }
 
-#[derive(Debug, Identifiable, Queryable, QueryableByName, Selectable)]
+#[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(primary_key(instance_id, protocol_component_id, attribute_name))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -168,7 +171,7 @@ pub struct ProtocolState {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewProtocolState {
