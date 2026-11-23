@@ -5,7 +5,7 @@ use std::any::Any;
 use alloy::primitives::{Address as AlloyAddress, U256};
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -26,6 +26,7 @@ use crate::{
             curve::{
                 adapter::{build_pool, CurveVariant},
                 math::Pool,
+                policy::CurvePolicy,
                 swap_to_price::{exchange, swap_to_price, SwapToPriceError},
                 vm,
             },
@@ -41,6 +42,10 @@ const FEE_DENOMINATOR: f64 = 1e10;
 const STABLESWAP_GAS: u64 = 150_000;
 /// Representative gas cost of a CryptoSwap exchange (heavier math + price oracle update).
 const CRYPTOSWAP_GAS: u64 = 350_000;
+/// Policy version whose grant pricing [`CurveState::exclusive_view`] models.
+const SUPPORTED_POLICY_VERSION: u64 = 1;
+/// Gas a grant adds to a CryptoSwap exchange: the grant submission and the policy's fee hook.
+const GRANT_GAS: u64 = 176_000;
 
 /// A single Curve pool quoted via `curve_math`.
 ///
@@ -66,6 +71,23 @@ pub struct CurveState {
     /// Admin share scaled by 1e10. Absent in old snapshots; legacy StableSwap must refresh.
     #[serde(default)]
     admin_fee: Option<U256>,
+    /// The pool's policy contract.
+    #[serde(default)]
+    policy: CurvePolicy,
+    /// How quotes price a swap.
+    #[serde(default)]
+    pricing: Pricing,
+}
+
+/// How a [`CurveState`] prices a swap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum Pricing {
+    /// At the pool's own fee.
+    #[default]
+    Public,
+    /// At the policy's `min_fee`, with the gas of the grant, while the policy gives grants.
+    /// At the pool's own fee otherwise.
+    Exclusive,
 }
 
 impl CurveState {
@@ -79,7 +101,57 @@ impl CurveState {
         pool: Pool,
         admin_fee: Option<U256>,
     ) -> Self {
-        Self { pool_address, tokens, decimals, variant, pool, admin_fee }
+        Self {
+            pool_address,
+            tokens,
+            decimals,
+            variant,
+            pool,
+            admin_fee,
+            policy: CurvePolicy::default(),
+            pricing: Pricing::Public,
+        }
+    }
+
+    /// Sets the pool's policy contract.
+    pub(super) fn with_policy(mut self, policy: CurvePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Returns a copy that quotes swaps with a grant from the pool's policy: at the policy's
+    /// `min_fee`, with the gas of the grant. `None` for a StableSwap pool, an unsupported policy
+    /// version, a killed policy or a zero `min_fee`. Ignores who signs the grants.
+    ///
+    /// While a later policy update stops the grants, the copy quotes at the pool's own fee.
+    pub fn exclusive_view(&self) -> Option<Self> {
+        if !self.can_grant() {
+            return None;
+        }
+        let mut view = Self { pricing: Pricing::Exclusive, ..self.clone() };
+        self.apply_grant(&mut view.pool)?;
+        Some(view)
+    }
+
+    /// Whether quotes price a swap with a grant from the policy.
+    pub fn is_exclusive_view(&self) -> bool {
+        self.pricing == Pricing::Exclusive && self.can_grant()
+    }
+
+    /// Whether the policy gives grants this code can price.
+    fn can_grant(&self) -> bool {
+        self.policy.version() == U256::from(SUPPORTED_POLICY_VERSION) &&
+            !self.policy.is_killed() &&
+            !self.policy.min_fee().is_zero()
+    }
+
+    /// Sets the fee of every swap on `pool` to the policy's `min_fee`. `None` if the policy gives
+    /// no grants or `pool` is a StableSwap pool.
+    fn apply_grant(&self, pool: &mut Pool) -> Option<()> {
+        if !self.can_grant() {
+            return None;
+        }
+        set_fixed_fee(pool, self.policy.min_fee())
     }
 
     fn admin_fee(&self) -> Result<U256, SimulationError> {
@@ -118,10 +190,11 @@ impl CurveState {
     }
 
     fn gas_estimate(&self) -> u64 {
-        if self.is_crypto() {
-            CRYPTOSWAP_GAS
+        let gas = if self.is_crypto() { CRYPTOSWAP_GAS } else { STABLESWAP_GAS };
+        if self.is_exclusive_view() {
+            gas + GRANT_GAS
         } else {
-            STABLESWAP_GAS
+            gas
         }
     }
 
@@ -192,6 +265,29 @@ impl CurveState {
                 Ok(None)
             }
         }
+    }
+}
+
+/// Sets the fee of every swap on a CryptoSwap pool, in units of 1e-10. `None` for a StableSwap
+/// pool.
+fn set_fixed_fee(pool: &mut Pool, fee: U256) -> Option<()> {
+    match pool {
+        Pool::TwoCryptoV1 { mid_fee, out_fee, .. } |
+        Pool::TwoCryptoNG { mid_fee, out_fee, .. } |
+        Pool::TwoCryptoStable { mid_fee, out_fee, .. } |
+        Pool::TriCryptoV1 { mid_fee, out_fee, .. } |
+        Pool::TriCryptoNG { mid_fee, out_fee, .. } => {
+            *mid_fee = fee;
+            *out_fee = fee;
+            Some(())
+        }
+        Pool::StableSwapV0 { .. } |
+        Pool::StableSwapV1 { .. } |
+        Pool::StableSwapV2 { .. } |
+        Pool::StableSwapSTETH { .. } |
+        Pool::StableSwapALend { .. } |
+        Pool::StableSwapNG { .. } |
+        Pool::StableSwapMeta { .. } => None,
     }
 }
 
@@ -324,6 +420,15 @@ impl ProtocolSim for CurveState {
         _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        let mut policy = self.policy.clone();
+        for (name, value) in &delta.updated_attributes {
+            policy
+                .update(name, value)
+                .map_err(|error| TransitionError::DecodeError(error.to_string()))?;
+        }
+        for name in &delta.deleted_attributes {
+            policy.delete(name);
+        }
         let state = match delta
             .updated_attributes
             .get(vm::POOL_STATE_ADJUSTED)
@@ -358,8 +463,20 @@ impl ProtocolSim for CurveState {
                 )?
             }
         };
-        let pool = build_pool(&state)
+        let mut pool = build_pool(&state)
             .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))?;
+        let was_granted = self.is_exclusive_view();
+        self.policy = policy;
+        if self.pricing == Pricing::Exclusive {
+            let is_granted = self.apply_grant(&mut pool).is_some();
+            if is_granted != was_granted {
+                info!(
+                    pool = %self.pool_address,
+                    is_granted,
+                    "curve exclusive view changes between grant and public pricing"
+                );
+            }
+        }
         self.pool = pool;
         self.admin_fee = state.admin_fee;
         Ok(())
@@ -421,7 +538,14 @@ mod tests {
 
     use super::*;
     use crate::evm::{
-        protocol::curve::{adapter::RawPoolState, vm::encode_raw_state},
+        protocol::curve::{
+            adapter::RawPoolState,
+            policy::{
+                POLICY_ATTRIBUTE, POLICY_KILLED_ATTRIBUTE, POLICY_MIN_FEE_ATTRIBUTE,
+                POLICY_VERSION_ATTRIBUTE,
+            },
+            vm::encode_raw_state,
+        },
         query_pool_swap::test_helpers::{target_price_params, to_price},
     };
 
@@ -539,6 +663,54 @@ mod tests {
         // Falling back to the indexed VM state would silently price a pending block against
         // confirmed state, so a malformed attribute must fail instead.
         assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
+    }
+
+    fn policy(entries: &[(&str, Vec<u8>)]) -> CurvePolicy {
+        let attributes = entries
+            .iter()
+            .map(|(name, value)| (name.to_string(), Bytes::from(value.clone())))
+            .collect();
+        CurvePolicy::from_attributes(&attributes).expect("decode policy")
+    }
+
+    #[rstest]
+    #[case::set(Some(vec![7; 20]), false, Some(vec![7; 20]))]
+    #[case::cleared(Some(vec![0; 20]), false, None)]
+    #[case::deleted(None, true, None)]
+    #[case::absent(None, false, Some(vec![9; 20]))]
+    fn test_delta_transition_policy_attribute(
+        #[case] updated: Option<Vec<u8>>,
+        #[case] deleted: bool,
+        #[case] expected: Option<Vec<u8>>,
+    ) {
+        let balances = vec![u("1"), u("2"), u("3")];
+        let mut curve = state(balances.clone()).with_policy(policy(&[
+            (POLICY_ATTRIBUTE, vec![9; 20]),
+            (POLICY_MIN_FEE_ATTRIBUTE, vec![5]),
+        ]));
+        let mut attributes = HashMap::from([(
+            vm::POOL_STATE_ADJUSTED.to_string(),
+            encode_raw_state(&raw_pool_state(balances)).expect("encode"),
+        )]);
+        if let Some(value) = updated {
+            attributes.insert(POLICY_ATTRIBUTE.to_string(), Bytes::from(value));
+        }
+        let mut delta = delta(attributes);
+        if deleted {
+            delta
+                .deleted_attributes
+                .insert(POLICY_ATTRIBUTE.to_string());
+        }
+
+        curve
+            .delta_transition(delta, &HashMap::new(), &Balances::default())
+            .expect("delta transition failed");
+
+        let mut expected_entries = vec![(POLICY_MIN_FEE_ATTRIBUTE, vec![5])];
+        if let Some(address) = expected {
+            expected_entries.push((POLICY_ATTRIBUTE, address));
+        }
+        assert_eq!(curve.policy, policy(&expected_entries));
     }
 
     const WAD: u128 = 1_000_000_000_000_000_000;
@@ -673,6 +845,151 @@ mod tests {
                 .balances()[1]
         };
         assert!(balance(&with_fee) < balance(&no_fee));
+    }
+
+    fn granted_policy(min_fee: u64) -> CurvePolicy {
+        policy(&[
+            (POLICY_VERSION_ATTRIBUTE, vec![1]),
+            (POLICY_MIN_FEE_ATTRIBUTE, min_fee.to_be_bytes().to_vec()),
+        ])
+    }
+
+    #[test]
+    fn test_exclusive_view_min_fee() {
+        let (state, token_in, token_out) = two_crypto_ng_state();
+        let amount_out = |state: &CurveState| {
+            state
+                .get_amount_out(BigUint::from(10u64).pow(18), &token_in, &token_out)
+                .expect("amount out")
+        };
+        let exclusive = |min_fee: u64| {
+            state
+                .clone()
+                .with_policy(granted_policy(min_fee))
+                .exclusive_view()
+                .expect("exclusive view")
+        };
+        let lowest = amount_out(&exclusive(100_000));
+        let one_percent = amount_out(&exclusive(100_000_000));
+
+        assert!(lowest.amount > amount_out(&state).amount);
+        // Each output is the fee-free output times (1 - fee): 0.99999 and 0.99.
+        let scaled_one_percent = &one_percent.amount * 99_999u64;
+        let scaled_lowest = &lowest.amount * 99_000u64;
+        let difference = if scaled_one_percent > scaled_lowest {
+            scaled_one_percent - scaled_lowest
+        } else {
+            scaled_lowest - scaled_one_percent
+        };
+        assert!(difference <= BigUint::from(200_000u64), "difference {difference}");
+        assert_eq!(one_percent.gas, BigUint::from(CRYPTOSWAP_GAS + GRANT_GAS));
+    }
+
+    #[rstest]
+    #[case::no_policy(vec![0], vec![0], 100_000)]
+    #[case::unknown_version(vec![2], vec![0], 100_000)]
+    #[case::killed(vec![1], vec![1], 100_000)]
+    #[case::zero_min_fee(vec![1], vec![0], 0)]
+    fn test_exclusive_view_without_grants(
+        #[case] version: Vec<u8>,
+        #[case] killed: Vec<u8>,
+        #[case] min_fee: u64,
+    ) {
+        let (state, _, _) = two_crypto_ng_state();
+        let state = state.with_policy(policy(&[
+            (POLICY_VERSION_ATTRIBUTE, version),
+            (POLICY_KILLED_ATTRIBUTE, killed),
+            (POLICY_MIN_FEE_ATTRIBUTE, min_fee.to_be_bytes().to_vec()),
+        ]));
+
+        assert!(state.exclusive_view().is_none());
+    }
+
+    #[test]
+    fn test_exclusive_view_stableswap_pool() {
+        let (state, _, _) = v1_two_coin_state();
+
+        assert!(state
+            .with_policy(granted_policy(100_000))
+            .exclusive_view()
+            .is_none());
+    }
+
+    /// Applies a delta that sets `name` to `value` on an exclusive view with a 0.001% `min_fee`.
+    fn exclusive_view_after_delta(name: &str, value: Vec<u8>) -> CurveState {
+        let balances = vec![u("2466241139205"), u("4200057336"), u("1595469030050811720465")];
+        let mut view = state(balances.clone())
+            .with_policy(granted_policy(100_000))
+            .exclusive_view()
+            .expect("exclusive view");
+        let attributes = HashMap::from([
+            (
+                vm::POOL_STATE_ADJUSTED.to_string(),
+                encode_raw_state(&raw_pool_state(balances)).expect("encode"),
+            ),
+            (name.to_string(), Bytes::from(value)),
+        ]);
+        view.delta_transition(delta(attributes), &HashMap::new(), &Balances::default())
+            .expect("delta transition failed");
+        view
+    }
+
+    #[test]
+    fn test_exclusive_view_delta_transition_min_fee() {
+        let view = exclusive_view_after_delta(
+            POLICY_MIN_FEE_ATTRIBUTE,
+            100_000_000u64.to_be_bytes().to_vec(),
+        );
+
+        assert!(view.is_exclusive_view());
+        assert_eq!(view.fee(), 0.01);
+    }
+
+    #[test]
+    fn test_exclusive_view_delta_transition_killed() {
+        let view = exclusive_view_after_delta(POLICY_KILLED_ATTRIBUTE, vec![1]);
+
+        assert!(!view.is_exclusive_view());
+        assert_eq!(view.fee(), 0.0003);
+    }
+
+    #[test]
+    fn test_exclusive_view_delta_transition_revived() {
+        let mut view = exclusive_view_after_delta(POLICY_KILLED_ATTRIBUTE, vec![1]);
+        let balances = vec![u("2466241139205"), u("4200057336"), u("1595469030050811720465")];
+        let attributes = HashMap::from([
+            (
+                vm::POOL_STATE_ADJUSTED.to_string(),
+                encode_raw_state(&raw_pool_state(balances)).expect("encode"),
+            ),
+            (POLICY_KILLED_ATTRIBUTE.to_string(), Bytes::from(vec![0])),
+        ]);
+
+        view.delta_transition(delta(attributes), &HashMap::new(), &Balances::default())
+            .expect("delta transition failed");
+
+        assert!(view.is_exclusive_view());
+        assert_eq!(view.fee(), 0.00001);
+    }
+
+    #[test]
+    fn test_delta_transition_malformed_policy_attribute() {
+        let balances = vec![u("1"), u("2"), u("3")];
+        let before = policy(&[(POLICY_ATTRIBUTE, vec![9; 20])]);
+        let mut curve = state(balances.clone()).with_policy(before.clone());
+        let attributes = HashMap::from([
+            (
+                vm::POOL_STATE_ADJUSTED.to_string(),
+                encode_raw_state(&raw_pool_state(balances)).expect("encode"),
+            ),
+            (POLICY_ATTRIBUTE.to_string(), Bytes::from(vec![7; 19])),
+        ]);
+
+        let result =
+            curve.delta_transition(delta(attributes), &HashMap::new(), &Balances::default());
+
+        assert!(matches!(result, Err(TransitionError::DecodeError(_))), "got {result:?}");
+        assert_eq!(curve.policy, before);
     }
 
     fn two_crypto_ng_state() -> (CurveState, Token, Token) {

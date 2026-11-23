@@ -52,6 +52,15 @@ const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
+
+/// `TychoRouterV3`'s storage slot of the `executorsActivationTimestamp` mapping, from
+/// `forge inspect TychoRouterV3 storageLayout`.
+/// `TychoRouterTest.testStorageSlotsOfTychoTestOverrides` checks it against the router, so a layout
+/// change fails there rather than reverting every execution the harness simulates.
+pub const ROUTER_EXECUTORS_ACTIVATION_SLOT: u64 = 7;
+
+/// `TychoRouterV3`'s storage slot of `_feeCalculator`, checked the same way.
+pub const ROUTER_FEE_CALCULATOR_SLOT: u64 = 10;
 const FERMISWAP_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
 // The Fermi engine currently pointed at by the swapper's storage slot 2. Fermi migrates engines
 // by re-pointing the swapper (last: 2026-07-21, block 25581704); update this together with
@@ -104,6 +113,50 @@ pub fn encode_swap(
         gas_usage,
         expected_amount_out,
     )?;
+    encode_solution(solution, chain, executors_json)
+}
+
+/// [`encode_swap`] with the router's `expectedAmountOut` at its maximum, for a check that the
+/// execution pays exactly `quote`.
+///
+/// The deployed router's fee calculator takes any output above `expectedAmountOut` as positive
+/// slippage, so a swap encoded with its quote never pays the receiver more than the quote, and a
+/// simulation that underquotes would pass. Above the maximum nothing is taken, and the receiver
+/// gets all the venue pays, less the router fee. The minimum output stays 80% of `quote`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
+pub fn encode_swap_without_surplus_capture(
+    component: &ProtocolComponent,
+    state: Option<Arc<dyn ProtocolSim>>,
+    sell_token: &Token,
+    buy_token: &Token,
+    amount_in: BigUint,
+    chain: Chain,
+    executors_json: Option<String>,
+    gas_usage: BigUint,
+    quote: BigUint,
+) -> miette::Result<(Solution, Transaction)> {
+    let solution = solution(
+        component.clone(),
+        state,
+        sell_token.clone(),
+        buy_token.clone(),
+        amount_in,
+        gas_usage,
+        quote,
+        Some(BigUint::from_bytes_be(&U256::MAX.to_be_bytes::<32>())),
+    )?;
+    encode_solution(solution, chain, executors_json)
+}
+
+/// Encodes `solution` for the router, as one transaction.
+fn encode_solution(
+    solution: Solution,
+    chain: Chain,
+    executors_json: Option<String>,
+) -> miette::Result<(Solution, Transaction)> {
     let swap_encoder_registry = SwapEncoderRegistry::new(chain)
         .add_default_encoders(executors_json)
         .into_diagnostic()?;
@@ -137,6 +190,34 @@ pub fn create_solution(
     gas_usage: BigUint,
     expected_amount_out: BigUint,
 ) -> miette::Result<Solution> {
+    solution(
+        component,
+        state,
+        sell_token,
+        buy_token,
+        amount_in,
+        gas_usage,
+        expected_amount_out,
+        None,
+    )
+}
+
+/// A one-swap solution whose minimum output is 80% of `quote`, with `router_expected` as the
+/// router's `expectedAmountOut`, or `quote` without it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is an independent input of one swap encoding"
+)]
+fn solution(
+    component: ProtocolComponent,
+    state: Option<Arc<dyn ProtocolSim>>,
+    sell_token: Token,
+    buy_token: Token,
+    amount_in: BigUint,
+    gas_usage: BigUint,
+    quote: BigUint,
+    router_expected: Option<BigUint>,
+) -> miette::Result<Solution> {
     let user_address = Bytes::from_str(USER_ADDR).into_diagnostic()?;
 
     // Prepare data to encode. First we need to create a swap object
@@ -152,7 +233,7 @@ pub fn create_solution(
 
     // The widest tolerance the router accepts (20% below the quote) — these tests care about
     // whether the swap executes, not about a tight slippage bound.
-    let min_amount_out = &expected_amount_out * BigUint::from(8000u64) / BigUint::from(10_000u64);
+    let min_amount_out = &quote * BigUint::from(8000u64) / BigUint::from(10_000u64);
 
     Ok(Solution::new(
         user_address.clone(),
@@ -160,7 +241,7 @@ pub fn create_solution(
         sell_token.address,
         buy_token.address,
         amount_in,
-        expected_amount_out,
+        router_expected.unwrap_or(quote),
         min_amount_out,
         vec![simple_swap],
     ))
@@ -454,15 +535,7 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
     let mut key_bytes = [0u8; 32];
     key_bytes[12..].copy_from_slice(key.as_slice());
 
-    // Storage layout (from `forge inspect TychoRouterV3 storageLayout`):
-    //   slot 0: _roles             (AccessControl)
-    //   slot 1: _balances          (ERC6909)
-    //   slot 2: _operatorApprovals (ERC6909)
-    //   slot 3: _allowances        (ERC6909)
-    //   slot 4: _paused            (Pausable)
-    //   slot 5: _vaultBalances     (Vault)
-    //   slot 6: executorsActivationTimestamp (Dispatcher)
-    let slot = U256::from(6);
+    let slot = U256::from(ROUTER_EXECUTORS_ACTIVATION_SLOT);
 
     // Convert U256 slot to 32-byte big-endian array
     let slot_bytes = slot.to_be_bytes::<32>();
@@ -482,7 +555,7 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
 ///
 /// # Arguments
 /// * `angstrom_address` - The address of the Angstrom hook contract
-///   (0x0000000AA8c2Fb9b232F78D2B286dC2aE53BfAD4)
+///   (0x0000000aa232009084Bd71A5797d089AA4Edfad4)
 /// * `current_block_number` - The current block number to set as _lastBlockUpdated
 ///
 /// # Returns
@@ -697,8 +770,7 @@ pub fn setup_router_overwrites(
     // The FeeCalculator override returns zero fees for all clients, so it acts as a no-op.
     if let Some(fee_calculator_bytecode) = data.fee_calculator_bytecode {
         let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
-        // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
-        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
+        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(ROUTER_FEE_CALCULATOR_SLOT));
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator_address.as_slice());
         router_state_diff
@@ -1067,7 +1139,7 @@ mod tests {
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator.as_slice());
         assert_eq!(
-            state_diff.get(&FixedBytes::<32>::from(U256::from(9))),
+            state_diff.get(&FixedBytes::<32>::from(U256::from(ROUTER_FEE_CALCULATOR_SLOT))),
             Some(&FixedBytes::<32>::from(fee_calculator_slot_value)),
             "the router does not point at the overwritten fee calculator"
         );

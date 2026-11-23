@@ -889,11 +889,7 @@ where
 
                 state_overrides.insert(
                     router_address.clone(),
-                    AccountOverrides {
-                        slots: None,
-                        native_balance,
-                        code: Some(router_code.clone()),
-                    },
+                    AccountOverrides { slots: None, native_balance, code: Some(router_code) },
                 );
 
                 let mut pool_manager_storage_diff = BTreeMap::new();
@@ -913,7 +909,7 @@ where
                 );
 
                 state_overrides.insert(
-                    pool_manager.clone(),
+                    pool_manager,
                     AccountOverrides {
                         slots: Some(StorageOverride::Diff(pool_manager_storage_diff)),
                         native_balance: None,
@@ -1429,7 +1425,8 @@ mod tests {
         );
 
         let mut hook_data = create_test_hook_data();
-        hook_data.use_balance_overwrites = true; // Enable balance overwrites for storage slot override test
+        // Enable balance overwrites for storage slot override test
+        hook_data.use_balance_overwrites = true;
         let context = create_test_context();
 
         let result = generator
@@ -1528,7 +1525,8 @@ mod tests {
         );
 
         let mut hook_data = create_test_hook_data();
-        hook_data.use_balance_overwrites = true; // Enable balance overwrites to test detection error
+        // Enable balance overwrites to test detection error
+        hook_data.use_balance_overwrites = true;
         let context = create_test_context();
 
         let result = generator

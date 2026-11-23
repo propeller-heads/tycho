@@ -174,7 +174,7 @@ impl Levels {
     pub fn average_price(&self, amount_in: f64) -> Option<f64> {
         let fill = self.fill(amount_in);
         let consumed = amount_in - fill.remaining_in;
-        (consumed > 0.0).then(|| fill.amount_out / consumed)
+        (consumed > 0.0).then_some(fill.amount_out / consumed)
     }
 }
 

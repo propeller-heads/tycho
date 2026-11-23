@@ -54,6 +54,7 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("uniswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("pancakeswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("gigadex_v3", UNISWAP_V3_BYTECODE_JSON);
+    map.insert("swaphood_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("kleos_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("elyspump_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("stockiumswap_v3", UNISWAP_V3_BYTECODE_JSON);

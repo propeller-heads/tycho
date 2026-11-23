@@ -85,6 +85,14 @@ what it collected over time remains visible in `credited_as_fees`.
 Balances are per router: each deployment holds its own vault, and a rotation leaves the old
 balance where it was.
 
+Read `vault_balances_snapshot` from a dashboard or an alert, not the view. Summing the view reads
+every trade, because each fee credit finds its router by joining to `trades`, and that takes
+longer than Grafana waits for a query. The snapshot holds the same rows plus `decimals`,
+`price_usd` (the token's most recent settled price) and `balance_usd`, and `refreshed_at` says
+when it was built. The pricer rebuilds it after a pricing pass every `VAULT_SNAPSHOT_INTERVAL`
+seconds (default 600) with `refresh_vault_balances_snapshot()`, which a reader never sees half
+done. Call that function by hand to rebuild it sooner, for example after a re-index.
+
 Two things to know when reading real data:
 
 * A **negative** balance means credits are missing. Expect one on a chain that still holds trades
@@ -163,14 +171,18 @@ produced above it. Who keeps that surplus takes three columns:
    no switch and always reports true.
 2. Otherwise the router captures `router_positive_slippage_bps` of it, and the receiver keeps the
    rest.
-3. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
+3. The client's cap limits the captured amount to `positive_slippage_cap_bps` of
+   `gross_amount_out`, the swaps' output before fees. The receiver keeps the surplus above it.
+4. The client gets `client_positive_slippage_share_bps` of the captured amount, and the router
    keeps the remainder, rounded in its favour.
 
 Both values are in fee units (100000000 = all of it). The router positive slippage bps is the client's custom
 value (`CustomRouterPositiveSlippageBpsUpdated`, `CustomRouterPositiveSlippageBpsRemoved`) when
 one is set, otherwise the calculator's global value (`RouterPositiveSlippageBpsUpdated`). A
 calculator that never emitted a router positive slippage event captures the full surplus. The client share comes from
-`ClientPositiveSlippageShareUpdated` and defaults to zero.
+`ClientPositiveSlippageShareUpdated` and defaults to zero. The cap comes from
+`PositiveSlippageCapUpdated`. A client without one reads as 100000000, which captures as much as
+no cap does, the same value the FeeCalculator reports.
 
 The calculator generation before per-client router positive slippage bps exempted a client instead, with
 `PositiveSlippageExemptionSet(address indexed client, bool exempt)`. `store_fee_config` stores an
@@ -183,6 +195,15 @@ The client is the one the FeeCalculator resolves: the signed `client_fee_receive
 
 `positive_slippage` is what the swaps produced, not what was taken. Read `router_fee_amount`,
 which comes from the `FeesTaken` event, for what the router actually collected.
+
+### Token pair fees
+
+`TokenPairFeeUpdated` sets a router fee on output for swaps between two tokens, in both
+directions, and `TokenPairFeeRemoved` drops it. The calculator names the pair lower address first,
+and `fee_config_events` stores it in `token0` and `token1`. `router_fee_on_output_bps` applies the
+pair fee the way `FeeCalculator._applyTokenPairFee` does: it replaces the default fee, and against
+a client's custom fee the lower of the two applies. `token_pair_fee` says whether the trade's pair
+has one.
 
 ### Router generations
 
@@ -233,9 +254,11 @@ column was not merely mislabelled there but wrong.
 `pricing/price_trades.sql` values a trade from one side only, preferring a side that holds a
 pinned token (lowest `priority` first: stablecoins, then the native token and its wrapper, then
 BTC wrappers) and otherwise any side Tycho happens to price. The unit price of the token on the
-other side is then implied from the trade itself. That is what gives the long tail a price at all:
-Tycho prices 7852 tokens on ethereum but only 29 on unichain and 126 on arbitrum, while nearly
-every trade has a stablecoin, WETH or the native token on one side.
+other side is always implied from the trade itself, even when Tycho prices that token too. That is
+what gives the long tail a price at all — Tycho prices 7852 tokens on ethereum but only 29 on
+unichain and 126 on arbitrum — and it keeps a row consistent, so `price x amount` equals
+`volume_usd` on both sides. A Tycho price there would be a price of today on a trade that may be
+a year old.
 
 Pinning is by address, never by symbol. Tycho holds many tokens with a copied symbol — base has
 about 40 `cbBTC` rows and ethereum a second 18-decimal `USDC` — and their prices are nonsense.
@@ -254,6 +277,14 @@ calls](#discarded-calls)).
 A probe is priced like any other call that returned, on purpose: the quote it read is real market
 activity and worth reading in USD. Leaving it out of a volume figure is the view's job, not the
 pricer's.
+
+The pricer polls: it runs a pass over every chain each `INTERVAL` seconds (60 in dev), so a new
+trade is valued about a minute after the sink writes it. Nothing prices a row on insert. A trade
+stays eligible while `priced_at IS NULL`, so a pass that is skipped costs nothing — with one
+exception: a trade that needs a non-stable basis is only eligible for `MAX_AGE` after its block
+time, so a pricer that is down longer than that leaves those rows unpriced for good. Re-running
+the values later is possible with `pricing/reprice.sql`, which offers priced rows to the logic
+again.
 
 The trades live in their own database (all chains in one table). Each chain has its own Tycho
 database, reached through `postgres_fdw`: one server and one `tycho_<chain>` schema per chain,
@@ -388,7 +419,9 @@ It mirrors `protocols/substreams/release.sh`, including its rules:
   testing.
 
 Run it from CI with the **Release Router Trades Substreams** workflow (`workflow_dispatch`, with
-an optional space-separated `chains` input). It prints the `db_out` module hash of every package.
+an optional space-separated `chains` input), started from the release tag: only a tag can assume
+the role that uploads, so a run from a branch fails at its AWS credentials, and the run uses the
+workflow file as it is at that tag. It prints the `db_out` module hash of every package.
 That hash is the identity the cursors are keyed by, so compare it with the running
 `cursors_<chain>.id` before pinning, to know whether a chain will resume or restart.
 
@@ -539,7 +572,9 @@ hand. ABIs come from the verified sources on Sourcify
 `0xea290cE3…`, `FeeCalculator` = `0xA236E1F0…`). Two ABI files hold events that deployment does not have:
 `FeeCalculatorV3_0.json` the `uint16` event signatures of the earlier FeeCalculator, and
 `FeeCalculatorExemption.json` the `PositiveSlippageExemptionSet` of the later one, and
-`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it.
+`FeeCalculatorRouterPositiveSlippage.json` the router positive slippage events of the one after it,
+and `FeeCalculatorCapAndPairFee.json` the positive slippage cap and token pair fee events of the
+one after that.
 Each is events-only, and the decoders try them in turn. `SubsidyPayer.json` holds the two events of
 `contracts/interfaces/ISubsidyPayer.sol`, events-only as well.
 

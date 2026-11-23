@@ -24,8 +24,10 @@ use crate::{
     rfq::protocols::bebop::{client::BebopClient, models::BebopBook},
 };
 
-/// Rough gas estimate for one Bebop settlement.
-const BEBOP_SWAP_GAS: u64 = 70_000;
+/// Gas for one Bebop settlement, without the router's transfers and approval. Router swaps on
+/// Ethereum and Base use 287k to 860k gas in total, so with the router overhead this keeps the
+/// estimate within 50% of the gas used for almost every swap.
+const BEBOP_SWAP_GAS: u64 = 285_000;
 
 /// What Bebop's quote endpoint refuses below, measured against the live API on Ethereum and
 /// Base in both directions: a trade worth less than one US dollar on the side being sold, the

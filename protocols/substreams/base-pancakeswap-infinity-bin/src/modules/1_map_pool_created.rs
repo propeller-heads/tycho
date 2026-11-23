@@ -1,36 +1,10 @@
 use crate::{abi::bin_pool_manager::events::Initialize, parameters};
 use ethabi::ethereum_types::Address;
-use serde::Deserialize;
+use pancakeswap_infinity_substreams::params::Deployment;
 use substreams::scalar::BigInt;
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 use tycho_substreams::prelude::*;
-
-/// Per-chain deployment addresses, hex without the 0x prefix.
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct Params {
-    /// `BinPoolManager`, the emitter of `Initialize`.
-    pool_manager: String,
-    /// Holds every pool's funds, so it is `balance_owner` on every component.
-    vault: String,
-}
-
-/// Decodes a 20-byte address given as hex without the `0x` prefix.
-pub(crate) fn decode_address(
-    name: &str,
-    value: &str,
-) -> Result<Vec<u8>, substreams::errors::Error> {
-    let bytes =
-        hex::decode(value).map_err(|err| anyhow::anyhow!("Invalid {name} {value:?}: {err}"))?;
-    if bytes.len() != 20 {
-        return Err(anyhow::anyhow!(
-            "Invalid {name} {value:?}: expected 20 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
-}
 
 /// One `ProtocolComponent` per `BinPoolManager.Initialize`, for pools with no swap hook and a
 /// static LP fee.
@@ -46,12 +20,9 @@ pub fn map_pools_created(
     block: eth::Block,
 ) -> Result<BlockEntityChanges, substreams::errors::Error> {
     let mut new_pools: Vec<TransactionEntityChanges> = vec![];
-    let params: Params = serde_qs::from_str(&params)
-        .map_err(|err| anyhow::anyhow!("Invalid map_pools_created params {params:?}: {err}"))?;
-    let pool_manager = decode_address("pool_manager", &params.pool_manager)?;
-    let vault = decode_address("vault", &params.vault)?;
+    let deployment = Deployment::parse("map_pools_created", &params)?;
 
-    get_new_pools(&block, &mut new_pools, &pool_manager, &vault)?;
+    get_new_pools(&block, &mut new_pools, &deployment.pool_manager, &deployment.vault)?;
 
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
@@ -408,27 +379,6 @@ mod tests {
 
     /// Pins the whole attribute schema. A renamed or dropped attribute fails here instead of as
     /// an undecodable snapshot later.
-    #[test]
-    fn params_parse_pool_manager_and_vault() {
-        let params: Params =
-            serde_qs::from_str(&format!("pool_manager={POOL_MANAGER}&vault={VAULT}")).unwrap();
-        assert_eq!(
-            params,
-            Params { pool_manager: POOL_MANAGER.to_string(), vault: VAULT.to_string() }
-        );
-        assert!(serde_qs::from_str::<Params>(POOL_MANAGER).is_err(), "bare address is rejected");
-        assert!(
-            serde_qs::from_str::<Params>(&format!(
-                "pool_manager={POOL_MANAGER}&vault={VAULT}&pool_mgr={POOL_MANAGER}"
-            ))
-            .is_err(),
-            "a misspelled key is rejected, not ignored"
-        );
-        assert!(decode_address("vault", "0x1234").is_err(), "0x prefix is not hex");
-        assert!(decode_address("vault", "1234").is_err(), "2 bytes are not an address");
-        assert_eq!(decode_address("vault", VAULT).unwrap(), hex::decode(VAULT).unwrap());
-    }
-
     #[test]
     fn static_hookless_pool_is_emitted_with_infinity_attributes() {
         let changes = run(&static_pool_block(&[0u8; 20], 7, 0));

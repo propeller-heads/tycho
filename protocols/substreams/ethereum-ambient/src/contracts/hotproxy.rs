@@ -42,7 +42,7 @@ pub fn decode_direct_swap_hotproxy_call(
                 .ok_or_else(|| {
                     anyhow!(
                         "Failed to convert base token to address for direct swap hotproxy call: {:?}",
-                        &input_params[0]
+                        input_params[0]
                     )
                 })?
                 .to_fixed_bytes()
@@ -54,7 +54,7 @@ pub fn decode_direct_swap_hotproxy_call(
                 .ok_or_else(|| {
                     anyhow!(
                         "Failed to convert quote token to address for direct swap hotproxy call: {:?}",
-                        &input_params[1]
+                        input_params[1]
                     )
                 })?
                 .to_fixed_bytes()

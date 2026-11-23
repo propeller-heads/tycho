@@ -19,7 +19,7 @@ use tracing::{error, warn};
 
 use crate::execution::{
     four_byte_client::FourByteClient,
-    models::{SimulationInput, SimulationResult},
+    models::{SimulationInput, SimulationResult, NODE_ERROR_PREFIX},
     traces::print_call_trace,
 };
 
@@ -357,15 +357,15 @@ impl ExecutionSimulator {
                     }
                 }
                 Err(err) => {
-                    let reason = format!("Transaction failed: {}", err);
-                    if crate::is_block_not_found(&reason) {
+                    let error_msg = format!("{NODE_ERROR_PREFIX} {err}");
+                    if crate::is_block_not_found(&error_msg) {
                         // All calls share the same block_id in a single batch request to one node,
                         // so if one fails with block-not-found the rest will too. Early-return so
                         // the caller can retry the whole batch.
-                        return Err(reason.into());
+                        return Err(error_msg.into());
                     }
                     error!("Error tracing transaction {}: {:?}", simulation_id, err);
-                    results.insert(simulation_id.clone(), SimulationResult::Revert { reason });
+                    results.insert(simulation_id.clone(), SimulationResult::Failed { error_msg });
                 }
             }
         }

@@ -6,8 +6,8 @@ use substreams::{
     pb::substreams::StoreDeltas,
     scalar::BigInt,
     store::{
-        StoreAddBigInt, StoreGet, StoreGetInt64, StoreGetString, StoreNew, StoreSet, StoreSetInt64,
-        StoreSetString,
+        StoreAddBigInt, StoreGet, StoreGetInt64, StoreGetRaw, StoreGetString, StoreNew, StoreSet,
+        StoreSetInt64, StoreSetRaw, StoreSetString,
     },
 };
 use substreams_ethereum::{pb::eth, Function};
@@ -17,6 +17,10 @@ use crate::{
     abi::set_oracle_implementation::functions::SetOracle,
     consts::ZERO_ADDRESS,
     params::{emit_specific_pools, parse_curve_params},
+    policy::{
+        created_policies, created_policy_key, merge_attributes, policy_entity_changes,
+        policy_state_writes, PolicyGrant,
+    },
     pool_changes::emit_eth_deltas,
     pool_factories,
 };
@@ -119,6 +123,50 @@ pub fn store_component_tokens(map: BlockChanges, store: StoreSetString) {
                     .join(":"),
             );
         });
+}
+
+/// Stores the pool and version of each grant policy, keyed by the policy address.
+#[substreams::handlers::store]
+pub fn store_created_policies(block: eth::v2::Block, store: StoreSetRaw) {
+    for trx in block.transactions() {
+        for created in created_policies(trx) {
+            store.set(
+                created.ordinal,
+                created_policy_key(&created.policy),
+                &created.grant.encode(),
+            );
+        }
+    }
+}
+
+/// Stores the policy of each pool and the grant terms of each grant policy.
+#[substreams::handlers::store]
+pub fn store_policy_states(
+    block: eth::v2::Block,
+    components_store: StoreGetString,
+    created_policies_store: StoreGetRaw,
+    store: StoreSetRaw,
+) {
+    for trx in block.transactions() {
+        let writes = policy_state_writes(
+            trx,
+            |pool| is_tracked_pool(&components_store, pool),
+            |policy| {
+                created_policies_store
+                    .get_last(created_policy_key(policy))
+                    .is_some()
+            },
+        );
+        for write in writes {
+            store.set(write.ordinal, write.key, &write.value);
+        }
+    }
+}
+
+fn is_tracked_pool(components_store: &StoreGetString, pool: &[u8]) -> bool {
+    components_store
+        .get_last(format!("pool:0x{0}", hex::encode(pool)))
+        .is_some()
 }
 
 /// Stores contracts required by components, for example LP tokens if they are different from the
@@ -244,6 +292,8 @@ pub fn map_protocol_changes(
     non_component_accounts_store: StoreGetInt64,
     set_oracle_components_store: StoreGetInt64,
     balance_store: StoreDeltas, // Note, this map module is using the `deltas` mode for the store.
+    created_policies_store: StoreGetRaw,
+    policy_states_store: StoreGetRaw,
 ) -> Result<BlockChanges> {
     let curve_param = parse_curve_params(&params)?;
     // We merge contract changes by transaction (identified by transaction index) making it easy to
@@ -576,6 +626,32 @@ pub fn map_protocol_changes(
                 .extend(entrypoint_params);
         });
 
+    // After the component changes, so a policy set in a pool's creation transaction replaces the
+    //  pool's initial `policy`.
+    for trx in block.transactions() {
+        let changes = policy_entity_changes(
+            trx,
+            |pool| is_tracked_pool(&components_store, pool),
+            |policy| {
+                created_policies_store
+                    .get_last(created_policy_key(policy))
+                    .as_deref()
+                    .and_then(PolicyGrant::decode)
+            },
+            |ordinal, key| policy_states_store.get_at(ordinal, key),
+        );
+        if changes.is_empty() {
+            continue;
+        }
+        let entity_changes = &mut transaction_changes
+            .entry(trx.index.into())
+            .or_default()
+            .entity_changes;
+        for change in changes {
+            merge_attributes(entity_changes, change.component_id, change.attributes);
+        }
+    }
+
     // Balance changes are gathered by the `StoreDelta` based on `TokenExchange`, etc. creating
     //  `BalanceDeltas`. We essentially just process the changes that occurred to the `store` this
     //  block. Then, these balance changes are merged onto the existing map of tx contract changes,
@@ -585,16 +661,11 @@ pub fn map_protocol_changes(
         .into_iter()
         .zip(deltas.balance_deltas)
         .map(|(store_delta, balance_delta)| {
-            let new_value_string = String::from_utf8(store_delta.new_value)
-                .unwrap()
-                .to_string();
             (
                 balance_delta.tx.unwrap(),
                 BalanceChange {
                     token: balance_delta.token,
-                    balance: BigInt::try_from(new_value_string)
-                        .unwrap()
-                        .to_signed_bytes_be(),
+                    balance: balance_from_store_value(store_delta.new_value),
                     component_id: format!(
                         "0x{}",
                         String::from_utf8(balance_delta.component_id).unwrap()
@@ -680,7 +751,8 @@ pub fn map_protocol_changes(
             .filter_map(|(_, change)| {
                 if change.contract_changes.is_empty() &&
                     change.component_changes.is_empty() &&
-                    change.balance_changes.is_empty()
+                    change.balance_changes.is_empty() &&
+                    change.entity_changes.is_empty()
                 {
                     None
                 } else {
@@ -711,4 +783,42 @@ fn build_entrypoint_calldata(sig: &str, amount: &BigInt) -> Vec<u8> {
 
 fn get_token_decimals(wrapped_token: &[u8]) -> Option<BigInt> {
     abi::erc20::functions::Decimals {}.call(wrapped_token.to_owned())
+}
+
+/// Encodes a tallied balance from the balance store as the bytes of a `BalanceChange`.
+///
+/// The tally only sums `Transfer` deltas, so it drops below zero when a pool's balance grows
+/// without a `Transfer` (rebasing tokens such as stETH) and the pool is later drained. Tycho reads
+/// balance bytes as unsigned, so a negative tally is reported as zero instead of as
+/// two's-complement bytes that would read back as a huge balance.
+fn balance_from_store_value(new_value: Vec<u8>) -> Vec<u8> {
+    let new_value_string = String::from_utf8(new_value).unwrap();
+    BigInt::try_from(new_value_string)
+        .unwrap()
+        .max(BigInt::zero())
+        .to_signed_bytes_be()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn balance_from_store_value_keeps_positive_tally() {
+        assert_eq!(balance_from_store_value(b"1000".to_vec()), vec![0x03, 0xe8]);
+        assert_eq!(balance_from_store_value(b"255".to_vec()), vec![0x00, 0xff]);
+    }
+
+    #[test]
+    fn balance_from_store_value_keeps_zero_tally() {
+        assert_eq!(balance_from_store_value(b"0".to_vec()), vec![0x00]);
+    }
+
+    #[test]
+    fn balance_from_store_value_clamps_negative_tally_to_zero() {
+        // STRCx tally of pool 0x7d476d419bbc9f0115cd59ac35e8a71ae88192c2 after its drain, which
+        // was emitted as 0xff566a5ada7ec474 and read back as 18.4 STRCx.
+        assert_eq!(balance_from_store_value(b"-47733807595469708".to_vec()), vec![0x00]);
+        assert_eq!(balance_from_store_value(b"-1".to_vec()), vec![0x00]);
+    }
 }

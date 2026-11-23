@@ -143,7 +143,7 @@ impl PreCachedDB {
                     write_guard.accounts.overwrite_account(
                         update.address,
                         AccountInfo::new(balance, 0, code.hash_slow(), code),
-                        Some(update.slots.clone()),
+                        Some(update.slots),
                         true, /* Flag all accounts in TychoDB mocked to sign that we cannot
                                * call an RPC provider for an update */
                     );
@@ -177,7 +177,7 @@ impl PreCachedDB {
                 write_guard.accounts.overwrite_account(
                     update.address,
                     AccountInfo::new(balance, 0, code.hash_slow(), code),
-                    Some(update.slots.clone()),
+                    Some(update.slots),
                     true,
                 );
             } else {

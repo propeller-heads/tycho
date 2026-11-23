@@ -1,6 +1,5 @@
-use substreams_ethereum::pb::eth::v2::TransactionTrace;
-
 use crate::pb::pancakeswap::infinity::cl::Transaction;
+use substreams_ethereum::pb::eth::v2::TransactionTrace;
 
 #[path = "1_map_pool_created.rs"]
 pub mod map_pool_created;
@@ -30,12 +29,6 @@ pub mod map_store_liquidity;
 pub mod map_protocol_changes;
 
 pub mod uni_math;
-
-impl From<TransactionTrace> for Transaction {
-    fn from(value: TransactionTrace) -> Self {
-        Self { hash: value.hash, from: value.from, to: value.to, index: value.index.into() }
-    }
-}
 
 impl From<&TransactionTrace> for Transaction {
     fn from(value: &TransactionTrace) -> Self {
