@@ -79,6 +79,18 @@ pub struct GlobalArgs {
     )]
     pub delta_window_fold_batch: usize,
 
+    /// `/protocol_systems` leaves out a protocol system while the newest block of its extractor
+    /// is more than this many minutes old, e.g. while a new extractor backfills. Keep it above
+    /// the chain's finality lag plus the indexer's startup time: a restarted extractor resumes
+    /// from its last finalized block.
+    #[clap(
+        long,
+        env,
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub max_protocol_lag_minutes: u64,
+
     /// Which path answers `/contract_state` and `/protocol_state`: `off` reads the database;
     /// `shadow` serves the database answer and, on a sample of requests set by
     /// `--entity-cache-shadow-sample-rate`, compares it with the entity cache answer; `serve`
