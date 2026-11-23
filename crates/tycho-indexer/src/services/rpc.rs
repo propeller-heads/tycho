@@ -2898,6 +2898,21 @@ mod tests {
         serde_json::json!({"protocol_system": "  "}),
         PROTOCOL_SYSTEM_REQUIRED
     )]
+    #[case::protocol_state_missing(
+        "/v1/protocol_state",
+        serde_json::json!({"protocol_ids": []}),
+        "missing field `protocol_system`"
+    )]
+    #[case::protocol_state_empty(
+        "/v1/protocol_state",
+        serde_json::json!({"protocol_system": ""}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[case::protocol_state_blank(
+        "/v1/protocol_state",
+        serde_json::json!({"protocol_system": "  "}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
     #[actix_web::test]
     async fn test_rejects_a_missing_or_blank_protocol_system(
         #[case] route: &str,
