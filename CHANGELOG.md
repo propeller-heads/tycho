@@ -1,3 +1,10 @@
+## [0.537.2](https://github.com/propeller-heads/tycho/compare/0.537.1...0.537.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **indexer:** send full blocks to partial subscriptions on extractors without partial blocks ([8ee91a0](https://github.com/propeller-heads/tycho/commit/8ee91a0f549baa8904ce2664792653e5dc5bf937))
+
 ## [0.537.1](https://github.com/propeller-heads/tycho/compare/0.537.0...0.537.1) (2026-11-23)
 
 
