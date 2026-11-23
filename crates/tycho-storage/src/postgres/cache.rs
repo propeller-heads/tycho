@@ -1871,6 +1871,91 @@ mod test_serial_db {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_instance_batch_writes_tokens_and_balances() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let component =
+                db_fixtures::insert_instance_component(&mut connection, instance, "pool", &[])
+                    .await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let token_address = Bytes::from("0x0a");
+            let token = models::token::Token::new(
+                &token_address,
+                "A",
+                18,
+                0,
+                &[],
+                models::Chain::Ethereum,
+                100,
+            );
+            let balance = models::protocol::ComponentBalance::new(
+                token_address.clone(),
+                Bytes::from(7_u64),
+                7.0,
+                tx_1.hash.clone(),
+                "pool",
+            );
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            // Staged before the token: the executor writes tokens first anyway.
+            cached_gw
+                .add_component_balances(&[balance])
+                .await
+                .expect("Staging balances ok");
+            cached_gw
+                .add_tokens(&[token])
+                .await
+                .expect("Staging tokens ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let stored_tokens: i64 = schema::token::table
+                .filter(schema::token::address.eq(&token_address))
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the tokens failed");
+            assert_eq!(stored_tokens, 1);
+            let stored_balance: (i64, Bytes, Bytes, NaiveDateTime, i32) =
+                instance_schema::component_balance::table
+                    .filter(instance_schema::component_balance::instance_id.eq(instance))
+                    .select((
+                        instance_schema::component_balance::protocol_component_id,
+                        instance_schema::component_balance::token,
+                        instance_schema::component_balance::new_balance,
+                        instance_schema::component_balance::valid_from,
+                        instance_schema::component_balance::tx_index,
+                    ))
+                    .get_result(&mut connection)
+                    .await
+                    .expect("instance balance stored");
+            assert_eq!(
+                stored_balance,
+                (component, token_address, Bytes::from(7_u64), block_1.ts, 1)
+            );
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_fresh_gateway_keeps_instance() {
         run_against_db(|connection_pool| async move {
             let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
