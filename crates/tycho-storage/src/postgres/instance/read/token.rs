@@ -53,11 +53,7 @@ impl PostgresGatewayNew {
         let filtered = || {
             let mut query = token::table.into_boxed::<Pg>();
             if let Some(address) = address {
-                query = query.filter(
-                    token::address
-                        .assume_not_null()
-                        .eq_any(address),
-                );
+                query = query.filter(token::address.eq_any(address));
             }
             if let Some(min) = quality.min {
                 query = query.filter(token::quality.ge(min));
@@ -69,7 +65,7 @@ impl PostgresGatewayNew {
                 query = query.filter(exists(
                     component_balance::table
                         .filter(component_balance::instance_id.eq_any(&instances))
-                        .filter(component_balance::token.eq(token::address.assume_not_null()))
+                        .filter(component_balance::token.eq(token::address))
                         .filter(component_balance::valid_from.gt(since)),
                 ));
             }
@@ -78,7 +74,7 @@ impl PostgresGatewayNew {
 
         let mut query = filtered()
             .order_by(token::id)
-            .select((orm::Token::as_select(), token::address.assume_not_null()));
+            .select(orm::Token::as_select());
         let mut total = None;
         if let Some(pagination) = pagination_params {
             total = Some(
@@ -92,14 +88,14 @@ impl PostgresGatewayNew {
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }
-        let rows: Vec<(orm::Token, Address)> = query
+        let rows: Vec<orm::Token> = query
             .load(conn)
             .await
             .map_err(PostgresError::from)?;
 
         let tokens: Vec<Token> = rows
             .into_iter()
-            .map(|(row, address)| row.to_model(&address, chain))
+            .map(|row| row.to_model(chain))
             .collect::<Result<_, _>>()?;
         let total = total.unwrap_or_else(|| count_to_i64(tokens.len()));
         Ok(WithTotal { entity: tokens, total: Some(total) })
@@ -116,7 +112,7 @@ impl PostgresGatewayNew {
         self.get_chain_id(chain)?;
         let prices: Vec<(Bytes, f64)> = token_price::table
             .inner_join(token::table)
-            .select((token::address.assume_not_null(), token_price::price))
+            .select((token::address, token_price::price))
             .load(conn)
             .await
             .map_err(PostgresError::from)?;
@@ -222,7 +218,6 @@ mod tests {
 
     struct Setup {
         gateway: PostgresGatewayNew,
-        chain_id: i64,
         active: InstanceId,
         inactive: InstanceId,
         uniswap_v4: InstanceId,
@@ -231,7 +226,7 @@ mod tests {
     /// "vm:curve" and "uniswap_v4" on ethereum, each pointing to an instance. "vm:curve" has a
     /// second `ready` instance it does not point to.
     async fn setup(conn: &mut AsyncPgConnection) -> Setup {
-        let chain_id = db_fixtures::insert_chain(conn, "ethereum").await;
+        db_fixtures::insert_chain(conn, "ethereum").await;
         let curve_system_id =
             db_fixtures::insert_protocol_system(conn, "vm:curve".to_string()).await;
         let uniswap_v4_system_id =
@@ -242,21 +237,13 @@ mod tests {
         db_fixtures::set_active_instance(conn, curve_system_id, Some(active)).await;
         db_fixtures::set_active_instance(conn, uniswap_v4_system_id, Some(uniswap_v4)).await;
         let gateway = PostgresGatewayNew::from_connection(conn).await;
-        Setup { gateway, chain_id, active, inactive, uniswap_v4 }
+        Setup { gateway, active, inactive, uniswap_v4 }
     }
 
     /// Inserts a token at the `0x`-prefixed `address` and returns its id.
-    async fn token(
-        conn: &mut AsyncPgConnection,
-        chain_id: i64,
-        address: &str,
-        symbol: &str,
-        quality: i32,
-    ) -> i64 {
+    async fn token(conn: &mut AsyncPgConnection, address: &str, symbol: &str, quality: i32) -> i64 {
         let hex = address.trim_start_matches("0x");
-        db_fixtures::insert_token(conn, chain_id, hex, symbol, 18, Some(quality))
-            .await
-            .1
+        db_fixtures::insert_token(conn, hex, symbol, 18, Some(quality)).await
     }
 
     /// Inserts a pool of the instance that holds `token`, with a balance of it.
@@ -309,9 +296,9 @@ mod tests {
     async fn test_tokens_by_address() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
-        let a = token(&mut conn, s.chain_id, A, "A", 100).await;
-        token(&mut conn, s.chain_id, B, "B", 100).await;
-        // The account keeps its address, so only a read of token.address finds the token at C.
+        let a = token(&mut conn, A, "A", 100).await;
+        token(&mut conn, B, "B", 100).await;
+        // Move the token to C: the read finds a token by token.address only.
         diesel::update(schema::token::table.find(a))
             .set(schema::token::address.eq(b(C)))
             .execute(&mut conn)
@@ -340,8 +327,8 @@ mod tests {
     async fn test_tokens_by_quality() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
-        token(&mut conn, s.chain_id, A, "A", 5).await;
-        token(&mut conn, s.chain_id, B, "B", 100).await;
+        token(&mut conn, A, "A", 5).await;
+        token(&mut conn, B, "B", 100).await;
 
         let result = s
             .gateway
@@ -357,8 +344,8 @@ mod tests {
     async fn test_traded_tokens_count_active_instances_only() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
-        token(&mut conn, s.chain_id, A, "A", 100).await;
-        token(&mut conn, s.chain_id, B, "B", 100).await;
+        token(&mut conn, A, "A", 100).await;
+        token(&mut conn, B, "B", 100).await;
         traded(&mut conn, s.active, A).await;
         traded(&mut conn, s.inactive, B).await;
         let before_balances: NaiveDateTime = NaiveDate::from_ymd_opt(2019, 12, 31)
@@ -386,7 +373,7 @@ mod tests {
     async fn test_traded_tokens_skip_older_balance_changes() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
-        token(&mut conn, s.chain_id, A, "A", 100).await;
+        token(&mut conn, A, "A", 100).await;
         traded(&mut conn, s.active, A).await;
         let after_balances: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 2)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
@@ -414,7 +401,7 @@ mod tests {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         for (address, symbol) in [(A, "A"), (B, "B"), (C, "C")] {
-            token(&mut conn, s.chain_id, address, symbol, 100).await;
+            token(&mut conn, address, symbol, 100).await;
         }
 
         let result = s
@@ -438,8 +425,8 @@ mod tests {
     async fn test_token_prices() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
-        let a = token(&mut conn, s.chain_id, A, "A", 100).await;
-        let b_id = token(&mut conn, s.chain_id, B, "B", 100).await;
+        let a = token(&mut conn, A, "A", 100).await;
+        let b_id = token(&mut conn, B, "B", 100).await;
         db_fixtures::insert_token_prices(&[(a, 1.0), (b_id, 2.0)], &mut conn).await;
 
         let prices = s

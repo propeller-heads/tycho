@@ -1778,10 +1778,9 @@ mod test_serial_db {
             .get()
             .await
             .expect("Failed to get a connection from the pool");
-        let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+        db_fixtures::insert_chain(&mut connection, "ethereum").await;
         db_fixtures::insert_token(
             &mut connection,
-            chain_id,
             "0000000000000000000000000000000000000000",
             "ETH",
             18,

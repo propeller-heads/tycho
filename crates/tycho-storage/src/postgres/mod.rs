@@ -1891,36 +1891,27 @@ pub mod db_fixtures {
             .expect("protocol state insert ok");
     }
 
+    /// Inserts a token with tax 10 and gas `[10]`, and returns its id.
     pub async fn insert_token(
         conn: &mut AsyncPgConnection,
-        chain_id: i64,
         address: &str,
         symbol: &str,
         decimals: i32,
         quality: Option<i32>,
-    ) -> (i64, i64) {
-        let title = format!("token_{symbol}");
-        let account_id = insert_account(conn, address, &title, chain_id, None).await;
-
-        let quality = quality.unwrap_or(0);
-
-        let query = diesel::insert_into(schema::token::table).values((
-            schema::token::account_id.eq(account_id),
-            schema::token::symbol.eq(symbol),
-            schema::token::decimals.eq(decimals),
-            schema::token::tax.eq(10),
-            schema::token::gas.eq(vec![10]),
-            schema::token::quality.eq(quality),
-            schema::token::address.eq(hex::decode(address).unwrap()),
-        ));
-        (
-            account_id,
-            query
-                .returning(schema::token::id)
-                .get_result(conn)
-                .await
-                .unwrap(),
-        )
+    ) -> i64 {
+        diesel::insert_into(schema::token::table)
+            .values((
+                schema::token::address.eq(hex::decode(address).unwrap()),
+                schema::token::symbol.eq(symbol),
+                schema::token::decimals.eq(decimals),
+                schema::token::tax.eq(10),
+                schema::token::gas.eq(vec![10]),
+                schema::token::quality.eq(quality.unwrap_or(0)),
+            ))
+            .returning(schema::token::id)
+            .get_result(conn)
+            .await
+            .unwrap()
     }
 
     pub async fn get_token_by_symbol(conn: &mut AsyncPgConnection, symbol: String) -> orm::Token {

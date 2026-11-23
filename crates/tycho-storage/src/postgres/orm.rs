@@ -1373,13 +1373,11 @@ impl<'a> NewAccount<'a> {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
-#[derive(Identifiable, Queryable, Associations, Selectable, Debug, PartialEq)]
-#[diesel(belongs_to(Account))]
+#[derive(Identifiable, Queryable, Selectable, Debug, PartialEq)]
 #[diesel(table_name = token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Token {
     pub id: i64,
-    pub account_id: i64,
     pub symbol: String,
     pub decimals: i32,
     pub tax: i64,
@@ -1387,14 +1385,14 @@ pub struct Token {
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
     pub quality: i32,
-    pub address: Option<Bytes>,
+    pub address: Bytes,
 }
 
 #[derive(AsChangeset, Insertable, Debug)]
 #[diesel(table_name = token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewToken {
-    pub account_id: i64,
+    pub address: Bytes,
     pub symbol: String,
     pub decimals: i32,
     pub tax: i64,
@@ -1412,9 +1410,9 @@ impl NewToken {
     /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 
-    pub fn from_token(account_id: i64, token: &models::token::Token) -> Result<Self, StorageError> {
+    pub fn from_token(token: &models::token::Token) -> Result<Self, StorageError> {
         Ok(Self {
-            account_id,
+            address: token.address.clone(),
             symbol: token.symbol.clone(),
             decimals: convert_int(token.decimals, "token decimals")?,
             tax: convert_int(token.tax, "token tax")?,
@@ -1433,11 +1431,7 @@ impl NewToken {
 
 impl Token {
     /// Builds the domain token of this row, failing when a column holds a negative value.
-    pub fn to_model(
-        &self,
-        address: &Address,
-        chain: models::Chain,
-    ) -> Result<models::token::Token, StorageError> {
+    pub fn to_model(&self, chain: models::Chain) -> Result<models::token::Token, StorageError> {
         let gas_usage = self
             .gas
             .iter()
@@ -1447,7 +1441,7 @@ impl Token {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(models::token::Token::new(
-            address,
+            &self.address,
             self.symbol.as_str(),
             convert_int(self.decimals, "token decimals")?,
             convert_int(self.tax, "token tax")?,
