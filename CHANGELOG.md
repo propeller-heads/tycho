@@ -1,3 +1,44 @@
+## [0.538.0](https://github.com/propeller-heads/tycho/compare/0.537.3...0.538.0) (2026-11-23)
+
+
+### Features
+
+* add a readiness endpoint that waits until a follower reaches the chain head ([443bd47](https://github.com/propeller-heads/tycho/commit/443bd470eb497b56d1783b7b23f1d0ced6aa7c6e))
+* add storage primitives for a leader and its followers ([70062ab](https://github.com/propeller-heads/tycho/commit/70062ab7c939c2f7752dcdee4df0e9fcd6c96609))
+* catch the entity cache up every hour for systems a follower waits on ([96356c1](https://github.com/propeller-heads/tycho/commit/96356c17fd8fbbb56bfb0d24794b244599f4a6f5))
+* catch the entity cache up from the database before an extractor build ([2baf495](https://github.com/propeller-heads/tycho/commit/2baf49518f63ecc65a4f9717cf29d60a9e18a08f))
+* close the HTTP connections of a stopping indexer ([f186e38](https://github.com/propeller-heads/tycho/commit/f186e38a2765affc58efc01e4b70f7964a005ca1))
+* commit the final blocks of a leader before its extractors stop ([c85c4a0](https://github.com/propeller-heads/tycho/commit/c85c4a00839162773c5784c25bf134f51921b8a9))
+* elect one database writer among indexer processes ([084a8c3](https://github.com/propeller-heads/tycho/commit/084a8c38157ada9d40596e95967ae60afe983e57))
+* fence database writes with a writer epoch ([3003036](https://github.com/propeller-heads/tycho/commit/30030361335f2a8d6b9fccfc1c610573410df7ff))
+* hand over to the follower at once when the indexer shuts down ([15edc42](https://github.com/propeller-heads/tycho/commit/15edc4276edb98b015ceede5981de40aa726fcb3))
+* let extractors follow a leader and take over its commits ([73baaca](https://github.com/propeller-heads/tycho/commit/73baaca5de482696d61e7947628f4236811db948))
+* measure the duration of the leader lock check ([c2bbfc2](https://github.com/propeller-heads/tycho/commit/c2bbfc27df310d1c03bbd4f759fb63272cf42a11))
+* open no stream on a follower while the leader syncs history ([f17c56e](https://github.com/propeller-heads/tycho/commit/f17c56ed0fd389e1398c37ad92643f7c8c1e3ab8))
+* restart DCI extractors from the database cursor to take over ([ccb15c8](https://github.com/propeller-heads/tycho/commit/ccb15c8b887bb474ddd5a52dac1eef51c4f2f3ee))
+* run head commits before backfill commits ([9178261](https://github.com/propeller-heads/tycho/commit/9178261aef04fc921b6b68b06feb9c37e8ebdb6a))
+
+
+### Bug Fixes
+
+* bound how long Postgres keeps a session that waits for a dead peer ([314b875](https://github.com/propeller-heads/tycho/commit/314b8754170d601aceedcfe6d3a5d43fcd9bce67))
+* keep the hook orchestrator span out of other tasks ([15d350a](https://github.com/propeller-heads/tycho/commit/15d350adaa817b6146cd2b71dd25e5cc10d68b24))
+* keep the last traded time of tokens current on a follower ([68a8eaf](https://github.com/propeller-heads/tycho/commit/68a8eaf5d563e116fb9e873a25b9a9ae2de2ac0a))
+* let the shutdown finish before the indexer process exits ([82b53ae](https://github.com/propeller-heads/tycho/commit/82b53aee0baaafacac752efb27c2f9e6dc7a9cbf))
+* read the extractor cursor before the DCI plugin loads its state ([2b547f5](https://github.com/propeller-heads/tycho/commit/2b547f5ec6a72e2e2172fbdc8d72b4a80a33a813))
+* read the writer role before the extractor reads its cursor ([2cb4748](https://github.com/propeller-heads/tycho/commit/2cb47480960bed8325c2bbcc8f8094bc312fddf1))
+* release the leader lock before the extractor state is freed ([f0da6cf](https://github.com/propeller-heads/tycho/commit/f0da6cf531839a09d59ebd61a7b689d5ff79f960))
+* resume each extractor from the cursor in the entity cache snapshot ([764d899](https://github.com/propeller-heads/tycho/commit/764d89955e12b3f772a6276548ced5bda8abe393))
+* run database migrations under an advisory lock ([40f7150](https://github.com/propeller-heads/tycho/commit/40f71503d9e1c541b7a72995859cc024f14fdd60))
+* stop the server before the indexer exits at shutdown ([5432737](https://github.com/propeller-heads/tycho/commit/5432737020913ed0934587c74e2aa170e1ed1dcc))
+
+
+### Performance Improvements
+
+* read catch-up value rows through the modify_tx index ([ad98ed5](https://github.com/propeller-heads/tycho/commit/ad98ed5312d7aa61eb00f1e870e9fcf18fd12836))
+* read the accounts of a catch-up by a list of ids ([9451a06](https://github.com/propeller-heads/tycho/commit/9451a06a8ad53a51c3c7b7aa5771b4bbe6d02c51))
+* run entity cache catch-ups of different systems in parallel ([a9a572d](https://github.com/propeller-heads/tycho/commit/a9a572db018741b12b9c2f9b7af90b15bba77ca7))
+
 ## [0.537.3](https://github.com/propeller-heads/tycho/compare/0.537.2...0.537.3) (2026-11-23)
 
 
