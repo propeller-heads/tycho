@@ -258,6 +258,7 @@ mod tests {
     async fn history(setup: &mut Setup) -> Vec<ProtocolStateHistory> {
         protocol_state_history::table
             .filter(protocol_state_history::instance_id.eq(setup.instance))
+            .order_by((protocol_state_history::valid_from, protocol_state_history::tx_index))
             .select(ProtocolStateHistory::as_select())
             .load(&mut setup.conn)
             .await
@@ -316,6 +317,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_two_updates_in_one_batch_link_the_history() {
+        let mut setup = setup().await;
+        let first = origin(minutes_ago(2), 0);
+        let second = origin(minutes_ago(1), 0);
+
+        let changes =
+            vec![update(&setup, "reserve", 2, first), update(&setup, "reserve", 3, second)];
+
+        write(&mut setup, changes)
+            .await
+            .unwrap();
+
+        let current = current(&mut setup).await;
+        assert_eq!(
+            (&current[0].attribute_value, &current[0].previous_value),
+            (&value(3), &Some(value(2)))
+        );
+        let history = history(&mut setup).await;
+        assert_eq!(history.len(), 2);
+        assert_eq!((&history[0].attribute_value, &history[0].previous_value), (&value(1), &None));
+        assert_eq!(
+            (&history[1].attribute_value, &history[1].previous_value),
+            (&value(2), &Some(value(1)))
+        );
+    }
+
+    #[tokio::test]
     async fn test_deletion_moves_the_stored_value_to_history() {
         let mut setup = setup().await;
         let at = origin(minutes_ago(1), 0);
@@ -333,6 +361,104 @@ mod tests {
             (history[0].valid_from, history[0].valid_to),
             (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from)
         );
+    }
+
+    #[tokio::test]
+    async fn test_batch_changes_only_its_keys_of_its_instance() {
+        let mut setup = setup().await;
+        let c1 = setup.component;
+        let c2 =
+            db_fixtures::insert_instance_component(&mut setup.conn, setup.instance, "pool-2", &[])
+                .await;
+        let system =
+            db_fixtures::insert_protocol_system(&mut setup.conn, "uniswap_v4".to_string()).await;
+        let other = db_fixtures::insert_instance(&mut setup.conn, system, "0.0.1").await;
+        // An import keeps the source database's ids, so the other instance holds the same
+        // component ids.
+        for (component, external_id) in [(c1, "pool"), (c2, "pool-2")] {
+            sql_query(
+                "INSERT INTO tycho.protocol_component
+                     (instance_id, id, external_id, protocol_type, created_at, creation_block,
+                      creation_tx_hash)
+                 VALUES ($1, $2, $3, 'pool', '2020-01-01', 1, '\\x01')",
+            )
+            .bind::<Int4, _>(other)
+            .bind::<BigInt, _>(component)
+            .bind::<Text, _>(external_id)
+            .execute(&mut setup.conn)
+            .await
+            .expect("inserting the imported component failed");
+        }
+        db_fixtures::insert_instance_state(&mut setup.conn, setup.instance, c1, "fee", value(30))
+            .await;
+        db_fixtures::insert_instance_state(&mut setup.conn, setup.instance, c2, "fee", value(5))
+            .await;
+        // `price` exists only in the other instance.
+        for (component, name) in [(c1, "reserve"), (c1, "fee"), (c1, "price"), (c2, "fee")] {
+            db_fixtures::insert_instance_state(&mut setup.conn, other, component, name, value(9))
+                .await;
+        }
+        let at = origin(minutes_ago(1), 0);
+
+        let changes = vec![
+            delete(&setup, "reserve", at),
+            VersionedChange::Delete { key: (c2, "fee".to_string()), origin: at },
+            update(&setup, "price", 7, at),
+        ];
+
+        write(&mut setup, changes)
+            .await
+            .unwrap();
+
+        let instances = [setup.instance, other];
+        let current_keys: Vec<(InstanceId, i64, String)> = protocol_state::table
+            .filter(protocol_state::instance_id.eq_any(instances))
+            .order_by((
+                protocol_state::instance_id,
+                protocol_state::protocol_component_id,
+                protocol_state::attribute_name,
+            ))
+            .select((
+                protocol_state::instance_id,
+                protocol_state::protocol_component_id,
+                protocol_state::attribute_name,
+            ))
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the current state failed");
+        let archived_keys: Vec<(InstanceId, i64, String)> = protocol_state_history::table
+            .filter(protocol_state_history::instance_id.eq_any(instances))
+            .order_by((
+                protocol_state_history::instance_id,
+                protocol_state_history::protocol_component_id,
+                protocol_state_history::attribute_name,
+            ))
+            .select((
+                protocol_state_history::instance_id,
+                protocol_state_history::protocol_component_id,
+                protocol_state_history::attribute_name,
+            ))
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the state history failed");
+        let key = |instance, component, name: &str| (instance, component, name.to_string());
+        assert_eq!(
+            current_keys,
+            vec![
+                key(setup.instance, c1, "fee"),
+                key(setup.instance, c1, "price"),
+                key(other, c1, "fee"),
+                key(other, c1, "price"),
+                key(other, c1, "reserve"),
+                key(other, c2, "fee"),
+            ]
+        );
+        assert_eq!(
+            archived_keys,
+            vec![key(setup.instance, c1, "reserve"), key(setup.instance, c2, "fee")]
+        );
+        let price = &current(&mut setup).await[1];
+        assert_eq!((&price.attribute_name, &price.previous_value), (&"price".to_string(), &None));
     }
 
     #[tokio::test]
