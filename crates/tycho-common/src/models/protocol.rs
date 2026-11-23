@@ -12,7 +12,7 @@ use crate::{
     dto,
     models::{
         token::Token, Address, AttrStoreKey, Balance, Chain, ChangeType, ComponentId, MergeError,
-        StoreVal, TxHash,
+        ProtocolSystem, StoreVal, TxHash,
     },
     Bytes,
 };
@@ -256,6 +256,39 @@ impl ComponentBalance {
             component_id: component_id.to_string(),
         }
     }
+}
+
+/// An admin pause of one component, with optional audit details for operators.
+///
+/// `reason`, `actor` and `evidence_url` are notes for operators; no logic depends on them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PauseRecord {
+    /// External id of the component to pause.
+    pub component_id: ComponentId,
+    /// Why the component is paused.
+    pub reason: Option<String>,
+    /// Who asked for the pause: an operator, or the service that called the admin API.
+    pub actor: Option<String>,
+    /// Link to evidence for the pause, such as a failing quote or an incident report.
+    pub evidence_url: Option<String>,
+}
+
+/// The end of admin pauses, with optional audit details for operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpauseRecord {
+    /// Why the pauses ended.
+    pub reason: Option<String>,
+    /// Who ended the pauses: an operator, or the service that called the admin API.
+    pub actor: Option<String>,
+}
+
+/// An admin pause that is in effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentPause {
+    pub protocol_system: ProtocolSystem,
+    pub record: PauseRecord,
+    /// When the pause started.
+    pub paused_at: NaiveDateTime,
 }
 
 /// Token quality range filter

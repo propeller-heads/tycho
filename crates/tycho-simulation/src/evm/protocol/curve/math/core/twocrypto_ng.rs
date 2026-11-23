@@ -15,14 +15,37 @@ use alloy_primitives::{I256, U256};
 /// Floor division for signed integers (Vyper `//` and `/` semantics).
 /// Rust I256 `/` truncates toward zero; Vyper rounds toward negative infinity.
 /// Differs when operands have different signs and there's a remainder.
-fn fdiv(a: I256, b: I256) -> I256 {
-    let d = a / b;
-    let r = a % b;
+/// Returns `None` where Vyper reverts (zero divisor) instead of panicking.
+fn fdiv(a: I256, b: I256) -> Option<I256> {
+    let d = a.checked_div(b)?;
+    let r = a.checked_rem(b)?;
     if !r.is_zero() && ((a ^ b) < I256::ZERO) {
-        d - I256::try_from(1u64).unwrap()
+        Some(d - I256::try_from(1u64).unwrap())
     } else {
-        d
+        Some(d)
     }
+}
+
+/// EVM `SDIV` (Vyper `unsafe_div` on int256): truncates toward zero and wraps on overflow.
+/// Returns `None` for a zero divisor, where I256 division panics.
+fn sdiv(a: I256, b: I256) -> Option<I256> {
+    if b.is_zero() {
+        return None;
+    }
+    Some(a.wrapping_div(b))
+}
+
+/// Domain guard ported from the Vyper math contract's `get_y` / `newton_y` safety assert
+/// `assert _D > 10**17 - 1 and _D < 10**15 * 10**18 + 1  # dev: unsafe values D`:
+/// <https://github.com/curvefi/twocrypto-ng/blob/89c8dfb6c9b3204647954018d2a0238b9c69349d/contracts/main/CurveCryptoMathOptimized2.vy#L240>
+///
+/// The deployed contract reverts outside this domain, so quoting returns `None`. Without it, a
+/// drained pool (`D = 0`) divides by zero in both solvers below.
+fn check_d_domain(d: U256) -> Option<()> {
+    if d < U256::from(10u128.pow(17)) || d > U256::from(10u128.pow(33)) {
+        return None;
+    }
+    Some(())
 }
 
 pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
@@ -125,9 +148,10 @@ pub fn newton_y_2_ng(
     if i >= 2 {
         return None;
     }
+    check_d_domain(d)?;
     let n = U256::from(2u64);
     let x_j = x[1 - i];
-    let mut y = d * d / (x_j * U256::from(4u64));
+    let mut y = (d * d).checked_div(x_j * U256::from(4u64))?;
     let k0_i = WAD * n * x_j / d;
     if k0_i < U256::from(10u128.pow(36)) / lim_mul || k0_i > lim_mul {
         return None;
@@ -156,9 +180,9 @@ pub fn newton_y_2_ng(
             continue;
         }
         let yfprime = yfprime - _dyfprime;
-        let fprime = yfprime / y;
-        let y_minus = mul1 / fprime;
-        let y_plus = (yfprime + WAD * d) / fprime + y_minus * WAD / k0;
+        let fprime = yfprime.checked_div(y)?;
+        let y_minus = mul1.checked_div(fprime)?;
+        let y_plus = (yfprime + WAD * d) / fprime + (y_minus * WAD).checked_div(k0)?;
         let y_minus = y_minus + WAD * s / fprime;
         if y_plus < y_minus {
             y = y_prev / U256::from(2);
@@ -177,6 +201,7 @@ pub fn get_y_2_ng(ann: U256, gamma: U256, x: [U256; 2], d: U256, i: usize) -> Op
     if i >= 2 {
         return None;
     }
+    check_d_domain(d)?;
     // These closures convert known small constants from the Vyper Cardano solver into I256.
     // All values are hardcoded literals (max 10^36 << 2^255), so try_from never fails.
     let s = |v: u128| -> I256 { I256::try_from(v).expect("i256 const") };
@@ -201,33 +226,33 @@ pub fn get_y_2_ng(ann: U256, gamma: U256, x: [U256; 2], d: U256, i: usize) -> Op
         e18.wrapping_mul(n_s)
             .wrapping_mul(x_j_s),
         d_s,
-    );
+    )?;
     let lim_mul_signed = I256::try_from(lim_mul).ok()?;
-    if k0_i < fdiv(s(10u128.pow(36)), lim_mul_signed) || k0_i > lim_mul_signed {
+    if k0_i < fdiv(s(10u128.pow(36)), lim_mul_signed)? || k0_i > lim_mul_signed {
         return None;
     }
 
     let ann_gamma2 = ann_s.wrapping_mul(gamma2);
     let a: I256 = s(10u128.pow(32));
-    let b: I256 = fdiv(fdiv(d_s.wrapping_mul(ann_gamma2), s(400_000_000)), x_j_s) -
+    let b: I256 = fdiv(fdiv(d_s.wrapping_mul(ann_gamma2), s(400_000_000))?, x_j_s)? -
         s(3).wrapping_mul(s(10u128.pow(32))) -
         s(2).wrapping_mul(gamma_s)
             .wrapping_mul(s(10u128.pow(14)));
     let c: I256 = s(3).wrapping_mul(s(10u128.pow(32))) +
         s(4).wrapping_mul(gamma_s)
             .wrapping_mul(s(10u128.pow(14))) +
-        fdiv(gamma2, s(10u128.pow(4))) +
-        fdiv(fdiv(s(4).wrapping_mul(ann_gamma2), s(400_000_000)).wrapping_mul(x_j_s), d_s) -
-        fdiv(s(4).wrapping_mul(ann_gamma2), s(400_000_000));
+        fdiv(gamma2, s(10u128.pow(4)))? +
+        fdiv(fdiv(s(4).wrapping_mul(ann_gamma2), s(400_000_000))?.wrapping_mul(x_j_s), d_s)? -
+        fdiv(s(4).wrapping_mul(ann_gamma2), s(400_000_000))?;
     // Vyper: d = -unsafe_div((10^18 + gamma)^2, 10^4)
     // Negate AFTER truncation-dividing positive values (not floor-dividing negative)
     let d_coeff: I256 = -((e18 + gamma_s)
         .wrapping_mul(e18 + gamma_s)
         .wrapping_div(s(10u128.pow(4))));
 
-    let delta0: I256 = fdiv(s(3).wrapping_mul(a).wrapping_mul(c), b) - b;
+    let delta0: I256 = fdiv(s(3).wrapping_mul(a).wrapping_mul(c), b)? - b;
     let delta1: I256 = s(3).wrapping_mul(delta0) + b -
-        fdiv(fdiv(s(27).wrapping_mul(a).wrapping_mul(a), b).wrapping_mul(d_coeff), b);
+        fdiv(fdiv(s(27).wrapping_mul(a).wrapping_mul(a), b)?.wrapping_mul(d_coeff), b)?;
 
     let threshold = delta0.abs().min(delta1.abs()).min(a);
     let threshold_u = U256::try_from(threshold.abs()).unwrap_or(U256::ZERO);
@@ -264,26 +289,17 @@ pub fn get_y_2_ng(ann: U256, gamma: U256, x: [U256; 2], d: U256, i: usize) -> Op
     };
 
     // After divider: Vyper uses unsafe_div (EVM SDIV = truncation toward zero).
-    // wrapping_div matches SDIV semantics for I256.
+    // wrapping_div matches SDIV semantics for I256; `sdiv` does the same for divisors that can
+    // be zero.
     let a = a.wrapping_div(divider);
     let b = b.wrapping_div(divider);
     let c = c.wrapping_div(divider);
     let d_coeff = d_coeff.wrapping_div(divider);
-    let delta0 = s(3)
-        .wrapping_mul(a)
-        .wrapping_mul(c)
-        .wrapping_div(b) -
-        b;
+    let delta0 = sdiv(s(3).wrapping_mul(a).wrapping_mul(c), b)? - b;
     let delta1 = s(3).wrapping_mul(delta0) + b -
-        s(27)
-            .wrapping_mul(a.wrapping_mul(a))
-            .wrapping_div(b)
-            .wrapping_mul(d_coeff)
-            .wrapping_div(b);
+        sdiv(sdiv(s(27).wrapping_mul(a.wrapping_mul(a)), b)?.wrapping_mul(d_coeff), b)?;
     let sqrt_arg = delta1.wrapping_mul(delta1) +
-        s(4).wrapping_mul(delta0.wrapping_mul(delta0))
-            .wrapping_div(b)
-            .wrapping_mul(delta0);
+        sdiv(s(4).wrapping_mul(delta0.wrapping_mul(delta0)), b)?.wrapping_mul(delta0);
 
     if sqrt_arg <= I256::ZERO {
         let y = newton_y_2_ng(ann, gamma, x, d, i, lim_mul)?;
@@ -315,14 +331,11 @@ pub fn get_y_2_ng(ann: U256, gamma: U256, x: [U256; 2], d: U256, i: usize) -> Op
     let root: I256 = fdiv(
         e18.wrapping_mul(c1) -
             e18.wrapping_mul(b) -
-            e18.wrapping_mul(b)
-                .wrapping_div(c1)
-                .wrapping_mul(delta0),
+            sdiv(e18.wrapping_mul(b), c1)?.wrapping_mul(delta0),
         s(3).wrapping_mul(a),
-    );
+    )?;
     let y_out = U256::try_from(
-        d_s.wrapping_mul(d_s)
-            .wrapping_div(x_j_s)
+        sdiv(d_s.wrapping_mul(d_s), x_j_s)?
             .wrapping_mul(root)
             .wrapping_div(s(4))
             .wrapping_div(e18),
@@ -358,6 +371,22 @@ mod tests {
         let x = WAD * WAD;
         let s = isqrt(x);
         assert_eq!(s, WAD);
+    }
+
+    #[test]
+    fn signed_divisions_round_like_vyper() {
+        let i = |v: i64| I256::try_from(v).expect("i64 fits I256");
+        assert_eq!(fdiv(i(-7), i(2)), Some(i(-4)));
+        assert_eq!(fdiv(i(7), i(2)), Some(i(3)));
+        assert_eq!(sdiv(i(-7), i(2)), Some(i(-3)));
+        assert_eq!(sdiv(i(7), i(2)), Some(i(3)));
+    }
+
+    #[test]
+    fn signed_divisions_reject_zero_divisor() {
+        let seven = I256::try_from(7i64).expect("i64 fits I256");
+        assert!(fdiv(seven, I256::ZERO).is_none());
+        assert!(sdiv(seven, I256::ZERO).is_none());
     }
 
     #[test]
@@ -409,6 +438,45 @@ mod tests {
         let lim_mul = U256::from(100u64) * wad;
         assert!(get_y_2_ng(ann, gamma, x, d, 2).is_none());
         assert!(newton_y_2_ng(ann, gamma, x, d, 2, lim_mul).is_none());
+    }
+
+    #[test]
+    fn get_y_2_ng_rejects_out_of_domain_d() {
+        let wad = WAD;
+        let ann = U256::from(540_000u64) * A_MULTIPLIER;
+        let gamma = U256::from(11_809_167_828_997u64);
+        let x = [U256::from(5000u64) * wad, U256::from(5000u64) * wad];
+        let lim_mul = U256::from(100u64) * wad;
+        let below = U256::from(10u128.pow(17)) - U256::from(1u64);
+        let above = U256::from(10u128.pow(33)) + U256::from(1u64);
+        for (x, d) in
+            [([U256::ZERO, U256::ZERO], U256::ZERO), (x, U256::ZERO), (x, below), (x, above)]
+        {
+            assert!(get_y_2_ng(ann, gamma, x, d, 1).is_none());
+            assert!(newton_y_2_ng(ann, gamma, x, d, 1, lim_mul).is_none());
+        }
+    }
+
+    #[test]
+    fn get_y_2_ng_accepts_d_at_domain_bounds() {
+        let ann = U256::from(540_000u64) * A_MULTIPLIER;
+        let gamma = U256::from(11_809_167_828_997u64);
+        for d in [U256::from(10u128.pow(17)), U256::from(10u128.pow(33))] {
+            let half = d / U256::from(2u64);
+            assert!(get_y_2_ng(ann, gamma, [half, half], d, 1).is_some());
+        }
+    }
+
+    #[test]
+    fn newton_y_2_ng_rejects_zero_other_balance() {
+        let wad = WAD;
+        let ann = U256::from(540_000u64) * A_MULTIPLIER;
+        let gamma = U256::from(11_809_167_828_997u64);
+        let d = U256::from(10000u64) * wad;
+        let lim_mul = U256::from(100u64) * wad;
+        let x = [U256::ZERO, U256::from(5000u64) * wad];
+        assert!(newton_y_2_ng(ann, gamma, x, d, 1, lim_mul).is_none());
+        assert!(get_y_2_ng(ann, gamma, x, d, 1).is_none());
     }
 
     #[test]

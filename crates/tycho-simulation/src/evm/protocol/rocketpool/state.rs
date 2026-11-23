@@ -1072,8 +1072,9 @@ mod tests {
         state.deposit_contract_balance = U256::from(50e18);
         state.deposit_assigning_enabled = true;
         state.deposit_assign_maximum = U256::from(90u64);
-        state.megapool_queue_requested_total = U256::from(96e18); // 3 entries
-                                                                  // target = 200e18 * 10% / 1e18 = 20 ETH → shortfall = 20 - 0 = 20
+        // 3 entries
+        state.megapool_queue_requested_total = U256::from(96e18);
+        // target = 200e18 * 10% / 1e18 = 20 ETH → shortfall = 20 - 0 = 20
         state.target_reth_collateral_rate = U256::from(100_000_000_000_000_000u64); // 10%
 
         let res = state

@@ -193,6 +193,8 @@ class BlockChanges(BaseModel):
         default_factory=dict
     )
     component_tvl: Dict[str, float]
+    paused_components: Set[str] = Field(default_factory=set)
+    unpaused_components: Set[str] = Field(default_factory=set)
 
 
 class ResponseProtocolState(BaseModel):
@@ -403,6 +405,7 @@ class ProtocolSystemsResponse(BaseModel):
 class ProtocolComponentsResponse(BaseModel):
     protocol_components: List[ProtocolComponent]
     pagination: PaginationResponse
+    paused_component_ids: List[str] = Field(default_factory=list)
 
 
 class ProtocolStateResponse(BaseModel):

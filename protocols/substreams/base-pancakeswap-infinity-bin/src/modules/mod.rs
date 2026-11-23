@@ -1,6 +1,5 @@
-use substreams_ethereum::pb::eth::v2::TransactionTrace;
-
 use crate::pb::pancakeswap::infinity::bin::Transaction;
+use substreams_ethereum::pb::eth::v2::TransactionTrace;
 
 #[path = "1_map_pool_created.rs"]
 pub mod map_pool_created;

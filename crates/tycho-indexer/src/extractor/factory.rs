@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{format_err, Context};
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
+use chrono::Duration;
 use prost::Message;
 use serde::Deserialize;
 use tokio::{
@@ -11,7 +12,11 @@ use tokio::{
 };
 use tracing::info;
 use tycho_common::{
-    models::{Address, Chain, ExtractorIdentity, FinancialType, ImplementationType, ProtocolType},
+    models::{
+        blockchain::Block, Address, Chain, ExtractorIdentity, FinancialType, ImplementationType,
+        ProtocolType,
+    },
+    storage::{BlockIdentifier, ChainGateway, StorageError},
     Bytes,
 };
 use tycho_ethereum::{
@@ -291,13 +296,13 @@ impl ExtractorFactory {
         let dci_plugin = match self.config.dci_plugin.as_ref() {
             None => None,
             Some(DCIType::RPC) => {
-                let rpc_dci = Self::create_rpc_dci(
+                let mut rpc_dci = Self::create_rpc_dci(
                     &self.rpc_client,
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
+                rpc_dci.initialize().await?;
                 Some(DCIPlugin::Standard(rpc_dci))
             }
             Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
@@ -310,8 +315,7 @@ impl ExtractorFactory {
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
 
                 let mut hooks_dci = UniswapV4HookDCIBuilder::new(
                     base_dci,
@@ -380,6 +384,28 @@ impl ExtractorFactory {
                 config_start_block = self.config.start_block,
                 "Fresh start: resuming from block after last committed"
             );
+        } else {
+            // A new extractor stamps its first block against the block before it, like the
+            // extractors that already processed that block.
+            let first_block = u64::try_from(start_block).map_err(|_negative| {
+                ExtractionError::Setup(format!("start block {start_block} must not be negative"))
+            })?;
+            let blocks =
+                earlier_blocks_in_second(&self.rpc_client, self.config.chain, first_block).await?;
+            let Some((first, earlier)) = blocks.split_last() else {
+                return Err(ExtractionError::Setup(format!("No block {first_block} on the node")));
+            };
+            check_stored_block(&fresh_gw, first).await?;
+            if let Some(before) = earlier.last() {
+                info!(
+                    start_block,
+                    reference_ts = %before.ts,
+                    "New extractor: stamps its first block after the block before it"
+                );
+                extractor
+                    .update_last_processed_block(before.clone())
+                    .await;
+            }
         }
 
         let stream = SubstreamsStream::new(
@@ -414,7 +440,10 @@ impl ExtractorFactory {
     }
 
     /// Creates a RPC-based `DynamicContractIndexer` with account extractor and tracer configured.
-    async fn create_rpc_dci(
+    ///
+    /// The returned indexer is not initialized: the caller must call `initialize` on it, or on
+    /// the plugin that wraps it, before it processes a block.
+    fn create_rpc_dci(
         rpc_client: &EthereumRpcClient,
         chain: Chain,
         extractor_name: String,
@@ -448,16 +477,83 @@ impl ExtractorFactory {
         let tracer =
             EVMEntrypointService::new_with_config(&tracer_rpc_client, max_retries, retry_delay_ms);
 
-        let mut rpc_dci = DynamicContractIndexer::new(
+        let rpc_dci = DynamicContractIndexer::new(
             chain,
             extractor_name,
             cached_gw.clone(),
             account_extractor,
             tracer,
         );
-        rpc_dci.initialize().await?;
-
         Ok(rpc_dci)
+    }
+}
+
+/// Most blocks before a block that [`earlier_blocks_in_second`] reads in its second.
+const MAX_BLOCKS_PER_SECOND: usize = 1_000;
+
+/// Reads from the node the blocks of the second of block `number`, up to and including
+/// `number`, oldest first, with the timestamp every extractor stamps on them.
+///
+/// On a fast chain several blocks share one second. Each extractor stamps such a block one
+/// microsecond after the block before it, so the i-th block of a second gets the second plus
+/// i µs. The stamp depends only on the chain, never on what is stored.
+pub async fn earlier_blocks_in_second(
+    rpc: &EthereumRpcClient,
+    chain: Chain,
+    number: u64,
+) -> Result<Vec<Block>, ExtractionError> {
+    let read = |number| async move {
+        rpc.get_block(number, chain)
+            .await
+            .map_err(|err| ExtractionError::Setup(err.to_string()))
+    };
+    let last = read(number).await?;
+    let second = last.ts;
+
+    let mut blocks = vec![last];
+    for earlier in (0..number).rev() {
+        let block = read(earlier).await?;
+        if block.ts != second {
+            break;
+        }
+        if blocks.len() > MAX_BLOCKS_PER_SECOND {
+            return Err(ExtractionError::Setup(format!(
+                "More than {MAX_BLOCKS_PER_SECOND} blocks share the second of block {number}"
+            )));
+        }
+        blocks.push(block);
+    }
+    blocks.reverse();
+
+    let mut ts = second;
+    for block in &mut blocks {
+        block.ts = ts;
+        ts += Duration::microseconds(1);
+    }
+    Ok(blocks)
+}
+
+/// Fails when `block` is stored with another timestamp.
+///
+/// A new extractor and account initialisation stamp their first block from the node. Versions refer
+/// to their block by timestamp, so a stored row with another timestamp would make them refer to a
+/// timestamp that no stored block has. The blocks after the first one are stamped from it, so one
+/// check at start is enough.
+pub async fn check_stored_block(
+    gateway: &(impl ChainGateway + Sync),
+    block: &Block,
+) -> Result<(), ExtractionError> {
+    match gateway
+        .get_block(&BlockIdentifier::Hash(block.hash.clone()))
+        .await
+    {
+        Ok(stored) if stored.ts != block.ts => Err(ExtractionError::Setup(format!(
+            "Block {} ({}) is stored with timestamp {}, but the chain gives it {}: correct the \
+             stored timestamp",
+            block.number, block.hash, stored.ts, block.ts
+        ))),
+        Ok(_) | Err(StorageError::NotFound(..)) => Ok(()),
+        Err(err) => Err(ExtractionError::Storage(err)),
     }
 }
 
@@ -518,7 +614,161 @@ async fn download_file_from_s3(
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDateTime;
+
     use super::*;
+    use crate::testing::{
+        mock_node::{block_response, node},
+        MockGateway,
+    };
+
+    const SECOND: i64 = 1_700_000_000;
+
+    fn ts_at(second: i64, micros: i64) -> NaiveDateTime {
+        chrono::DateTime::from_timestamp(second, 0)
+            .expect("valid timestamp")
+            .naive_utc() +
+            Duration::microseconds(micros)
+    }
+
+    fn block(number: u64, ts: NaiveDateTime) -> Block {
+        Block::new(
+            number,
+            Chain::Ethereum,
+            Bytes::from(number).lpad(32, 0),
+            Bytes::from(number.saturating_sub(1)).lpad(32, 0),
+            ts,
+        )
+    }
+
+    // The node of `test_extractors_starting_at_different_blocks_stamp_the_same` in
+    // `protocol_extractor.rs`: there every extractor stamps block 8 at S and block 10 at S + 2 µs.
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_stops_at_earlier_second() {
+        let (_server, rpc) = node(&[(7, SECOND - 1), (8, SECOND), (9, SECOND), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(8, ts_at(SECOND, 0)),
+                block(9, ts_at(SECOND, 1)),
+                block(10, ts_at(SECOND, 2))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_block_before_in_earlier_second() {
+        let (_server, rpc) = node(&[(9, SECOND - 1), (10, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(10, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_down_to_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND), (1, SECOND), (2, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(0, ts_at(SECOND, 0)),
+                block(1, ts_at(SECOND, 1)),
+                block(2, ts_at(SECOND, 2))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_of_block_zero() {
+        let (_server, rpc) = node(&[(0, SECOND)]).await;
+
+        let blocks = earlier_blocks_in_second(&rpc, Chain::Ethereum, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(blocks, vec![block(0, ts_at(SECOND, 0))]);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_with_too_many_blocks_fails() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/")
+            .with_body(block_response(5_000, SECOND))
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url()).unwrap();
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 5_000).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    #[tokio::test]
+    async fn test_earlier_blocks_in_second_node_error_fails() {
+        let (_server, rpc) = node(&[(10, SECOND)]).await;
+
+        let res = earlier_blocks_in_second(&rpc, Chain::Ethereum, 10).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    /// A gateway whose `get_block` returns `stored`.
+    fn gateway(stored: Result<Block, StorageError>) -> MockGateway {
+        let mut gateway = MockGateway::new();
+        gateway
+            .expect_get_block()
+            .return_once(move |_| stored);
+        gateway
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_not_stored() {
+        let gateway = gateway(Err(StorageError::NotFound("Block".into(), "10".into())));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_with_same_timestamp() {
+        let gateway = gateway(Ok(block(10, ts_at(SECOND, 2))));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_with_other_timestamp_fails() {
+        let gateway = gateway(Ok(block(10, ts_at(SECOND, 0))));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(matches!(res, Err(ExtractionError::Setup(_))));
+    }
+
+    #[tokio::test]
+    async fn test_check_stored_block_storage_error_fails() {
+        let gateway = gateway(Err(StorageError::Unexpected("connection lost".into())));
+
+        let res = check_stored_block(&gateway, &block(10, ts_at(SECOND, 2))).await;
+
+        assert!(matches!(res, Err(ExtractionError::Storage(_))));
+    }
 
     #[test]
     fn test_extractor_config_without_dci_plugin() {

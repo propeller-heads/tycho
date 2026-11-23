@@ -248,7 +248,8 @@ mod tests {
 
                 // Now verify the detected slot by setting it to a specific value and checking
                 // balanceOf
-                let target_balance = U256::from(5000000000000000000u64); // 5 ETH in wei. Without overrides
+                // 5 ETH in wei. Without overrides
+                let target_balance = U256::from(5000000000000000000u64);
                 let verified_balance = verify_storage_slot_manipulation(
                     &rpc_url,
                     &steth,

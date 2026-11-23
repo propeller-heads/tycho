@@ -33,7 +33,8 @@ impl AdapterContractBuilder {
         Ok(contract_path)
     }
 
-    /// Runs the buildRuntime Bash script in a subprocess with the provided arguments.
+    /// Runs the buildRuntime Bash script in a subprocess with the provided arguments, for an
+    /// adapter or a balance lens.
     ///
     /// # Parameters
     /// - `adapter_contract`: The contract name to be passed to the script.
@@ -64,15 +65,15 @@ impl AdapterContractBuilder {
         let output: Output = cmd
             .output()
             .into_diagnostic()
-            .wrap_err("Error running '{script_path}'")?;
+            .wrap_err_with(|| format!("Error running '{script_path}'"))?;
 
         if !output.status.success() {
             return Err(miette!(
-                "Failed to build adapter: {}",
+                "Failed to build {adapter_contract}: {}",
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        info!("Adapter built successfully");
+        info!("{adapter_contract} built successfully");
         debug!("{}", String::from_utf8_lossy(&output.stdout));
 
         self.find_contract(adapter_contract)

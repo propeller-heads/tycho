@@ -10,13 +10,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 extern crate pretty_assertions;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::File,
     io::Read,
     process, slice,
     str::FromStr,
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, RwLock},
 };
 
 use actix_web::{dev::ServerHandle, web, App, HttpResponse, HttpServer, Responder};
@@ -35,6 +35,7 @@ use tokio::{
     runtime::Handle,
     select,
     signal::unix::{signal, SignalKind},
+    sync::watch,
     task::JoinHandle,
 };
 use tracing::{debug, error, info, instrument, warn};
@@ -44,9 +45,9 @@ use tycho_common::{
         blockchain::{Block, Transaction},
         chain_config::{init_chain_registry, ChainConfigRegistry},
         contract::AccountDelta,
-        Address, Chain, ExtractionState, ImplementationType,
+        Address, Chain, ExtractionState, ImplementationType, ProtocolSystem,
     },
-    storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
+    storage::{ChainGateway, ComponentPauseGateway, ContractStateGateway, ExtractionStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
     Bytes,
 };
@@ -62,7 +63,8 @@ use tycho_indexer::{
         SubstreamsArgs,
     },
     extractor::{
-        factory::ExtractorFactory,
+        factory::{earlier_blocks_in_second, ExtractorFactory},
+        pause::{PauseRefresher, PauseRegistry},
         protocol_cache::ProtocolMemoryCache,
         runner::ExtractorHandle,
         supervisor::{DCIType, ExtractorConfig, ExtractorSupervisor, ProtocolTypeConfig},
@@ -118,7 +120,8 @@ fn init_chains(path: &str) -> Result<(), ExtractionError> {
 }
 
 type ExtractionTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
-type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>; //TODO: introduce an error type for it
+// TODO: introduce an error type for it
+type ServerTasks = Vec<JoinHandle<Result<(), ExtractionError>>>;
 
 fn main() -> Result<(), anyhow::Error> {
     let cli: Cli = Cli::parse();
@@ -224,6 +227,34 @@ fn spawn_jemalloc_stats_reporter() {
             }
         }
     });
+}
+
+/// Logs a warning when the extraction runtime starts a task late.
+///
+/// The task asks to wake every 100 ms. A wake-up more than 250 ms late means that the runtime's
+/// threads were busy, for example with long synchronous work inside a task. The warning carries
+/// the delay as `stall_ms`. The task runs on one thread at a time, so it can miss a stall that
+/// blocks only another thread.
+async fn watch_extraction_runtime_stalls() {
+    const PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let mut tick = tokio::time::interval(PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    let mut last = tokio::time::Instant::now();
+    loop {
+        tick.tick().await;
+        // `tick` returns the planned instant, so measure the actual wake-up time.
+        let now = tokio::time::Instant::now();
+        let delay = now
+            .duration_since(last)
+            .saturating_sub(PERIOD);
+        if delay > MAX_DELAY {
+            warn!(stall_ms = delay.as_millis(), "Extraction runtime stalled");
+        }
+        last = now;
+    }
 }
 
 /// Starts continuous profiling if `PYROSCOPE_SERVER_URL` is set and not empty, and returns no
@@ -394,6 +425,8 @@ fn run_indexer(global_args: &GlobalArgs, index_args: &IndexArgs) -> Result<(), E
         Ok::<_, ExtractionError>((extraction_tasks, other_tasks))
     })?;
 
+    extraction_runtime.spawn(watch_extraction_runtime_stalls());
+
     let extractor_ctrl_tx = control_tx.clone();
     extraction_runtime.spawn(async move {
         // Wait for the supervisors, shutting the whole process down as soon as one of them
@@ -546,9 +579,11 @@ async fn run_rpc(
     })?;
 
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
+    let (pause_changes, pause_task) =
+        start_pause_refresher(direct_gw.clone(), chain, HashSet::new()).await?;
 
     let (server_handle, server_task) =
-        ServicesBuilder::new(direct_gw.clone(), rpc_client.clone(), api_key)
+        ServicesBuilder::new(direct_gw.clone(), rpc_client.clone(), api_key, pause_changes)
             .prefix(&global_args.server_version_prefix)
             .bind(&global_args.server_ip)
             .port(global_args.server_port)
@@ -562,8 +597,33 @@ async fn run_rpc(
             .run()?;
     info!(server_url, "Http and Ws server started");
     let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
-    let (res, _, _) = select_all([server_task, shutdown_task]).await;
+    let (res, _, _) = select_all([server_task, shutdown_task, pause_task]).await;
     res.map_err(|join_err| ExtractionError::Unknown(format!("Service task panicked: {join_err}")))?
+}
+
+/// Loads the admin pauses of `chain` and starts refreshing them. Queues pause events for
+/// `extracted_systems`. Returns a receiver notified on every change, and the refresher's task.
+///
+/// A failed load is a setup error: a registry that started empty would treat every component as
+/// unpaused.
+async fn start_pause_refresher<G>(
+    gateway: G,
+    chain: Chain,
+    extracted_systems: HashSet<ProtocolSystem>,
+) -> Result<(watch::Receiver<()>, JoinHandle<Result<(), ExtractionError>>), ExtractionError>
+where
+    G: ComponentPauseGateway + Send + Sync + 'static,
+{
+    let registry = PauseRegistry::load(&gateway, &chain, extracted_systems)
+        .await
+        .map_err(|e| ExtractionError::Setup(format!("Failed to load admin pauses: {e}")))?;
+    let refresher = PauseRefresher::new(gateway, chain, Arc::new(RwLock::new(registry)));
+    let changes = refresher.subscribe();
+    let task = tokio::spawn(async move {
+        refresher.run().await;
+        Ok(())
+    });
+    Ok((changes, task))
 }
 
 /// Creates extraction and server tasks.
@@ -602,6 +662,17 @@ async fn create_indexing_tasks(
     let chain = *chains
         .first()
         .expect("No chain provided"); //TODO: handle multichain?
+
+    let (pause_changes, pause_task) = start_pause_refresher(
+        rpc_gw.clone(),
+        chain,
+        protocol_systems
+            .iter()
+            .cloned()
+            .collect(),
+    )
+    .await?;
+
     let token_processor = EthereumTokenPreProcessor::new(&rpc_client, chain, settlement_contract);
 
     let (supervisors, extractor_handles, pending_deltas_rxs) = build_all_extractors(
@@ -644,28 +715,29 @@ async fn create_indexing_tasks(
         }
     };
 
-    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
-        .prefix(&global_args.server_version_prefix)
-        .bind(&global_args.server_ip)
-        .port(global_args.server_port)
-        .plans_config(plans_config)
-        .dci_protocols(dci_protocols)
-        .protocol_systems(protocol_systems)
-        .register_extractors(extractor_handles.clone())
-        .pending_deltas(pending_deltas_rxs)
-        .window_config(WindowConfig {
-            depth: global_args.delta_window_depth,
-            min_fold_batch: global_args.delta_window_fold_batch,
-        })
-        .entity_cache(entity_cache)
-        .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
-        .disabled_rpc_caches(
-            global_args
-                .disabled_rpc_caches
-                .0
-                .clone(),
-        )
-        .run()?;
+    let (server_handle, server_task) =
+        ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key, pause_changes)
+            .prefix(&global_args.server_version_prefix)
+            .bind(&global_args.server_ip)
+            .port(global_args.server_port)
+            .plans_config(plans_config)
+            .dci_protocols(dci_protocols)
+            .protocol_systems(protocol_systems)
+            .register_extractors(extractor_handles.clone())
+            .pending_deltas(pending_deltas_rxs)
+            .window_config(WindowConfig {
+                depth: global_args.delta_window_depth,
+                min_fold_batch: global_args.delta_window_fold_batch,
+            })
+            .entity_cache(entity_cache)
+            .shadow_sample_rate(global_args.entity_cache_shadow_sample_rate)
+            .disabled_rpc_caches(
+                global_args
+                    .disabled_rpc_caches
+                    .0
+                    .clone(),
+            )
+            .run()?;
     info!(server_url, "Http and Ws server started");
 
     let shutdown_task =
@@ -684,7 +756,7 @@ async fn create_indexing_tasks(
         .map(|supervisor| runtime.spawn(supervisor.run()))
         .collect::<Vec<_>>();
 
-    Ok((supervisor_tasks, vec![server_task, shutdown_task]))
+    Ok((supervisor_tasks, vec![server_task, shutdown_task, pause_task]))
 }
 
 #[expect(
@@ -874,12 +946,13 @@ async fn get_accounts_data(
     rpc: &EthereumRpcClient,
     chain: Chain,
 ) -> (Block, HashMap<Bytes, AccountDelta>) {
-    let account_extractor = EVMAccountExtractor::new(rpc, chain);
-
-    let block = account_extractor
-        .get_block_data(block_id)
+    let block = earlier_blocks_in_second(rpc, chain, block_id)
         .await
-        .expect("Failed to get block data");
+        .expect("Failed to get block data")
+        .pop()
+        .expect("The blocks end with the init block");
+
+    let account_extractor = EVMAccountExtractor::new(rpc, chain);
 
     let requests = accounts
         .iter()

@@ -34,6 +34,7 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
     struct Roles {
         address signerSetter;
         address budgetManager;
+        address routerSetter;
         address pauserAdmin;
         address unpauser;
         address[] pausers;
@@ -44,6 +45,9 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         keccak256("SIGNER_SETTER_ROLE");
     // Gates `withdraw`
     bytes32 public constant BUDGET_ROLE = keccak256("BUDGET_ROLE");
+    // Gates `setRouter`
+    bytes32 public constant ROUTER_SETTER_ROLE =
+        keccak256("ROUTER_SETTER_ROLE");
     // Gates `unpause`
     bytes32 public constant UNPAUSER_ROLE = keccak256("UNPAUSER_ROLE");
     // Grants and revokes `PAUSER_ROLE`
@@ -64,20 +68,24 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
     // running the swap out of gas.
     uint256 private constant _ETH_TRANSFER_GAS = 20_000;
 
-    address public immutable router;
+    // The only address allowed to call `pay`. Changes with `setRouter` when
+    // the router is redeployed, so the payer and its executor carry over.
+    address public router;
     address public signer;
 
     // Unordered nonces: word `nonce >> 8`, bit `nonce & 0xff`
     mapping(uint256 => uint256) private _nonceBitmap;
 
     event SignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event RouterUpdated(address indexed oldRouter, address indexed newRouter);
     event NoncesInvalidated(uint256 indexed word, uint256 mask);
     event Withdrawal(
         address indexed token, uint256 amount, address indexed receiver
     );
 
     /**
-     * @param router_ The only address allowed to call `pay`
+     * @param router_ The initial `router`, the only address allowed to call
+     *        `pay`
      * @param signer_ The initial `signer`, whose signatures `pay` accepts
      * @param roles Initial holder of each role
      */
@@ -88,23 +96,27 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
             router_ == address(0) || signer_ == address(0)
                 || roles.signerSetter == address(0)
                 || roles.budgetManager == address(0)
+                || roles.routerSetter == address(0)
                 || roles.pauserAdmin == address(0)
                 || roles.unpauser == address(0)
         ) {
             revert SubsidyPayer__AddressZero();
         }
         router = router_;
+        emit RouterUpdated(address(0), router_);
         signer = signer_;
         emit SignerUpdated(address(0), signer_);
 
         _setRoleAdmin(SIGNER_SETTER_ROLE, SIGNER_SETTER_ROLE);
         _setRoleAdmin(BUDGET_ROLE, BUDGET_ROLE);
+        _setRoleAdmin(ROUTER_SETTER_ROLE, ROUTER_SETTER_ROLE);
         _setRoleAdmin(UNPAUSER_ROLE, UNPAUSER_ROLE);
         _setRoleAdmin(PAUSER_ADMIN_ROLE, PAUSER_ADMIN_ROLE);
         _setRoleAdmin(PAUSER_ROLE, PAUSER_ADMIN_ROLE);
 
         _grantRole(SIGNER_SETTER_ROLE, roles.signerSetter);
         _grantRole(BUDGET_ROLE, roles.budgetManager);
+        _grantRole(ROUTER_SETTER_ROLE, roles.routerSetter);
         _grantRole(UNPAUSER_ROLE, roles.unpauser);
         _grantRole(PAUSER_ADMIN_ROLE, roles.pauserAdmin);
         for (uint256 i = 0; i < roles.pausers.length; i++) {
@@ -169,6 +181,18 @@ contract SubsidyPayer is ISubsidyPayer, AccessControl, Pausable, EIP712 {
         }
         emit SignerUpdated(signer, newSigner);
         signer = newSigner;
+    }
+
+    /// @notice Sets the router allowed to call `pay`, for a router redeploy.
+    function setRouter(address newRouter)
+        external
+        onlyRole(ROUTER_SETTER_ROLE)
+    {
+        if (newRouter == address(0)) {
+            revert SubsidyPayer__AddressZero();
+        }
+        emit RouterUpdated(router, newRouter);
+        router = newRouter;
     }
 
     /// @notice Sends `amount` of `token` from the budget to `to`. Use

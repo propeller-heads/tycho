@@ -125,9 +125,9 @@ pub(crate) const BASE_LISTED_BASES: [Address; 2] = [
 ];
 
 /// Tycho's default router on Base, the taker the books are priced for unless
-/// [`BaibaiFeedBuilder::taker`] sets another. BaiBai whitelisted it at a zero fee for every base
-/// at block 53,359,421, where other callers pay the venue default of 50 millionths.
-pub(crate) const BASE_ROUTER: Address = address!("AbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67");
+/// [`BaibaiFeedBuilder::taker`] sets another. The books carry the fee the entrypoint charges this
+/// router; a router BaiBai has not whitelisted pays the venue default of 50 millionths.
+pub(crate) const BASE_ROUTER: Address = address!("d374c00614f95492D816b5957E3797ce3f0c445C");
 
 #[cfg(test)]
 mod test_support;

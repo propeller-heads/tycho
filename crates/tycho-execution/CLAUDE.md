@@ -42,10 +42,10 @@ Entry (e.g. splitSwap)
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `TychoRouterV3.sol`              | Entry point. 3 swap strategies (single/sequential/split) x 3 funding modes (transferFrom/Permit2/vault) = 9 public methods. `_takeFees()` deducts fees, `_settleOutput()` transfers/credits final output to receiver or vault                                  |
 | `Vault.sol`                    | ERC6909 multi-token vault (see subsection below)                                                                                                                                                                                                               |
-| `Dispatcher.sol`               | Executor dispatch. 1-day timelock on new executors. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
+| `Dispatcher.sol`               | Executor dispatch. Executors passed to the router constructor are active at deployment; ones added later with `setExecutors` wait 1 day. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
+| `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`; `ROUTER_SETTER_ROLE` changes it with `setRouter` after a router redeploy. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
 | `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
@@ -72,6 +72,14 @@ delta when tokens arrive at the router, negative when they leave. `nonZeroDeltaC
 - Vault-funded swaps: at most one negative delta (the input token), which gets burned from the user's vault balance
 
 **External methods**: `deposit(token, amount)` and `withdraw(token, amount)`. Supports native ETH via `address(0)`.
+
+**Delta casts**: every `uint256` amount enters the deltas through `SafeCast.toInt256`, which reverts above
+`type(int256).max`. A raw cast would turn an amount near 2^256 into a credit for a token the router never received.
+
+**Vault pause**: `pauseVault` (`PAUSER_ROLE`) and `unpauseVault` (`UNPAUSER_ROLE`) on TychoRouterV3 block `deposit`
+and the three `*UsingVault` entry points with `Vault__Paused`; `vaultPaused()` reads the flag. Other swaps and
+withdrawals keep working, and so do vault credits and debits inside them (fees, outputs to the router, client
+contributions). `pause()` still stops everything but `withdraw`.
 
 **Fee accounting**: Fees credited directly to fee receivers' vault balances via `_creditVault()` -- persistent storage
 writes (~22k gas each) but no ERC20 transfers.
@@ -142,6 +150,10 @@ the forced router hop.
 Per-client shares (`setClientPositiveSlippageShare`, `_clientPositiveSlippageShareBps` mapping, fee units) give the
 resolved client part of the captured surplus, credited with its client fee; the router keeps the rest, rounded in its
 favour. The default share of zero leaves the full surplus to the router.
+Per-client caps (`setPositiveSlippageCap`, `_positiveSlippageCaps` mapping of `{isSet, capBps}`, fee units of
+`actualAmountOut`) limit the captured surplus of the resolved client's swaps, after the router positive slippage bps,
+to `actualAmountOut * capBps / MAX_BPS`. The surplus above the cap stays in the swap output and fees compute on it. A client without a cap is uncapped, and
+`getPositiveSlippageCap` reports `MAX_BPS` for it; setting `MAX_BPS` uncaps a client again.
 
 **Deduction order**: client fee calculated first, then router's cut of client fee subtracted from it, then router fee on
 output. `amountOut = amountIn - clientPortion - totalRouterFee`.
@@ -159,11 +171,11 @@ Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
 Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
-Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi, NativeWrap (ETH↔WETH
-and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing the standard `IPropAMM`
-interface; the pAMM address travels in the swap data), Fallback (runs one leg through `TychoFallbackRouter` -- see
-"Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and pays a signed subsidy -- see
-"Subsidies").
+Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Euclid (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi,
+NativeWrap (ETH↔WETH and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing
+the standard `IPropAMM` interface; the pAMM address travels in the swap data), Fallback (runs one leg through
+`TychoFallbackRouter` -- see "Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and
+pays a signed subsidy -- see "Subsidies").
 
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
@@ -236,6 +248,10 @@ settlement pulls the signed amount, so the rest of `amountIn` goes back to the c
 the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
+
+A natively indexed `IPropAMM` venue uses the same pAMM lane: tycho-simulation publishes its
+components as `fallback:{protocol}` (`via_fallback_router`), the family `fallback` entry resolves
+the executor, and the encoder reads the component's `pamm_address`.
 
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
 fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and
@@ -401,7 +417,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
 | **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice                                                                              | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice, Euclid                                                                      | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
@@ -483,7 +499,7 @@ group is PLE-encoded (`[len: u16][data]...`); Ekubo uses concatenation instead (
 
 **Parallel encoding**: `encode_swap_groups` (`strategy_encoders.rs`) and `TychoRouterEncoder::encode_solutions`
 spawn threads via `map_on_threads` (`evm/utils.rs`) **only when an encoder in the batch blocks on a quote** —
-`SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Hashflow,
+`SwapEncoder::blocks_on_quote()` defaults to `false` and is `true` only for the RFQ encoders (Bebop, Euclid, Hashflow,
 Liquorice, Metric). Otherwise encoding runs serially on the calling thread. Input order is preserved
 either way. Hashflow quotes stay independent under this parallelism because the Hashflow RFQ client
 (tycho-simulation) sends a fresh random effectiveTrader with every quote request: Hashflow scopes its strictly
@@ -551,7 +567,7 @@ same `FallbackSwapData` `user_data`:
   inserts a length prefix before the venue data and appends the fallback; the Liquorice one drops the partial-fill
   fields and keeps the settlement calldata.
 
-The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum and Polygon, Bebop's on Ethereum and Base,
+The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum, Polygon and Elysium, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
 The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
 Hashflow, Native or Liquorice leg the router's approval and output forward.
@@ -560,10 +576,11 @@ Hashflow, Native or Liquorice leg the router's approval and output forward.
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
 V1) and `executor_addresses.json` has an executor for it there; tests check both against the
 executor configs. A chain missing from the list has no router and supports nothing. Ethereum,
-Base, Robinhood, BSC, Arbitrum and Polygon are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
+Base, Robinhood, BSC, Arbitrum, Polygon and Elysium are listed today. On BSC, PancakeSwap V2 pairs encode as Uniswap V2
 with `fee_bps` 25 and PancakeSwap V3 pools as Uniswap V3, quoted by simulation since BSC has no
 static quoter. On Polygon, QuickSwap V2 pairs encode as Uniswap V2 with `fee_bps` 30, and Uniswap V3
-and Ramses V3 pools are quoted by Eden's static quoter.
+and Ramses V3 pools are quoted by Eden's static quoter. Elysium has no static quoter either, so its
+Uniswap V3 pools and V3 forks (Kleos, ElysPump, StockiumSwap, AERO CL) are quoted by simulation.
 
 `FallbackProtocol` is `#[repr(u8)]`, so the discriminant is the protocol byte, and `strum` derives
 its snake-case variant name as the `user_data` tag, which the `FallbackSwapData` variant of the same
