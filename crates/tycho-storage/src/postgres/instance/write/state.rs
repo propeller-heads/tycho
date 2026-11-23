@@ -15,14 +15,11 @@ use crate::postgres::{
     instance::{
         orm::{NewProtocolState, NewProtocolStateHistory, ProtocolState},
         schema::tycho::{protocol_state, protocol_state_history},
-        write::versioning::VersionedRow,
+        write::{versioning::VersionedRow, ROWS_PER_INSERT},
         InstanceId,
     },
     storage_error_from_diesel,
 };
-
-/// Rows per insert statement, far below the bind parameter limit of Postgres.
-const ROWS_PER_INSERT: usize = 1000;
 
 #[async_trait]
 impl VersionedRow for NewProtocolState {
