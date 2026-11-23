@@ -259,10 +259,7 @@ impl ValidateRestrictions for dto::ProtocolStateRequestBody {
 
 impl ValidateRestrictions for dto::StateRequestBody {
     fn validate_restrictions(&self, restrictions: &PlanRestrictions) -> Result<(), RpcError> {
-        // protocol_system defaults to "" via serde; skip check when not provided
-        if !self.protocol_system.is_empty() {
-            restrictions.check_protocol_system(&self.protocol_system)?;
-        }
+        restrictions.check_protocol_system(&self.protocol_system)?;
         restrictions.check_version_recency(&self.version)
     }
 }
