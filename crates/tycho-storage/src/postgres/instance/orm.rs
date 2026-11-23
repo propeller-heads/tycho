@@ -184,6 +184,15 @@ pub struct NewProtocolState {
     pub tx_index: i32,
 }
 
+impl NewProtocolState {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 7;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::protocol_state_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -212,6 +221,15 @@ pub struct NewProtocolStateHistory {
     pub valid_from: NaiveDateTime,
     pub valid_to: NaiveDateTime,
     pub tx_index: i32,
+}
+
+impl NewProtocolStateHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]

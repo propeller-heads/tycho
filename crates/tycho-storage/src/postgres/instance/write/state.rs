@@ -21,9 +21,6 @@ use crate::postgres::{
     storage_error_from_diesel,
 };
 
-/// Rows per insert statement, far below the bind parameter limit of Postgres.
-const ROWS_PER_INSERT: usize = 1000;
-
 #[async_trait]
 impl VersionedRowNew for NewProtocolState {
     const ENTITY: &'static str = "ProtocolState";
@@ -87,7 +84,7 @@ impl VersionedRowNew for NewProtocolState {
         rows: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(Self::MAX_BATCH_SIZE) {
             diesel::insert_into(protocol_state::table)
                 .values(chunk)
                 .on_conflict((
@@ -136,7 +133,7 @@ impl VersionedRowNew for NewProtocolState {
         rows: &[NewProtocolStateHistory],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(NewProtocolStateHistory::MAX_BATCH_SIZE) {
             diesel::insert_into(protocol_state_history::table)
                 .values(chunk)
                 .execute(conn)
