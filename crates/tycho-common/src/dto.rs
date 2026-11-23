@@ -1565,12 +1565,13 @@ pub struct ProtocolStateRequestBody {
 impl_pagination_limits!(ProtocolStateRequestBody, compressed = 360, uncompressed = 100);
 
 impl ProtocolStateRequestBody {
-    pub fn id_filtered<I, T>(ids: I) -> Self
+    pub fn id_filtered<I, T>(system: &str, ids: I) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
     {
         Self {
+            protocol_system: system.to_string(),
             protocol_ids: Some(
                 ids.into_iter()
                     .map(Into::into)
