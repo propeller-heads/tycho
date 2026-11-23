@@ -32,6 +32,7 @@ use crate::{
     },
 };
 
+#[cfg(feature = "jemalloc")]
 mod access_control;
 mod api_docs;
 mod cache;
@@ -57,6 +58,10 @@ pub struct ServicesBuilder<G> {
     port: u16,
     bind: String,
     rpc: EthereumRpcClient,
+    #[cfg_attr(
+        not(feature = "jemalloc"),
+        expect(dead_code, reason = "only the heap profile route checks the API key")
+    )]
     api_key: String,
     extractor_handles: ws::MessageSenderMap,
     db_gateway: G,

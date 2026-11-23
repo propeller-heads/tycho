@@ -54,7 +54,7 @@ services/
                             state answers serialize from them without copying the entries
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
-  access_control.rs         API-key authentication middleware
+  access_control.rs         API-key middleware for the heap profile route (`jemalloc`)
   client_metadata.rs        Parses the X-Tycho-Client-Metadata header into allowlisted Prometheus labels
   debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
