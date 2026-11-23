@@ -10,16 +10,16 @@ Protocol-specific routes may also depend on constructor or integration addresses
 
 | Network | Status | Effective date | Migration deadline |
 | --- | --- | --- | --- |
-| Ethereum | Active | 1 September 2026 | None |
-| Base | Active | 1 September 2026 | None |
-| Unichain | Active | 1 September 2026 | None |
-| Arbitrum | Active | 1 September 2026 | None |
-| BSC | Active | 1 September 2026 | None |
-| Polygon | Active | 1 September 2026 | None |
-| Plasma | Active | 1 September 2026 | None |
-| Robinhood | Active | 1 September 2026 | None |
-| Arc | Active | 29 September 2026 | None |
-| Elysium | Active | 9 November 2026 | None |
+| Ethereum | Active | 16 November 2026 | None |
+| Base | Active | 16 November 2026 | None |
+| Unichain | Active | 16 November 2026 | None |
+| Arbitrum | Active | 16 November 2026 | None |
+| BSC | Active | 16 November 2026 | None |
+| Polygon | Active | 16 November 2026 | None |
+| Plasma | Active | 16 November 2026 | None |
+| Robinhood | Active | 16 November 2026 | None |
+| Arc | Active | 16 November 2026 | None |
+| Elysium | Active | 16 November 2026 | None |
 
 ## Scheduled successors
 
@@ -30,6 +30,8 @@ For notices published on or after 22 September 2026, PropellerHeads provides at 
 ## Migration history
 
 Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea5808f9e82a9078583fd839c9" target="_blank" rel="noopener noreferrer"><code>91b7f151</code></a> introduced the deployment that took effect on 1 August 2026. Commit <a href="https://github.com/propeller-heads/tycho/commit/8cfd100c1da5b6e367417c281859496f189a9388" target="_blank" rel="noopener noreferrer"><code>8cfd100c</code></a> introduced the deployment that superseded it on 1 September 2026 across all eight chains. These deployments predate the notice policy. The machine-readable registry records both address sets. Commit <a href="https://github.com/propeller-heads/tycho/commit/629a473fe5b9ab24016f81eda1e968a6782aab53" target="_blank" rel="noopener noreferrer"><code>629a473f</code></a> introduced the Arc deployment that took effect on 29 September 2026. Arc had no earlier router. Commit <a href="https://github.com/propeller-heads/tycho/commit/460fc8f3950205502f7618a5fb591a15fde3d341" target="_blank" rel="noopener noreferrer"><code>460fc8f3</code></a> introduced the Elysium deployment that took effect on 9 November 2026. Elysium had no earlier router. Structured registry history starts on 1 August 2026; the Router V2 tables below and Git history preserve earlier deployments.
+
+Commit <a href="https://github.com/propeller-heads/tycho/commit/8aab890549e09358f5de1b3fc3eb3d6af9906a92" target="_blank" rel="noopener noreferrer"><code>8aab8905</code></a> introduced the deployment that took effect on 16 November 2026 across all ten chains. It replaced every router and FeeCalculator, and some executors. PropellerHeads gave no advance notice and applied the material security risk exception: an emergency redeployment to fix a vulnerability in the router's vault accounting. The machine-readable registry records the superseded routers and FeeCalculators for every chain.
 
 ## Ethereum
 
