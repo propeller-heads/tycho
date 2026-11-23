@@ -12,7 +12,6 @@ use futures03::future::try_join_all;
 use tokio::task::JoinHandle;
 use tracing::info;
 use tycho_common::storage::Gateway;
-use tycho_ethereum::rpc::EthereumRpcClient;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -55,7 +54,6 @@ pub struct ServicesBuilder<G> {
     prefix: String,
     port: u16,
     bind: String,
-    rpc: EthereumRpcClient,
     #[cfg_attr(
         not(feature = "jemalloc"),
         expect(dead_code, reason = "only the heap profile route checks the API key")
@@ -98,12 +96,11 @@ impl<G> ServicesBuilder<G>
 where
     G: Gateway + Send + Sync + 'static,
 {
-    pub fn new(db_gateway: G, rpc: EthereumRpcClient, api_key: String) -> Self {
+    pub fn new(db_gateway: G, api_key: String) -> Self {
         Self {
             prefix: "v1".to_owned(),
             port: 4242,
             bind: "0.0.0.0".to_owned(),
-            rpc,
             api_key,
             extractor_handles: HashMap::new(),
             db_gateway,
