@@ -1,3 +1,10 @@
+## [0.535.1](https://github.com/propeller-heads/tycho/compare/0.535.0...0.535.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** clear the url and cookie cargo audit advisories ([a635f2f](https://github.com/propeller-heads/tycho/commit/a635f2f7b3f4af4d9bf2b16ff2c371baa2b1c249))
+
 ## [0.535.0](https://github.com/propeller-heads/tycho/compare/0.534.0...0.535.0) (2026-11-21)
 
 
