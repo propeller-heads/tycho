@@ -1609,7 +1609,6 @@ mod tests {
             AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
             WriteTimestamp,
         },
-        traits::MockEntryPointTracer,
     };
 
     use super::*;
@@ -1844,7 +1843,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -1896,15 +1894,8 @@ mod tests {
             new_windows(["uniswap_v2"], WindowConfig::default()),
             Arc::new(EntityCache::new()),
         );
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
 
         let request = dto::StateRequestBody {
             contract_ids: None,
@@ -1935,10 +1926,7 @@ mod tests {
     /// A handler whose state service holds one `ex` window with blocks 5 and 6: account
     /// `0x..01` and component `c1` are created in block 5. The cache starts empty. Without
     /// expectations, `gw` panics on any database call.
-    fn state_routing_handler(
-        gw: MockGateway,
-        mode: CacheMode,
-    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    fn state_routing_handler(gw: MockGateway, mode: CacheMode) -> RpcHandler<MockGateway> {
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);
         for n in 5..=6 {
@@ -1967,15 +1955,7 @@ mod tests {
             CacheMode::Serve => EntityCacheSetup::Serve(service),
             CacheMode::Shadow => EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(0.0))),
         };
-        RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(setup)
+        RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]).with_state_service(setup)
     }
 
     /// A request without ids lists the component ids first; a failure there keeps its status.
@@ -1988,14 +1968,7 @@ mod tests {
                     Err(StorageError::NotFound("ProtocolComponent".to_string(), "ex".to_string()))
                 })
             });
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         let result = handler
             .get_protocol_state_inner(dto::ProtocolStateRequestBody {
@@ -2032,17 +2005,10 @@ mod tests {
         windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
         cache: Arc<EntityCache>,
         rate: f64,
-    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    ) -> RpcHandler<MockGateway> {
         let service = Arc::new(StateService::new(windows, cache));
-        RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
+        RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
     }
 
     fn uniswap_v2_windows() -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
@@ -2087,15 +2053,9 @@ mod tests {
             }
             EntityCacheSetup::Serve(()) => EntityCacheSetup::Serve(service),
         };
-        let handler = RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(state_service);
+        let handler =
+            RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![])
+                .with_state_service(state_service);
 
         let request = shadow_request("uniswap_v2", Some(vec![Bytes::from(1u64).lpad(20, 0)]));
 
@@ -2674,7 +2634,7 @@ mod tests {
     /// A `serve` handler whose cache holds [`loaded_account`] and [`loaded_component`] from block
     /// 4. The `ex` window then sets slot 1, the native balance and attribute `x` to `n` in blocks 5
     /// and 6. The gateway panics on any database call, so only a cache answer passes.
-    fn loaded_cache_handler() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    fn loaded_cache_handler() -> RpcHandler<MockGateway> {
         let account = loaded_account();
         let at = WriteTimestamp::from(&testing::block(4));
         let cache = EntityCache::from_snapshot(StateSnapshot {
@@ -2711,41 +2671,19 @@ mod tests {
                 .unwrap();
         }
         let service = StateService::new(windows, Arc::new(cache));
-        RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
+        RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
     }
 
     async fn post_to_bare_handler(route: &str, body: serde_json::Value) -> (StatusCode, String) {
-        let handler = RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let handler =
+            RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                )
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                )
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>))
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>))
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -2811,10 +2749,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(loaded_cache_handler()))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>)),
         )
         .await;
         let mut account = loaded_account();
@@ -2845,10 +2780,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(loaded_cache_handler()))
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>)),
         )
         .await;
         let mut state = loaded_component();
@@ -2910,14 +2842,7 @@ mod tests {
                 Box::pin(async move { Ok(WithTotal { entity: vec![response], total: Some(1) }) })
             });
 
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         let request = dto::StateRequestBody {
             contract_ids: Some(vec![first_page_addr, second_page_addr.clone()]),
@@ -2954,14 +2879,7 @@ mod tests {
             .returning(|_, _, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
         let request = dto::StateRequestBody {
             contract_ids: None,
             protocol_system: "uniswap_v2".to_string(),
@@ -3061,14 +2979,7 @@ mod tests {
         gw.expect_get_traced_entry_points_by_component()
             .return_once(|_, _| Box::pin(async move { mock_traced_entry_points_response }));
 
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         // Request for two protocol components
         let request = dto::TracedEntryPointRequestBody {
@@ -3234,14 +3145,7 @@ mod tests {
                 let response = Ok(WithTotal { entity: mock_entity.clone(), total: Some(3) });
                 Box::pin(async move { response })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         // request for 2 tokens that are in the DB (WETH and USDC)
         let request = dto::TokensRequestBody {
@@ -3289,15 +3193,8 @@ mod tests {
             .returning(|_, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
 
         let request = dto::ProtocolComponentsRequestBody {
             protocol_system: "uniswap_v2".to_string(),
@@ -3352,7 +3249,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -3440,7 +3336,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -3540,7 +3435,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -3623,21 +3517,14 @@ mod tests {
             gw.expect_get_protocol_components()
                 .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
         }
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
                 .route(
                     "/v1/protocol_components",
-                    web::post().to(protocol_components::<MockGateway, MockEntryPointTracer>),
+                    web::post().to(protocol_components::<MockGateway>),
                 ),
         )
         .await;
@@ -3689,19 +3576,12 @@ mod tests {
             gw.expect_get_tokens()
                 .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
         }
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route("/v1/tokens", web::post().to(tokens::<MockGateway, MockEntryPointTracer>)),
+                .route("/v1/tokens", web::post().to(tokens::<MockGateway>)),
         )
         .await;
 
@@ -3747,8 +3627,7 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free =
-            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
+        let handler_free = RpcHandler::new(gw_free, None, config, vec![], vec![]);
 
         let restrictions = handler_free
             .resolve_plan_restrictions(
@@ -3798,7 +3677,6 @@ plans:
         let req_handler = RpcHandler::new(
             gw,
             None,
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             dci_protocols.clone(),
             protocol_systems,
@@ -3827,14 +3705,7 @@ plans:
             "uniswap_v3".to_string(),
         ];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let allowed: HashSet<String> =
             HashSet::from(["uniswap_v2".to_string(), "uniswap_v3".to_string()]);
@@ -3862,14 +3733,7 @@ plans:
             "uniswap_v4".to_string(),
         ];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let allowed: HashSet<String> = HashSet::from([
             "uniswap_v2".to_string(),
@@ -3910,14 +3774,7 @@ plans:
         let protocol_systems =
             vec!["ambient".to_string(), "uniswap_v2".to_string(), "uniswap_v3".to_string()];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let request = dto::ProtocolSystemsRequestBody {
             chain: dto::Chain::Ethereum,
@@ -3938,21 +3795,15 @@ plans:
         let active_systems =
             vec!["ambient".to_string(), "sushiswap".to_string(), "uniswap_v3".to_string()];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            active_systems,
-        );
+        let handler =
+            RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], active_systems);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
                 .route(
                     "/v1/protocol_systems",
-                    web::post().to(super::protocol_systems::<MockGateway, MockEntryPointTracer>),
+                    web::post().to(super::protocol_systems::<MockGateway>),
                 ),
         )
         .await;
@@ -4025,21 +3876,11 @@ plans:
             .return_once(|_, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: HashMap::new(), total: Some(0) }) })
             });
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -4062,21 +3903,11 @@ plans:
     async fn test_component_tvl_rejects_a_protocol_outside_the_plan() {
         let mut gw = MockGateway::new();
         gw.expect_get_component_tvls().never();
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -4132,7 +3963,6 @@ plans:
         let handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             plans_config_restricted_history(),
             vec![],
             vec![],
@@ -4141,10 +3971,7 @@ plans:
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>)),
         )
         .await;
 
@@ -4202,7 +4029,6 @@ plans:
         let handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             plans_config_restricted_history(),
             vec![],
             vec![],
@@ -4211,10 +4037,7 @@ plans:
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>)),
         )
         .await;
 
