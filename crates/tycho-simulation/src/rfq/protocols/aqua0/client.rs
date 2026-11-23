@@ -139,18 +139,7 @@ impl Aqua0Client {
             .query(&[("chainId", self.chain_id.to_string())]);
         let response: Aqua0MarketsResponse =
             fetch_json(request, "Aqua0 markets", refuses_the_chain).await?;
-        // One malformed entry is skipped, not the whole list.
-        Ok(response
-            .markets
-            .into_iter()
-            .filter_map(|entry| match serde_json::from_value::<Aqua0Market>(entry) {
-                Ok(market) => Some(market),
-                Err(error) => {
-                    warn!(%error, "skipping a malformed Aqua0 market entry");
-                    None
-                }
-            })
-            .collect())
+        Ok(response.markets)
     }
 
     /// Indicative levels for one listed market at the given comma-separated sample sizes.

@@ -225,8 +225,14 @@ impl HttpSource for Aqua0BookSource {
 
         let now = unix_now().map_err(|error| FeedError::Fatal(error.to_string()))?;
         let mut books = Books::new();
+        // Markets with nothing to fill answer `NoLiquidity`; they neither count as failed nor
+        // keep a poll where every other market failed from counting as failed.
+        let mut answered = 0;
         let mut failed = 0;
         for ((market, token0, token1), answer) in wanted.iter().zip(answers) {
+            if !matches!(answer, Ok(StateAnswer::NoLiquidity)) {
+                answered += 1;
+            }
             match answer {
                 Ok(StateAnswer::Quotable(state)) => {
                     let component_id = state.component_id.clone();
@@ -249,9 +255,9 @@ impl HttpSource for Aqua0BookSource {
                 }
             }
         }
-        // Only a poll where every pool failed, to answer or to check, is a failed poll, which
-        // backs off.
-        if failed > 0 && failed == wanted.len() {
+        // Only a poll where every pool with liquidity failed, to answer or to check, is a failed
+        // poll, which backs off.
+        if failed > 0 && failed == answered {
             return Err(FeedError::Connection(format!(
                 "every Aqua0 pool failed to load or to check ({failed} pools)"
             )));
@@ -700,6 +706,87 @@ pub mod tests {
         .await;
         let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
         assert!(matches!(source.fetch().await, Err(FeedError::Connection(_))));
+    }
+
+    /// Markets with no liquidity do not count: one empty market and one that fails its checks
+    /// make a failed poll.
+    #[tokio::test]
+    async fn an_empty_market_does_not_hide_a_poll_where_the_rest_fail() {
+        let good = market_of(&recorded(POLYGON_STATE));
+        let empty_pool = format!("0x{}", "33".repeat(32));
+        let markets = serde_json::json!({ "markets": [
+            { "chainId": 137, "poolId": good.pool_id, "classId": good.class_id, "tokens": good.tokens },
+            { "chainId": 137, "poolId": empty_pool, "classId": "1", "tokens": good.tokens },
+        ]})
+        .to_string();
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                return Some(("200 OK", markets.clone()));
+            }
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["expiresAt"] = u64::MAX.into();
+            if request.target.contains(&empty_pool) {
+                state["quotable"] = false.into();
+                state["directions"] = serde_json::json!({ "zeroForOne": [], "oneForZero": [] });
+            } else {
+                state["hooks"] = format!("0x{}", "ab".repeat(20)).into();
+            }
+            Some(("200 OK", state.to_string()))
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
+        assert!(matches!(source.fetch().await, Err(FeedError::Connection(_))));
+    }
+
+    /// A `/markets` answer where every entry is malformed fails the read instead of emptying the
+    /// book: with no earlier list the poll fails, and an earlier list is kept.
+    #[tokio::test]
+    async fn a_market_list_where_every_entry_is_malformed_is_a_failed_read() {
+        let markets = polygon_markets();
+        let market_reads = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::clone(&market_reads);
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                if reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                    return Some(("200 OK", markets.clone()));
+                }
+                return Some((
+                    "200 OK",
+                    r#"{"markets":[{"chainId":"137","poolId":7},{"pool":"0x01"}]}"#.to_string(),
+                ));
+            }
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["expiresAt"] = u64::MAX.into();
+            Some(("200 OK", state.to_string()))
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(1));
+        assert!(matches!(source.fetch().await, Err(FeedError::Parsing(_))));
+        assert!(source.cached_markets().is_none(), "nothing was cached");
+
+        // With no list to fall back on, the next poll reads again, and a good list is cached.
+        assert_eq!(
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
+            1
+        );
+        // Once it is due again, a list of malformed entries leaves the cached one in place.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
+            1,
+            "the last list is served"
+        );
+        assert_eq!(market_reads.load(Ordering::SeqCst), 3);
     }
 
     /// After a failed `/markets` read the last list is served without reading again until the

@@ -1,13 +1,18 @@
 //! Aqua0's Tycho RFQ API, as it answers on the wire.
 
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
+
+use crate::book::wire::SkipInvalidEntries;
 
 /// `GET /markets`: every pool on one chain where Aqua0 quotes, with its strategy id.
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Aqua0MarketsResponse {
-    /// Read one by one, so a malformed entry does not fail the list.
-    pub markets: Vec<serde_json::Value>,
+    /// A malformed entry is skipped; a list where every entry is malformed fails to parse.
+    #[serde_as(deserialize_as = "SkipInvalidEntries")]
+    pub markets: Vec<Aqua0Market>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
