@@ -393,19 +393,20 @@ if __name__ == "__main__":
             )
             print()
 
-        # Example 7: Get contract state
-        print("7. Getting contract state...")
-        contract_params = ContractStateParams(
-            pagination=PaginationParams(page=0, page_size=5)
-        )
-        contracts = client.get_contract_state(contract_params)
-        print(f"   Found {len(contracts.accounts)} contracts")
-        print(
-            f"   Pagination: page {contracts.pagination.page}, size {contracts.pagination.page_size}, total {contracts.pagination.total}"
-        )
-        if contracts.accounts:
-            print(f"   First contract: {contracts.accounts[0].address.hex()}")
-        print()
+            # Example 7: Get contract state
+            print("7. Getting contract state...")
+            contract_params = ContractStateParams(
+                protocol_system=systems.protocol_systems[0],
+                pagination=PaginationParams(page=0, page_size=5),
+            )
+            contracts = client.get_contract_state(contract_params)
+            print(f"   Found {len(contracts.accounts)} contracts")
+            print(
+                f"   Pagination: page {contracts.pagination.page}, size {contracts.pagination.page_size}, total {contracts.pagination.total}"
+            )
+            if contracts.accounts:
+                print(f"   First contract: {contracts.accounts[0].address.hex()}")
+            print()
 
         # Example 8: Get protocol state with balances
         if systems.protocol_systems:

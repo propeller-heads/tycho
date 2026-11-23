@@ -318,7 +318,7 @@ class ProtocolStateParams(BaseModel):
 
 class ContractStateParams(BaseModel):
     contract_ids: Optional[List[str]] = Field(default=None)
-    protocol_system: Optional[str] = Field(default=None)
+    protocol_system: str
     version: Optional[VersionParams] = None
     pagination: Optional[PaginationParams] = None
 
