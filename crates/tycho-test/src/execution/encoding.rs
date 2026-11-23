@@ -52,6 +52,15 @@ const GAS_RESERVE: U256 = alloy::uint!(1_000_000_000_000_000_000_000_U256);
 pub const EXECUTOR_ADDRESS: &str = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
 // Fixed address used to plant FeeCalculator bytecode in state overrides.
 pub const FEE_CALCULATOR_ADDRESS: &str = "0xfEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0fEEcA1C0";
+
+/// `TychoRouterV3`'s storage slot of the `executorsActivationTimestamp` mapping, from
+/// `forge inspect TychoRouterV3 storageLayout`.
+/// `TychoRouterTest.testStorageSlotsOfTychoTestOverrides` checks it against the router, so a layout
+/// change fails there rather than reverting every execution the harness simulates.
+pub const ROUTER_EXECUTORS_ACTIVATION_SLOT: u64 = 7;
+
+/// `TychoRouterV3`'s storage slot of `_feeCalculator`, checked the same way.
+pub const ROUTER_FEE_CALCULATOR_SLOT: u64 = 10;
 const FERMISWAP_REGISTRY_ADDRESS: &str = "0xDA7AFeEd01fe625cF15D187A19F94B45F00b8C5f";
 // The Fermi engine currently pointed at by the swapper's storage slot 2. Fermi migrates engines
 // by re-pointing the swapper (last: 2026-07-21, block 25581704); update this together with
@@ -526,15 +535,7 @@ pub fn calculate_executor_storage_slot(key: Address) -> FixedBytes<32> {
     let mut key_bytes = [0u8; 32];
     key_bytes[12..].copy_from_slice(key.as_slice());
 
-    // Storage layout (from `forge inspect TychoRouterV3 storageLayout`):
-    //   slot 0: _roles             (AccessControl)
-    //   slot 1: _balances          (ERC6909)
-    //   slot 2: _operatorApprovals (ERC6909)
-    //   slot 3: _allowances        (ERC6909)
-    //   slot 4: _paused            (Pausable)
-    //   slot 5: _vaultBalances     (Vault)
-    //   slot 6: executorsActivationTimestamp (Dispatcher)
-    let slot = U256::from(6);
+    let slot = U256::from(ROUTER_EXECUTORS_ACTIVATION_SLOT);
 
     // Convert U256 slot to 32-byte big-endian array
     let slot_bytes = slot.to_be_bytes::<32>();
@@ -769,8 +770,7 @@ pub fn setup_router_overwrites(
     // The FeeCalculator override returns zero fees for all clients, so it acts as a no-op.
     if let Some(fee_calculator_bytecode) = data.fee_calculator_bytecode {
         let fee_calculator_address = Address::from_str(FEE_CALCULATOR_ADDRESS).into_diagnostic()?;
-        // Storage layout slot 9 = _feeCalculator (see `forge inspect TychoRouterV3 storageLayout`)
-        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(9));
+        let fee_calculator_slot = FixedBytes::<32>::from(U256::from(ROUTER_FEE_CALCULATOR_SLOT));
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator_address.as_slice());
         router_state_diff
@@ -1139,7 +1139,7 @@ mod tests {
         let mut fee_calculator_slot_value = [0u8; 32];
         fee_calculator_slot_value[12..].copy_from_slice(fee_calculator.as_slice());
         assert_eq!(
-            state_diff.get(&FixedBytes::<32>::from(U256::from(9))),
+            state_diff.get(&FixedBytes::<32>::from(U256::from(ROUTER_FEE_CALCULATOR_SLOT))),
             Some(&FixedBytes::<32>::from(fee_calculator_slot_value)),
             "the router does not point at the overwritten fee calculator"
         );

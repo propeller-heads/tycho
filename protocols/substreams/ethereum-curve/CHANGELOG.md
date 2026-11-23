@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0
+
+- Add the `policy` state attribute to Twocrypto pools: the pool's policy contract, or the zero
+  address if it has none. This changes the output.
+- Add the `policy_version`, `policy_controller`, `policy_router`, `policy_killed` and
+  `policy_min_fee` state attributes to Twocrypto pools: the grant terms of a policy that emits
+  `FyndPolicyCreated`, or zero values. This changes the output.
+
 ## v0.4.0
 
 - Report a negative balance tally as zero. The tally sums `Transfer` deltas, so it goes negative

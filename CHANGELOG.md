@@ -1,3 +1,16 @@
+## [0.536.0](https://github.com/propeller-heads/tycho/compare/0.535.1...0.536.0) (2026-11-23)
+
+
+### Features
+
+* **simulation:** route native IPropAMM venues through the fallback router ([98629e2](https://github.com/propeller-heads/tycho/commit/98629e271633072cf4e830693b50462a301e5880))
+
+
+### Bug Fixes
+
+* **simulation:** reject an unregistered via_fallback_router venue ([1e2e357](https://github.com/propeller-heads/tycho/commit/1e2e357fedae71110a8fb5d28e844bb015951552))
+* **tycho-test:** write the router overrides to the slots the paused vault moved ([6b9eb27](https://github.com/propeller-heads/tycho/commit/6b9eb27658d5240119b48a487763bc9824688c40))
+
 ## [0.535.1](https://github.com/propeller-heads/tycho/compare/0.535.0...0.535.1) (2026-11-23)
 
 
