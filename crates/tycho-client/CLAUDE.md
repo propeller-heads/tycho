@@ -55,8 +55,9 @@ TychoStreamBuilder (stream.rs)
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are polled after the active ones:
    each round they only consume what queued while the active ones advanced, so a stale synchronizer
    cannot hold the round to its `block_time` wait. They wait only when no synchronizer is active.
-   A stale synchronizer replaying blocks more than `max_missed_blocks` behind the tip stays stale,
-   so the replay never holds a round; it leaves stale once it is within that distance.
+   A synchronizer replaying blocks more than `max_missed_blocks` behind the tip is stale, whether it
+   comes back from a gap or restarts behind the tip (a subscription to an extractor that is still
+   syncing), so the replay never holds a round; it leaves stale once it is within that distance.
 
 ## CLI
 

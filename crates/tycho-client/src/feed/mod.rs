@@ -531,8 +531,7 @@ impl SynchronizerStream {
     /// Updates the synchronizer's state according to the position of the received block:
     /// - Next expected block -> Ready state
     /// - Latest/Delayed block -> Either Delayed or Stale (if no progress for `stale.threshold`)
-    /// - Latest/Delayed block on a Stale stream more than `stale.max_missed_blocks` behind the tip
-    ///   -> stays Stale
+    /// - Latest/Delayed block more than `stale.max_missed_blocks` behind the tip -> Stale
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
@@ -553,12 +552,13 @@ impl SynchronizerStream {
                 self.state = SynchronizerState::Ready(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed
-                if self.is_stale() &&
-                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
+                if blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
             {
                 // A stream replaying blocks this old would hold every round while Delayed, so it
-                // catches up in the stale pass instead.
-                debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
+                // catches up in the stale pass instead. This covers a stream that comes back from
+                // a gap and one that restarts behind the tip, such as a subscription to an
+                // extractor that is still syncing.
+                debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
                 self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
