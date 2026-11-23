@@ -22,8 +22,11 @@ use tycho_common::storage::StorageError;
 use crate::postgres::instance::{gateway::PostgresGatewayNew, origins::ChangeOrigin, InstanceId};
 
 /// A row of the current table of a versioned entity.
+///
+/// A working name while both versioning traits exist: the cut-over renames it to `VersionedRow`
+/// and deletes the trait on the old tables.
 #[async_trait]
-pub trait VersionedRow: Debug + Send + Sync + Sized {
+pub trait VersionedRowNew: Debug + Send + Sync + Sized {
     /// Name of the entity, for error messages.
     const ENTITY: &'static str;
 
@@ -76,14 +79,14 @@ pub trait VersionedRow: Debug + Send + Sync + Sized {
 
 /// A change to one key of a versioned entity.
 #[derive(Debug)]
-pub enum VersionedChange<R: VersionedRow> {
+pub enum VersionedChange<R: VersionedRowNew> {
     /// A new version of the row's key. It starts at the row's `valid_from` and `tx_index`.
     Update(R),
     /// The end of the latest version of `key`, at `origin`.
     Delete { key: R::Key, origin: ChangeOrigin },
 }
 
-impl<R: VersionedRow> VersionedChange<R> {
+impl<R: VersionedRowNew> VersionedChange<R> {
     fn key(&self) -> R::Key {
         match self {
             Self::Update(row) => row.key(),
@@ -102,7 +105,7 @@ impl<R: VersionedRow> VersionedChange<R> {
 
 /// The writes that apply the changes of one batch to one versioned entity.
 #[derive(Debug)]
-struct VersionWrites<R: VersionedRow> {
+struct VersionWrites<R: VersionedRowNew> {
     /// The latest version of each changed key that still exists.
     current: Vec<R>,
     /// The changed keys that no longer exist.
@@ -116,7 +119,7 @@ struct VersionWrites<R: VersionedRow> {
 /// Fails with [`StorageError::Unexpected`] when an updated row is not of `instance` or a change
 /// does not start after the version it replaces, and with [`StorageError::NotFound`] when a
 /// deletion finds no version of its key.
-fn plan_writes<R: VersionedRow>(
+fn plan_writes<R: VersionedRowNew>(
     instance: InstanceId,
     stored: Vec<R>,
     mut changes: Vec<VersionedChange<R>>,
@@ -193,7 +196,7 @@ impl PostgresGatewayNew {
     /// replaces, when a deletion finds no version of its key, and when the history day of a
     /// replaced version does not exist. On a failure, some rows can already be written; the
     /// caller rolls back its transaction.
-    pub(crate) async fn write_versions<R: VersionedRow>(
+    pub(crate) async fn write_versions<R: VersionedRowNew>(
         &self,
         instance: InstanceId,
         changes: Vec<VersionedChange<R>>,
@@ -249,7 +252,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl VersionedRow for Row {
+    impl VersionedRowNew for Row {
         const ENTITY: &'static str = "Row";
         type Key = u8;
         type History = HistoryRow;

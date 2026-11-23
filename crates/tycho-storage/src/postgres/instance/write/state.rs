@@ -15,7 +15,7 @@ use crate::postgres::{
     instance::{
         orm::{NewProtocolState, NewProtocolStateHistory, ProtocolState},
         schema::tycho::{protocol_state, protocol_state_history},
-        write::versioning::VersionedRow,
+        write::versioning::VersionedRowNew,
         InstanceId,
     },
     storage_error_from_diesel,
@@ -25,7 +25,7 @@ use crate::postgres::{
 const ROWS_PER_INSERT: usize = 1000;
 
 #[async_trait]
-impl VersionedRow for NewProtocolState {
+impl VersionedRowNew for NewProtocolState {
     const ENTITY: &'static str = "ProtocolState";
     /// Component id and attribute name.
     type Key = (i64, String);
