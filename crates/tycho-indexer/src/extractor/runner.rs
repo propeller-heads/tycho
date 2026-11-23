@@ -116,17 +116,25 @@ pub trait MessageSender: Send + Sync {
         subscription_id: Uuid,
         user_identity: Option<String>,
     ) -> Result<Receiver<DeltaCommand>, SendError<ControlMessage>>;
+
+    /// Returns whether the extractor sends partial block messages.
+    fn partial_blocks(&self) -> bool;
 }
 
 #[derive(Clone)]
 pub struct ExtractorHandle {
     id: ExtractorIdentity,
     control_tx: Sender<ControlMessage>,
+    partial_blocks: bool,
 }
 
 impl ExtractorHandle {
-    pub fn new(id: ExtractorIdentity, control_tx: Sender<ControlMessage>) -> Self {
-        Self { id, control_tx }
+    pub fn new(
+        id: ExtractorIdentity,
+        control_tx: Sender<ControlMessage>,
+        partial_blocks: bool,
+    ) -> Self {
+        Self { id, control_tx, partial_blocks }
     }
 
     pub fn get_id(&self) -> ExtractorIdentity {
@@ -165,6 +173,10 @@ impl MessageSender for ExtractorHandle {
         // TODO: use a better error type that lets us return this as an error.
         send_result.unwrap_or_else(|_elapsed| panic!("Subscription timed out!"))?;
         Ok(rx)
+    }
+
+    fn partial_blocks(&self) -> bool {
+        self.partial_blocks
     }
 }
 
