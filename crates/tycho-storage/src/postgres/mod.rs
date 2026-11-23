@@ -144,6 +144,7 @@ use tycho_common::{
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     Bytes,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 pub mod builder;
 pub mod cache;
@@ -391,7 +392,7 @@ fn is_transaction_conflict(message: &str) -> bool {
     message.contains("deadlock detected") || message.contains("could not serialize access")
 }
 
-#[cfg(old_gateway)]
+/// Cuts `input` to at most `limit` bytes, at a boundary between graphemes.
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     let mut result = String::new();
     let mut byte_count = 0;

@@ -39,7 +39,7 @@ use super::{
         protocol_component_holds_token, protocol_component_uses_entry_point, protocol_state,
         protocol_state_default, protocol_system, protocol_type, token, transaction,
     },
-    InstanceId, PostgresError, MAX_TS, MAX_VERSION_TS,
+    truncate_to_byte_limit, InstanceId, PostgresError, MAX_TS, MAX_VERSION_TS,
 };
 
 #[derive(Identifiable, Queryable, Selectable)]
@@ -1413,7 +1413,8 @@ impl NewToken {
     pub fn from_token(token: &models::token::Token) -> Result<Self, StorageError> {
         Ok(Self {
             address: token.address.clone(),
-            symbol: token.symbol.clone(),
+            // The column holds at most 255 characters, so a cut at 255 bytes always fits.
+            symbol: truncate_to_byte_limit(&token.symbol, 255),
             decimals: convert_int(token.decimals, "token decimals")?,
             tax: convert_int(token.tax, "token tax")?,
             gas: token

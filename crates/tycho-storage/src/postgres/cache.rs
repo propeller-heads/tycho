@@ -575,11 +575,15 @@ impl DBCacheWriteExecutor {
                     .save_state(instance, origins, state, conn)
                     .await?
             }
+            WriteOp::InsertTokens(tokens) => {
+                self.instance_gateway
+                    .insert_tokens(tokens, conn)
+                    .await?
+            }
             WriteOp::InsertContract(_) |
             WriteOp::UpdateContracts(_) |
             WriteOp::InsertAccountBalances(_) |
             WriteOp::InsertProtocolComponents(_) |
-            WriteOp::InsertTokens(_) |
             WriteOp::UpdateTokens(_) |
             WriteOp::InsertComponentBalances(_) |
             WriteOp::UpsertProtocolState(_) |
