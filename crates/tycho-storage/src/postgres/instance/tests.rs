@@ -809,3 +809,40 @@ async fn test_premake_makes_days_for_empty_history_tables() {
         assert!(present, "{table}: the day 7 days ahead must be made again");
     }
 }
+
+#[tokio::test]
+async fn test_token_is_keyed_by_address() {
+    let mut conn = instance_test_connection().await;
+
+    let has_account_link = sql_query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'token' AND column_name = 'account_id') \
+         AS present",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token columns failed")
+    .present;
+    let address_is_nullable = sql_query(
+        "SELECT is_nullable = 'YES' AS present FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'token' AND column_name = 'address'",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token address column failed")
+    .present;
+    let address_is_unique = sql_query(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint c \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
+         WHERE c.conrelid = 'public.token'::regclass AND c.contype = 'u' \
+         AND cardinality(c.conkey) = 1 AND a.attname = 'address') AS present",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token constraints failed")
+    .present;
+
+    assert!(!has_account_link, "a token has no account");
+    assert!(!address_is_nullable, "every token has an address");
+    assert!(address_is_unique, "the address is the key of a token");
+}
