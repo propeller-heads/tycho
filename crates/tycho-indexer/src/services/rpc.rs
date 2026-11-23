@@ -1298,15 +1298,22 @@ fn register_db_path_counters() {
     }
 }
 
+const PROTOCOL_SYSTEM_REQUIRED: &str =
+    "protocol_system is required: use a name from /v1/protocol_systems";
+
+fn require_protocol_system(system: &str) -> Result<(), RpcError> {
+    if system.trim().is_empty() {
+        return Err(RpcError::Parse(PROTOCOL_SYSTEM_REQUIRED.to_string()));
+    }
+    Ok(())
+}
+
 /// Retrieve contract states
 ///
 /// This endpoint retrieves the state of contracts within a specific execution environment. If no
-/// contract ids are given, all contracts are returned. Note that `protocol_system` is not a filter;
-/// it's a way to specify the protocol system associated with the contracts requested and is used to
-/// ensure that the correct extractor's block status is used when querying the database. If omitted,
-/// the block status will be determined by a random extractor, which could be risky if the extractor
-/// is out of sync. Filtering by protocol system is not currently supported on this endpoint and
-/// should be done client side.
+/// contract ids are given, all contracts are returned. `protocol_system` is required. It selects
+/// the extractor whose block status applies. It does not filter the response. A missing, empty or
+/// blank value is a 400.
 #[utoipa::path(
     post,
     path = "/v1/contract_state",
@@ -1332,6 +1339,7 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     tracing::Span::current().record("page_size", body.pagination.page_size);
     tracing::Span::current().record("protocol_system", &body.protocol_system);
 
+    require_protocol_system(&body.protocol_system)?;
     body.validate_pagination(&req)?;
     if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
         body.version = handler
