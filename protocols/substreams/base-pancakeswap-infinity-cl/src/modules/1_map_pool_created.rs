@@ -3,33 +3,11 @@ use crate::{
     parameters::{self, CL_POOLS_MAPPING_SLOT},
 };
 use ethabi::ethereum_types::Address;
-use serde::Deserialize;
+use pancakeswap_infinity_substreams::params::Deployment;
 use substreams::scalar::BigInt;
 use substreams_ethereum::pb::eth::v2::{self as eth};
 use substreams_helper::{event_handler::EventHandler, hex::Hexable};
 use tycho_substreams::prelude::*;
-
-/// Per-chain deployment addresses, hex without the 0x prefix.
-#[derive(Debug, Deserialize, PartialEq)]
-struct Params {
-    /// `CLPoolManager`, the emitter of `Initialize`.
-    pool_manager: String,
-    /// Holds every pool's funds, so it is `balance_owner` on every component.
-    vault: String,
-}
-
-/// Decodes a 20-byte address given as hex without the `0x` prefix.
-pub fn decode_address(name: &str, value: &str) -> Result<Vec<u8>, substreams::errors::Error> {
-    let bytes =
-        hex::decode(value).map_err(|err| anyhow::anyhow!("Invalid {name} {value:?}: {err}"))?;
-    if bytes.len() != 20 {
-        return Err(anyhow::anyhow!(
-            "Invalid {name} {value:?}: expected 20 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
-}
 
 /// One `ProtocolComponent` per `CLPoolManager.Initialize`, for pools with no swap hook and a
 /// static LP fee.
@@ -44,12 +22,9 @@ pub fn map_pools_created(
     block: eth::Block,
 ) -> Result<BlockEntityChanges, substreams::errors::Error> {
     let mut new_pools: Vec<TransactionEntityChanges> = vec![];
-    let params: Params = serde_qs::from_str(&params)
-        .map_err(|err| anyhow::anyhow!("Invalid map_pools_created params {params:?}: {err}"))?;
-    let pool_manager = decode_address("pool_manager", &params.pool_manager)?;
-    let vault = decode_address("vault", &params.vault)?;
+    let deployment = Deployment::parse("map_pools_created", &params)?;
 
-    get_new_pools(&block, &mut new_pools, &pool_manager, &vault);
+    get_new_pools(&block, &mut new_pools, &deployment.pool_manager, &deployment.vault);
 
     Ok(BlockEntityChanges { block: None, changes: new_pools })
 }
@@ -347,18 +322,6 @@ mod tests {
             initialize_log(hooks, fee, &pool_key_parameters(hook_bitmap, 60)),
             vec![slot0_write(slot0_with_protocol_fee(200, 300))],
         )
-    }
-
-    #[test]
-    fn params_parse_pool_manager_and_vault() {
-        let params: Params =
-            serde_qs::from_str(&format!("pool_manager={POOL_MANAGER}&vault={VAULT}")).unwrap();
-        assert_eq!(
-            params,
-            Params { pool_manager: POOL_MANAGER.to_string(), vault: VAULT.to_string() }
-        );
-        assert!(serde_qs::from_str::<Params>(POOL_MANAGER).is_err(), "bare address is rejected");
-        assert!(decode_address("vault", "0x1234").is_err(), "0x prefix and short input rejected");
     }
 
     #[test]
