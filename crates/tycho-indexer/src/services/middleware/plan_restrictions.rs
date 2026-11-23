@@ -595,7 +595,7 @@ plans:
     #[rstest]
     #[case::allowed_system("uniswap_v2", false)]
     #[case::blocked_system("sushiswap", true)]
-    #[case::empty_system_skips("", false)]
+    #[case::empty_system_is_blocked("", true)]
     #[tokio::test]
     async fn test_contract_state_restriction(
         #[case] protocol_system: &str,
