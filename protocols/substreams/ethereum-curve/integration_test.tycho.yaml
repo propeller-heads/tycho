@@ -217,6 +217,30 @@ tests:
         skip_simulation: false
         skip_execution: false
 
+  # Twocrypto v3.0.0 pool: `initialize` sets its policy in a later transaction.
+  - name: test_pool_with_policy
+    start_block: 26104440
+    stop_block: 26105440
+    initialized_accounts:
+      - "0x98EE851a00abeE0d95D08cF4CA2BdCE32aeaAF7F"
+    expected_components:
+      - id: "0x846254836ab71e53fa66fadb95129036c837c030"
+        tokens:
+          - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" # WETH
+          - "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E" # crvUSD
+        static_attributes:
+          factory_name: "0x74776f63727970746f5f666163746f7279"
+          pool_type: "0x74776f63727970746f"
+          name: "0x6372765553442f57455448204f7261636c697a656420506f6c696379"
+          factory: "0x307839386565383531613030616265653064393564303863663463613262646365333261656161663766"
+          coins: "0x5b22307866393339653061303366623037663539613733333134653733373934626530653537616331623465222c22307863303261616133396232323366653864306130653563346632376561643930383363373536636332225d"
+        state_attributes:
+          policy: "0x3ed7534221b24c07ffe081bd62dce51a50b3b8bb"
+          policy_version: "0x00"
+        creation_tx: "0x7b5336a538fae44c6fbf1582e16e6e1336d73deb366a04f7e0e354170d2d8bf0"
+        skip_simulation: false
+        skip_execution: false
+
   # This test is commented out because it needs to index more than 200k blocks
   #  # set_oracle & rebase token
   #  - name: test_ETHx_ETH_pool

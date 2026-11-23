@@ -13,6 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
+use super::fill::{exact_fill_inside_bin, Bin, BookSide};
 use crate::{
     book::{component::PairState, sim},
     pamm::protocols::metric::models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
@@ -53,42 +54,77 @@ impl MetricState {
         }
     }
 
-    /// The quoted price of the book side `direction` trades against: the bid when selling
-    /// token0, the ask when buying it. `None` when the pool quotes no price on that side.
-    fn quoted_price(&self, direction: MetricDirection) -> Result<Option<f64>, SimulationError> {
+    /// The book side `direction` trades against — the bid when selling token0, the ask when
+    /// buying it — or `None` when that side cannot be traded: Metric quotes no price on it or it
+    /// has no depth.
+    fn tradable_side(
+        &self,
+        direction: MetricDirection,
+    ) -> Result<Option<TradableSide<'_>>, SimulationError> {
+        let bins = match direction {
+            MetricDirection::ZeroForOne => self.bid_ask.tradable_bids(),
+            MetricDirection::OneForZero => self.bid_ask.tradable_asks(),
+        };
+        let Some(bins) = bins else {
+            return Ok(None);
+        };
+        let Some((last_bin, _)) = bins.split_last() else {
+            return Ok(None);
+        };
         let price = match direction {
             MetricDirection::ZeroForOne => self.bid_ask.bid_price()?,
             MetricDirection::OneForZero => self.bid_ask.ask_price()?,
         };
-        Ok(price)
-    }
-
-    fn quote_with_depth(
-        &self,
-        direction: MetricDirection,
-        amount_in: &BigUint,
-        max_output: &BigUint,
-    ) -> Result<Option<DepthQuote>, SimulationError> {
-        let bins = match direction {
-            MetricDirection::ZeroForOne => &self.bid_ask.depth.bids,
-            MetricDirection::OneForZero => &self.bid_ask.depth.asks,
-        };
-
-        // `is_quotable` only requires one side of the book to be populated, so the traded side
-        // may still have no bins when the depth is one-sided. The top-of-book quote is then the
-        // best signal we have.
-        let Some(depth_max_output) = depth_max_output(bins) else {
+        let Some(price) = price else {
             return Ok(None);
         };
+        let side = match direction {
+            MetricDirection::ZeroForOne => BookSide::Bids,
+            MetricDirection::OneForZero => BookSide::Asks,
+        };
+        let decimals = (self.base_token.decimals, self.quote_token.decimals);
+        Ok(Some(TradableSide { price, bins, last_bin, side, decimals }))
+    }
+}
 
-        let effective_max_output = depth_max_output.min(max_output.clone());
-        let depth_fill = depth_output_for_input(bins, amount_in, &effective_max_output)?;
+/// One side of the book that can be traded: Metric quotes its price and it has at least one
+/// bin.
+struct TradableSide<'a> {
+    /// Top-of-book price of token0 in token1.
+    price: f64,
+    /// The side's bins, nearest the top of the book first.
+    bins: &'a [MetricDepthBin],
+    /// The deepest bin, which carries the side's cumulative totals.
+    last_bin: &'a MetricDepthBin,
+    /// Which side of the book an order walks, and the token0 and token1 decimals.
+    side: BookSide,
+    decimals: (u32, u32),
+}
 
-        Ok(Some(DepthQuote {
+impl TradableSide<'_> {
+    /// The output `amount_in` buys walking this side's bins, capped by `max_output`.
+    fn quote(
+        &self,
+        amount_in: &BigUint,
+        max_output: &BigUint,
+    ) -> Result<DepthQuote, SimulationError> {
+        let effective_max_output = self
+            .last_bin
+            .cumulative_volume
+            .clone()
+            .min(max_output.clone());
+        let depth_fill = depth_output_for_input(
+            self.bins,
+            self.side,
+            self.decimals,
+            amount_in,
+            &effective_max_output,
+        )?;
+        Ok(DepthQuote {
             amount_out: depth_fill.output,
             max_output: effective_max_output,
             exhausted: depth_fill.exhausted,
-        }))
+        })
     }
 }
 
@@ -120,13 +156,13 @@ impl PairState for MetricState {
     }
 
     fn directions(&self) -> Vec<(Bytes, Bytes)> {
-        let priced =
-            |direction| matches!(self.quoted_price(direction), Ok(Some(price)) if price > 0.0);
+        let tradable =
+            |direction| matches!(self.tradable_side(direction), Ok(Some(side)) if side.price > 0.0);
         sim::directions(
             &self.base_token,
             &self.quote_token,
-            priced(MetricDirection::ZeroForOne),
-            priced(MetricDirection::OneForZero),
+            tradable(MetricDirection::ZeroForOne),
+            tradable(MetricDirection::OneForZero),
         )
     }
 }
@@ -138,7 +174,14 @@ impl ProtocolSim for MetricState {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let price = match (self.bid_ask.bid_price()?, self.bid_ask.ask_price()?) {
+        let side_price = |direction| -> Result<Option<f64>, SimulationError> {
+            Ok(self
+                .tradable_side(direction)?
+                .map(|side| side.price))
+        };
+        let bid = side_price(MetricDirection::ZeroForOne)?;
+        let ask = side_price(MetricDirection::OneForZero)?;
+        let price = match (bid, ask) {
             (Some(bid), Some(ask)) => (bid + ask) / 2.0,
             (Some(bid), None) => bid,
             (None, Some(ask)) => ask,
@@ -172,11 +215,11 @@ impl ProtocolSim for MetricState {
         sim::require_positive_amount(&amount_in)?;
 
         let direction = self.direction(&token_in.address, &token_out.address)?;
-        let Some(price) = self.quoted_price(direction)? else {
+        let Some(side) = self.tradable_side(direction)? else {
             return Err(SimulationError::InvalidInput(
                 format!(
-                    "Metric pool quotes no price in this direction. Input {amount_in} cannot be \
-                     filled"
+                    "Metric pool has no tradable side in this direction (no price or no depth). \
+                     Input {amount_in} cannot be filled"
                 ),
                 None,
             ));
@@ -186,48 +229,21 @@ impl ProtocolSim for MetricState {
             MetricDirection::OneForZero => self.bid_ask.total_token0_available()?,
         };
 
-        // Prefer size-aware depth when Metric exposes it. The depth walk runs entirely in raw
-        // integer units on Metric's own per-bin accounting, so the cap it reports when the depth
-        // is exhausted is exact (no f64 round-trip); see `depth_output_for_input` for the
-        // intra-bin rounding.
-        if let Some(quote) = self.quote_with_depth(direction, &amount_in, &max_output)? {
-            let res = GetAmountOutResult {
-                amount: quote.amount_out,
-                gas: BigUint::from(METRIC_SWAP_GAS),
-                new_state: self.clone_box(),
-            };
-            if quote.exhausted {
-                return Err(SimulationError::InvalidInput(
-                    format!(
-                        "Metric pool depth exhausted. Input {amount_in} cannot be fully filled; \
-                         tradable depth caps output at {}",
-                        quote.max_output
-                    ),
-                    Some(res),
-                ));
-            }
-            return Ok(res);
-        }
-
-        // No depth bins: flat top-of-book quote, capped only by the aggregate inventory.
-        let amount_in_human = sim::to_human(&amount_in, token_in.decimals);
-        let flat_amount_out_human = match direction {
-            MetricDirection::ZeroForOne => amount_in_human * price,
-            MetricDirection::OneForZero => amount_in_human / price,
-        };
-        let amount_out = sim::to_atomic(flat_amount_out_human, token_out.decimals)?;
+        // The depth walk runs entirely in raw integer units on Metric's own per-bin accounting,
+        // so the cap it reports when the depth is exhausted is exact (no f64 round-trip); see
+        // `depth_output_for_input` for the intra-bin rounding.
+        let quote = side.quote(&amount_in, &max_output)?;
         let res = GetAmountOutResult {
-            amount: amount_out
-                .clone()
-                .min(max_output.clone()),
+            amount: quote.amount_out,
             gas: BigUint::from(METRIC_SWAP_GAS),
             new_state: self.clone_box(),
         };
-        if amount_out > max_output {
+        if quote.exhausted {
             return Err(SimulationError::InvalidInput(
                 format!(
-                    "Metric pool has not enough liquidity. Requested output {amount_out} exceeds \
-                     available {max_output}"
+                    "Metric pool depth exhausted. Input {amount_in} cannot be fully filled; \
+                     tradable depth caps output at {}",
+                    quote.max_output
                 ),
                 Some(res),
             ));
@@ -241,24 +257,22 @@ impl ProtocolSim for MetricState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let direction = self.direction(&sell_token, &buy_token)?;
-        let Some(price) = self.quoted_price(direction)? else {
-            // Nothing on this side is no swap at any size, so there is no limit to report.
+        let Some(side) = self.tradable_side(direction)? else {
+            // An untradable side is no swap at any size, so there is no limit to report.
             return Err(SimulationError::RecoverableError("No liquidity".into()));
         };
-        // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap, depth
-        // side, and token decimals.
-        let (sell_per_buy, aggregate, bins, sell_decimals, buy_decimals) = match direction {
+        // Price of one buy-token unit in sell tokens, plus the per-direction inventory cap and
+        // token decimals.
+        let (sell_per_buy, aggregate, sell_decimals, buy_decimals) = match direction {
             MetricDirection::ZeroForOne => (
-                1.0 / price,
+                1.0 / side.price,
                 self.bid_ask.total_token1_available()?,
-                &self.bid_ask.depth.bids,
                 self.base_token.decimals,
                 self.quote_token.decimals,
             ),
             MetricDirection::OneForZero => (
-                price,
+                side.price,
                 self.bid_ask.total_token0_available()?,
-                &self.bid_ask.depth.asks,
                 self.quote_token.decimals,
                 self.base_token.decimals,
             ),
@@ -267,18 +281,17 @@ impl ProtocolSim for MetricState {
         // Metric's own accounting gives the exact input required to consume the whole book: the
         // last bin's cumulativeInputVolume. Prefer it over reconstructing the input from the
         // top-of-book price, which understates the limit by the cumulative price impact.
-        if let Some(last_bin) = bins.last() {
-            if last_bin.cumulative_volume <= aggregate {
-                return Ok((
-                    last_bin.cumulative_input_volume.clone(),
-                    last_bin.cumulative_volume.clone(),
-                ));
-            }
+        if side.last_bin.cumulative_volume <= aggregate {
+            return Ok((
+                side.last_bin
+                    .cumulative_input_volume
+                    .clone(),
+                side.last_bin.cumulative_volume.clone(),
+            ));
         }
 
-        // No depth bins, or the aggregate inventory truncates the walkable depth: either way the
-        // aggregate is the binding output cap, and get_amount_out rejects anything beyond it
-        // (as insufficient liquidity or depth-exhausted respectively). Estimate the matching
+        // The aggregate inventory truncates the walkable depth, so it is the binding output cap
+        // and get_amount_out reports anything beyond it as depth-exhausted. Estimate the matching
         // input from the top-of-book price.
         let buy_limit = aggregate;
         let buy_limit_human = sim::to_human(&buy_limit, buy_decimals);
@@ -325,21 +338,16 @@ impl ProtocolSim for MetricState {
     }
 }
 
-fn depth_max_output(bins: &[MetricDepthBin]) -> Option<BigUint> {
-    bins.last()
-        .map(|bin| bin.cumulative_volume.clone())
-}
-
 /// Walks the depth bins and computes the output bought by `amount_in`, entirely in raw integer
 /// units using Metric's own per-bin accounting.
 ///
 /// Full bins cost exactly their `cumulativeInputVolume` difference — Metric's authoritative,
-/// fee-adjusted accounting. Partial fills are priced pro-rata at the bin's average cost: under
-/// the documented linear intra-bin model this is exact at bin boundaries and conservative inside
-/// the bin (off by at most half the bin's price width, understating the output; the division
-/// also rounds down).
+/// fee-adjusted accounting. The bin an order ends in is priced along its own straight-line curve
+/// (see `fill::exact_fill_inside_bin`). A bin the inventory cap cuts short is charged pro-rata.
 fn depth_output_for_input(
     bins: &[MetricDepthBin],
+    side: BookSide,
+    decimals: (u32, u32),
     amount_in: &BigUint,
     max_output: &BigUint,
 ) -> Result<DepthFill, SimulationError> {
@@ -385,25 +393,32 @@ fn depth_output_for_input(
             break;
         }
 
-        // The aggregate inventory cap can cut the bin short; charge the fillable slice pro-rata,
-        // rounding the input up so the quote never undercharges.
-        let (fillable_volume, fillable_input) = if volume_in_bin <= output_capacity {
-            (volume_in_bin, input_in_bin)
-        } else {
+        if volume_in_bin > output_capacity {
+            // The aggregate inventory cap cuts the bin short: charge the fillable slice pro-rata,
+            // rounding the input up so the quote never undercharges.
             let fillable_input = (&input_in_bin * &output_capacity + &volume_in_bin -
                 BigUint::from(1u8)) /
                 &volume_in_bin;
-            (output_capacity, fillable_input)
-        };
+            if remaining_input >= fillable_input {
+                output += &output_capacity;
+                remaining_input -= &fillable_input;
+                continue;
+            }
+            output += &output_capacity * &remaining_input / &fillable_input;
+            remaining_input = BigUint::ZERO;
+            break;
+        }
 
-        if remaining_input >= fillable_input {
-            output += &fillable_volume;
-            remaining_input -= &fillable_input;
+        if remaining_input >= input_in_bin {
+            output += &volume_in_bin;
+            remaining_input -= &input_in_bin;
             continue;
         }
 
-        // The input runs out inside this bin: pro-rata output, rounding down.
-        output += &fillable_volume * &remaining_input / &fillable_input;
+        // The input runs out inside this bin: the exact fill along the bin's own curve.
+        let bin_curve = Bin { input: &input_in_bin, output: &volume_in_bin, price: &bin.price };
+        output += exact_fill_inside_bin(bin_curve, side, &remaining_input, decimals)
+            .unwrap_or_else(|| &volume_in_bin * &remaining_input / &input_in_bin);
         remaining_input = BigUint::ZERO;
         break;
     }
@@ -491,25 +506,88 @@ mod tests {
             total_token1_available: Some(big("30000000000")),
             server_ts: 100,
             price_provider_status: Some("healthy".to_string()),
-            depth: MetricDepth::default(),
+            // One flat bin per side at the quoted prices: the bid buys 10 WETH for 30000 USDC
+            // (3000), the ask sells 10 WETH for 30100 USDC (3010). Closing at the
+            // quoted price keeps each bin flat, so the walk takes the proportional
+            // share.
+            depth: MetricDepth {
+                bids: vec![MetricDepthBin {
+                    price: big("55340232221128654848000"),
+                    ..depth_bin("30000000000", "10000000000000000000")
+                }],
+                asks: vec![MetricDepthBin {
+                    price: big("55524699661865750400000"),
+                    ..depth_bin("10000000000000000000", "30100000000")
+                }],
+            },
         };
         MetricState { base_token: weth, quote_token: usdc, metadata, bid_ask }
     }
 
-    /// A book with an ask side only: one bin selling 1 WETH for 3011 USDC.
+    /// A book whose bid side Metric closed, as it answers one: the bid sentinel and no bid bins.
+    /// The ask side is one bin selling 1 WETH for 3011 USDC.
     fn state_without_bid() -> MetricState {
         let mut state = state();
         state.bid_ask.bid_adj = BigUint::zero();
+        state.bid_ask.depth.bids = vec![];
         state.bid_ask.depth.asks = vec![depth_bin("1000000000000000000", "3011000000")];
         state
     }
 
-    /// A book with a bid side only: one bin buying 1 WETH for 2999 USDC.
+    /// A book whose ask side Metric closed: the ask sentinel and no ask bins. The bid side is one
+    /// bin buying 1 WETH for 2999 USDC.
     fn state_without_ask() -> MetricState {
         let mut state = state();
         state.bid_ask.ask_adj = BigUint::from(u128::MAX);
+        state.bid_ask.depth.asks = vec![];
         state.bid_ask.depth.bids = vec![depth_bin("2999000000", "1000000000000000000")];
         state
+    }
+
+    /// A side whose price Metric quotes but whose depth holds nothing is not traded at the top of
+    /// the book: there is no size the quote is good for. Metric sends such a side either with no
+    /// bins or with bins whose volumes are all zero.
+    #[rstest::rstest]
+    #[case::no_bins(vec![])]
+    #[case::bins_without_volume(vec![depth_bin("0", "0"), depth_bin("0", "0")])]
+    fn a_priced_side_without_depth_is_not_tradable(#[case] bids: Vec<MetricDepthBin>) {
+        let mut state = state();
+        state.bid_ask.depth.bids = bids;
+        let ask = state
+            .bid_ask
+            .ask_price()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(state.directions(), vec![(usdc().address, weth().address)]);
+        assert_eq!(
+            state
+                .spot_price(&weth(), &usdc())
+                .unwrap(),
+            ask
+        );
+        assert!(matches!(
+            state.get_limits(weth().address, usdc().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        let Err(SimulationError::InvalidInput(msg, None)) =
+            state.get_amount_out(big("100000000000000000"), &weth(), &usdc())
+        else {
+            panic!("selling WETH into a bid without depth must fail");
+        };
+        assert!(msg.contains("no tradable side"), "{msg}");
+    }
+
+    /// A side Metric closed by its sentinel price is not traded even when bins are left on it.
+    #[test]
+    fn a_side_with_bins_but_no_price_is_not_tradable() {
+        let mut state = state();
+        state.bid_ask.ask_adj = BigUint::from(u128::MAX);
+
+        assert_eq!(state.directions(), vec![(weth().address, usdc().address)]);
+        assert!(state
+            .get_amount_out(big("3010000000"), &usdc(), &weth())
+            .is_err());
     }
 
     #[test]
@@ -537,7 +615,7 @@ mod tests {
         else {
             panic!("selling WETH into a book without a bid must fail");
         };
-        assert!(msg.contains("quotes no price in this direction"), "{msg}");
+        assert!(msg.contains("no tradable side"), "{msg}");
         assert_eq!(
             state
                 .get_limits(usdc().address, weth().address)
@@ -571,13 +649,35 @@ mod tests {
         else {
             panic!("buying WETH from a book without an ask must fail");
         };
-        assert!(msg.contains("quotes no price in this direction"), "{msg}");
+        assert!(msg.contains("no tradable side"), "{msg}");
         assert_eq!(
             state
                 .get_limits(weth().address, usdc().address)
                 .unwrap(),
             (big("1000000000000000000"), big("2999000000"))
         );
+    }
+
+    /// A zero ask price is no quote, so the ask side is not traded even with bins on it:
+    /// `directions`, `get_limits` and `get_amount_out` all leave it out, and the bid side still
+    /// trades.
+    #[test]
+    fn zero_ask_price_is_not_quoted() {
+        let mut state = state();
+        state.bid_ask.ask_adj = BigUint::zero();
+
+        assert!(state.bid_ask.is_quotable());
+        assert_eq!(state.directions(), vec![(weth().address, usdc().address)]);
+        assert!(matches!(
+            state.get_limits(usdc().address, weth().address),
+            Err(SimulationError::RecoverableError(_))
+        ));
+        let Err(SimulationError::InvalidInput(msg, None)) =
+            state.get_amount_out(big("300000000"), &usdc(), &weth())
+        else {
+            panic!("buying WETH from a zero ask price must fail");
+        };
+        assert!(msg.contains("no tradable side"), "{msg}");
     }
 
     #[test]
@@ -750,18 +850,6 @@ mod tests {
     }
 
     #[test]
-    fn get_limits_uses_aggregate_without_depth() {
-        let state = state();
-
-        let (_, buy_limit) = state
-            .get_limits(state.base_token.address.clone(), state.quote_token.address.clone())
-            .unwrap();
-
-        // No depth bins: fall back to aggregate inventory (30000 USDC).
-        assert_eq!(buy_limit, BigUint::from(30_000_000_000u64));
-    }
-
-    #[test]
     fn get_amount_out_walks_bid_depth() {
         let mut state = state();
         state.bid_ask.depth.bids = vec![MetricDepthBin {
@@ -823,6 +911,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -840,6 +930,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Asks,
+            (18, 6),
             &BigUint::from(3_000_000_000u64),
             &BigUint::from(1_000_000_000_000_000_000u128),
         )
@@ -859,6 +951,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(2_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -878,6 +972,8 @@ mod tests {
 
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             // 1.55 WETH: consumes bin 1 fully, then half of bin 2's 1.1 WETH.
             &BigUint::from(1_550_000_000_000_000_000u128),
             &BigUint::from(6_000_000_000u64),
@@ -897,6 +993,8 @@ mod tests {
         // pro-rata 0.5 WETH, so 1 WETH exhausts it.
         let fill = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(1_500_000_000u64),
         )
@@ -913,6 +1011,8 @@ mod tests {
 
         let err = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(1_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -931,6 +1031,8 @@ mod tests {
 
         let err = depth_output_for_input(
             &bins,
+            BookSide::Bids,
+            (18, 6),
             &BigUint::from(2_000_000_000_000_000_000u128),
             &BigUint::from(3_000_000_000u64),
         )
@@ -1017,5 +1119,33 @@ mod tests {
         let result = state.get_amount_out(BigUint::ZERO, &weth(), &usdc());
 
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))), "{result:?}");
+    }
+
+    /// The WETH/USDC example of Metric's "Estimate a fill from depth" page: 5 WETH sold into two
+    /// bid bins. The second bin is only partly filled, and the page's exact fill inside it gives
+    /// 13535754492 raw USDC in total.
+    #[test]
+    fn get_amount_out_fills_the_bin_on_the_pool_curve() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![
+            MetricDepthBin {
+                bin_idx: -1,
+                price: big("49937913286041055521250"),
+                cumulative_volume: big("7430706558"),
+                cumulative_input_volume: big("2744786401520641763"),
+            },
+            MetricDepthBin {
+                bin_idx: -2,
+                price: big("49932918995283375647711"),
+                cumulative_volume: big("21731301391"),
+                cumulative_input_volume: big("8027598362225637937"),
+            },
+        ];
+
+        let result = state
+            .get_amount_out(big("5000000000000000000"), &state.base_token, &state.quote_token)
+            .unwrap();
+
+        assert_eq!(result.amount, big("13535754492"));
     }
 }

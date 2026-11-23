@@ -45,7 +45,7 @@ Entry (e.g. splitSwap)
 | `Dispatcher.sol`               | Executor dispatch. Executors passed to the router constructor are active at deployment; ones added later with `setExecutors` wait 1 day. Balance-diff verification of swap outputs. Queries transfer data via staticcall, executes swaps via delegatecall                                                                                           |
 | `TransferManager.sol`          | Caps transferFrom to the declared input amount. `_transferOut` for output transfers (handles FoT/rebasing tokens via balance-diff). 6 transfer scenarios depending on context                                                                                  |
 | `FeeCalculator.sol`            | Dual fee system: router fee on output + router fee on client fee. Per-client custom rates. Upgradeable without redeploying router                                                                                                                              |
-| `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
+| `SubsidyPayer.sol`             | Holds the subsidy budget (ERC20 and native ETH) and pays one EIP-712-signed `Subsidy` per nonce (unordered bitmap). Only the router may call `pay`; `ROUTER_SETTER_ROLE` changes it with `setRouter` after a router redeploy. Any other failed check emits `SubsidySkipped` with a `SkipReason` and returns false. `boundTo` must be the router's caller or `tx.origin`. ETH goes out with a capped gas stipend |
 | `fallback/TychoFallbackRouter.sol` | Abstract standalone contract (not an executor, never delegatecalled). Holds `tokenIn` for one leg, quotes a primary venue against the caller's chosen fallback protocol and runs whichever quotes more; a primary that wins the quote but fails still falls through. `fallback/PropAMMFallbackRouter.sol` is the pAMM primary. See "Protocol fallback" below. |
 | `uniswap_x/UniswapXFiller.sol` | Filler contract for UniswapX V2DutchOrder Reactor. Wraps TychoRouterV3: receives an order via `reactorCallback`, approves TychoRouterV3 to pull input tokens, calls TychoRouterV3, then approves the reactor to pull output. Single-order only; AccessControl-gated. |
 
@@ -248,6 +248,10 @@ settlement pulls the signed amount, so the rest of `amountIn` goes back to the c
 the signed amount makes the pull revert, and the fallback fills the whole leg.
 
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
+
+A natively indexed `IPropAMM` venue uses the same pAMM lane: tycho-simulation publishes its
+components as `fallback:{protocol}` (`via_fallback_router`), the family `fallback` entry resolves
+the executor, and the encoder reads the component's `pamm_address`.
 
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the
 fallback router as receiver and `outputToRouter = false`. `PropAMMFallbackExecutor` decodes the pAMM swap data and

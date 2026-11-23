@@ -296,13 +296,13 @@ impl ExtractorFactory {
         let dci_plugin = match self.config.dci_plugin.as_ref() {
             None => None,
             Some(DCIType::RPC) => {
-                let rpc_dci = Self::create_rpc_dci(
+                let mut rpc_dci = Self::create_rpc_dci(
                     &self.rpc_client,
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
+                rpc_dci.initialize().await?;
                 Some(DCIPlugin::Standard(rpc_dci))
             }
             Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
@@ -315,8 +315,7 @@ impl ExtractorFactory {
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
 
                 let mut hooks_dci = UniswapV4HookDCIBuilder::new(
                     base_dci,
@@ -441,7 +440,10 @@ impl ExtractorFactory {
     }
 
     /// Creates a RPC-based `DynamicContractIndexer` with account extractor and tracer configured.
-    async fn create_rpc_dci(
+    ///
+    /// The returned indexer is not initialized: the caller must call `initialize` on it, or on
+    /// the plugin that wraps it, before it processes a block.
+    fn create_rpc_dci(
         rpc_client: &EthereumRpcClient,
         chain: Chain,
         extractor_name: String,
@@ -475,15 +477,13 @@ impl ExtractorFactory {
         let tracer =
             EVMEntrypointService::new_with_config(&tracer_rpc_client, max_retries, retry_delay_ms);
 
-        let mut rpc_dci = DynamicContractIndexer::new(
+        let rpc_dci = DynamicContractIndexer::new(
             chain,
             extractor_name,
             cached_gw.clone(),
             account_extractor,
             tracer,
         );
-        rpc_dci.initialize().await?;
-
         Ok(rpc_dci)
     }
 }

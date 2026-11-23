@@ -399,7 +399,7 @@ mod tests {
         for protocol in [
             FALLBACK_KEY,
             "fallback:fermiswap",
-            "fallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
+            "fallback:0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
         ] {
             let resolved = registry
                 .get_encoder(protocol)
@@ -410,6 +410,23 @@ mod tests {
         assert!(registry
             .get_encoder("fallbackless_protocol")
             .is_none());
+    }
+
+    /// A native IPropAMM venue published as `fallback:biconomy` resolves to Base's deployed
+    /// fallback executor through the family entry.
+    #[test]
+    fn test_native_venue_fallback_resolves_on_base() {
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(None)
+            .unwrap();
+        let resolved = registry
+            .get_encoder("fallback:biconomy")
+            .expect("no encoder resolved for fallback:biconomy");
+
+        assert_eq!(
+            resolved.executor_address(),
+            &Bytes::from_str("0x08f22285d13533d68aA8bE5949536322DB3538De").unwrap()
+        );
     }
 
     /// An exact entry wins over the `fallback` family entry.
@@ -549,10 +566,9 @@ mod tests {
 
     #[test]
     fn test_registry_configured_with_subsidizing_executor_without_payer() {
-        let executors =
-            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+        let executors = r#"{"polygon": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
 
-        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+        let result = SwapEncoderRegistry::new(Chain::Polygon)
             .add_default_encoders(Some(executors.to_string()));
 
         assert!(

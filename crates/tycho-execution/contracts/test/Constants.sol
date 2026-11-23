@@ -228,7 +228,7 @@ contract Constants is
         0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE;
 
     // FermiSwap
-    address FERMI_SWAPPER = 0xb1076fE3AB5e28005C7c323Bac5AC06a680d452e;
+    address FERMI_SWAPPER = 0xF6d5b2FefeC7B420d9990b95790ADFD3D4c4F977;
 
     // BopAMM (Bebop on-chain PMM)
     address BOPAMM_SETTLEMENT = 0xdB13ad0fcD134E9c48f2fDaEa8f6751a0F5349ca;

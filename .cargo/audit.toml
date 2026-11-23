@@ -17,5 +17,6 @@ ignore = [
     "RUSTSEC-2026-0429", # zip 0.6.6: extract aborts on an oversized symlink entry; same chain and blocker as RUSTSEC-2026-0367
     "RUSTSEC-2026-0545", # zip 0.6.6: AES entries returned unauthenticated when data ends early; same chain and blocker as RUSTSEC-2026-0367, and utoipa-swagger-ui builds zip without the aes-crypto feature
     "RUSTSEC-2026-0548", # zip 0.6.6: ZipStreamReader trusts local-header names; same chain and blocker as RUSTSEC-2026-0367, and the build script reads with ZipArchive, not ZipStreamReader
+    "RUSTSEC-2026-0594", # cookie 0.16.2: PrivateJar nonces can repeat after fork; via actix-web 4, which builds cookie with default features only, so PrivateJar (feature "private") is not compiled; fixed in 0.18.3, which no actix-web 4 release allows (cookie ^0.16)
     "RUSTSEC-2026-0387", # crypto-bigint 0.5.5: timing variability; via elliptic-curve 0.13 (alloy-signer, k256); fixed in 0.7.6, which no alloy 1.x release allows
 ]
