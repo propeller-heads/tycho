@@ -1,3 +1,10 @@
+## [0.537.1](https://github.com/propeller-heads/tycho/compare/0.537.0...0.537.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **execution:** record the 16 November redeploy in the router registry ([0c23087](https://github.com/propeller-heads/tycho/commit/0c2308743ff784992d8f45335e991853d8f9cf85))
+
 ## [0.537.0](https://github.com/propeller-heads/tycho/compare/0.536.0...0.537.0) (2026-11-23)
 
 
