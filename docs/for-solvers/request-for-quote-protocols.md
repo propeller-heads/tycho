@@ -232,7 +232,17 @@ After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution mu
 {% endhint %}
 
 {% hint style="info" %}
-**Aqua0 is different.** Its quote binds the exact input, so an Aqua0 swap must be the first hop of the solution and its input must equal the solution's input. Set `estimated_amount_in` to that exact amount, not a padded one, and do not place Aqua0 after another hop: a path like Uniswap → Aqua0 → Curve is refused at encoding. A route may use one Aqua0 market once. Aqua0's quote is valid for 45 seconds, and it reserves Aqua0 liquidity until then, so encode an Aqua0 route only to execute it.
+**Aqua0 is different.** Its quote binds the exact input. The Aqua0 encoder checks only what it sees in its own swap: it is the first swap of its group, it is not split, and its `estimated_amount_in` is non-zero. The rest is up to the solver:
+
+* The Aqua0 swap is the first hop of the solution. A path like Uniswap → Aqua0 → Curve does not fill.
+* The route has one Aqua0 swap and no splits.
+* Its `estimated_amount_in` is exactly the solution's input, not a padded amount.
+
+A route that breaks one of these still encodes and reserves Aqua0 liquidity, then reverts on chain.
+
+Aqua0's quote is valid for 45 seconds and reserves Aqua0 liquidity until then, so encode an Aqua0 route only to execute it. Reservations compete, also between quotes from the same caller, and Tycho encodes the solutions of one `encode_solutions` call in parallel. Put at most one solution through a given Aqua0 market in one call. Otherwise the second quote is refused, the call fails, and the first quote's liquidity stays reserved for 45 seconds.
+
+Set the gas limit at least 30% above Tycho's gas estimate, or use `eth_estimateGas` on the encoded transaction. The fill adds and removes its liquidity inside the swap, so it needs more gas while it runs than it is billed for after the refund. The recorded one-range fill on Arbitrum is estimated at about 758k gas and billed about 731k, but reverts with a gas limit below about 920k.
 {% endhint %}
 
 #### Encode solution

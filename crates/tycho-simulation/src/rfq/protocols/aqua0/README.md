@@ -28,14 +28,18 @@ Each token is sampled at 1, 10, 100, 1,000 and 10,000 whole units unless `sample
 other sizes. Levels expire 10 seconds after the backend prices them. Gas per level is Aqua0's
 estimate from its recent fills on the chain with the same number of JIT ranges.
 
-Prices are linear between backed samples. An amount below the smallest backed sample, which is at
-or above Aqua0's minimum trade size, is refused, and so is one above the largest. `min_tvl_usd`
-compares the largest backed fill each way, valued in whichever token of the pair is in the
-builder's USD stablecoins; a pair with neither clears only a zero floor.
+Besides the requested samples, `/state` adds a level at or just above Aqua0's minimum trade size,
+and one at 98% of the largest size Aqua0 can fully back at that moment, so a hold placed after the
+poll rarely makes it fail. Prices are linear between backed levels. An amount below the smallest
+backed level is refused, and so is one above the largest. `min_tvl_usd` compares the largest
+backed fill each way, valued in whichever token of the pair is in the builder's USD stablecoins; a
+pair with neither clears only a zero floor.
 
-A malformed entry in `/markets` is skipped. While `/markets` fails, the last list is used for up to
-five refresh periods and read again with a growing wait. A poll where every market fails to load
-or to pass its checks counts as a failed poll and backs off.
+A malformed entry in `/markets` is skipped with one warning for the list, and a list where every
+entry is malformed is a failed read. While `/markets` fails, the last list is used for up to five
+refresh periods and read again with a growing wait. A poll where every market with liquidity fails
+to load or to pass its checks counts as a failed poll and backs off. Markets with no liquidity do
+not count either way.
 
 Before a market is published, the client checks that `/state` describes the listed pool and
 class, that every address is 20 bytes, and that `keccak256(abi.encode(PoolKey))` from the
@@ -53,7 +57,7 @@ returns signed `hookData`. It is requested inside `encode_solutions`, so encode 
 to execute it. If anything in front of the API answers `429`, the client stops requesting
 approvals and publishes no Aqua0 markets until `Retry-After` has passed (at most five minutes), and
 an encode in the meantime fails with a recoverable error. There is no call to release a quote;
-its reservation ends at the deadline. Quotes compete for the same backing whoever asks for them.
+its reservation ends at the deadline.
 
 Before it asks for the quote, the encoder prices the amount on the state (positive, within the
 backed sizes) and runs the V4 encoding once without hook data, so a swap that cannot be encoded
@@ -67,15 +71,32 @@ encoder checks it again. The caller's V4 `user_data` (such as `skip_unlock`) is 
 
 ## Execution
 
-- Exact input, same chain, no split routes.
-- One Aqua0 leg, the first hop, whose input equals the whole solution's input.
-- Simulation enforces this only in part: the state a fill returns quotes nothing more, so the same
-  market cannot fill twice in a route, but two different Aqua0 markets in one route simulate fine
-  and are refused at encoding.
-- Chains: Base, Arbitrum, Polygon, Robinhood and Arc (`AQUA0_CHAINS` in tycho-execution's encoder
-  registry).
-- The `rfq:aqua0` encoder reuses the chain's `uniswap_v4` executor; there is no Aqua0 executor
-  contract to deploy.
+The hook binds the exact input, so a route with an Aqua0 swap must keep these rules:
+
+- One Aqua0 swap, the first hop of the whole route.
+- No splits.
+- The Aqua0 swap's `estimated_amount_in` equals the solution's input.
+
+The encoder checks only what it sees in its own swap: it is first in its group, it is not split,
+and its `estimated_amount_in` is non-zero. The route-level rules are the solver's to keep. A route
+that breaks them still gets a binding quote, which holds backing until its deadline, and then
+reverts on chain instead of filling at another amount. In simulation, the state a fill returns
+quotes nothing more, so the same market cannot fill twice in a route.
+
+Quotes compete for backing, also when they come from the same caller, and Tycho encodes the
+solutions of one `encode_solutions` call in parallel. Put at most one solution through a given
+Aqua0 market in one call, or the second quote is refused, the call fails, and the first quote's
+backing stays held until its deadline.
+
+Set the gas limit at least 30% above Tycho's gas estimate, or use `eth_estimateGas` on the encoded
+transaction. The fill adds and removes its JIT ranges inside the swap, so it needs more gas while
+it runs than it is billed for after the refund. The recorded one-range fill on Arbitrum is
+estimated at about 758k gas and billed about 731k, but reverts with a gas limit below about 920k.
+A refund is at most a fifth of the gas used, so 30% covers fills with more ranges too.
+
+- Chains: Base, Arbitrum, Polygon, Robinhood and Arc. Each has an `rfq:aqua0` entry in
+  tycho-execution's `config/executor_addresses.json`.
+- That entry is the chain's `uniswap_v4` executor; there is no Aqua0 executor contract to deploy.
 
 ```bash
 cargo test -p tycho-simulation --lib aqua0
