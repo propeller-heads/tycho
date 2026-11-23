@@ -10,12 +10,6 @@ Tycho Simulation is a Rust crate that provides powerful tools for **interacting 
 
 The crate lives at <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">`crates/tycho-simulation`</a> inside the <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Tycho monorepo</a>.
 
-{% hint style="info" %}
-**✨ New: Sub-Second Latency with Partial Blocks**
-
-Tycho now provides early support for partial blocks on Base, enabling sub-second latency by streaming pre-confirmation updates. Enable this feature with `.enable_partial_blocks()` on your `ProtocolStreamBuilder`.
-{% endhint %}
-
 ## Installation
 
 The `tycho-simulation` package is available on <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>.
@@ -213,12 +207,12 @@ For a full list of supported protocols and the simulation state implementations 
 `ProtocolStreamBuilder` supports the same <a href="https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-client#streaming-options" target="_blank" rel="noopener noreferrer">streaming options</a> as the Tycho Client, with one difference: TVL estimates are **always included** in the simulation package and cannot be disabled.
 {% endhint %}
 
-### Partial Blocks (Flashblocks)
+### Partial Blocks
 
-Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ — pre-confirmation updates that contain parts of a future block before its construction is finished. Enable this on your stream to receive sub-block latency updates as they arrive. On chains without flash block support, enabling this flag is unsupported.
+Some chains make _partial blocks_: pre-confirmation updates that contain parts of a block before the chain seals it. Enable this option on your stream to receive these updates as they arrive. Do not enable this option on a chain that does not have partial blocks.
 
 ```rust
-let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Base)
+let mut protocol_stream = ProtocolStreamBuilder::new(&tycho_url, chain)
     // ... other builder options ...
     .enable_partial_blocks()
     .await
