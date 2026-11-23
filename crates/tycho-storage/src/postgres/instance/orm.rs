@@ -2,8 +2,8 @@
 //!
 //! Each table has a row struct for reads. Tables whose rows get database-filled columns (a
 //! sequence id, `inserted_ts`, `modified_ts`) also have a `New*` struct for inserts that leaves
-//! those columns out. Link tables without such columns use one struct for both. History tables
-//! use one struct for both, except those that a writer fills (`New*History`).
+//! those columns out. Link tables without such columns use one struct for both. So do the history
+//! tables that no writer fills: only tests insert into them.
 //!
 //! A writer also loads rows into a `New*` struct when it writes them again. `QueryableByName`
 //! reads the columns of the struct by name and ignores the other columns.
@@ -193,7 +193,8 @@ impl NewProtocolState {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable)]
+#[expect(dead_code, reason = "only tests read history rows, and only some fields")]
+#[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = tycho::protocol_state_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProtocolStateHistory {
