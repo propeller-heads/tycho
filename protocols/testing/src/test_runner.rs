@@ -1102,7 +1102,11 @@ impl TestRunner {
             .collect();
 
         checks.run(CheckId::StateComponents, || {
-            Self::validate_state(&test.expected_components, &protocol_components)
+            Self::validate_state(
+                &test.expected_components,
+                &protocol_components,
+                &response_protocol_states_by_id,
+            )
         })?;
         checks.run(CheckId::StateExcluded, || {
             Self::validate_excluded_components(&test.excluded_components, &protocol_components)
@@ -1688,6 +1692,7 @@ impl TestRunner {
     ///   configuration
     /// * `protocol_components` - HashMap of component ID to component. These components are the raw
     ///   Tycho RPC response ones. Not the ones from tycho simulation
+    /// * `states` - The indexed state of each component, by lowercase component ID
     ///
     /// # Returns
     /// Returns `Ok(())` if all expected components are found and match their expected state.
@@ -1699,6 +1704,7 @@ impl TestRunner {
     fn validate_state(
         expected_components: &Vec<ProtocolComponentWithTestConfig>,
         protocol_components: &[ProtocolComponent],
+        states: &HashMap<String, ProtocolComponentState>,
     ) -> miette::Result<()> {
         if expected_components.is_empty() {
             debug!("No expected components defined for this test. Skipping state validation.");
@@ -1734,6 +1740,24 @@ impl TestRunner {
                 None => {
                     info!("Component {} matches the expected state", component_id);
                 }
+            }
+            if expected_component
+                .base
+                .state_attributes
+                .is_empty()
+            {
+                continue;
+            }
+            let state = states
+                .get(&component_id)
+                .ok_or_else(|| miette!("Component {component_id} has no indexed state"))?;
+            if let Some(diff) = expected_component
+                .base
+                .compare_state_attributes(&state.attributes)
+            {
+                return Err(miette!(
+                    "Component {component_id} does not match the expected state:\n{diff}"
+                ));
             }
         }
         info!(
@@ -1852,7 +1876,7 @@ impl TestRunner {
 
         info!("Executing {} simulations ...", inputs.len());
 
-        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data, None)
+        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data)
             .await
             .map_err(|(error, _, _)| error)
     }
@@ -2154,6 +2178,7 @@ mod tests {
                 id: id.to_string(),
                 tokens: Vec::new(),
                 static_attributes: HashMap::new(),
+                state_attributes: HashMap::new(),
                 creation_tx: Bytes::default(),
             },
             skip_simulation,

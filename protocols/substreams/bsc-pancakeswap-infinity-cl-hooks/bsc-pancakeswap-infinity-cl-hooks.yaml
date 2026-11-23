@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "bsc_pancakeswap_infinity_cl_hooks"
-  version: v0.1.0
+  version: v0.1.1
   url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/bsc-pancakeswap-infinity-cl-hooks"
 
 protobuf:

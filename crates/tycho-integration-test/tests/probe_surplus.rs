@@ -185,7 +185,6 @@ async fn a_probe_without_surplus_capture_sees_an_underquote() {
         HashMap::from([("captured".to_string(), captured), ("uncaptured".to_string(), uncaptured)]),
         &block,
         RouterOverwritesData::default(),
-        None,
     )
     .await
     .map_err(|(e, _, _)| e)

@@ -12,5 +12,11 @@
     "name": "VIEW",
     "inputs": [],
     "outputs": [{"name": "", "type": "address"}]
+  },
+  {
+    "anonymous": false,
+    "type": "event",
+    "name": "SetPolicyContract",
+    "inputs": [{"name": "policy", "type": "address", "indexed": false}]
   }
 ]

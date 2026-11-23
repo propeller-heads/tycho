@@ -162,6 +162,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('ethereum', '0xd74644f4ed013dc5f63fe2a576e5fbf6070aec00', ARRAY['rfq:bebop']),
     ('ethereum', '0xd95d619fa709ba559d9cee7645c5f71dbcf19f0f', ARRAY['rfq:metric']),
     ('ethereum', '0xda551e2aa856101ea172f0f6efe25bf27dfdf9e0', ARRAY['rocketpool']),
+    ('ethereum', '0xdf9317b0b37ac12c5b7e6cba0189b5a26bd971b0', ARRAY['rfq:euclid']),
     ('ethereum', '0xe2c352232127afc9803e7ed79f129e458b20925e', ARRAY['fermi_swap', 'vm:fermiswap']),
     ('ethereum', '0xe49b916032c734cd89cdfe80a868805c738a6ceb', ARRAY['uniswap_v4']),
     ('ethereum', '0xe7b267d06df83c8fecad18af8be0cef54068f138', ARRAY['fluid_v1']),

@@ -146,10 +146,19 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
 /// [`add_pamm`](super::stream::PriceLevelStreamBuilder::add_pamm) entry for one of these
 /// addresses overrides the denial.
 pub fn default_denied_pamms() -> Vec<Bytes> {
-    // Venues that settle only for callers on their own allowlist, which Tycho's routers are not on.
     let pamms = [
-        // Unnamed venue; reverts `NotWhitelisted()` for the TychoRouterV3 (2026-11-17).
+        // Unnamed venue that settles only for callers on its own allowlist, which Tycho's routers
+        // are not on; reverts `NotWhitelisted()` for the TychoRouterV3 (2026-11-17).
         "0xb8d4e06e3038b07b4376ba3020eabce69f673463",
+        // Metric's second quote address (see `PAMM_ADDRESS_ALIASES`), which now streams books of
+        // its own but is not a swap entry point: every swap sent to it reverts
+        // `FeedsLengthMismatch()` (6,518 of 6,518 integration test swaps, 2026-11-22). Denial
+        // only keeps its books out; its quote stream entries still complete Metric's overrides
+        // through `pricedAddresses`.
+        "0x30a88bf894d1b806125a23ebf23d715496fd7102",
+        // Unnamed venue whose simulation overrides include Metric's streamed state; every swap
+        // reverts `Dispatcher__SwapReverted` (7,920 of 7,920 integration test swaps, 2026-11-22).
+        "0x38e6f145586043a030d02f1aa32eb55c65183a1d",
     ];
     pamms
         .into_iter()
@@ -178,13 +187,13 @@ pub const PAMM_ADDRESS_ALIASES: &[(&str, &str)] = &[
     // pAMM swap event at all — while its swaps go to the router 0x99ab7c1c…, the address
     // `default_served_pamms` registers it under.
     //
-    // Metric's router also reads the state of a second quote address, 0x30a88bf8…, which streams
-    // no books of its own (2026-10-21) but lists 0x99ab7c1c… in its quote stream entries'
-    // `pricedAddresses`. It is deliberately left unaliased. The overrides path merges its entries
-    // into Metric's own through `pricedAddresses`; aliased, they would count as Metric's own
-    // entries and replace rather than complete them. And any book it streamed in future would
-    // become a second book of the same pair, where the duplicate rule keeps the last in stream
-    // order rather than the better price.
+    // Metric's router also reads the state of a second quote address, 0x30a88bf8…, which lists
+    // 0x99ab7c1c… in its quote stream entries' `pricedAddresses`. It also streams books of its
+    // own (seen 2026-11-22), which `default_denied_pamms` keeps out. It is deliberately left
+    // unaliased. The overrides path merges its entries into Metric's own through
+    // `pricedAddresses`; aliased, they would count as Metric's own entries and replace rather than
+    // complete them. And any book it streamed in future would become a second book of the same
+    // pair, where the duplicate rule keeps the last in stream order rather than the better price.
     ("0xe844701934d9c6085b292e428f41b911cc0b3872", "0x99ab7c1c5eab47801f7937075998527a550fba8a"),
 ];
 

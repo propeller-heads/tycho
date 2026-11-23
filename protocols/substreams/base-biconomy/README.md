@@ -28,7 +28,8 @@ makers keep in the PropAMM executor.
 
 The `biconomy` state in `tycho-simulation` decodes these attributes and prices a swap exactly
 as `PropAMMVenue.quote` does at the execution block. The package makes no RPC calls: every
-value comes from storage changes or from the package params, so it runs on Flashblocks.
+value comes from storage changes or from the package params, so it also runs on a stream
+with partial blocks.
 
 | attribute | source |
 |---|---|
@@ -125,6 +126,6 @@ generation, so each of these is a resync.
 
 ## Update timing
 
-Updates arrive per flashblock on Tycho's Base stream. Prices also move with time inside a board
+Updates arrive once per block on Tycho's Base stream. Prices also move with time inside a board
 (anchor drift, quote-age widening, premium window, expiry), which the simulation applies from
 the execution block's number and timestamp without a state update.

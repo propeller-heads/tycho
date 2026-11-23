@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "registry_version": "2026-09-25",
-  "published_at": "2026-09-25",
+  "registry_version": "2026-11-23",
+  "published_at": "2026-11-23",
   "designation": "Fynd License 1.0",
   "legal_contact": "legal@propellerheads.xyz",
   "notice_policy": {
@@ -26,11 +26,15 @@
     "ethereum": {
       "chain_id": 1,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -75,7 +79,8 @@
         "aero_basic": "0x9929EE6e01C0d599C4b791c6D6093293b05Ea91C",
         "fallback:rfq:native": "0x3F66A8010b33823796b6c7dd331455B821d65F9E",
         "fallback:rfq:liquorice": "0x8c54853D51BB615db48FCeA9A8cc8257847f1458",
-        "subsidy": "0x38eD3945e574Ff7C390fa03F16d0dF554a37D789"
+        "subsidy": "0x38eD3945e574Ff7C390fa03F16d0dF554a37D789",
+        "rfq:euclid": "0xdF9317B0b37Ac12C5B7e6cbA0189b5A26bD971b0"
       },
       "superseded": [{
         "status": "superseded",
@@ -86,16 +91,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0xea290cE3Eae57BdB37E57872a5a14DC0d2f6e614",
         "fee_calculator": "0xA236E1F03e18d5F0AD2c7FD1A94D32b459f06A85"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0x1644D2477f809cc2C71bCCFd6Dc9497E3F83210d",
+        "fee_calculator": "0x2930cB02F8293A684981EF7fB63C160329C410f1"
       }]
     },
     "base": {
       "chain_id": 8453,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -137,16 +155,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0x9bA632d83e9eF57571256Cf4cc951b8aF1158e9C",
         "fee_calculator": "0xb6e39A6ce7224fbC73EB24B10a1D3443ff7Fbfc1"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67",
+        "fee_calculator": "0x4C95D7678Be1668FCa8205f0d076B5E872B715e1"
       }]
     },
     "unichain": {
       "chain_id": 130,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -171,16 +202,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0xa0498D0Fa4081c9a735b137a2E6A1910FaA0E0bC",
         "fee_calculator": "0xfd1b57E41Fe4b2BB48E288F8e68F3bc4AEFb7b40"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0xCba5574597Ad00EA250Fd106DAB4Fc7461949635",
+        "fee_calculator": "0x3A20AdED2BAcfAB637DfDA86543Eb8E832402417"
       }]
     },
     "arbitrum": {
       "chain_id": 42161,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -211,16 +255,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0x8A8Ba3973C84252BF7D357E4C0244b7EedB8B658",
         "fee_calculator": "0x3A61c2A6EE1A752800a561435BF362bBaF25aA00"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0x924F147c50eA59f5180a26031A8b65B2aA1e81Cd",
+        "fee_calculator": "0x9ca59BD78aAB97Db9692E43684b12072e910F0b7"
       }]
     },
     "bsc": {
       "chain_id": 56,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -253,16 +310,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0x712d0213439d99e56eFe5453253C12131C4019C9",
         "fee_calculator": "0x12D75CC114C6a3216562Fe345BcC19B6c78ceC72"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0x7f3D12BBaFb8955E51B3ab9588b34c8ad95BDA4e",
+        "fee_calculator": "0x6C62645e52d40A700F8219f18CD92CE8a668C8Ea"
       }]
     },
     "polygon": {
       "chain_id": 137,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -289,16 +359,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0x0C85409014d6c8cAEF60C837198c931246BD6296",
         "fee_calculator": "0x64A487c26c39f7BcfdB04b60E906715f5b8aC5F2"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0xbd4e6011F03355C2A377Fd9Af939322A7d0A1bC1",
+        "fee_calculator": "0x3970230EAAC99d1C1880C04fcEc069E61dA823dC"
       }]
     },
     "plasma": {
       "chain_id": 9745,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -321,16 +404,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0xa7df4a8EeCA477c8A869fB5A6578A3D39AbE9A18",
         "fee_calculator": "0xE9F440E025B8B871Fce9f9255EaB7cEa30f5e946"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0x0953c7E23B44259e5e5630e9b97C31D7278C4c85",
+        "fee_calculator": "0x8b9918adcb59234fb9f3e7594cf972e3edbb93f1"
       }]
     },
     "robinhood": {
       "chain_id": 4663,
       "status": "active",
-      "effective_at": "2026-09-01T17:25:01Z",
-      "notice_published_at": "2026-09-01T17:25:01Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -367,16 +463,29 @@
         "deployment_record_commit": "91b7f1511facc4ea5808f9e82a9078583fd839c9",
         "router": "0x345e48768a65Ae596ac6A2Aee71202753C4866F5",
         "fee_calculator": "0xd16DBe64E5688C5771E52D530E0C21B32901F141"
+      }, {
+        "status": "superseded",
+        "effective_at": "2026-09-01T17:25:01Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-01T17:25:01Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "8cfd100c1da5b6e367417c281859496f189a9388",
+        "router": "0x09215a470bD585E59EB3F4B612fBD2678131fF9e",
+        "fee_calculator": "0x0Dd35E98aa40B4b75A8Aa4950Fd761B23De12854"
       }]
     },
     "arc": {
       "chain_id": 5042,
       "status": "active",
-      "effective_at": "2026-09-29T02:42:59Z",
-      "notice_published_at": "2026-09-29T02:42:59Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -395,16 +504,29 @@
         "aero_basic": "0x68F46568a26d46E4fc7FB97BbbDDfd3c4FaBdd0a",
         "aero_cl": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015"
       },
-      "superseded": []
+      "superseded": [{
+        "status": "superseded",
+        "effective_at": "2026-09-29T02:42:59Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-09-29T02:42:59Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+        "router": "0x72C452506a551C7fe069f1F66Beb671AC58909E9",
+        "fee_calculator": "0x865CC7A956159467b800e9d51D73Fa57182dFD0C"
+      }]
     },
     "elysium": {
       "chain_id": 99901,
       "status": "active",
-      "effective_at": "2026-11-09T16:41:04Z",
-      "notice_published_at": "2026-11-09T16:41:04Z",
+      "effective_at": "2026-11-16T17:37:32Z",
+      "notice_published_at": "2026-11-16T17:37:32Z",
       "migration_deadline": null,
       "scheduled_successor": null,
-      "deployment_record_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+      "notice_exception": {
+        "kind": "material_security_risk",
+        "reason": "Emergency redeployment to fix a vulnerability in the router's vault accounting."
+      },
+      "deployment_record_commit": "8aab890549e09358f5de1b3fc3eb3d6af9906a92",
       "dependency_snapshot": {
         "source_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
         "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
@@ -429,7 +551,16 @@
         "rfq:metric": "0x9a98EBA41d56eD6172Dc4167179f7e0f9638a974",
         "fallback:rfq:metric": "0xB64E27B8ff972EB0aF32fA6b4830De382CfD74F2"
       },
-      "superseded": []
+      "superseded": [{
+        "status": "superseded",
+        "effective_at": "2026-11-09T16:41:04Z",
+        "superseded_at": "2026-11-16T17:37:32Z",
+        "notice_published_at": "2026-11-09T16:41:04Z",
+        "migration_deadline": null,
+        "deployment_record_commit": "460fc8f3950205502f7618a5fb591a15fde3d341",
+        "router": "0xf7d2Ec960Cb9714C97897Db395Ff7f0a11de1060",
+        "fee_calculator": "0x4609Ed897E905F95C15159cb9cBC1A08486f5Fcf"
+      }]
     }
   }
 }

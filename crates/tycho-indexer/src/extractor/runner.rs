@@ -138,6 +138,9 @@ pub trait MessageSender: Send + Sync {
         subscription_id: Uuid,
         user_identity: Option<String>,
     ) -> Result<Receiver<DeltaCommand>, SubscribeError>;
+
+    /// Returns whether the extractor sends partial block messages.
+    fn partial_blocks(&self) -> bool;
 }
 
 #[derive(Clone)]
@@ -145,6 +148,7 @@ pub struct ExtractorHandle {
     id: ExtractorIdentity,
     control_tx: Sender<ControlMessage>,
     stream_state: watch::Receiver<StreamState>,
+    partial_blocks: bool,
 }
 
 impl ExtractorHandle {
@@ -152,8 +156,9 @@ impl ExtractorHandle {
         id: ExtractorIdentity,
         control_tx: Sender<ControlMessage>,
         stream_state: watch::Receiver<StreamState>,
+        partial_blocks: bool,
     ) -> Self {
-        Self { id, control_tx, stream_state }
+        Self { id, control_tx, stream_state, partial_blocks }
     }
 
     pub fn get_id(&self) -> ExtractorIdentity {
@@ -209,6 +214,10 @@ impl MessageSender for ExtractorHandle {
         .map_err(|_elapsed| SubscribeError::Timeout(timeout))?
         .map_err(|_send_error| SubscribeError::ControlChannelClosed)?;
         Ok(rx)
+    }
+
+    fn partial_blocks(&self) -> bool {
+        self.partial_blocks
     }
 }
 

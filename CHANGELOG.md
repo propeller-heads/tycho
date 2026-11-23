@@ -1,3 +1,88 @@
+## [0.537.3](https://github.com/propeller-heads/tycho/compare/0.537.2...0.537.3) (2026-11-23)
+
+
+### Bug Fixes
+
+* **client:** use the fast-chain timing for Base ([816087c](https://github.com/propeller-heads/tycho/commit/816087c9343b39b7f34d7f066a6ec240c7459bcf))
+* **common:** set the Base block time to 1 s ([d302a18](https://github.com/propeller-heads/tycho/commit/d302a1817d829f0ed975789f697d788274d415b6))
+* **indexer:** saturate the sync-progress block counts ([9fac7e5](https://github.com/propeller-heads/tycho/commit/9fac7e5490a54ab0dc3f06ec53e079067a4191a3))
+
+## [0.537.2](https://github.com/propeller-heads/tycho/compare/0.537.1...0.537.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **indexer:** send full blocks to partial subscriptions on extractors without partial blocks ([8ee91a0](https://github.com/propeller-heads/tycho/commit/8ee91a0f549baa8904ce2664792653e5dc5bf937))
+
+## [0.537.1](https://github.com/propeller-heads/tycho/compare/0.537.0...0.537.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **execution:** record the 16 November redeploy in the router registry ([0c23087](https://github.com/propeller-heads/tycho/commit/0c2308743ff784992d8f45335e991853d8f9cf85))
+
+## [0.537.0](https://github.com/propeller-heads/tycho/compare/0.536.0...0.537.0) (2026-11-23)
+
+
+### Features
+
+* **curve:** index the policy and grant terms of Twocrypto pools ([82fc2bc](https://github.com/propeller-heads/tycho/commit/82fc2bc2adf7eb779cb8971060591859b60adf71))
+
+
+### Bug Fixes
+
+* **curve:** price an exclusive view with a grant when its policy revives ([f0d32ea](https://github.com/propeller-heads/tycho/commit/f0d32eae0724b31aed1a573bc03fa3b1fca5a45e))
+* initialize the uniswap_v4_hooks DCI base indexer one time ([dde748c](https://github.com/propeller-heads/tycho/commit/dde748c20192ed78d765c6e2c760b64c9a0357bf))
+* **simulation:** deny two price level venues every swap reverts on ([9723c50](https://github.com/propeller-heads/tycho/commit/9723c500336f5da4389cffe1da93f21a752500da))
+
+## [0.536.0](https://github.com/propeller-heads/tycho/compare/0.535.1...0.536.0) (2026-11-23)
+
+
+### Features
+
+* **simulation:** route native IPropAMM venues through the fallback router ([98629e2](https://github.com/propeller-heads/tycho/commit/98629e271633072cf4e830693b50462a301e5880))
+
+
+### Bug Fixes
+
+* **simulation:** reject an unregistered via_fallback_router venue ([1e2e357](https://github.com/propeller-heads/tycho/commit/1e2e357fedae71110a8fb5d28e844bb015951552))
+* **tycho-test:** write the router overrides to the slots the paused vault moved ([6b9eb27](https://github.com/propeller-heads/tycho/commit/6b9eb27658d5240119b48a487763bc9824688c40))
+
+## [0.535.1](https://github.com/propeller-heads/tycho/compare/0.535.0...0.535.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** clear the url and cookie cargo audit advisories ([a635f2f](https://github.com/propeller-heads/tycho/commit/a635f2f7b3f4af4d9bf2b16ff2c371baa2b1c249))
+
+## [0.535.0](https://github.com/propeller-heads/tycho/compare/0.534.0...0.535.0) (2026-11-21)
+
+
+### Features
+
+* **execution:** register the Euclid executor on Ethereum ([e115102](https://github.com/propeller-heads/tycho/commit/e11510281daae5e7b788f558d421433cecb3600d))
+
+## [0.534.0](https://github.com/propeller-heads/tycho/compare/0.533.0...0.534.0) (2026-11-21)
+
+
+### Features
+
+* **tycho-test:** drop oracle_overwrites from the next-block simulation ([7800d43](https://github.com/propeller-heads/tycho/commit/7800d433fa3311d30e002f6e06fbbce752392ec8))
+* **tycho-test:** drop oracle_overwrites, narrow the account merge ([6828d6d](https://github.com/propeller-heads/tycho/commit/6828d6d6544c73961714d158840f73a770f8349a)), closes [#1673](https://github.com/propeller-heads/tycho/issues/1673) [#1673](https://github.com/propeller-heads/tycho/issues/1673)
+
+
+### Bug Fixes
+
+* **tycho-test:** fail a simulation whose account overwrites are unsupported ([6f60970](https://github.com/propeller-heads/tycho/commit/6f60970e9e341a1807cb7a036c36a4e2e6afc411))
+* **tycho-test:** warn on unsupported account overwrite fields ([e54fc90](https://github.com/propeller-heads/tycho/commit/e54fc906a9a71415d23aad46fc54cbe083c3800a))
+
+## [0.533.0](https://github.com/propeller-heads/tycho/compare/0.532.2...0.533.0) (2026-11-20)
+
+
+### Features
+
+* **ekubo-v3:** add an Elysium manifest ([34aa299](https://github.com/propeller-heads/tycho/commit/34aa29957e1ce8e1c188266d7e5132248ccc548a))
+
 ## [0.532.2](https://github.com/propeller-heads/tycho/compare/0.532.1...0.532.2) (2026-11-20)
 
 

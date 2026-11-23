@@ -7,6 +7,7 @@ use crate::{
     abi,
     consts::{ETH_ADDRESS, ZERO_ADDRESS},
     params::CurveParams,
+    policy::initial_policy_attributes,
 };
 use tycho_substreams::{
     attributes::{json_serialize_address_list, json_serialize_bigint_list, json_serialize_value},
@@ -1259,6 +1260,7 @@ pub fn address_map(
                         }
                     }
                 }
+                attributes.extend(initial_policy_attributes());
                 let id = hex::encode(&pool_added.pool);
 
                 Some((

@@ -393,7 +393,12 @@ impl ExtractorSupervisor {
 
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
     pub fn handle(&self) -> ExtractorHandle {
-        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone(), self.stream_state.subscribe())
+        ExtractorHandle::new(
+            self.id.clone(),
+            self.ctrl_tx.clone(),
+            self.stream_state.subscribe(),
+            self.factory.partial_blocks,
+        )
     }
 
     /// Runs the supervision loop. Returns `Ok` when the extractor exited gracefully or was
@@ -986,7 +991,7 @@ mod tests {
         let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
         let (state_tx, state_rx) = watch::channel(state);
         let id = ExtractorIdentity::new(Chain::Ethereum, EXTRACTOR);
-        (ExtractorHandle::new(id, ctrl_tx, state_rx), control_rx, state_tx)
+        (ExtractorHandle::new(id, ctrl_tx, state_rx, false), control_rx, state_tx)
     }
 
     #[tokio::test]
