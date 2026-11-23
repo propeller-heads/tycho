@@ -4652,6 +4652,121 @@ plans:
         assert_eq!(response.pagination.total, 3);
     }
 
+    const SYSTEMS_WITH_LAG: [&str; 5] =
+        ["balancer_v2", "curve", "ekubo_v3", "uniswap_v2", "uniswap_v3"];
+
+    fn block_at(ts: NaiveDateTime) -> Block {
+        Block::new(1, Chain::Ethereum, Bytes::from(1u8), Bytes::from(0u8), ts)
+    }
+
+    /// A handler with a one-hour lag check over [`SYSTEMS_WITH_LAG`], at `now`:
+    /// - `balancer_v2`: window tip now, committed block three hours ago
+    /// - `curve`: empty window, committed block ten minutes ago
+    /// - `ekubo_v3`: window tip two hours ago
+    /// - `uniswap_v2`: window tip now
+    /// - `uniswap_v3`: empty window, no committed block
+    ///
+    /// Without `with_pending_deltas`, the handler has no delta windows.
+    fn handler_with_lag(
+        now: NaiveDateTime,
+        with_pending_deltas: bool,
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let committed_block_ts = HashMap::from([
+            ("balancer_v2".to_string(), now - Duration::hours(3)),
+            ("curve".to_string(), now - Duration::minutes(10)),
+        ]);
+        let pending_deltas = with_pending_deltas.then(|| {
+            let mut buffer = MockPendingDeltas::new();
+            buffer
+                .expect_newest_blocks()
+                .returning(move || {
+                    Ok(HashMap::from([
+                        ("balancer_v2".to_string(), Some(block_at(now))),
+                        ("curve".to_string(), None),
+                        ("ekubo_v3".to_string(), Some(block_at(now - Duration::hours(2)))),
+                        ("uniswap_v2".to_string(), Some(block_at(now))),
+                        ("uniswap_v3".to_string(), None),
+                    ]))
+                });
+            Arc::new(buffer) as Arc<dyn PendingDeltasBuffer + Send + Sync>
+        });
+
+        RpcHandler::new(
+            MockGateway::new(),
+            pending_deltas,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            SYSTEMS_WITH_LAG
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            None,
+        )
+        .with_protocol_lag(Some(ProtocolLag::new(Duration::hours(1), committed_block_ts)))
+    }
+
+    fn all_protocol_systems() -> dto::ProtocolSystemsRequestBody {
+        dto::ProtocolSystemsRequestBody {
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 100 },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_leaves_out_lagging_systems() {
+        let handler = handler_with_lag(Utc::now().naive_utc(), true);
+
+        let response = handler
+            .get_protocol_systems(&all_protocol_systems(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol_systems, vec!["balancer_v2", "curve", "uniswap_v2"]);
+        assert_eq!(response.pagination.total, 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_applies_the_allowlist_and_the_lag_check() {
+        let handler = handler_with_lag(Utc::now().naive_utc(), true);
+        let allowed: HashSet<String> =
+            HashSet::from(["curve".to_string(), "ekubo_v3".to_string(), "uniswap_v3".to_string()]);
+
+        let response = handler
+            .get_protocol_systems(&all_protocol_systems(), Some(&allowed))
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol_systems, vec!["curve"]);
+        assert_eq!(response.pagination.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_systems_without_windows_uses_committed_blocks() {
+        let handler = handler_with_lag(Utc::now().naive_utc(), false);
+
+        let response = handler
+            .get_protocol_systems(&all_protocol_systems(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(response.protocol_systems, vec!["curve"]);
+        assert_eq!(response.pagination.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_protocol_lag_allows_a_block_exactly_max_lag_old() {
+        let now = Utc::now().naive_utc();
+        let lag = ProtocolLag::new(Duration::hours(1), HashMap::new());
+        let newest_blocks = HashMap::from([
+            ("at_limit".to_string(), Some(block_at(now - Duration::hours(1)))),
+            ("past_limit".to_string(), Some(block_at(now - Duration::minutes(61)))),
+        ]);
+
+        assert!(lag.is_fresh("at_limit", &newest_blocks, now));
+        assert!(!lag.is_fresh("past_limit", &newest_blocks, now));
+    }
+
     #[tokio::test]
     async fn test_get_protocol_systems_no_allowed_returns_all() {
         let gw = MockGateway::new();
