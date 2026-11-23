@@ -2624,6 +2624,25 @@ mod test {
     }
     "#
     )]
+    #[case(
+        r#"
+    {
+        "protocolIds": [
+            "0xb4eccE46b8D4e4abFd03C9B806276A6735C9c092"
+        ],
+        "protocolSystem": "uniswap_v2",
+        "include_balances": false,
+        "version": {
+            "timestamp": "2069-01-01T04:20:00",
+            "block": {
+                "hash": "0x24101f9cb26cd09425b52da10e8c2f56ede94089a8bbe0f31f1cda5f4daa52c4",
+                "number": 213,
+                "chain": "ethereum"
+            }
+        }
+    }
+    "#
+    )]
     fn test_parse_protocol_state_request(#[case] json_str: &str) {
         let result: ProtocolStateRequestBody = serde_json::from_str(json_str).unwrap();
 
@@ -2654,6 +2673,16 @@ mod test {
         assert_eq!(result, expected);
     }
 
+    #[test]
+    fn test_parse_protocol_state_request_without_protocol_system_fails() {
+        let result = serde_json::from_str::<ProtocolStateRequestBody>(
+            r#"{"protocol_ids": ["0xb4eccE46b8D4e4abFd03C9B806276A6735C9c092"]}"#,
+        );
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("missing field `protocol_system`"), "{message}");
+    }
+
     #[rstest]
     #[case::with_protocol_ids(vec![ProtocolId { id: "id1".to_string(), chain: Chain::Ethereum }, ProtocolId { id: "id2".to_string(), chain: Chain::Ethereum }], vec!["id1".to_string(), "id2".to_string()])]
     #[case::with_strings(vec!["id1".to_string(), "id2".to_string()], vec!["id1".to_string(), "id2".to_string()])]
@@ -2661,9 +2690,10 @@ mod test {
     where
         T: Into<String> + Clone,
     {
-        let request_body = ProtocolStateRequestBody::id_filtered(input_ids);
+        let request_body = ProtocolStateRequestBody::id_filtered("uniswap_v2", input_ids);
 
         assert_eq!(request_body.protocol_ids, Some(expected_ids));
+        assert_eq!(request_body.protocol_system, "uniswap_v2");
     }
 
     fn create_models_block_changes() -> crate::models::blockchain::BlockAggregatedChanges {
