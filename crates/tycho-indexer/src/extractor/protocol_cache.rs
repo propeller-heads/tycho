@@ -1,10 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{Duration, Local, NaiveDateTime};
-use deepsize::DeepSizeOf;
-use tokio::sync::RwLock;
-use tracing::{debug, info, instrument};
+use chrono::{Local, NaiveDateTime};
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, info, instrument, warn};
 use tycho_common::{
     models::{
         protocol::{ProtocolComponent, QualityRange},
@@ -46,6 +45,9 @@ pub trait ProtocolDataCache: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+/// Longest time a background price refresh may take before it is abandoned.
+const PRICE_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 type ProtocolComponentStore = HashMap<String, HashMap<ComponentId, ProtocolComponent>>;
 
 #[derive(Clone)]
@@ -56,12 +58,15 @@ pub struct ProtocolMemoryCache {
     components: Arc<RwLock<ProtocolComponentStore>>,
     max_price_age: chrono::Duration,
     gateway: Arc<dyn ProtocolGateway + Send + Sync>,
+    /// Held while a price refresh runs, so that at most one runs at a time.
+    price_refresh: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
 struct TokenPrices {
     prices: HashMap<Bytes, f64>,
-    last_price_update: NaiveDateTime,
+    /// `None` until the first load.
+    last_price_update: Option<NaiveDateTime>,
 }
 
 impl ProtocolMemoryCache {
@@ -77,6 +82,7 @@ impl ProtocolMemoryCache {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             components: Arc::new(RwLock::new(HashMap::new())),
             token_prices: Arc::new(RwLock::new(TokenPrices::default())),
+            price_refresh: Arc::new(Mutex::new(())),
         }
     }
 
@@ -116,35 +122,81 @@ impl ProtocolMemoryCache {
         Ok(())
     }
 
+    /// Loads all token prices of the chain and replaces the cached prices.
+    ///
+    /// Takes the write lock only to swap the prices: readers keep the old prices during the
+    /// load.
     #[instrument(skip_all)]
     async fn update_prices_cache(&self) -> Result<usize, StorageError> {
-        let mut token_prices = self.token_prices.write().await;
-        token_prices.prices = self
+        let prices = self
             .gateway
             .get_token_prices(&self.chain)
             .await?;
-        let n_fetched = token_prices.prices.len();
-        debug!(last_price_update = ?token_prices.last_price_update, ?n_fetched, resource = "prices", "CacheMiss");
-        token_prices.last_price_update = Local::now().naive_utc();
+        let n_fetched = prices.len();
+        let old_prices = {
+            let mut token_prices = self.token_prices.write().await;
+            debug!(last_price_update = ?token_prices.last_price_update, ?n_fetched, resource = "prices", "CacheMiss");
+            token_prices.last_price_update = Some(Local::now().naive_utc());
+            std::mem::replace(&mut token_prices.prices, prices)
+        };
+        // Free the old prices after the write lock is released.
+        drop(old_prices);
         Ok(n_fetched)
     }
 
-    /// Returns the approximate size of the cache in bytes.
-    pub async fn size_of(&self) -> usize {
-        self.chain.deep_size_of() +
-            self.tokens.read().await.deep_size_of() +
-            self.token_prices
-                .read()
-                .await
-                .prices
-                .deep_size_of() +
-            size_of::<NaiveDateTime>() +
-            self.components
-                .read()
-                .await
-                .deep_size_of() +
-            size_of::<Duration>() +
-            size_of_val(&self.gateway)
+    /// Refreshes the token prices on a new task, so the caller does not wait for the load.
+    /// Does nothing when a refresh already runs. A refresh that fails or takes longer than
+    /// [`PRICE_REFRESH_TIMEOUT`] logs a warning; the next call that finds the prices too old
+    /// starts a new one.
+    fn spawn_price_refresh(&self) {
+        let Ok(running) = self
+            .price_refresh
+            .clone()
+            .try_lock_owned()
+        else {
+            return;
+        };
+        let cache = self.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(PRICE_REFRESH_TIMEOUT, cache.update_prices_cache()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => warn!(%error, "Token price refresh failed"),
+                Err(_) => warn!(
+                    timeout_s = PRICE_REFRESH_TIMEOUT.as_secs(),
+                    "Token price refresh timed out"
+                ),
+            }
+            drop(running);
+        });
+    }
+
+    /// Returns the time since the last price load, or `None` before the first load.
+    pub async fn price_age(&self) -> Option<chrono::Duration> {
+        let last_update = self
+            .token_prices
+            .read()
+            .await
+            .last_price_update?;
+        Some(
+            Local::now()
+                .naive_utc()
+                .signed_duration_since(last_update),
+        )
+    }
+
+    /// Returns the number of cached tokens.
+    pub async fn token_count(&self) -> usize {
+        self.tokens.read().await.len()
+    }
+
+    /// Returns the number of cached protocol components, over all protocol systems.
+    pub async fn component_count(&self) -> usize {
+        self.components
+            .read()
+            .await
+            .values()
+            .map(HashMap::len)
+            .sum()
     }
 }
 
@@ -154,15 +206,13 @@ impl ProtocolDataCache for ProtocolMemoryCache {
         &'a self,
         addresses: &'a [Bytes],
     ) -> Result<Vec<Option<f64>>, StorageError> {
-        let last_update = self
-            .token_prices
-            .read()
-            .await
-            .last_price_update;
-
-        let now = Local::now().naive_utc();
-        if now.signed_duration_since(last_update) > self.max_price_age {
-            self.update_prices_cache().await?;
+        match self.price_age().await {
+            // No prices loaded yet, so there are no prices to answer with during the load.
+            None => {
+                self.update_prices_cache().await?;
+            }
+            Some(age) if age > self.max_price_age => self.spawn_price_refresh(),
+            Some(_) => {}
         }
         let mut res = Vec::with_capacity(addresses.len());
         let inner = self.token_prices.read().await;
@@ -205,6 +255,7 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect::<Vec<_>>())
     }
 
+    #[instrument(skip_all, fields(n_addresses = addresses.len()))]
     async fn has_token(&self, addresses: &[Address]) -> Vec<bool> {
         let guard = self.tokens.read().await;
         addresses
@@ -213,16 +264,21 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect()
     }
 
+    #[instrument(skip_all)]
     async fn add_tokens<T: IntoIterator<Item = Token> + Send + Sync>(
         &self,
         tokens: T,
     ) -> Result<(), StorageError> {
-        let mut guard = self.tokens.write().await;
-        guard.extend(
-            tokens
-                .into_iter()
-                .map(|t| (t.address.clone(), t)),
-        );
+        let tokens = tokens
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect::<Vec<_>>();
+        // Most blocks bring no new token. Taking the write lock anyway would queue this
+        // extractor behind any reader, and every later reader behind it.
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.tokens.write().await.extend(tokens);
         Ok(())
     }
 
@@ -278,10 +334,18 @@ impl ProtocolDataCache for ProtocolMemoryCache {
             .collect())
     }
 
+    #[instrument(skip_all)]
     async fn add_components<T: IntoIterator<Item = ProtocolComponent> + Send + Sync>(
         &self,
         components: T,
     ) -> Result<(), StorageError> {
+        let components = components
+            .into_iter()
+            .collect::<Vec<_>>();
+        // See `add_tokens`: skip the write lock when there is nothing to add.
+        if components.is_empty() {
+            return Ok(());
+        }
         let mut guard = self.components.write().await;
         components.into_iter().for_each(|pc| {
             let components = guard
@@ -324,6 +388,121 @@ mod tests {
             .unwrap();
 
         assert_eq!(prices, vec![Some(1.0), Some(2.0)]);
+    }
+
+    #[tokio::test]
+    async fn test_empty_adds_do_not_wait_for_readers() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        );
+        let wait = std::time::Duration::from_millis(100);
+
+        let tokens_reader = cache.tokens.read().await;
+        let components_reader = cache.components.read().await;
+
+        tokio::time::timeout(wait, cache.add_tokens(Vec::<Token>::new()))
+            .await
+            .expect("empty add_tokens waited for a reader")
+            .unwrap();
+        tokio::time::timeout(wait, cache.add_components(Vec::<ProtocolComponent>::new()))
+            .await
+            .expect("empty add_components waited for a reader")
+            .unwrap();
+
+        drop((tokens_reader, components_reader));
+    }
+
+    #[tokio::test]
+    async fn test_old_prices_are_served_during_refresh() {
+        let chain = Chain::Ethereum;
+        let (release_load, load_released) = tokio::sync::oneshot::channel::<()>();
+        let load_released = std::sync::Mutex::new(Some(load_released));
+        // Counted here, not with `times`: a mock panic inside the refresh task would be lost.
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut gateway = MockGateway::new();
+        let counted_loads = loads.clone();
+        gateway
+            .expect_get_token_prices()
+            .with(eq(chain))
+            .returning(move |_| {
+                counted_loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let load_released = load_released.lock().unwrap().take();
+                Box::pin(async move {
+                    if let Some(load_released) = load_released {
+                        load_released.await.unwrap();
+                    }
+                    Ok(HashMap::from([(Bytes::from("0x01"), 10.0)]))
+                })
+            });
+        let cache = ProtocolMemoryCache::new(chain, Duration::seconds(60), Arc::new(gateway));
+        {
+            let mut token_prices = cache.token_prices.write().await;
+            token_prices.prices = prices();
+            token_prices.last_price_update =
+                Some(Local::now().naive_utc() - Duration::seconds(120));
+        }
+        let addresses = &[Bytes::from("0x01")];
+        let wait = std::time::Duration::from_millis(100);
+
+        // The prices are too old: the call starts a refresh and answers with the old prices.
+        let during_load = tokio::time::timeout(wait, cache.get_token_prices(addresses))
+            .await
+            .expect("get_token_prices waited for the price load")
+            .unwrap();
+        // A second call during the load does not start a second refresh.
+        let second = tokio::time::timeout(wait, cache.get_token_prices(addresses))
+            .await
+            .expect("get_token_prices waited for the price load")
+            .unwrap();
+        release_load.send(()).unwrap();
+        let after_load = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let prices = cache
+                    .get_token_prices(addresses)
+                    .await
+                    .unwrap();
+                if prices == vec![Some(10.0)] {
+                    return prices;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refresh did not replace the prices");
+
+        assert_eq!(during_load, vec![Some(1.0)]);
+        assert_eq!(second, vec![Some(1.0)]);
+        assert_eq!(after_load, vec![Some(10.0)]);
+        assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_entry_counts() {
+        let cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            Duration::seconds(60),
+            Arc::new(MockGateway::new()),
+        );
+        let mut other_system = components()[0].clone();
+        other_system.protocol_system = "sys2".to_string();
+
+        cache
+            .add_tokens(tokens())
+            .await
+            .unwrap();
+        cache
+            .add_components(
+                components()
+                    .into_iter()
+                    .chain([other_system]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cache.token_count().await, 2);
+        assert_eq!(cache.component_count().await, 3);
     }
 
     fn prices() -> HashMap<Bytes, f64> {

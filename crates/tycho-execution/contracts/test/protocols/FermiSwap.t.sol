@@ -3,6 +3,9 @@ pragma solidity ^0.8.26;
 import "../TychoRouterTestSetup.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
     FermiSwapExecutor,
     FermiSwapExecutor__AmountTooLarge,
     FermiSwapExecutor__InvalidDataLength
@@ -24,8 +27,16 @@ contract FermiSwapExecutorExposed is FermiSwapExecutor {
 contract FermiSwapExecutorTest is TestUtils, Constants {
     FermiSwapExecutorExposed executor;
 
+    bytes32 constant FILL_TX =
+        0x16927066210ca504b19c8de4d97586594d27ae66e72228b629366b2fd604d436;
+    // The USDT amount that fill swapped for USDC (6 decimals).
+    uint256 constant FILL_AMOUNT_IN = 168143666903;
+
     function setUp() public {
-        vm.createSelectFork(vm.rpcUrl("mainnet"), 25143884);
+        // The state just before a real fill of the router, in block 26443801. FermiSwap only
+        // quotes in the block its oracle was refreshed in, so a fork at a block boundary reverts
+        // every swap; replaying the block up to this transaction keeps the refresh.
+        vm.createSelectFork(vm.rpcUrl("mainnet"), FILL_TX);
         executor = new FermiSwapExecutorExposed(FERMI_SWAPPER);
     }
 
@@ -64,24 +75,25 @@ contract FermiSwapExecutorTest is TestUtils, Constants {
         assertFalse(outputToRouter);
     }
 
-    function testSwapWethToUsdc() public {
-        uint256 amountIn = 1 ether;
+    function testSwapUsdtToUsdc() public {
+        uint256 amountIn = FILL_AMOUNT_IN;
 
-        deal(WETH_ADDR, address(executor), amountIn);
+        deal(USDT_ADDR, address(executor), amountIn);
         vm.prank(address(executor));
-        IERC20(WETH_ADDR).approve(FERMI_SWAPPER, amountIn);
+        // USDT's approve returns no value, which the IERC20 interface cannot decode.
+        SafeERC20.forceApprove(IERC20(USDT_ADDR), FERMI_SWAPPER, amountIn);
 
         uint256 usdcBalanceBefore = IERC20(USDC_ADDR).balanceOf(BOB);
-        uint256 wethBalanceBefore =
-            IERC20(WETH_ADDR).balanceOf(address(executor));
-        executor.swap(amountIn, _params(), BOB);
+        uint256 usdtBalanceBefore =
+            IERC20(USDT_ADDR).balanceOf(address(executor));
+        executor.swap(amountIn, abi.encodePacked(USDT_ADDR, USDC_ADDR), BOB);
         uint256 usdcDelta = IERC20(USDC_ADDR).balanceOf(BOB) - usdcBalanceBefore;
-        uint256 wethDelta =
-            wethBalanceBefore - IERC20(WETH_ADDR).balanceOf(address(executor));
+        uint256 usdtDelta =
+            usdtBalanceBefore - IERC20(USDT_ADDR).balanceOf(address(executor));
 
         assertGt(usdcDelta, 0);
-        assertEq(wethDelta, amountIn);
-        assertEq(IERC20(WETH_ADDR).balanceOf(address(executor)), 0);
+        assertEq(usdtDelta, amountIn);
+        assertEq(IERC20(USDT_ADDR).balanceOf(address(executor)), 0);
     }
 
     function testSwapRevertsWhenAmountTooLarge() public {
@@ -106,32 +118,45 @@ contract FermiSwapExecutorTest is TestUtils, Constants {
 }
 
 contract FermiSwapRouterTest is TychoRouterTestSetup {
+    // The state just before the real fill that FermiSwapExecutorTest replays, in block 26443801.
+    bytes32 constant FILL_TX =
+        0x16927066210ca504b19c8de4d97586594d27ae66e72228b629366b2fd604d436;
+    // The USDT amount that fill swapped for USDC (6 decimals).
+    uint256 constant FILL_AMOUNT_IN = 168143666903;
+
     function getForkBlock() public pure override returns (uint256) {
-        return 25143884;
+        return 26443801;
+    }
+
+    function getForkTx() public pure override returns (bytes32) {
+        return FILL_TX;
     }
 
     function testSingleSwap() public {
-        uint256 amountIn = 1 ether;
+        uint256 amountIn = FILL_AMOUNT_IN;
         bytes memory callData = loadCallDataFromFile(
-            "test_single_encoding_strategy_fermiswap_weth_usdc"
+            "test_single_encoding_strategy_fermiswap_usdt_usdc"
         );
 
-        deal(WETH_ADDR, ALICE, amountIn);
+        deal(USDT_ADDR, ALICE, amountIn);
         vm.startPrank(ALICE);
-        IERC20(WETH_ADDR).approve(tychoRouterAddr, type(uint256).max);
+        // USDT's approve returns no value, which the IERC20 interface cannot decode.
+        SafeERC20.forceApprove(
+            IERC20(USDT_ADDR), tychoRouterAddr, type(uint256).max
+        );
 
         uint256 usdcBalanceBefore = IERC20(USDC_ADDR).balanceOf(ALICE);
-        uint256 wethBalanceBefore = IERC20(WETH_ADDR).balanceOf(ALICE);
+        uint256 usdtBalanceBefore = IERC20(USDT_ADDR).balanceOf(ALICE);
         (bool success,) = tychoRouterAddr.call(callData);
         uint256 usdcDelta =
             IERC20(USDC_ADDR).balanceOf(ALICE) - usdcBalanceBefore;
-        uint256 wethDelta =
-            wethBalanceBefore - IERC20(WETH_ADDR).balanceOf(ALICE);
+        uint256 usdtDelta =
+            usdtBalanceBefore - IERC20(USDT_ADDR).balanceOf(ALICE);
 
         assertTrue(success, "Call Failed");
         assertGt(usdcDelta, 0);
-        assertEq(wethDelta, amountIn);
-        assertEq(IERC20(WETH_ADDR).balanceOf(tychoRouterAddr), 0);
+        assertEq(usdtDelta, amountIn);
+        assertEq(IERC20(USDT_ADDR).balanceOf(tychoRouterAddr), 0);
         assertEq(IERC20(USDC_ADDR).balanceOf(tychoRouterAddr), 0);
     }
 }

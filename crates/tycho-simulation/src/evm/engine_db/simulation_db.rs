@@ -397,11 +397,12 @@ where
     ///   from the contract, initializes the account in the storage with the retrieved information,
     ///   and returns a clone of the account information.
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        if let Some(account) = {
-            self.read_account_storage()?
-                .get_account_info(&address)
-                .cloned()
-        } {
+        // A separate statement, so the read lock is released before `init_account` writes.
+        let stored = self
+            .read_account_storage()?
+            .get_account_info(&address)
+            .cloned();
+        if let Some(account) = stored {
             return Ok(Some(account));
         }
         let account_info = self.query_account_info(address)?;

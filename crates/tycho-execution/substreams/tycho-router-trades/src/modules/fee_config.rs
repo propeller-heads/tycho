@@ -12,7 +12,8 @@ use substreams_ethereum::{
 use super::{block_timestamp, events, hex_addr, keys};
 use crate::{
     abi::{
-        fee_calculator::events as fc, fee_calculator_exemption::events as fc_exempt,
+        fee_calculator::events as fc, fee_calculator_cap_and_pair_fee::events as fc_cap_pair,
+        fee_calculator_exemption::events as fc_exempt,
         fee_calculator_router_positive_slippage::events as fc_router_ps,
         fee_calculator_v3_0::events as fc_v3_0, tycho_router_v3_0::events as router_v3_0,
         tycho_router_v3_1::events as router_v3_1,
@@ -57,6 +58,8 @@ pub fn map_fee_config_events(params: String, block: Block) -> Result<FeeConfigEv
                 old_value: decoded.old_value,
                 new_value: decoded.new_value,
                 bps_scale: decoded.bps_scale.unwrap_or_default(),
+                token0: decoded.token0,
+                token1: decoded.token1,
             });
         }
     }
@@ -68,6 +71,7 @@ const BPS_SCALE_UINT16: u64 = 10_000;
 const BPS_SCALE_UINT32: u64 = 100_000_000;
 
 /// One decoded fee-config event.
+#[derive(Default)]
 struct Decoded {
     event: &'static str,
     client: Vec<u8>,
@@ -81,6 +85,9 @@ struct Decoded {
     /// carries no bps value has the same signature in both and identifies nothing, and a router
     /// event says nothing about a calculator at all; both leave this `None`.
     bps_scale: Option<u64>,
+    /// The token pair of a pair fee event, lower address first.
+    token0: Vec<u8>,
+    token1: Vec<u8>,
 }
 
 /// Whether the log is one the fee-config decoders recognise, from any emitter.
@@ -94,7 +101,14 @@ pub(crate) fn is_fee_config_log(log: &Log) -> bool {
 fn decode_router_event(log: &Log) -> Option<Decoded> {
     // A router event names a calculator; it says nothing about that calculator's generation.
     let rotation = |event, old_value, new_value| {
-        Some(Decoded { event, client: Vec::new(), old_value, new_value, bps_scale: None })
+        Some(Decoded {
+            event,
+            client: Vec::new(),
+            old_value,
+            new_value,
+            bps_scale: None,
+            ..Default::default()
+        })
     };
     if let Some(ev) = router_v3_1::FeeCalculatorActivated::match_and_decode(log) {
         return rotation(
@@ -132,6 +146,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
                     old_value: ev.old_fee_bps.to_string(),
                     new_value: ev.new_fee_bps.to_string(),
                     bps_scale: Some($scale),
+                    ..Default::default()
                 });
             }
         };
@@ -145,6 +160,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
                     old_value: ev.old_fee_bps.to_string(),
                     new_value: ev.new_fee_bps.to_string(),
                     bps_scale: Some($scale),
+                    ..Default::default()
                 });
             }
         };
@@ -159,6 +175,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
                     old_value: String::new(),
                     new_value: String::new(),
                     bps_scale: None,
+                    ..Default::default()
                 });
             }
         };
@@ -172,6 +189,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
                     old_value: hex_addr(&ev.old_receiver),
                     new_value: hex_addr(&ev.new_receiver),
                     bps_scale: None,
+                    ..Default::default()
                 });
             }
         };
@@ -233,6 +251,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
             old_value: String::new(),
             new_value: if ev.exempt { "1".to_string() } else { "0".to_string() },
             bps_scale: Some(BPS_SCALE_UINT32),
+            ..Default::default()
         });
     }
     // Positive slippage capture and client shares are on the newer generation's fee units too.
@@ -245,6 +264,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
                     old_value: ev.$old.to_string(),
                     new_value: ev.$new.to_string(),
                     bps_scale: Some(BPS_SCALE_UINT32),
+                    ..Default::default()
                 });
             }
         };
@@ -268,6 +288,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
             old_value: ev.old_slippage_bps.to_string(),
             new_value: ev.new_slippage_bps.to_string(),
             bps_scale: Some(BPS_SCALE_UINT32),
+            ..Default::default()
         });
     }
     if let Some(ev) = fc_router_ps::CustomRouterPositiveSlippageBpsRemoved::match_and_decode(log) {
@@ -277,6 +298,7 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
             old_value: String::new(),
             new_value: String::new(),
             bps_scale: Some(BPS_SCALE_UINT32),
+            ..Default::default()
         });
     }
     if let Some(ev) = fc::PositiveSlippageToggled::match_and_decode(log) {
@@ -286,6 +308,37 @@ fn decode_fee_calculator_event(log: &Log) -> Option<Decoded> {
             old_value: String::new(),
             new_value: if ev.enabled { "1".to_string() } else { "0".to_string() },
             bps_scale: Some(BPS_SCALE_UINT32),
+            ..Default::default()
+        });
+    }
+    // Caps and pair fees arrived on the uint32 generation, so their bps are on its fee units.
+    if let Some(ev) = fc_cap_pair::PositiveSlippageCapUpdated::match_and_decode(log) {
+        return Some(Decoded {
+            event: events::POSITIVE_SLIPPAGE_CAP_UPDATED,
+            client: ev.client,
+            old_value: ev.old_cap_bps.to_string(),
+            new_value: ev.new_cap_bps.to_string(),
+            bps_scale: Some(BPS_SCALE_UINT32),
+            ..Default::default()
+        });
+    }
+    if let Some(ev) = fc_cap_pair::TokenPairFeeUpdated::match_and_decode(log) {
+        return Some(Decoded {
+            event: events::TOKEN_PAIR_FEE_UPDATED,
+            new_value: ev.new_fee_bps.to_string(),
+            bps_scale: Some(BPS_SCALE_UINT32),
+            token0: ev.token0,
+            token1: ev.token1,
+            ..Default::default()
+        });
+    }
+    if let Some(ev) = fc_cap_pair::TokenPairFeeRemoved::match_and_decode(log) {
+        return Some(Decoded {
+            event: events::TOKEN_PAIR_FEE_REMOVED,
+            bps_scale: Some(BPS_SCALE_UINT32),
+            token0: ev.token0,
+            token1: ev.token1,
+            ..Default::default()
         });
     }
     None
@@ -355,6 +408,11 @@ fn store_action(ev: &FeeConfigEvent) -> StoreAction {
         }
         events::CLIENT_POSITIVE_SLIPPAGE_SHARE_UPDATED => {
             set(keys::client_positive_slippage_share(fc, &ev.client))
+        }
+        events::POSITIVE_SLIPPAGE_CAP_UPDATED => set(keys::positive_slippage_cap(fc, &ev.client)),
+        events::TOKEN_PAIR_FEE_UPDATED => set(keys::token_pair_fee(fc, &ev.token0, &ev.token1)),
+        events::TOKEN_PAIR_FEE_REMOVED => {
+            StoreAction::DeletePrefix(keys::token_pair_fee(fc, &ev.token0, &ev.token1))
         }
         // The calculator generation before per-client router positive slippage bps exempted a
         // client instead. An exemption is a custom router positive slippage bps of zero, so
@@ -601,6 +659,90 @@ mod tests {
         assert_eq!(
             store_action(&event(events::CUSTOM_FEE_ON_OUTPUT_REMOVED)),
             StoreAction::DeletePrefix(keys::custom_fee_on_output(&[0xaa; 20], &[0xbb; 20]))
+        );
+    }
+
+    /// keccak256("PositiveSlippageCapUpdated(address,uint32,uint32)").
+    const CAP_TOPIC: &str = "1e03c58a1075cd0d84c4bf1e3bbbcb307ef709ec7723d8aa06e6614f99a141e5";
+    /// keccak256("TokenPairFeeUpdated(address,address,uint32)").
+    const PAIR_FEE_TOPIC: &str = "6b5f37e254290426d37577b5e33c59b3fa745798ae22feb2bddb32177850b50d";
+    /// keccak256("TokenPairFeeRemoved(address,address)").
+    const PAIR_FEE_REMOVED_TOPIC: &str =
+        "4c22edc9421994678b1b11b1da20c47a5ce6f2eba7c38b7f345c55518866fc38";
+
+    fn address_topic(address: [u8; 20]) -> Vec<u8> {
+        let mut topic = vec![0u8; 12];
+        topic.extend_from_slice(&address);
+        topic
+    }
+
+    #[test]
+    fn decodes_and_stores_a_positive_slippage_cap() {
+        let mut log = bps_log(CAP_TOPIC, 100_000_000, 50_000);
+        log.topics
+            .push(address_topic([0xcc; 20]));
+        let decoded = decode_fee_calculator_event(&log).unwrap();
+        assert_eq!(decoded.event, events::POSITIVE_SLIPPAGE_CAP_UPDATED);
+        assert_eq!(decoded.client, vec![0xcc; 20]);
+        assert_eq!(decoded.old_value, "100000000");
+        assert_eq!(decoded.new_value, "50000");
+        assert_eq!(decoded.bps_scale, Some(BPS_SCALE_UINT32));
+        assert_eq!(
+            store_action(&event(events::POSITIVE_SLIPPAGE_CAP_UPDATED)),
+            StoreAction::Set {
+                key: keys::positive_slippage_cap(&[0xaa; 20], &[0xbb; 20]),
+                value: "42".to_string(),
+            }
+        );
+    }
+
+    fn pair_event(name: &str) -> FeeConfigEvent {
+        FeeConfigEvent { token0: vec![0x11; 20], token1: vec![0x22; 20], ..event(name) }
+    }
+
+    #[test]
+    fn decodes_and_stores_a_token_pair_fee() {
+        let mut data = vec![0u8; 32];
+        data[28..].copy_from_slice(&30_000u32.to_be_bytes());
+        let log = Log {
+            topics: vec![
+                hex::decode(PAIR_FEE_TOPIC).unwrap(),
+                address_topic([0x11; 20]),
+                address_topic([0x22; 20]),
+            ],
+            data,
+            ..Default::default()
+        };
+        let decoded = decode_fee_calculator_event(&log).unwrap();
+        assert_eq!(decoded.event, events::TOKEN_PAIR_FEE_UPDATED);
+        assert_eq!((decoded.token0, decoded.token1), (vec![0x11; 20], vec![0x22; 20]));
+        assert_eq!(decoded.new_value, "30000");
+        assert!(decoded.client.is_empty());
+        assert_eq!(
+            store_action(&pair_event(events::TOKEN_PAIR_FEE_UPDATED)),
+            StoreAction::Set {
+                key: keys::token_pair_fee(&[0xaa; 20], &[0x11; 20], &[0x22; 20]),
+                value: "42".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_and_stores_a_token_pair_fee_removal() {
+        let log = Log {
+            topics: vec![
+                hex::decode(PAIR_FEE_REMOVED_TOPIC).unwrap(),
+                address_topic([0x11; 20]),
+                address_topic([0x22; 20]),
+            ],
+            ..Default::default()
+        };
+        let decoded = decode_fee_calculator_event(&log).unwrap();
+        assert_eq!(decoded.event, events::TOKEN_PAIR_FEE_REMOVED);
+        assert_eq!((decoded.token0, decoded.token1), (vec![0x11; 20], vec![0x22; 20]));
+        assert_eq!(
+            store_action(&pair_event(events::TOKEN_PAIR_FEE_REMOVED)),
+            StoreAction::DeletePrefix(keys::token_pair_fee(&[0xaa; 20], &[0x11; 20], &[0x22; 20]))
         );
     }
 

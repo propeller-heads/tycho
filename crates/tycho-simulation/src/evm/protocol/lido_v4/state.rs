@@ -1643,7 +1643,7 @@ mod tests {
             let token_in = Token::new(&sell, "in", 18, 0, &[], Chain::Ethereum, 100);
             let token_out = Token::new(&buy, "out", 18, 0, &[], Chain::Ethereum, 100);
             let quoted = state
-                .get_amount_out(max_in.clone(), &token_in, &token_out)
+                .get_amount_out(max_in, &token_in, &token_out)
                 .unwrap_or_else(|e| panic!("{sell:x} -> {buy:x} limit does not quote: {e:?}"));
             assert_eq!(quoted.amount, max_out, "{sell:x} -> {buy:x} limit disagrees with quote");
         }

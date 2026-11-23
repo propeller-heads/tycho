@@ -23,6 +23,10 @@ BEGIN
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS router_positive_slippage_bps BIGINT;
     ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_positive_slippage_share_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS positive_slippage_cap_bps BIGINT;
+    ALTER TABLE trades ADD COLUMN IF NOT EXISTS token_pair_fee BOOLEAN;
+    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token0 TEXT;
+    ALTER TABLE IF EXISTS fee_config_events ADD COLUMN IF NOT EXISTS token1 TEXT;
     ALTER TABLE router_call_errors ADD COLUMN IF NOT EXISTS state_committed BOOLEAN;
 
     -- Looking up the trades of one transaction by hash, which no other index serves.
@@ -110,6 +114,74 @@ BEGIN
            max(block_time) AS last_change
     FROM vault_flows
     GROUP BY 1, 2, 3, 4;
+
+    -- vault_balances valued in USD, stored so a dashboard or an alert reads a few thousand rows
+    -- instead of summing every flow. The fee branch of vault_flows joins each credit to its
+    -- trade, so the view reads all of `trades` and takes longer than Grafana waits for a query.
+    --
+    -- A table rather than a materialized view: this file drops and recreates vault_balances on
+    -- every container start, which a materialized view on top of it would block. The pricer
+    -- refreshes it with refresh_vault_balances_snapshot(); `refreshed_at` says how old it is.
+    -- CREATE TABLE IF NOT EXISTS leaves an existing table as it is, so a new column needs an
+    -- ALTER TABLE here, like the ones on `trades` above.
+    CREATE TABLE IF NOT EXISTS vault_balances_snapshot (
+        chain            TEXT             NOT NULL,
+        router           TEXT             NOT NULL,
+        owner            TEXT             NOT NULL,
+        token            TEXT             NOT NULL,
+        balance          NUMERIC          NOT NULL,
+        credited_as_fees NUMERIC,
+        n_flows          BIGINT           NOT NULL,
+        last_block       BIGINT           NOT NULL,
+        last_change      TIMESTAMPTZ      NOT NULL,
+        -- From preferred_tokens, else from a priced trade. NULL when neither knows the token.
+        decimals         INTEGER,
+        -- The token's most recent settled price: a spot estimate, not a mark. NULL for a token
+        -- no priced trade has produced, and balance_usd with it.
+        price_usd        DOUBLE PRECISION,
+        balance_usd      DOUBLE PRECISION,
+        refreshed_at     TIMESTAMPTZ      NOT NULL,
+        PRIMARY KEY (chain, router, owner, token)
+    );
+
+    -- Replaces the snapshot in one transaction. DELETE rather than TRUNCATE, so a reader keeps
+    -- the previous snapshot until this one commits instead of waiting for the lock.
+    --
+    -- plpgsql, because its body is checked only when it runs: preferred_tokens is created by
+    -- the pricer, and a sink can apply this file before the pricer has started.
+    CREATE OR REPLACE FUNCTION refresh_vault_balances_snapshot() RETURNS VOID
+    LANGUAGE plpgsql AS $fn$
+    BEGIN
+        DELETE FROM vault_balances_snapshot;
+        INSERT INTO vault_balances_snapshot (
+            chain, router, owner, token, balance, credited_as_fees, n_flows, last_block,
+            last_change, decimals, price_usd, balance_usd, refreshed_at
+        )
+        WITH vb AS (
+            SELECT * FROM vault_balances
+        ),
+        -- One price per held token, from the token_out index rather than a pass over trades.
+        px AS (
+            SELECT DISTINCT ON (t.chain, t.token_out)
+                   t.chain, t.token_out AS token, t.price_out_usd, t.decimals_out
+            FROM trades_settled t
+            WHERE t.price_out_usd IS NOT NULL
+              AND (t.chain, t.token_out) IN (SELECT chain, token FROM vb)
+            ORDER BY t.chain, t.token_out, t.block_time DESC
+        )
+        SELECT vb.chain, vb.router, vb.owner, vb.token, vb.balance, vb.credited_as_fees,
+               vb.n_flows, vb.last_block, vb.last_change,
+               coalesce(pt.decimals, px.decimals_out),
+               px.price_out_usd,
+               vb.balance / power(10, coalesce(pt.decimals, px.decimals_out))
+                   * px.price_out_usd,
+               now()
+        FROM vb
+          LEFT JOIN preferred_tokens pt
+            ON pt.chain = vb.chain AND lower(pt.address) = lower(vb.token)
+          LEFT JOIN px ON px.chain = vb.chain AND px.token = vb.token;
+    END
+    $fn$;
 END $$;
 
 DO $$

@@ -3,10 +3,96 @@ const {ethers} = require("hardhat");
 const hre = require("hardhat");
 const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
 
+// Fee units: 100_000_000 = 100%.
+const ROUTER_FEE_ON_CLIENT_FEE = 20_000_000;
+
+// Client addresses stay out of the repository: fill these in locally before a
+// deployment.
+const SLIPPAGE_EXEMPT_CLIENTS = [];
+
+// Keyed by network name without the tenderly_ prefix.
+const SLIPPAGE_EXEMPT_CLIENTS_BY_NETWORK = {};
+
+const CLIENT_FEE_EXEMPT_CLIENTS = [];
+
+// A load-balanced RPC can serve reads from a node that has not yet seen the
+// latest mined block, so a read right after tx.wait() can return old state.
+async function waitUntil(isDone, failureMessage) {
+    for (let attempt = 1; attempt <= 30; attempt++) {
+        if (await isDone()) return;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    throw new Error(`${failureMessage} after 60s`);
+}
+
+async function sendAndWait(description, txPromise) {
+    const tx = await txPromise;
+    await tx.wait();
+    console.log(`- ${description} (tx ${tx.hash})`);
+}
+
+// The constructor already sets the router positive slippage to 100%.
+async function setInitialFees(feeCalculator, network) {
+    const base = network.replace(/^tenderly_/, "");
+    const slippageExempt = [
+        ...SLIPPAGE_EXEMPT_CLIENTS,
+        ...(SLIPPAGE_EXEMPT_CLIENTS_BY_NETWORK[base] ?? []),
+    ];
+
+    console.log("Setting initial fees:");
+    await sendAndWait(
+        `router fee on client fee = ${ROUTER_FEE_ON_CLIENT_FEE}`,
+        feeCalculator.setRouterFeeOnClientFee(ROUTER_FEE_ON_CLIENT_FEE)
+    );
+    for (const client of slippageExempt) {
+        await sendAndWait(
+            `router positive slippage for ${client} = 0`,
+            feeCalculator.setCustomRouterPositiveSlippageBps(client, 0)
+        );
+    }
+    for (const client of CLIENT_FEE_EXEMPT_CLIENTS) {
+        await sendAndWait(
+            `router fee on client fee for ${client} = 0`,
+            feeCalculator.setCustomRouterFeeOnClientFee(client, 0)
+        );
+    }
+}
+
+// The deployer holds ROUTER_FEE_SETTER_ROLE only until the initial fees are
+// set. Then the role moves to the fee setter from roles.json.
+async function configureAndHandOver(feeCalculator, deployer, routerFeeSetter, network) {
+    const role = await feeCalculator.ROUTER_FEE_SETTER_ROLE();
+    if (!(await feeCalculator.hasRole(role, deployer.address))) {
+        console.log("Deployer no longer holds ROUTER_FEE_SETTER_ROLE, skipping fee setup");
+        return;
+    }
+
+    await setInitialFees(feeCalculator, network);
+
+    console.log("Handing over ROUTER_FEE_SETTER_ROLE:");
+    await sendAndWait(
+        `grant role to ${routerFeeSetter}`,
+        feeCalculator.grantRole(role, routerFeeSetter)
+    );
+    await sendAndWait(
+        `renounce role of deployer ${deployer.address}`,
+        feeCalculator.renounceRole(role, deployer.address)
+    );
+
+    await waitUntil(
+        () => feeCalculator.hasRole(role, routerFeeSetter),
+        `Fee setter ${routerFeeSetter} does not hold ROUTER_FEE_SETTER_ROLE`
+    );
+    await waitUntil(
+        async () => !(await feeCalculator.hasRole(role, deployer.address)),
+        `Deployer ${deployer.address} still holds ROUTER_FEE_SETTER_ROLE`
+    );
+}
+
 async function main() {
     const network = hre.network.name;
 
-    // The routerFeeSetter is the address that will be granted
+    // The routerFeeSetter is the address that will hold
     // ROUTER_FEE_SETTER_ROLE to manage fee configuration.
     const networkRoles = resolveRolesNetwork(network);
     const routerFeeSetter = networkRoles.ROUTER_FEE_SETTER[0];
@@ -22,6 +108,9 @@ async function main() {
 
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);
+    if (deployer.address.toLowerCase() === routerFeeSetter.toLowerCase()) {
+        throw new Error("The deployer must not be the fee setter: it renounces the role");
+    }
     console.log(
         `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
     );
@@ -35,7 +124,7 @@ async function main() {
     const FeeCalculator =
         await ethers.getContractFactory("FeeCalculator");
     const deployTx =
-        FeeCalculator.getDeployTransaction(routerFeeSetter, routerFeeReceiver);
+        FeeCalculator.getDeployTransaction(deployer.address, routerFeeReceiver);
     const bytecode = deployTx.data;
 
     const salt = ethers.utils.id(`FeeCalculator-${network}`);
@@ -64,7 +153,14 @@ async function main() {
         });
         await tx.wait();
         console.log(`FeeCalculator deployed to: ${computedAddress}`);
+        await waitUntil(
+            async () => (await ethers.provider.getCode(computedAddress)) !== "0x",
+            `No code at ${computedAddress}`
+        );
     }
+
+    const feeCalculator = FeeCalculator.attach(computedAddress).connect(deployer);
+    await configureAndHandOver(feeCalculator, deployer, routerFeeSetter, network);
 
     // Verify on Tenderly
     try {
@@ -90,7 +186,7 @@ async function main() {
             network,
             address: computedAddress,
             contractFqn: "src/FeeCalculator.sol:FeeCalculator",
-            constructorArgs: [routerFeeSetter, routerFeeReceiver],
+            constructorArgs: [deployer.address, routerFeeReceiver],
         });
         console.log(
             "FeeCalculator verified successfully on blockchain explorer!"

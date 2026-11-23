@@ -22,9 +22,10 @@ interface IFeeCalculator {
      * @dev Called from TychoRouterV3. Does not perform any accounting.
      *      Handles both regular fees and positive slippage surplus
      *      in a single call. When positive slippage capture is
-     *      enabled, the surplus is split between the router and the
-     *      client by the client's share; otherwise the surplus stays
-     *      in the swap output.
+     *      enabled, the surplus, up to the client's cap set as a
+     *      fraction of the actual output, is split between the router
+     *      and the client by the client's share; the rest of the
+     *      surplus stays in the swap output.
      *      Router fee parameters are retrieved from contract storage
      *      based on the client address; client fee parameters are
      *      passed as function arguments.

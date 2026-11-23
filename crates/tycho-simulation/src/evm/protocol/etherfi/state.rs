@@ -1913,7 +1913,7 @@ mod tests {
                 let token_in = token(sell.as_ref().try_into().unwrap(), "in");
                 let token_out = token(buy.as_ref().try_into().unwrap(), "out");
                 let quoted = state
-                    .get_amount_out(max_in.clone(), &token_in, &token_out)
+                    .get_amount_out(max_in, &token_in, &token_out)
                     .unwrap_or_else(|e| panic!("{sell:x} -> {buy:x} limit does not quote: {e:?}"));
                 assert_eq!(
                     quoted.amount, max_out,
@@ -1944,7 +1944,7 @@ mod tests {
                 if supported.contains(&(id, sell_bytes, buy_bytes)) {
                     continue;
                 }
-                assert!(matches_fatal(&state.get_limits(sell.clone(), buy.clone())));
+                assert!(matches_fatal(&state.get_limits(sell, buy)));
                 assert!(matches_fatal(&state.get_amount_out(
                     BigUint::from(1u64),
                     &token(sell_bytes, "in"),
