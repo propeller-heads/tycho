@@ -192,7 +192,7 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
 | `RPC_URL` | Ethereum JSON-RPC endpoint |
-| `AUTH_API_KEY` | API key for RPC access control |
+| `AUTH_API_KEY` | API key for the heap profile route (`jemalloc` builds) |
 | `SUBSTREAMS_API_TOKEN` | Substreams gRPC auth |
 | `TYCHO_CHAINS_CONFIG` | Custom-chain registry YAML (default `./chains.yaml`) |
 | `EXTRACTORS_CONFIG` | Extractor config YAML (default `./extractors.yaml`) |
