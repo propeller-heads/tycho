@@ -1660,7 +1660,8 @@ impl<'de> Deserialize<'de> for ProtocolStateRequestBody {
 
                 Ok(ProtocolStateRequestBody {
                     protocol_ids,
-                    protocol_system: protocol_system.unwrap_or_default(),
+                    protocol_system: protocol_system
+                        .ok_or_else(|| de::Error::missing_field("protocol_system"))?,
                     version: version.unwrap_or_else(VersionParam::default),
                     chain: chain.unwrap_or_else(Chain::default),
                     include_balances: include_balances.unwrap_or(true),
