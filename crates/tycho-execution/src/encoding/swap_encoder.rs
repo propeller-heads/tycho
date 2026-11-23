@@ -50,6 +50,11 @@ pub trait SwapEncoder: Sync + Send {
         false
     }
 
+    /// Maximum number of this protocol's swaps in one solution, including distinct pairs.
+    fn max_swaps_per_solution(&self) -> Option<usize> {
+        None
+    }
+
     /// Creates a cloned instance of the swap encoder.
     ///
     /// This allows the encoder to be cloned when it is being used as a `Box<dyn SwapEncoder>`.

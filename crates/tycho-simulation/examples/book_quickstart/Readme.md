@@ -95,29 +95,25 @@ book feeds.
 
 ## ElFomoFi
 
-Enable ElFomoFi with `--enable-elfomofi`. On Base, BSC and Robinhood, set `RPC_URL` and
-`WS_RPC_URL` for the selected chain.
-`propamm:elfomofi` fetches complete helper books on new block heads, discovers pair changes,
-and interpolates quotes locally. Use `--book-polling` for HTTP-only providers. Settlement uses
-`swapWithContractBalance`, partner **299**, and no venue approval.
-New pairs use the configured token universe. Add `--discover-elfomofi-tokens` to include
-unknown tokens through RPC metadata. Invalid endpoint configuration fails startup.
-Only one ElFomoFi swap is allowed per transaction, across all pairs.
+Enable ElFomoFi with `--enable-elfomofi` and set `RPC_URL` for Base, BSC or Robinhood.
+`propamm:elfomofi` polls complete helper books and interpolates quotes locally. Pair changes
+update automatically within the configured token universe. Settlement uses
+`swapWithContractBalance`, partner **299**, and no venue approval. Each transaction permits
+one ElFomoFi swap across all pairs.
 
-The executor enforces a positive per-leg output floor without a separate snapshot deadline.
-Solvers can allocate their route tolerance with `ElfomofiSwapPolicy` in the swap's `user_data`;
-the default tolerance is 50 bps.
+Set a per-leg execution floor through `ElfomofiSwapPolicy` in the swap's `user_data`.
+The default tolerance is 50 bps. `MinAmountOut` supplies an absolute floor and supports
+serialized solutions without attaching local protocol state.
 
 ```bash
 cargo run --release --example book_quickstart -- --chain base --enable-elfomofi
 ```
 
-The quickstart needs a configured executor address for simulation or execution.
-
-Validate execution with the local executor fixture through read-only RPC state overrides:
+The quickstart needs a configured executor address for simulation or execution. To test with
+the local executor fixture through read-only RPC state overrides:
 
 ```bash
-cargo run -p tycho-integration-test -- --chain base --enable-elfomofi \
+cargo run -p tycho-integration-test -- --chain base --pamm elfomofi \
   --disable-onchain --disable-rfq --disable-price-level-stream \
   --max-blocks 1 --skip-messages-duration 0 \
   --executor-fixture propamm:elfomofi=protocols/testing/fixtures/Elfomofi.runtime.json

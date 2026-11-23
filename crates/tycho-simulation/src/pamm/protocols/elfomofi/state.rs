@@ -20,9 +20,9 @@ use crate::book::{all_pairs::PricesAfterFill, component::PairState};
 #[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
 fn swap_gas(chain: tycho_common::models::Chain) -> Result<u64, SimulationError> {
     match chain {
-        tycho_common::models::Chain::Base => Ok(320_000),
-        tycho_common::models::Chain::Bsc => Ok(300_000),
-        tycho_common::models::Chain::Robinhood => Ok(340_000),
+        tycho_common::models::Chain::Base => Ok(400_000),
+        tycho_common::models::Chain::Bsc => Ok(600_000),
+        tycho_common::models::Chain::Robinhood => Ok(400_000),
         _ => Err(SimulationError::InvalidInput(
             format!("ElFomoFi is not configured for {chain}"),
             None,
@@ -125,13 +125,12 @@ impl ElfomofiState {
     fn limits(levels: &[Level], balance: &BigUint) -> (BigUint, BigUint) {
         let mut input = BigUint::ZERO;
         let mut output = BigUint::ZERO;
-        let max_input = (BigUint::from(1u8) << 256) - BigUint::from(1u8);
         for level in levels {
-            if &level.amount_out > balance || level.amount_in > max_input {
+            if &level.amount_out > balance {
                 let inventory_input = &input +
                     (balance - &output) * (&level.amount_in - &input) /
                         (&level.amount_out - &output);
-                let capped = inventory_input.min(max_input);
+                let capped = inventory_input;
                 let capped_output = &output +
                     (&capped - &input) * (&level.amount_out - &output) /
                         (&level.amount_in - &input);

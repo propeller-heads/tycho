@@ -6,7 +6,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PropAMMExecutor} from "@src/executors/PropAMMExecutor.sol";
 import {TychoRouterTestSetup} from "../TychoRouterTestSetup.sol";
 import {TransferManager} from "@src/TransferManager.sol";
-import {TychoRouter__NegativeSlippage} from "@src/TychoRouterV3.sol";
+import {
+    TychoRouter__NegativeSlippage,
+    ClientFeeParams
+} from "@src/TychoRouterV3.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 import {
     ElfomofiExecutor,
@@ -121,22 +124,33 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
     ElfomofiTestToken internal output;
 
     function testConfiguredRuntimeUsesDeploymentArguments() public {
-        ElfomofiExecutor configured =
-            new ElfomofiExecutor(0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73);
-        assertEq(
-            configured.elfomofiRouter(),
-            0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73
-        );
-        assertEq(configured.partnerId(), 299);
-        assertEq(
-            vm.parseJsonBytes(
-                vm.readFile(
-                    "../../../protocols/testing/fixtures/Elfomofi.runtime.json"
-                ),
-                ".runtimeBytecode"
+        string memory deployments =
+            vm.readFile("../config/executor_deployments.json");
+        bytes memory runtime = vm.parseJsonBytes(
+            vm.readFile(
+                "../../../protocols/testing/fixtures/Elfomofi.runtime.json"
             ),
-            address(configured).code
+            ".runtimeBytecode"
         );
+        string[3] memory chains = ["base", "bsc", "robinhood"];
+        for (uint256 i = 0; i < chains.length; i++) {
+            string memory key =
+                string.concat("$['", chains[i], "']['propamm:elfomofi']");
+            assertEq(
+                vm.parseJsonString(
+                    deployments, string.concat(key, ".contract")
+                ),
+                "ElfomofiExecutor"
+            );
+            uint256[] memory args =
+                vm.parseJsonUintArray(deployments, string.concat(key, ".args"));
+            assertEq(args.length, 1);
+            ElfomofiExecutor configured =
+                new ElfomofiExecutor(address(uint160(args[0])));
+            assertEq(configured.elfomofiRouter(), address(uint160(args[0])));
+            assertEq(configured.partnerId(), 299);
+            assertEq(runtime, address(configured).code, chains[i]);
+        }
     }
 
     // Boundary tests run without RPC; only the protocol call is mocked. The actual TychoRouter
@@ -144,6 +158,8 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
     function setUp() public override {
         vm.etch(PERMIT2_ADDRESS, hex"00");
         deployRouter();
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
         deployFeeCalculator();
         venue = new MockElfomofiRouter();
         executor = new ElfomofiExecutor(address(venue));
@@ -220,6 +236,71 @@ contract ElfomofiExecutorTest is TychoRouterTestSetup {
         assertEq(input.balanceOf(venue.vault()), 100);
         assertEq(input.allowance(tychoRouterAddr, address(venue)), 0);
         assertEq(input.approvalCalls(tychoRouterAddr, address(venue)), 0);
+    }
+
+    function testClientFeeRoutesOutputThroughRouter() public {
+        bytes memory data = encodeSingleSwap(address(executor), _elfomofiData());
+        ClientFeeParams memory fees = makeClientFeeParams(
+            1_000_000,
+            0,
+            100,
+            address(input),
+            address(output),
+            200,
+            198,
+            BOB,
+            data,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+        vm.prank(BOB);
+        uint256 amount = tychoRouter.singleSwap(
+            100, address(input), address(output), 200, 198, BOB, fees, data
+        );
+        assertEq(amount, 198);
+        assertEq(output.balanceOf(BOB), 198);
+        assertEq(venue.lastReceiver(), tychoRouterAddr);
+        assertEq(venue.lastPartner(), 299);
+        assertEq(output.balanceOf(tychoRouterAddr), 2);
+        assertEq(
+            tychoRouter.balanceOf(
+                clientFeeReceiver, uint256(uint160(address(output)))
+            ),
+            2
+        );
+        assertEq(input.approvalCalls(tychoRouterAddr, address(venue)), 0);
+    }
+
+    function testClientFeeMinimumRevertsAtomically() public {
+        bytes memory data = encodeSingleSwap(address(executor), _elfomofiData());
+        ClientFeeParams memory fees = makeClientFeeParams(
+            1_000_000,
+            0,
+            100,
+            address(input),
+            address(output),
+            200,
+            199,
+            BOB,
+            data,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+        vm.prank(BOB);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TychoRouter__NegativeSlippage.selector,
+                uint256(198),
+                uint256(199)
+            )
+        );
+        tychoRouter.singleSwap(
+            100, address(input), address(output), 200, 199, BOB, fees, data
+        );
+        assertEq(input.balanceOf(BOB), 100);
+        assertEq(output.balanceOf(BOB), 0);
+        assertEq(output.balanceOf(tychoRouterAddr), 0);
+        assertEq(venue.lastAmount(), 0);
     }
 
     function testRouterMinimumOutputRevertsAtomically() public {
@@ -641,11 +722,137 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
         _testDirection(true);
     }
 
+    function testHelperBidWithClientFeeExecutesThroughTychoRouter() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            ).getOrderbook(_baseToken(), _quoteToken());
+        IElfomofiHelperTest.Level memory level = book.bidCumulativeLevels[0];
+        uint256 fee = level.amountOut / 100;
+        uint256 minimum = level.amountOut - fee;
+        bytes memory data = encodeSingleSwap(
+            address(executor),
+            abi.encodePacked(
+                _baseToken(), _quoteToken(), level.amountIn, level.amountOut
+            )
+        );
+        ClientFeeParams memory fees = makeClientFeeParams(
+            1_000_000,
+            0,
+            level.amountIn,
+            _baseToken(),
+            _quoteToken(),
+            level.amountOut,
+            minimum,
+            BOB,
+            data,
+            tychoRouterAddr,
+            CLIENT_FEE_RECEIVER_PK
+        );
+        deal(_baseToken(), BOB, level.amountIn);
+        uint256 beforeOutput = IERC20(_quoteToken()).balanceOf(BOB);
+        vm.startPrank(BOB);
+        IERC20(_baseToken()).approve(tychoRouterAddr, level.amountIn);
+        uint256 gasBefore = gasleft();
+        uint256 amount = tychoRouter.singleSwap(
+            level.amountIn,
+            _baseToken(),
+            _quoteToken(),
+            level.amountOut,
+            minimum,
+            BOB,
+            fees,
+            data
+        );
+        uint256 routeGas = gasBefore - gasleft();
+        vm.stopPrank();
+        emit log_named_uint("client-fee route gas", routeGas);
+        assertEq(amount, minimum);
+        assertEq(IERC20(_quoteToken()).balanceOf(BOB) - beforeOutput, minimum);
+        assertEq(
+            tychoRouter.balanceOf(
+                clientFeeReceiver, uint256(uint160(_quoteToken()))
+            ),
+            fee
+        );
+        assertEq(IERC20(_baseToken()).allowance(tychoRouterAddr, VENUE), 0);
+    }
+
+    function testVenueMinimumOutputErrorPropagatesAtomically() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            ).getOrderbook(_baseToken(), _quoteToken());
+        IElfomofiHelperTest.Level memory level = book.bidCumulativeLevels[0];
+        uint256 minimum = level.amountOut + 1;
+        uint256 snapshot = vm.snapshotState();
+        deal(_baseToken(), VENUE, level.amountIn);
+        vm.prank(tychoRouterAddr);
+        (bool success, bytes memory venueError) = VENUE.call(
+            abi.encodeCall(
+                IElfomofiRouter.swapWithContractBalance,
+                (_baseToken(), _quoteToken(), minimum, BOB, 299)
+            )
+        );
+        assertFalse(success);
+        assertGt(venueError.length, 0, "Venue minimum must reject this fill");
+        assertTrue(vm.revertToState(snapshot));
+        deal(_baseToken(), BOB, level.amountIn);
+        uint256 beforeOutput = IERC20(_quoteToken()).balanceOf(BOB);
+        vm.startPrank(BOB);
+        IERC20(_baseToken()).approve(tychoRouterAddr, level.amountIn);
+        vm.expectRevert(venueError);
+        tychoRouter.singleSwap(
+            level.amountIn,
+            _baseToken(),
+            _quoteToken(),
+            level.amountOut,
+            level.amountOut,
+            BOB,
+            noClientFee(),
+            encodeSingleSwap(
+                address(executor),
+                abi.encodePacked(
+                    _baseToken(), _quoteToken(), level.amountIn, minimum
+                )
+            )
+        );
+        vm.stopPrank();
+        assertEq(IERC20(_baseToken()).balanceOf(BOB), level.amountIn);
+        assertEq(IERC20(_quoteToken()).balanceOf(BOB), beforeOutput);
+        assertEq(IERC20(_baseToken()).balanceOf(VENUE), 0);
+    }
+
+    function testFundedSettlementGas() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            ).getOrderbook(_baseToken(), _quoteToken());
+        for (uint256 i = 0; i < 2; i++) {
+            uint256 snapshot = vm.snapshotState();
+            bool reverse = i == 1;
+            IElfomofiHelperTest.Level memory level = reverse
+                ? book.askCumulativeLevels[0]
+                : book.bidCumulativeLevels[0];
+            address sell = reverse ? _quoteToken() : _baseToken();
+            address buy = reverse ? _baseToken() : _quoteToken();
+            uint256 beforeOutput = IERC20(buy).balanceOf(BOB);
+            deal(sell, VENUE, level.amountIn);
+            vm.prank(tychoRouterAddr);
+            uint256 gasBefore = gasleft();
+            IElfomofiRouter(VENUE)
+                .swapWithContractBalance(sell, buy, level.amountOut, BOB, 299);
+            uint256 venueGas = gasBefore - gasleft();
+            assertEq(IERC20(buy).balanceOf(BOB) - beforeOutput, level.amountOut);
+            assertTrue(vm.revertToState(snapshot));
+            emit log_named_uint(
+                reverse ? "ask funded venue gas" : "bid funded venue gas",
+                venueGas
+            );
+        }
+    }
+
     function testFillableHelperLevelsMatchTychoPricing() public {
         (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
                 _helper()
-            )
-            .getOrderbook(_baseToken(), _quoteToken());
+            ).getOrderbook(_baseToken(), _quoteToken());
         _assertHelperLevelsMatchPricing(
             book.bidCumulativeLevels,
             _baseToken(),
@@ -657,6 +864,68 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
             _quoteToken(),
             _baseToken(),
             book.balanceBase
+        );
+    }
+
+    function testMidpointQuotesDoNotExceedVenueQuotes() public {
+        (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
+                _helper()
+            ).getOrderbook(_baseToken(), _quoteToken());
+        _checkMidpoints(
+            book.bidCumulativeLevels,
+            _baseToken(),
+            _quoteToken(),
+            book.balanceQuote
+        );
+        _checkMidpoints(
+            book.askCumulativeLevels,
+            _quoteToken(),
+            _baseToken(),
+            book.balanceBase
+        );
+    }
+
+    function _checkMidpoints(
+        IElfomofiHelperTest.Level[] memory levels,
+        address sell,
+        address buy,
+        uint256 outputBalance
+    ) internal {
+        uint256 previousInput;
+        uint256 previousOutput;
+        uint256 checked;
+        uint256 underquotes;
+        uint256 maximumShortfall;
+        for (uint256 i = 0; i < levels.length; i++) {
+            IElfomofiHelperTest.Level memory level = levels[i];
+            if (level.amountOut > outputBalance) break;
+            uint256 amountIn =
+                previousInput + (level.amountIn - previousInput) / 2;
+            if (amountIn == previousInput) {
+                previousInput = level.amountIn;
+                previousOutput = level.amountOut;
+                continue;
+            }
+            uint256 interpolated = previousOutput + (amountIn - previousInput)
+                * (level.amountOut - previousOutput)
+                / (level.amountIn - previousInput);
+            vm.prank(VENUE);
+            (uint256 quoted,,) = IElfomofiPricingTest(PRICING)
+                .getAmountOut(sell, buy, amountIn, tychoRouterAddr, 299);
+            assertLe(interpolated, quoted, "Helper interpolation over-quotes");
+            uint256 shortfall = quoted - interpolated;
+            if (shortfall > 0) underquotes++;
+            if (shortfall > maximumShortfall) maximumShortfall = shortfall;
+            checked++;
+            previousInput = level.amountIn;
+            previousOutput = level.amountOut;
+        }
+        assertGt(checked, 0, "Fillable helper levels required");
+        emit log_named_address("midpoint input token", sell);
+        emit log_named_uint("midpoints checked", checked);
+        emit log_named_uint("midpoint underquotes", underquotes);
+        emit log_named_uint(
+            "maximum interpolation shortfall wei", maximumShortfall
         );
     }
 
@@ -733,6 +1002,7 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
         emit ElfomoTrade(
             0, 299, tychoRouterAddr, BOB, sell, buy, level.amountIn, expected
         );
+        uint256 gasBefore = gasleft();
         uint256 amount = tychoRouter.singleSwap(
             level.amountIn,
             sell,
@@ -743,7 +1013,11 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
             noClientFee(),
             data
         );
+        uint256 routeGas = gasBefore - gasleft();
         vm.stopPrank();
+        emit log_named_uint(
+            reverse ? "ask route gas" : "bid route gas", routeGas
+        );
         assertEq(amount, expected);
         assertEq(IERC20(buy).balanceOf(BOB) - beforeOutput, expected);
         assertEq(IERC20(sell).balanceOf(BOB), 0);
@@ -762,12 +1036,33 @@ abstract contract ElfomofiForkTestBase is TychoRouterTestSetup {
     }
 }
 
-contract ElfomofiForkTest is ElfomofiForkTestBase {
+abstract contract ElfomofiBaseForkTestBase is ElfomofiForkTestBase {
+    function getChain() public pure override returns (string memory) {
+        return "base";
+    }
+
+    function _helper() internal pure override returns (address) {
+        return 0xc1b13606FC7227f2554067aFb3fb12De75C02d81;
+    }
+
+    function _productionRouter() internal pure override returns (address) {
+        return 0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67;
+    }
+
+    function _baseToken() internal pure override returns (address) {
+        return 0x4200000000000000000000000000000000000006;
+    }
+
+    function _quoteToken() internal pure override returns (address) {
+        return BASE_USDC;
+    }
+}
+
+contract ElfomofiForkTest is ElfomofiBaseForkTestBase {
     function testHelperRefreshTracksTimeDecay() public {
         (IElfomofiHelperTest.Book memory initial,,) = IElfomofiHelperTest(
                 _helper()
-            )
-            .getOrderbook(_baseToken(), _quoteToken());
+            ).getOrderbook(_baseToken(), _quoteToken());
         uint256 previousOutput = initial.bidCumulativeLevels[0].amountOut;
         testFillableHelperLevelsMatchTychoPricing();
         uint256[2] memory elapsed = [uint256(6), 12];
@@ -775,8 +1070,7 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
             vm.warp(forkTimestamp + elapsed[i]);
             (IElfomofiHelperTest.Book memory refreshed,,) = IElfomofiHelperTest(
                     _helper()
-                )
-                .getOrderbook(_baseToken(), _quoteToken());
+                ).getOrderbook(_baseToken(), _quoteToken());
             assertLt(refreshed.bidCumulativeLevels[0].amountOut, previousOutput);
             previousOutput = refreshed.bidCumulativeLevels[0].amountOut;
             testFillableHelperLevelsMatchTychoPricing();
@@ -784,8 +1078,7 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
         vm.warp(forkTimestamp + 60);
         (IElfomofiHelperTest.Book memory expired,,) = IElfomofiHelperTest(
                 _helper()
-            )
-            .getOrderbook(_baseToken(), _quoteToken());
+            ).getOrderbook(_baseToken(), _quoteToken());
         assertEq(expired.bidCumulativeLevels.length, 0);
         assertEq(expired.askCumulativeLevels.length, 0);
         vm.prank(VENUE);
@@ -803,8 +1096,7 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
     function testInterpolatedBidExecutesAtQuotedOutput() public {
         (IElfomofiHelperTest.Book memory book,,) = IElfomofiHelperTest(
                 _helper()
-            )
-            .getOrderbook(_baseToken(), _quoteToken());
+            ).getOrderbook(_baseToken(), _quoteToken());
         uint256 quotedOutput;
         uint256 previousInput;
         uint256 previousOutput;
@@ -853,28 +1145,8 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
         assertEq(IERC20(_baseToken()).allowance(tychoRouterAddr, VENUE), 0);
     }
 
-    function getChain() public pure override returns (string memory) {
-        return "base";
-    }
-
     function getForkBlock() public pure override returns (uint256) {
         return 52_898_481;
-    }
-
-    function _helper() internal pure override returns (address) {
-        return 0xc1b13606FC7227f2554067aFb3fb12De75C02d81;
-    }
-
-    function _productionRouter() internal pure override returns (address) {
-        return 0xAbA5B53b03eAfaD1C5fc8BD5Fc765fC85Bb3de67;
-    }
-
-    function _baseToken() internal pure override returns (address) {
-        return 0x4200000000000000000000000000000000000006;
-    }
-
-    function _quoteToken() internal pure override returns (address) {
-        return BASE_USDC;
     }
 
     function _swapData(address, address, bool reverse, uint256, uint256)
@@ -892,13 +1164,19 @@ contract ElfomofiForkTest is ElfomofiForkTestBase {
     }
 }
 
+contract ElfomofiBaseRecentForkTest is ElfomofiBaseForkTestBase {
+    function getForkBlock() public pure override returns (uint256) {
+        return 61_234_722;
+    }
+}
+
 contract ElfomofiBscForkTest is ElfomofiForkTestBase {
     function getChain() public pure override returns (string memory) {
         return "bsc";
     }
 
-    function getForkBlock() public pure override returns (uint256) {
-        return 128_939_405;
+    function getForkBlock() public pure virtual override returns (uint256) {
+        return 135_271_915;
     }
 
     function _helper() internal pure override returns (address) {
@@ -918,6 +1196,12 @@ contract ElfomofiBscForkTest is ElfomofiForkTestBase {
     }
 }
 
+contract ElfomofiBscEarlierForkTest is ElfomofiBscForkTest {
+    function getForkBlock() public pure override returns (uint256) {
+        return 135_270_000;
+    }
+}
+
 contract ElfomofiRobinhoodForkTest is ElfomofiForkTestBase {
     function _configureForkSystemContracts() internal override {
         // Foundry lacks Arbitrum's native ArbSys precompile. Only its block-number read is
@@ -933,8 +1217,8 @@ contract ElfomofiRobinhoodForkTest is ElfomofiForkTestBase {
         return "robinhood";
     }
 
-    function getForkBlock() public pure override returns (uint256) {
-        return 94_288_199;
+    function getForkBlock() public pure virtual override returns (uint256) {
+        return 121_410_000;
     }
 
     function _helper() internal pure override returns (address) {
@@ -951,5 +1235,11 @@ contract ElfomofiRobinhoodForkTest is ElfomofiForkTestBase {
 
     function _quoteToken() internal pure override returns (address) {
         return 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
+    }
+}
+
+contract ElfomofiRobinhoodRecentForkTest is ElfomofiRobinhoodForkTest {
+    function getForkBlock() public pure override returns (uint256) {
+        return 121_411_343;
     }
 }

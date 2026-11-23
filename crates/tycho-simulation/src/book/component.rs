@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+pub use tycho_common::models::protocol::pair_component_id;
 use tycho_common::{
     models::{token::Token, Chain},
     simulation::protocol_sim::ProtocolSim,
@@ -14,15 +15,6 @@ use tycho_common::{
 };
 
 use crate::{book::Book, protocol::models::ProtocolComponent};
-
-/// The id of a book from `base` into `quote`: the protocol system and the two addresses,
-/// concatenated. The order of the two addresses is part of the id, so a venue whose reverse book
-/// is a separate book passes the orientation it published, and a venue that emits one book per
-/// pair passes the two addresses in a fixed order, keeping the component when the venue flips the
-/// pair around.
-pub fn pair_component_id(protocol_system: &str, base: &Bytes, quote: &Bytes) -> Bytes {
-    Bytes::from([protocol_system.as_bytes(), base, quote].concat())
-}
 
 /// The id of `market_maker`'s book on that pair: its [`pair_component_id`] followed by the
 /// maker's name, for a venue whose quote comes from the one maker it is asked of.

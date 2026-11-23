@@ -1,17 +1,12 @@
-//! ElFomoFi's complete helper books, using shared polling or head-triggered fetching.
+//! Complete helper books fetched through the shared HTTP polling feed.
 use std::time::Duration;
-
-use futures::StreamExt;
 
 use super::{client::ElfomofiClient, models::max_snapshot_age, source::ElfomofiBookSource};
 use crate::{
-    book::{BookFeedConfig, BookSnapshot, ReceivedAt},
+    book::{all_pairs::ComponentLayout, BookFeedConfig, BookSnapshot, ReceivedAt},
     snapshot_feed::{
         errors::FeedError,
-        evm_heads::{head_events, HeadEvent},
         http::{default_http_feed_config, run_http_poll_feed, HttpFeedConfig},
-        trigger::{run_triggered_feed, TriggerEvent},
-        ws::WsFeedConfig,
         Publisher, SnapshotFeed,
     },
 };
@@ -20,66 +15,44 @@ use crate::{
 pub struct ElfomofiFeed {
     config: HttpFeedConfig,
     source: ElfomofiBookSource,
-    #[debug(skip)]
-    ws_rpc_url: Option<String>,
 }
 
-/// Endpoints are supplied by the caller and must serve `book_config.chain`.
+/// The RPC endpoint must serve `book_config.chain`.
 pub struct ElfomofiFeedBuilder {
     book_config: BookFeedConfig,
     rpc_url: String,
-    ws_rpc_url: Option<String>,
-    polling: bool,
-    discover_tokens: bool,
+    layout: ComponentLayout<()>,
     config: HttpFeedConfig,
 }
 
 impl ElfomofiFeedBuilder {
     pub fn new(book_config: BookFeedConfig, rpc_url: String) -> Self {
-        let age = max_snapshot_age(book_config.chain).unwrap_or(Duration::from_secs(1));
-        let config = HttpFeedConfig {
-            poll_interval: age / 2,
-            request_timeout: age,
-            max_snapshot_age: Some(age),
-            ..Self::default_feed_config()
-        };
         Self {
             book_config,
             rpc_url,
-            ws_rpc_url: None,
-            polling: false,
-            discover_tokens: false,
-            config,
+            layout: ComponentLayout::AllPairs(()),
+            config: Self::default_feed_config(),
         }
     }
 
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
-            poll_interval: Duration::from_millis(500),
-            request_timeout: Duration::from_secs(1),
-            max_snapshot_age: Some(Duration::from_secs(1)),
+            poll_interval: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(2),
+            max_snapshot_age: Some(Duration::from_secs(2)),
             ..default_http_feed_config()
         }
     }
 
-    pub fn ws_rpc_url(mut self, url: String) -> Self {
-        self.ws_rpc_url = Some(url);
-        self.polling = false;
-        self
-    }
-    pub fn polling(mut self) -> Self {
-        self.polling = true;
-        self
-    }
-    pub fn feed_config(mut self, config: HttpFeedConfig) -> Self {
-        self.config = config;
+    /// Publishes one component per pair instead of one component for the venue.
+    /// The encoder still permits only one ElFomoFi swap in a solution.
+    pub fn per_pair(mut self) -> Self {
+        self.layout = ComponentLayout::PerPair;
         self
     }
 
-    /// Opt into RPC metadata for tokens outside the configured universe. Disabled by default.
-    /// Configured token metadata always takes precedence over discovered metadata.
-    pub fn discover_tokens(mut self, enabled: bool) -> Self {
-        self.discover_tokens = enabled;
+    pub fn feed_config(mut self, config: HttpFeedConfig) -> Self {
+        self.config = config;
         self
     }
 
@@ -102,20 +75,6 @@ impl ElfomofiFeedBuilder {
                 "ElFomoFi minimum TVL must be finite and nonnegative".into(),
             ));
         }
-        let ws_rpc_url = if self.polling {
-            None
-        } else {
-            let url = self.ws_rpc_url.ok_or_else(|| FeedError::InvalidInput("ElFomoFi head updates require an explicit WebSocket endpoint; select polling() for HTTP".into()))?;
-            let parsed = reqwest::Url::parse(&url).map_err(|_error| {
-                FeedError::InvalidInput("Invalid ElFomoFi WebSocket endpoint".into())
-            })?;
-            if !matches!(parsed.scheme(), "ws" | "wss") || parsed.host_str().is_none() {
-                return Err(FeedError::InvalidInput(
-                    "ElFomoFi WebSocket endpoint must use WS or WSS".into(),
-                ));
-            }
-            Some(url)
-        };
         let client = ElfomofiClient::new(self.book_config.chain, &self.rpc_url)?;
         let source = ElfomofiBookSource::new(
             self.book_config,
@@ -124,9 +83,9 @@ impl ElfomofiFeedBuilder {
                 .max_snapshot_age
                 .expect("validated snapshot age")
                 .as_secs(),
-            self.discover_tokens,
+            self.layout,
         );
-        Ok(ElfomofiFeed { config: self.config, source, ws_rpc_url })
+        Ok(ElfomofiFeed { config: self.config, source })
     }
 }
 
@@ -135,34 +94,7 @@ impl SnapshotFeed for ElfomofiFeed {
     type Error = FeedError;
 
     async fn run(self, publisher: Publisher<Self::Snapshot>) -> Result<(), FeedError> {
-        if let Some(ws_rpc_url) = self.ws_rpc_url {
-            let events = head_events(
-                ws_rpc_url,
-                self.source.chain().id(),
-                &WsFeedConfig {
-                    connect_timeout: self.config.request_timeout,
-                    read_idle_timeout: self
-                        .config
-                        .max_snapshot_age
-                        .expect("validated snapshot age")
-                        .saturating_mul(4)
-                        .max(Duration::from_secs(5)),
-                    backoff_unit: self.config.poll_interval,
-                    max_backoff_exp: self.config.max_backoff_exp,
-                    max_consecutive_failures: self.config.max_consecutive_failures,
-                    max_snapshot_age: self.config.max_snapshot_age,
-                },
-            )
-            .map(|event| {
-                event.map(|event| match event {
-                    HeadEvent::Connected | HeadEvent::Head(_) => TriggerEvent::Fetch,
-                    HeadEvent::Reorg(_) => TriggerEvent::Invalidate,
-                })
-            });
-            run_triggered_feed(self.config, publisher, self.source, events).await
-        } else {
-            run_http_poll_feed(self.config, publisher, self.source).await
-        }
+        run_http_poll_feed(self.config, publisher, self.source).await
     }
 }
 
@@ -175,24 +107,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_lifetime_and_polling_are_bounded_by_the_chain() {
-        for (chain, seconds) in [(Chain::Base, 2), (Chain::Bsc, 1), (Chain::Robinhood, 2)] {
+    fn defaults_match_the_builder_on_every_supported_chain() {
+        for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
             let universe =
                 BookFeedConfig { chain, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 };
+            let default_config = ElfomofiFeedBuilder::default_feed_config();
             let feed = ElfomofiFeedBuilder::new(universe.clone(), "https://example.test".into())
-                .polling()
                 .build()
                 .unwrap();
-            let age = Duration::from_secs(seconds);
-            assert_eq!(feed.config.max_snapshot_age, Some(age));
-            assert!(feed.config.poll_interval * 2 <= age);
+            assert_eq!(feed.config.max_snapshot_age, Some(Duration::from_secs(2)));
+            assert_eq!(feed.config.poll_interval, default_config.poll_interval);
+            assert_eq!(feed.config.request_timeout, default_config.request_timeout);
+            assert_eq!(feed.config.max_snapshot_age, default_config.max_snapshot_age);
 
             let custom = HttpFeedConfig {
-                max_snapshot_age: Some(age + Duration::from_secs(1)),
+                max_snapshot_age: Some(Duration::from_secs(3)),
                 ..ElfomofiFeedBuilder::default_feed_config()
             };
             assert!(ElfomofiFeedBuilder::new(universe, "https://example.test".into())
-                .polling()
                 .feed_config(custom)
                 .build()
                 .is_err());

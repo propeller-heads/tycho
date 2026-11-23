@@ -28,7 +28,6 @@ fn snapshot(balance: u64) -> Snapshot {
         block_number: 100,
         block_hash: Bytes::from(vec![3; 32]),
         block_timestamp: 100,
-        observed_at: 100,
         max_age_seconds: 30,
         book: Book {
             base_token: Bytes::from(vec![1; 20]),
@@ -198,27 +197,10 @@ fn zero_input_and_failed_quotes_do_not_spend_a_pair() {
 }
 
 #[test]
-fn old_serialized_snapshots_start_with_an_unused_pair() {
-    let initial = state();
-    let mut json = serde_json::to_value(&initial).unwrap();
-    json.as_object_mut()
-        .unwrap()
-        .remove("used");
-    let restored: ElfomofiState = serde_json::from_value(json.clone()).unwrap();
-    assert!(restored.eq(&initial));
-    json["used"] = serde_json::json!("invalid");
-    assert!(serde_json::from_value::<ElfomofiState>(json).is_err());
-}
-
-#[test]
 fn snapshot_age_does_not_change_local_simulation() {
     let mut value = snapshot(10_000);
-    value.observed_at = 100;
     value.block_timestamp = 98;
     value.max_age_seconds = 10;
-    assert!(value.ensure_fresh(99).is_err());
-    assert!(value.ensure_fresh(107).is_ok());
-    assert!(value.ensure_fresh(108).is_err());
     let state = from_snapshot(value).unwrap();
     assert_eq!(quote(&state, 100, false).unwrap(), BigUint::from(200u64));
     let book = &state.snapshot().book;
@@ -401,7 +383,6 @@ fn public_helper_snapshot_preserves_initial_quote_outputs() {
         52_898_481,
         &Bytes::from(vec![1; 32]),
         1_792_586_309,
-        1_792_586_309,
         2,
     )
     .unwrap();
@@ -549,4 +530,50 @@ fn deserialization_rejects_token_metadata_from_another_pair_or_chain() {
     let mut json = serde_json::to_value(&state).unwrap();
     json["base_token"]["chain"] = serde_json::to_value(Chain::Bsc).unwrap();
     assert!(serde_json::from_value::<ElfomofiState>(json).is_err());
+}
+
+#[test]
+fn native_gas_allowance_covers_measured_router_routes() {
+    use tycho_common::models::protocol::ProtocolComponent;
+    use tycho_execution::encoding::{
+        evm::gas_estimator::estimate_gas_usage,
+        models::{Solution, Strategy, Swap},
+    };
+
+    // Router execution measured with client fees, plus the base transaction cost.
+    for (chain, measured_route_gas) in [
+        (Chain::Base, 444_839u64 + 21_000),
+        (Chain::Bsc, 616_770 + 21_000),
+        (Chain::Robinhood, 416_911 + 21_000),
+    ] {
+        let mut snapshot = snapshot(10_000);
+        snapshot.chain = chain;
+        let state = from_snapshot(snapshot).unwrap();
+        let sell = token_on(chain, &state.snapshot().book.base_token, 0);
+        let buy = token_on(chain, &state.snapshot().book.quote_token, 0);
+        let quoted = state
+            .get_amount_out(100u64.into(), &sell, &buy)
+            .unwrap();
+        let component = ProtocolComponent {
+            protocol_system: super::PROTOCOL_SYSTEM.into(),
+            chain,
+            tokens: vec![sell.address.clone(), buy.address.clone()],
+            ..Default::default()
+        };
+        let swap = Swap::new(component, sell.clone(), buy.clone(), quoted.gas);
+        let solution = Solution::new(
+            Bytes::from(vec![5; 20]),
+            Bytes::from(vec![6; 20]),
+            sell.address,
+            buy.address,
+            100u64.into(),
+            quoted.amount.clone(),
+            quoted.amount,
+            vec![swap],
+        );
+        assert!(
+            estimate_gas_usage(&solution, Strategy::Single) >= measured_route_gas.into(),
+            "{chain}"
+        );
+    }
 }

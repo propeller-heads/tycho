@@ -3,7 +3,13 @@ use std::collections::HashMap;
 use alloy::primitives::Address;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use tycho_common::{models::Chain, Bytes};
+use tycho_common::{
+    models::{
+        protocol::{all_pairs_component_id, pair_component_id},
+        Chain,
+    },
+    Bytes,
+};
 
 use crate::encoding::{
     errors::EncodingError,
@@ -16,22 +22,9 @@ use crate::encoding::{
 const PROTOCOL_SYSTEM: &str = "propamm:elfomofi";
 const DEFAULT_SLIPPAGE_BPS: u32 = 50;
 
-pub fn validate_swaps(swaps: &[Swap]) -> Result<(), EncodingError> {
-    if swaps
-        .iter()
-        .filter(|swap| swap.component().protocol_system == PROTOCOL_SYSTEM)
-        .nth(1)
-        .is_some()
-    {
-        return Err(EncodingError::InvalidInput(
-            "Only one ElFomoFi swap is supported in a solution".into(),
-        ));
-    }
-    Ok(())
-}
-
 /// Per-swap execution floor, serialized into `Swap::user_data`.
 /// An absolute floor applies at the estimated input; smaller fills scale it down.
+/// `MinAmountOut` can encode without a book state; the caller supplies that floor.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ElfomofiSwapPolicy {
@@ -83,7 +76,11 @@ impl ElfomofiSwapEncoder {
             ));
         }
         let component = swap.component();
-        if component.chain != self.chain || component.protocol_system != PROTOCOL_SYSTEM {
+        if component.chain != self.chain ||
+            swap.token_in().chain != self.chain ||
+            swap.token_out().chain != self.chain ||
+            component.protocol_system != PROTOCOL_SYSTEM
+        {
             return Err(EncodingError::InvalidInput(
                 "ElFomoFi component must use propamm:elfomofi on the encoder's chain".into(),
             ));
@@ -100,26 +97,25 @@ impl ElfomofiSwapEncoder {
                 "ElFomoFi component tokens do not match the swap pair".into(),
             ));
         }
-        let (first, second) = if sell < buy { (sell, buy) } else { (buy, sell) };
-        let pair_id =
-            hex::encode([PROTOCOL_SYSTEM.as_bytes(), first.as_slice(), second.as_slice()].concat());
+        let (first, second) = if sell < buy {
+            (&swap.token_in().address, &swap.token_out().address)
+        } else {
+            (&swap.token_out().address, &swap.token_in().address)
+        };
+        let pair_id = pair_component_id(PROTOCOL_SYSTEM, first, second);
         let component_id = component
             .id
-            .strip_prefix("0x")
-            .unwrap_or(&component.id);
-        if component_id != hex::encode(PROTOCOL_SYSTEM) &&
+            .parse::<Bytes>()
+            .map_err(|error| {
+                EncodingError::InvalidInput(format!("Invalid ElFomoFi component ID: {error}"))
+            })?;
+        if component_id != all_pairs_component_id(PROTOCOL_SYSTEM) &&
             (component_id != pair_id || component.tokens.len() != 2)
         {
             return Err(EncodingError::InvalidInput(
                 "ElFomoFi component does not match the canonical venue or token pair".into(),
             ));
         }
-        let state = swap
-            .protocol_state()
-            .as_ref()
-            .ok_or_else(|| {
-                EncodingError::FatalError("ElFomoFi requires its book protocol_state".into())
-            })?;
         let amount_in = swap
             .estimated_amount_in()
             .as_ref()
@@ -129,12 +125,6 @@ impl ElfomofiSwapEncoder {
         if amount_in == &BigUint::ZERO || amount_in.bits() > 256 {
             return Err(EncodingError::InvalidInput(
                 "ElFomoFi input must be positive and fit uint256".into(),
-            ));
-        }
-        let quote = state.get_amount_out(amount_in.clone(), swap.token_in(), swap.token_out())?;
-        if quote.amount == BigUint::ZERO || quote.amount.bits() > 256 {
-            return Err(EncodingError::InvalidInput(
-                "ElFomoFi book output must be positive and fit uint256".into(),
             ));
         }
         let policy = swap
@@ -148,13 +138,45 @@ impl ElfomofiSwapEncoder {
             .transpose()?
             .unwrap_or(ElfomofiSwapPolicy::SlippageBps(self.slippage_bps));
         policy.validate()?;
+        let quoted_amount = swap
+            .protocol_state()
+            .as_ref()
+            .map(|state| {
+                state
+                    .get_amount_out(amount_in.clone(), swap.token_in(), swap.token_out())
+                    .map(|quote| quote.amount)
+            })
+            .transpose()?;
+        if quoted_amount
+            .as_ref()
+            .is_some_and(|amount| amount == &BigUint::ZERO || amount.bits() > 256)
+        {
+            return Err(EncodingError::InvalidInput(
+                "ElFomoFi book output must be positive and fit uint256".into(),
+            ));
+        }
         let minimum = match policy {
             ElfomofiSwapPolicy::SlippageBps(bps) => {
+                let quote = quoted_amount.ok_or_else(|| {
+                    EncodingError::FatalError(
+                        "ElFomoFi slippage requires book protocol_state; use MinAmountOut for a serialized swap".into(),
+                    )
+                })?;
                 // Round up so a positive quote retains a positive execution floor.
-                (&quote.amount * BigUint::from(10_000 - bps) + BigUint::from(9_999u32)) /
+                (quote * BigUint::from(10_000 - bps) + BigUint::from(9_999u32)) /
                     BigUint::from(10_000u32)
             }
-            ElfomofiSwapPolicy::MinAmountOut(minimum) => minimum,
+            ElfomofiSwapPolicy::MinAmountOut(minimum) => {
+                if quoted_amount
+                    .as_ref()
+                    .is_some_and(|quote| &minimum > quote)
+                {
+                    return Err(EncodingError::InvalidInput(
+                        "ElFomoFi min_amount_out exceeds its book quote".into(),
+                    ));
+                }
+                minimum
+            }
         };
         let mut encoded = Vec::with_capacity(104);
         encoded.extend_from_slice(sell.as_slice());
@@ -211,6 +233,10 @@ impl SwapEncoder for ElfomofiSwapEncoder {
     }
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
+    }
+
+    fn max_swaps_per_solution(&self) -> Option<usize> {
+        Some(1)
     }
 }
 
@@ -293,7 +319,7 @@ mod tests {
     fn component(chain: Chain) -> ProtocolComponent {
         let (a, b) = tokens();
         ProtocolComponent {
-            id: hex::encode([PROTOCOL_SYSTEM.as_bytes(), a.as_ref(), b.as_ref()].concat()),
+            id: pair_component_id(PROTOCOL_SYSTEM, &a, &b).to_string(),
             protocol_system: PROTOCOL_SYSTEM.into(),
             chain,
             tokens: vec![a, b],
@@ -319,7 +345,7 @@ mod tests {
     fn pair_swap(chain: Chain, sell: Bytes, buy: Bytes) -> Swap {
         let (first, second) = if sell < buy { (&sell, &buy) } else { (&buy, &sell) };
         let component = ProtocolComponent {
-            id: hex::encode([PROTOCOL_SYSTEM.as_bytes(), first.as_ref(), second.as_ref()].concat()),
+            id: pair_component_id(PROTOCOL_SYSTEM, first, second).to_string(),
             protocol_system: PROTOCOL_SYSTEM.into(),
             chain,
             tokens: vec![sell.clone(), buy.clone()],
@@ -336,7 +362,7 @@ mod tests {
     fn venue_swap(chain: Chain, reverse: bool) -> Swap {
         let pair = swap(chain, reverse);
         let mut component = pair.component().clone();
-        component.id = hex::encode(PROTOCOL_SYSTEM);
+        component.id = all_pairs_component_id(PROTOCOL_SYSTEM).to_string();
         component
             .tokens
             .push(Bytes::from(vec![0x77; 20]));
@@ -422,12 +448,15 @@ mod tests {
     #[test]
     fn test_elfomofi_accepts_common_component_hex_ids() {
         let original = swap(Chain::Base, false);
-        assert!(!original
+        assert!(original
             .component()
             .id
             .starts_with("0x"));
         let mut component = original.component().clone();
-        component.id = format!("0x{}", component.id);
+        component.id = component
+            .id
+            .trim_start_matches("0x")
+            .to_string();
         let prefixed = Swap::new(
             component,
             original.token_in().clone(),
@@ -456,7 +485,10 @@ mod tests {
                     encoder(chain).encode(&pair).unwrap()
                 );
                 let mut component = venue.component().clone();
-                component.id = format!("0x{}", component.id);
+                component.id = component
+                    .id
+                    .trim_start_matches("0x")
+                    .to_string();
                 let prefixed = Swap::new(
                     component,
                     venue.token_in().clone(),
@@ -493,8 +525,11 @@ mod tests {
     #[test]
     fn test_elfomofi_requires_state_and_reference_input() {
         let (a, b) = tokens();
-        let swap =
-            Swap::new(component(Chain::Base), default_token(a), default_token(b), BigUint::ZERO);
+        let mut a = default_token(a);
+        let mut b = default_token(b);
+        a.chain = Chain::Base;
+        b.chain = Chain::Base;
+        let swap = Swap::new(component(Chain::Base), a, b, BigUint::ZERO);
         assert!(encoder(Chain::Base)
             .encode(&swap)
             .is_err());
@@ -566,6 +601,56 @@ mod tests {
                 .unwrap();
             assert_eq!(BigUint::from_bytes_be(&encoded[72..]), minimum.into());
         }
+    }
+
+    #[test]
+    fn test_elfomofi_explicit_floor_survives_solution_serialization() {
+        for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
+            let swap = venue_swap(chain, false).with_user_data(
+                ElfomofiSwapPolicy::MinAmountOut(190u64.into())
+                    .to_user_data()
+                    .unwrap(),
+            );
+            let original = solution(vec![swap]);
+            let restored: Solution =
+                serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+            assert!(restored.swaps()[0]
+                .protocol_state()
+                .is_none());
+            let before = solution_encoder(chain)
+                .encode_solutions(vec![original])
+                .unwrap();
+            let after = solution_encoder(chain)
+                .encode_solutions(vec![restored])
+                .unwrap();
+            assert_eq!(before[0].swaps(), after[0].swaps());
+            assert_eq!(before[0].interacting_with(), after[0].interacting_with());
+            assert_eq!(before[0].function_signature(), after[0].function_signature());
+        }
+    }
+
+    #[test]
+    fn test_elfomofi_explicit_floor_cannot_exceed_an_available_quote() {
+        let swap = venue_swap(Chain::Base, false).with_user_data(
+            ElfomofiSwapPolicy::MinAmountOut(201u64.into())
+                .to_user_data()
+                .unwrap(),
+        );
+        assert!(matches!(
+            encoder(Chain::Base).encode(&swap),
+            Err(EncodingError::InvalidInput(message)) if message.contains("exceeds its book quote")
+        ));
+    }
+
+    #[test]
+    fn test_elfomofi_serialized_slippage_requires_a_book_state() {
+        let original = solution(vec![venue_swap(Chain::Base, false)]);
+        let restored: Solution =
+            serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(matches!(
+            solution_encoder(Chain::Base).encode_solutions(vec![restored]),
+            Err(EncodingError::FatalError(message)) if message.contains("use MinAmountOut")
+        ));
     }
 
     #[test]
@@ -662,7 +747,7 @@ mod tests {
                 assert!(matches!(
                     encoder.encode_solutions(vec![solution(swaps)]),
                     Err(EncodingError::InvalidInput(message))
-                        if message.contains("Only one ElFomoFi swap is supported")
+                        if message.contains(PROTOCOL_SYSTEM)
                 ));
             }
         }
@@ -675,7 +760,10 @@ mod tests {
                     let first = venue_swap(chain, false).with_split(split);
                     let second = swap(chain, reverse);
                     let mut component = second.component().clone();
-                    component.id = format!("0x{}", component.id);
+                    component.id = component
+                        .id
+                        .trim_start_matches("0x")
+                        .to_string();
                     let alias = Swap::new(
                         component,
                         second.token_in().clone(),
@@ -687,32 +775,21 @@ mod tests {
                     assert!(matches!(
                         solution_encoder(chain).encode_solutions(vec![solution(vec![first, alias])]),
                         Err(EncodingError::InvalidInput(message))
-                            if message.contains("Only one ElFomoFi swap is supported")
+                            if message.contains(PROTOCOL_SYSTEM)
                     ));
                 }
             }
         }
     }
     #[test]
-    fn test_elfomofi_usage_validation_only_counts_elfomofi() {
-        let first = swap(Chain::Base, false);
-        let mut component = first.component().clone();
-        component.id = "another-component-id".into();
-        let alias = Swap::new(
-            component.clone(),
-            first.token_out().clone(),
-            first.token_in().clone(),
-            BigUint::ZERO,
+    fn test_elfomofi_exposes_its_solution_swap_limit() {
+        assert_eq!(encoder(Chain::Base).max_swaps_per_solution(), Some(1));
+        assert_eq!(
+            UniswapV2SwapEncoder::new(Bytes::zero(20), Chain::Base, None)
+                .unwrap()
+                .max_swaps_per_solution(),
+            None
         );
-        assert!(validate_swaps(&[first.clone(), alias]).is_err());
-        component.protocol_system = "uniswap_v2".into();
-        let other = Swap::new(
-            component,
-            first.token_in().clone(),
-            first.token_out().clone(),
-            BigUint::ZERO,
-        );
-        assert!(validate_swaps(&[first, other.clone(), other]).is_ok());
     }
     #[test]
     fn test_elfomofi_can_be_encoded_in_separate_solutions() {

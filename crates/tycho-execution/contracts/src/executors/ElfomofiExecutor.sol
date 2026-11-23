@@ -51,12 +51,14 @@ contract ElfomofiExecutor is IExecutor {
         ) = _decodeData(data);
         if (amountIn == 0) revert ElfomofiExecutor__InvalidAmount();
         // A larger input may cross a price level; retain the quoted absolute floor.
+        // Extra input from an earlier hop therefore has no additional per-leg protection.
         uint256 minimum = amountIn >= referenceIn
             ? referenceMinOut
             : Math.mulDiv(
                 amountIn, referenceMinOut, referenceIn, Math.Rounding.Ceil
             );
-        IElfomofiRouter(elfomofiRouter).swapWithContractBalance({
+        IElfomofiRouter(elfomofiRouter)
+            .swapWithContractBalance({
             fromToken: tokenIn,
             toToken: tokenOut,
             minAmountOut: minimum,

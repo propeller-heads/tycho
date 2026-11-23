@@ -111,22 +111,6 @@ struct Cli {
     #[arg(long, env = "RPC_URL")]
     rpc_url: String,
 
-    /// WebSocket endpoint on --chain for block-triggered pAMM book updates.
-    #[arg(long, env = "WS_RPC_URL", hide_env_values = true)]
-    ws_rpc_url: Option<String>,
-
-    /// Enable ElFomoFi books using --rpc-url and --ws-rpc-url (or --book-polling).
-    #[arg(long, default_value_t = false)]
-    enable_elfomofi: bool,
-
-    /// Include helper tokens outside the configured token universe.
-    #[arg(long, default_value_t = false)]
-    discover_elfomofi_tokens: bool,
-
-    /// Poll ElFomoFi books over HTTP instead of subscribing to new block heads.
-    #[arg(long, default_value_t = false)]
-    book_polling: bool,
-
     /// Connect to Tycho over plain HTTP/WS instead of TLS. Enable this when targeting a local
     /// dev instance (e.g. http://127.0.0.1:4242).
     #[arg(long, env = "TYCHO_NO_TLS", default_value_t = false)]
@@ -562,7 +546,7 @@ async fn run(mut cli: Cli) -> miette::Result<()> {
                 .await?,
         );
     }
-    let mut book_stream_processor = BookStreamProcessor::new(
+    let book_stream_processor = BookStreamProcessor::new(
         chain,
         tvl_threshold,
         cli.max_simulations as usize,
@@ -572,11 +556,6 @@ async fn run(mut cli: Cli) -> miette::Result<()> {
         cli.rpc_url.clone(),
         cli.rfq_all_pairs,
     );
-    if cli.enable_elfomofi {
-        book_stream_processor = book_stream_processor
-            .with_pamm_rpc(cli.rpc_url.clone(), cli.ws_rpc_url.clone(), cli.book_polling)
-            .with_elfomofi_token_discovery(cli.discover_elfomofi_tokens);
-    }
     let mut book_handle = book_stream_processor
         .run_stream(Arc::clone(&all_tokens), book_tx)
         .await?;
@@ -2651,15 +2630,13 @@ mod tests {
             "localhost:4242",
             "--rpc-url",
             "http://localhost:8545",
-            "--ws-rpc-url",
-            "ws://localhost:8546",
             "--partial-blocks",
             "--test-every-n-blocks",
             "10",
         ])
         .unwrap();
 
-        assert!(!cli.enable_elfomofi);
+        assert!(cli.pamm.is_none());
         assert!(!cli.disable_onchain);
         assert!(!cli.disable_rfq);
         assert!(!cli.disable_pamm);
@@ -2676,13 +2653,12 @@ mod tests {
             "localhost:4242",
             "--rpc-url",
             "http://localhost:8545",
-            "--enable-elfomofi",
-            "--book-polling",
+            "--pamm",
+            "elfomofi",
         ])
         .unwrap();
 
-        assert!(cli.enable_elfomofi);
-        assert!(cli.book_polling);
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Elfomofi]));
         assert!(!cli.disable_onchain);
         assert!(!cli.disable_rfq);
         assert!(!cli.disable_pamm);

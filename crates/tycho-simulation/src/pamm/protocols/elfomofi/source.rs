@@ -1,12 +1,8 @@
 //! One block-pinned helper response becomes one complete book snapshot.
-use std::{
-    collections::{HashMap, HashSet},
-    time::Instant,
-};
+use std::collections::{HashMap, HashSet};
 
 use alloy::sol_types::SolCall;
 use num_traits::ToPrimitive;
-use tokio::sync::Mutex;
 use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
@@ -17,16 +13,16 @@ use super::{
     client::{unix_now, ElfomofiClient},
     models::{decode_orderbooks, getAllOrderbooksCall, helper_for, Snapshot},
     state::ElfomofiState,
-    tokens, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
+    PROTOCOL_SYSTEM, PROTOCOL_TYPE,
 };
 use crate::{
     book::{
-        all_pairs::{all_pairs_book, SignedByVenue, Venue, VenueBook},
+        all_pairs::{BookCollector, ComponentLayout, SignedByVenue, Venue, VenueBook},
         component::pair_component_id,
         levels::{Levels, PriceLevel},
         quote_tokens::usd_stablecoins_for_chain,
         tvl::tvl_in_usd,
-        BookFeedConfig, BookSnapshot, Books, ReceivedAt,
+        BookFeedConfig, BookSnapshot, ReceivedAt,
     },
     snapshot_feed::{errors::FeedError, http::HttpSource},
 };
@@ -36,9 +32,7 @@ pub(super) struct ElfomofiBookSource {
     book_config: BookFeedConfig,
     client: ElfomofiClient,
     max_age_seconds: u64,
-    discover_tokens: bool,
-    discovered: Mutex<HashMap<Bytes, Token>>,
-    rejected_tokens: Mutex<tokens::NegativeCache>,
+    layout: ComponentLayout<()>,
 }
 
 impl ElfomofiBookSource {
@@ -46,16 +40,9 @@ impl ElfomofiBookSource {
         book_config: BookFeedConfig,
         client: ElfomofiClient,
         max_age_seconds: u64,
-        discover_tokens: bool,
+        layout: ComponentLayout<()>,
     ) -> Self {
-        Self {
-            book_config,
-            client,
-            max_age_seconds,
-            discover_tokens,
-            discovered: Mutex::new(HashMap::new()),
-            rejected_tokens: Mutex::new(tokens::NegativeCache::default()),
-        }
+        Self { book_config, client, max_age_seconds, layout }
     }
     pub fn chain(&self) -> Chain {
         self.book_config.chain
@@ -145,18 +132,33 @@ impl ElfomofiBookSource {
 impl HttpSource for ElfomofiBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
 
+    fn snapshot_deadline(&self, snapshot: &Self::Snapshot) -> Option<tokio::time::Instant> {
+        let block_timestamp = snapshot
+            .books
+            .values()
+            .filter_map(|book| {
+                let state = book.state.as_any();
+                state
+                    .downcast_ref::<ElfomofiAllPairsState>()
+                    .and_then(ElfomofiAllPairsState::block_timestamp)
+                    .or_else(|| {
+                        state
+                            .downcast_ref::<ElfomofiState>()
+                            .map(|state| state.snapshot().block_timestamp)
+                    })
+            })
+            .min()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let deadline =
+            std::time::Duration::from_secs(block_timestamp.saturating_add(self.max_age_seconds));
+        Some(tokio::time::Instant::now() + deadline.saturating_sub(now))
+    }
+
     async fn fetch(&self) -> Result<Self::Snapshot, FeedError> {
         self.client.verify_chain().await?;
         let header = self.client.header("latest").await?;
-        // A sequencer can announce the next integer second slightly before the local clock.
-        let now = std::time::SystemTime::now();
-        let current_second = unix_now()?;
-        if header.timestamp == current_second.saturating_add(1) {
-            let boundary = std::time::UNIX_EPOCH + std::time::Duration::from_secs(header.timestamp);
-            if let Ok(delay) = boundary.duration_since(now) {
-                tokio::time::sleep(delay).await;
-            }
-        }
         super::models::ensure_timestamp_fresh(header.timestamp, unix_now()?, self.max_age_seconds)?;
         let raw = self
             .client
@@ -173,98 +175,34 @@ impl HttpSource for ElfomofiBookSource {
             header.number,
             &header.hash,
             header.timestamp,
-            unix_now()?,
             self.max_age_seconds,
         )?;
-        if !self.discover_tokens {
-            snapshots.retain(|snapshot| {
-                self.book_config
-                    .pair_tokens(&snapshot.book.base_token, &snapshot.book.quote_token)
-                    .is_some()
-            });
-        }
-        let cached = self.discovered.lock().await;
-        let mut known: HashMap<_, _> = snapshots
-            .iter()
-            .flat_map(|snapshot| [&snapshot.book.base_token, &snapshot.book.quote_token])
-            .filter_map(|address| {
-                self.book_config
-                    .tokens
-                    .get(address)
-                    .or_else(|| cached.get(address))
-                    .filter(|token| {
-                        token.address == *address &&
-                            token.chain == self.chain() &&
-                            token.decimals <= 255 &&
-                            super::models::validate_address(address).is_ok()
-                    })
-                    .map(|token| (address.clone(), token.clone()))
-            })
-            .collect();
-        drop(cached);
-        let mut new_tokens = HashMap::new();
-        if self.discover_tokens {
-            let mut rejected = self.rejected_tokens.lock().await;
-            let now = Instant::now();
-            let addresses: HashSet<_> = snapshots
-                .iter()
-                .flat_map(|snapshot| [&snapshot.book.base_token, &snapshot.book.quote_token])
-                .filter(|address| {
-                    !known.contains_key(*address) &&
-                        !self
-                            .book_config
-                            .tokens
-                            .contains_key(*address) &&
-                        rejected.allows(address, now)
-                })
-                .cloned()
-                .collect();
-            drop(rejected);
-            let results = tokens::discover(
-                &self.client,
-                self.chain(),
-                &header,
-                addresses
-                    .into_iter()
-                    .take(tokens::MAX_DISCOVERY_PER_FETCH)
-                    .collect(),
-                (std::time::Duration::from_secs(self.max_age_seconds) / 4)
-                    .min(std::time::Duration::from_millis(250)),
-            )
-            .await;
-            let mut rejected = self.rejected_tokens.lock().await;
-            for (address, result) in results {
-                match result {
-                    Ok(token) => {
-                        new_tokens.insert(address, token);
-                    }
-                    Err(error) => {
-                        tracing::warn!(token = %address, %error,
-                            "Skipping ElFomoFi pairs with unusable token metadata");
-                        rejected.reject(address, Instant::now());
-                    }
-                }
-            }
-        }
-        known.extend(new_tokens.clone());
-        self.discovered
-            .lock()
-            .await
-            .extend(new_tokens);
-        super::models::ensure_timestamp_fresh(header.timestamp, unix_now()?, self.max_age_seconds)?;
-        let before_metadata_filter = snapshots.len();
         snapshots.retain(|snapshot| {
-            known.contains_key(&snapshot.book.base_token) &&
-                known.contains_key(&snapshot.book.quote_token)
+            let book = &snapshot.book;
+            let Some((base, quote)) = self
+                .book_config
+                .pair_tokens(&book.base_token, &book.quote_token)
+            else {
+                return false;
+            };
+            let valid = |address: &Bytes, token: &Token| {
+                token.address == *address && token.chain == self.chain() && token.decimals <= 255
+            };
+            let valid = valid(&book.base_token, base) && valid(&book.quote_token, quote);
+            if !valid {
+                tracing::warn!(base = %book.base_token, quote = %book.quote_token,
+                    "Skipping ElFomoFi pair with inconsistent configured token metadata");
+            }
+            valid
         });
-        if snapshots.len() < before_metadata_filter {
-            tracing::debug!(
-                skipped_pairs = before_metadata_filter - snapshots.len(),
-                "Filtering ElFomoFi pairs without usable token metadata"
-            );
-        }
-        let priced_pairs = Self::priced_pairs(&snapshots, &known);
-        let mut venue_books = Vec::new();
+        let known = &self.book_config.tokens;
+        let priced_pairs = Self::priced_pairs(&snapshots, known);
+        let mut collector = BookCollector::<ElfomofiState, SignedByVenue>::new(
+            PROTOCOL_SYSTEM,
+            PROTOCOL_TYPE,
+            self.chain(),
+            self.layout,
+        );
         for snapshot in snapshots {
             let (Some(base), Some(quote)) =
                 (known.get(&snapshot.book.base_token), known.get(&snapshot.book.quote_token))
@@ -274,25 +212,35 @@ impl HttpSource for ElfomofiBookSource {
             if !self.clears_tvl(&snapshot, base, quote, &priced_pairs) {
                 continue;
             }
+            let component_id = snapshot
+                .book
+                .component_id(self.chain())?;
             let state = match ElfomofiState::from_snapshot(snapshot, base.clone(), quote.clone()) {
                 Ok(state) => state,
                 Err(error) => {
-                    tracing::warn!(%error, "Skipping invalid ElFomoFi book state");
+                    tracing::warn!(base = %base.address, quote = %quote.address, %error,
+                        "Skipping invalid ElFomoFi book state");
                     continue;
                 }
             };
-            venue_books.push(VenueBook { signer: Venue, state, updated_at: None });
+            collector.push(component_id, VenueBook { signer: Venue, state, updated_at: None });
         }
-        let mut books = Books::new();
-        books.extend(all_pairs_book::<ElfomofiState, SignedByVenue, ElfomofiAllPairsState>(
-            PROTOCOL_SYSTEM,
-            PROTOCOL_TYPE,
-            self.chain(),
-            venue_books,
-            (),
-        ));
+        let mut books = collector
+            .finish::<ElfomofiAllPairsState>()
+            .into_map();
+        for book in books.values_mut() {
+            book.component
+                .static_attributes
+                .remove(crate::book::all_pairs::QuoteRule::ATTRIBUTE);
+            book.component
+                .static_attributes
+                .insert("max_swaps_per_solution".into(), Bytes::from(1u64.to_be_bytes().to_vec()));
+        }
         super::models::ensure_timestamp_fresh(header.timestamp, unix_now()?, self.max_age_seconds)?;
-        Ok(BookSnapshot::received_now(books))
+        Ok(BookSnapshot {
+            anchor: ReceivedAt(chrono::Utc::now()),
+            books: std::sync::Arc::new(books),
+        })
     }
 }
 
@@ -300,7 +248,7 @@ impl HttpSource for ElfomofiBookSource {
 mod tests {
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     use alloy::{
@@ -309,36 +257,19 @@ mod tests {
     };
     use futures::StreamExt;
     use serde_json::{json, Value};
+    use tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::{
         super::{
             feed::ElfomofiFeedBuilder,
             models::{getAllOrderbooksReturn, CumulativeLevel, PairOrderbook},
-            tokens::{decimalsCall, symbolCall},
         },
         *,
     };
-
-    fn published_pairs(
-        snapshot: &BookSnapshot<ReceivedAt>,
-    ) -> std::collections::BTreeSet<(Bytes, Bytes)> {
-        use crate::book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE};
-
-        snapshot
-            .books
-            .values()
-            .flat_map(|book| {
-                decode_swap_directions(&book.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE])
-                    .unwrap()
-            })
-            .map(|(sell, buy)| if sell < buy { (sell, buy) } else { (buy, sell) })
-            .collect()
-    }
     use crate::snapshot_feed::http::test_support::spawn_http_server;
 
     #[derive(Default)]
     struct Calls {
-        metadata: AtomicUsize,
         chain: AtomicUsize,
         headers: AtomicUsize,
         helper: AtomicUsize,
@@ -353,7 +284,9 @@ mod tests {
     fn config() -> BookFeedConfig {
         BookFeedConfig {
             chain: Chain::Base,
-            tokens: Arc::new([(addr(1), token(1)), (addr(2), token(2))].into()),
+            tokens: Arc::new(
+                [(addr(1), token(1)), (addr(2), token(2)), (addr(3), token(3))].into(),
+            ),
             min_tvl_usd: 0.0,
         }
     }
@@ -381,40 +314,27 @@ mod tests {
         };
         json!(format!("0x{}", hex::encode(getAllOrderbooksCall::abi_encode_returns(&raw))))
     }
-    async fn mock(
-        pairs: Arc<std::sync::Mutex<Vec<(u8, u8)>>>,
-        reorg: Arc<AtomicBool>,
-    ) -> (String, Arc<Calls>) {
-        mock_with_bad_metadata(
-            pairs,
-            reorg,
-            Arc::new(AtomicBool::new(false)),
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-        )
-        .await
-    }
 
-    async fn mock_with_bad_metadata(
-        pairs: Arc<std::sync::Mutex<Vec<(u8, u8)>>>,
+    async fn mock(
+        pairs: Arc<Mutex<Vec<(u8, u8)>>>,
         reorg: Arc<AtomicBool>,
-        invalid_metadata: Arc<AtomicBool>,
-        metadata_delay: std::time::Duration,
+        chain: Chain,
+        timestamp_offset: i64,
         helper_delay: std::time::Duration,
     ) -> (String, Arc<Calls>) {
         let timestamp = AtomicU64::new(unix_now().unwrap());
-        let metadata_calls = Arc::new(Calls::default());
-        let calls = metadata_calls.clone();
+        let calls = Arc::new(Calls::default());
+        let recorded = calls.clone();
         let server = spawn_http_server(move |request| {
             let req: Value = serde_json::from_str(&request.body).unwrap();
             let result = match req["method"].as_str().unwrap() {
                 "eth_chainId" => {
-                    calls.chain.fetch_add(1, Ordering::SeqCst);
-                    json!("0x2105")
+                    recorded.chain.fetch_add(1, Ordering::SeqCst);
+                    json!(format!("0x{:x}", chain.id()))
                 },
                 "eth_getBlockByNumber" => {
-                    calls.headers.fetch_add(1, Ordering::SeqCst);
-                    let now = unix_now().unwrap();
+                    recorded.headers.fetch_add(1, Ordering::SeqCst);
+                    let now = unix_now().unwrap().saturating_add_signed(timestamp_offset);
                     timestamp.store(now, Ordering::SeqCst);
                     let mut block: alloy::rpc::types::Block = Default::default();
                     block.header.number = 100;
@@ -423,44 +343,56 @@ mod tests {
                     json!(block)
                 }
                 "eth_call" => {
-                    assert_eq!(req["params"][1], json!({"blockHash":format!("0x{}", "01".repeat(32)), "requireCanonical":true}), "all helper and metadata reads must require the same canonical block hash");
+                    recorded.helper.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(req["params"][1], json!({"blockHash":format!("0x{}", "01".repeat(32)), "requireCanonical":true}));
                     if reorg.load(Ordering::SeqCst) {
                         return Some(("200 OK", json!({"jsonrpc":"2.0", "id":req["id"], "error":{"code":-32000,"message":"not canonical"}}).to_string()));
                     }
                     let data = req["params"][0].get("input").or_else(|| req["params"][0].get("data")).and_then(Value::as_str).unwrap();
-                    if data == format!("0x{}", hex::encode(getAllOrderbooksCall {}.abi_encode())) {
-                        calls.helper.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(helper_delay);
-                        helper(&pairs.lock().unwrap(), timestamp.load(Ordering::SeqCst))
-                    }
-                    else if data == format!("0x{}", hex::encode(decimalsCall {}.abi_encode())) {
-                        calls.metadata.fetch_add(1, Ordering::SeqCst);
-                        std::thread::sleep(metadata_delay);
-                        if invalid_metadata.load(Ordering::SeqCst) { json!("0x") }
-                        else { json!(format!("0x{}", hex::encode(decimalsCall::abi_encode_returns(&0)))) }
-                    } else if data == format!("0x{}", hex::encode(symbolCall {}.abi_encode())) {
-                        json!(format!("0x{}", hex::encode(symbolCall::abi_encode_returns(&"NEW".to_owned()))))
-                    } else { panic!("unexpected RPC selector") }
+                    assert_eq!(data, format!("0x{}", hex::encode(getAllOrderbooksCall {}.abi_encode())), "only the public helper is read");
+                    std::thread::sleep(helper_delay);
+                    helper(&pairs.lock().unwrap(), timestamp.load(Ordering::SeqCst))
                 }
                 method => panic!("unexpected RPC {method}"),
             };
             Some(("200 OK", json!({"jsonrpc":"2.0", "id":req["id"],"result":result}).to_string()))
         }).await;
-        (server.url(), metadata_calls)
+        (server.url(), calls)
+    }
+
+    fn source(config: BookFeedConfig, url: &str, max_age: u64) -> ElfomofiBookSource {
+        let client = ElfomofiClient::new(config.chain, url).unwrap();
+        ElfomofiBookSource::new(config, client, max_age, ComponentLayout::AllPairs(()))
+    }
+
+    fn published_pairs(
+        snapshot: &BookSnapshot<ReceivedAt>,
+    ) -> std::collections::BTreeSet<(Bytes, Bytes)> {
+        use crate::book::{decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE};
+        snapshot
+            .books
+            .values()
+            .flat_map(|book| {
+                decode_swap_directions(&book.component.static_attributes[SWAP_DIRECTIONS_ATTRIBUTE])
+                    .unwrap()
+            })
+            .map(|(sell, buy)| if sell < buy { (sell, buy) } else { (buy, sell) })
+            .collect()
     }
 
     #[tokio::test]
-    async fn complete_snapshots_discover_add_remove_replace_and_readd_pairs() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2)]));
-        let (url, metadata_calls) = mock(pairs.clone(), Arc::new(AtomicBool::new(false))).await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            true,
-        );
+    async fn complete_snapshots_add_remove_replace_and_readd_configured_pairs() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+        let (url, calls) = mock(
+            pairs.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let source = source(config(), &url, 30);
         let first = source.fetch().await.unwrap();
-        assert_eq!(first.books.len(), 1);
         assert_eq!(published_pairs(&first), [(addr(1), addr(2))].into());
         let first_id = first
             .books
@@ -468,46 +400,12 @@ mod tests {
             .next()
             .unwrap()
             .clone();
-        assert_eq!(
-            metadata_calls
-                .metadata
-                .load(Ordering::SeqCst),
-            0,
-            "configured metadata wins"
-        );
-        *pairs.lock().unwrap() = vec![(1, 2), (1, 3)];
-        let second = source.fetch().await.unwrap();
-        assert_eq!(second.books.len(), 1);
-        assert_eq!(published_pairs(&second), [(addr(1), addr(2)), (addr(1), addr(3))].into());
-        assert_eq!(
-            metadata_calls
-                .metadata
-                .load(Ordering::SeqCst),
-            1
-        );
-        let discovered = second
-            .books
-            .values()
-            .find(|book| {
-                book.component
-                    .tokens
-                    .iter()
-                    .any(|token| token.address == addr(3))
-            })
-            .unwrap();
-        assert_eq!(
-            discovered
-                .component
-                .tokens
-                .iter()
-                .find(|token| token.address == addr(3))
-                .unwrap()
-                .symbol,
-            "NEW"
-        );
+        *pairs.lock().unwrap() = vec![(1, 2), (1, 3), (1, 4)];
+        let added = source.fetch().await.unwrap();
+        assert_eq!(added.books.len(), 1);
+        assert_eq!(published_pairs(&added), [(addr(1), addr(2)), (addr(1), addr(3))].into());
         *pairs.lock().unwrap() = vec![(2, 3)];
         let replaced = source.fetch().await.unwrap();
-        assert_eq!(replaced.books.len(), 1);
         assert!(replaced.books.contains_key(&first_id));
         assert_eq!(published_pairs(&replaced), [(addr(2), addr(3))].into());
         *pairs.lock().unwrap() = vec![];
@@ -518,60 +416,252 @@ mod tests {
             .books
             .is_empty());
         *pairs.lock().unwrap() = vec![(2, 1)];
-        let restored = source.fetch().await.unwrap();
-        assert!(
-            restored.books.contains_key(&first_id),
-            "the venue keeps its component identity as pairs change"
-        );
-        assert_eq!(published_pairs(&restored), [(addr(1), addr(2))].into());
+        let readded = source.fetch().await.unwrap();
+        assert!(readded.books.contains_key(&first_id));
+        assert_eq!(published_pairs(&readded), [(addr(1), addr(2))].into());
+        assert_eq!(calls.chain.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.headers.load(Ordering::SeqCst), 5);
+        assert_eq!(calls.helper.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn configured_token_universe_is_always_respected() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2), (1, 4)]));
+        let (url, calls) = mock(
+            pairs.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let source = source(config(), &url, 30);
+        assert_eq!(published_pairs(&source.fetch().await.unwrap()), [(addr(1), addr(2))].into());
+        *pairs.lock().unwrap() = vec![(1, 4)];
+        assert!(source
+            .fetch()
+            .await
+            .unwrap()
+            .books
+            .is_empty());
+        assert_eq!(calls.headers.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.helper.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_duplicate_books_fail_only_when_every_book_is_invalid() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2), (0, 2), (3, 3)]));
+        let (url, _) = mock(
+            pairs.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let source = source(config(), &url, 30);
+        assert_eq!(published_pairs(&source.fetch().await.unwrap()), [(addr(1), addr(2))].into());
+        for invalid in [vec![(0, 2), (3, 3)], vec![(1, 2), (2, 1)]] {
+            *pairs.lock().unwrap() = invalid;
+            let error = source.fetch().await.unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("none were valid"));
+        }
+        *pairs.lock().unwrap() = vec![];
+        assert!(source
+            .fetch()
+            .await
+            .unwrap()
+            .books
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn bsc_publishes_with_bounded_sequencer_clock_skew() {
+        for offset in [0, 1, 2] {
+            let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+            let (url, _) = mock(
+                pairs,
+                Arc::new(AtomicBool::new(false)),
+                Chain::Bsc,
+                offset,
+                std::time::Duration::ZERO,
+            )
+            .await;
+            let mut config = config();
+            config.chain = Chain::Bsc;
+            for token in Arc::make_mut(&mut config.tokens).values_mut() {
+                token.chain = Chain::Bsc;
+            }
+            let source = source(config, &url, 2);
+            assert_eq!(
+                source
+                    .fetch()
+                    .await
+                    .unwrap()
+                    .books
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_far_future_or_stale_header_does_not_read_the_helper() {
+        for offset in [-10, 10] {
+            let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+            let (url, calls) = mock(
+                pairs,
+                Arc::new(AtomicBool::new(false)),
+                Chain::Base,
+                offset,
+                std::time::Duration::ZERO,
+            )
+            .await;
+            assert!(source(config(), &url, 2)
+                .fetch()
+                .await
+                .is_err());
+            assert_eq!(calls.helper.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_helper_response_that_aged_during_the_rpc_is_not_published() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+        let (url, _) = mock(
+            pairs,
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::from_millis(1100),
+        )
+        .await;
+        let error = source(config(), &url, 1)
+            .fetch()
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("freshness window"));
+    }
+
+    #[tokio::test]
+    async fn canonical_pinning_rejects_a_reorg() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+        let reorg = Arc::new(AtomicBool::new(true));
+        let (url, _) = mock(pairs, reorg.clone(), Chain::Base, 0, std::time::Duration::ZERO).await;
+        let source = source(config(), &url, 30);
+        assert!(source.fetch().await.is_err());
+        reorg.store(false, Ordering::SeqCst);
         assert_eq!(
-            metadata_calls
-                .metadata
-                .load(Ordering::SeqCst),
-            1,
-            "new token metadata is cached"
-        );
-        assert_eq!(
-            metadata_calls
-                .chain
-                .load(Ordering::SeqCst),
+            source
+                .fetch()
+                .await
+                .unwrap()
+                .books
+                .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn wrong_chain_metadata_only_filters_its_own_pairs() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2), (1, 3)]));
+        let (url, _) = mock(
+            pairs,
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let mut config = config();
+        Arc::make_mut(&mut config.tokens)
+            .get_mut(&addr(3))
+            .unwrap()
+            .chain = Chain::Bsc;
         assert_eq!(
-            metadata_calls
-                .headers
-                .load(Ordering::SeqCst),
-            5
-        );
-        assert_eq!(
-            metadata_calls
-                .helper
-                .load(Ordering::SeqCst),
-            5
+            published_pairs(
+                &source(config, &url, 30)
+                    .fetch()
+                    .await
+                    .unwrap()
+            ),
+            [(addr(1), addr(2))].into()
         );
     }
 
     #[tokio::test]
-    async fn strict_universe_filters_unknown_tokens_without_reading_metadata() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2), (1, 3)]));
-        let (url, calls) = mock(pairs, Arc::new(AtomicBool::new(false))).await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            false,
-        );
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 0);
+    async fn per_pair_layout_publishes_pair_states_and_refuses_repeated_fills() {
+        let pairs = Arc::new(Mutex::new(vec![(1, 2), (1, 3)]));
+        let (url, _) = mock(
+            pairs,
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let client = ElfomofiClient::new(Chain::Base, &url).unwrap();
+        let source = ElfomofiBookSource::new(config(), client, 30, ComponentLayout::PerPair);
+        let snapshot = source.fetch().await.unwrap();
+        assert_eq!(snapshot.books.len(), 2);
+        for book in snapshot.books.values() {
+            let state = book
+                .state
+                .as_any()
+                .downcast_ref::<ElfomofiState>()
+                .unwrap();
+            let (base, quote) = (&state.base_token, &state.quote_token);
+            let next = state
+                .get_amount_out(10u64.into(), base, quote)
+                .unwrap()
+                .new_state;
+            assert!(next
+                .get_amount_out(10u64.into(), base, quote)
+                .is_err());
+        }
     }
 
     #[tokio::test]
-    async fn default_builder_preserves_the_configured_token_universe() {
+    async fn snapshot_deadline_follows_the_block_in_both_layouts() {
+        for layout in [ComponentLayout::PerPair, ComponentLayout::AllPairs(())] {
+            let pairs = Arc::new(Mutex::new(vec![(1, 2)]));
+            let (url, _) = mock(
+                pairs,
+                Arc::new(AtomicBool::new(false)),
+                Chain::Base,
+                -1,
+                std::time::Duration::ZERO,
+            )
+            .await;
+            let client = ElfomofiClient::new(Chain::Base, &url).unwrap();
+            let source = ElfomofiBookSource::new(config(), client, 30, layout);
+            let snapshot = source.fetch().await.unwrap();
+            let remaining = source
+                .snapshot_deadline(&snapshot)
+                .unwrap()
+                .saturating_duration_since(tokio::time::Instant::now());
+            assert!(remaining <= std::time::Duration::from_secs(29));
+            assert!(remaining > std::time::Duration::from_secs(27));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_feed_needs_only_the_http_endpoint_and_redacts_it() {
         use crate::snapshot_feed::{SnapshotFeedEvent, SnapshotFeedStream};
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2), (1, 3)]));
-        let (url, calls) = mock(pairs, Arc::new(AtomicBool::new(false))).await;
+        let pairs = Arc::new(Mutex::new(vec![(1, 2), (1, 4)]));
+        let (url, _) = mock(
+            pairs,
+            Arc::new(AtomicBool::new(false)),
+            Chain::Base,
+            0,
+            std::time::Duration::ZERO,
+        )
+        .await;
         let feed = ElfomofiFeedBuilder::new(config(), url)
-            .polling()
             .build()
             .unwrap();
         let mut stream = SnapshotFeedStream::spawn("test", feed);
@@ -582,215 +672,16 @@ mod tests {
         let SnapshotFeedEvent::Published(snapshot) = event else {
             panic!("expected books");
         };
-        assert_eq!(snapshot.books.len(), 1);
         assert_eq!(published_pairs(&snapshot), [(addr(1), addr(2))].into());
-        assert!(
-            snapshot
-                .books
-                .values()
-                .all(|book| book.updated_at.is_none()),
-            "block observation time does not identify an operator's quote update"
-        );
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn strict_universe_still_tracks_new_pairs_between_configured_tokens() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2)]));
-        let (url, calls) = mock(pairs.clone(), Arc::new(AtomicBool::new(false))).await;
-        let mut universe = config();
-        Arc::make_mut(&mut universe.tokens).insert(addr(3), token(3));
-        let source = ElfomofiBookSource::new(
-            universe,
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            false,
-        );
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        *pairs.lock().unwrap() = vec![(1, 2), (1, 3), (1, 4)];
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 2);
-        *pairs.lock().unwrap() = vec![(1, 3)];
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 0);
-        assert_eq!(calls.chain.load(Ordering::SeqCst), 1);
-        assert_eq!(calls.headers.load(Ordering::SeqCst), 3);
-        assert_eq!(calls.helper.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn optional_discovery_progresses_in_bounded_batches() {
-        let pairs = Arc::new(std::sync::Mutex::new(
-            std::iter::once((1, 2))
-                .chain((3..=18).map(|quote| (1, quote)))
-                .collect(),
-        ));
-        let (url, calls) = mock(pairs, Arc::new(AtomicBool::new(false))).await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            true,
-        );
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 9);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 8);
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 17);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 16);
-    }
-
-    #[tokio::test]
-    async fn bad_books_and_metadata_do_not_hide_healthy_pairs_or_repeat_failed_reads() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2), (1, 3), (0, 2), (2, 2)]));
-        let bad_metadata = Arc::new(AtomicBool::new(true));
-        let (url, calls) = mock_with_bad_metadata(
-            pairs,
-            Arc::new(AtomicBool::new(false)),
-            bad_metadata.clone(),
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-        )
-        .await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            true,
-        );
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        bad_metadata.store(false, Ordering::SeqCst);
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 1);
-        assert!(source
-            .rejected_tokens
-            .lock()
-            .await
-            .allows(&addr(3), Instant::now() + std::time::Duration::from_secs(61)));
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 2);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn wrong_chain_configured_metadata_only_removes_its_own_pairs() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2), (1, 3)]));
-        let (url, calls) = mock(pairs, Arc::new(AtomicBool::new(false))).await;
-        let mut universe = config();
-        let mut invalid = token(3);
-        invalid.chain = Chain::Bsc;
-        Arc::make_mut(&mut universe.tokens).insert(addr(3), invalid);
-        let source = ElfomofiBookSource::new(
-            universe,
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            true,
-        );
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(
-            calls.metadata.load(Ordering::SeqCst),
-            0,
-            "configured metadata must not be replaced by RPC discovery"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn unresponsive_metadata_leaves_healthy_books_available_and_is_not_retried() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2), (1, 3)]));
-        let (url, calls) = mock_with_bad_metadata(
-            pairs,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            std::time::Duration::from_millis(1100),
-            std::time::Duration::ZERO,
-        )
-        .await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            2,
-            true,
-        );
-        let snapshot = tokio::time::timeout(std::time::Duration::from_millis(600), source.fetch())
-            .await
-            .expect("metadata must not hold the healthy books until its RPC returns")
-            .unwrap();
-        assert_eq!(snapshot.books.len(), 1);
-        assert_eq!(published_pairs(&snapshot), [(addr(1), addr(2))].into());
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(
-            calls.metadata.load(Ordering::SeqCst),
-            1,
-            "timed-out metadata must enter the negative cache"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_helper_response_that_aged_during_the_rpc_is_not_published() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 2)]));
-        let (url, _) = mock_with_bad_metadata(
-            pairs,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            std::time::Duration::ZERO,
-            std::time::Duration::from_millis(1100),
-        )
-        .await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            1,
-            false,
-        );
-        let error = source.fetch().await.unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("freshness window"));
-    }
-
-    #[tokio::test]
-    async fn canonical_pinning_rejects_reorg_and_does_not_cache_unpublished_metadata() {
-        let pairs = Arc::new(std::sync::Mutex::new(vec![(1, 3)]));
-        let reorg = Arc::new(AtomicBool::new(true));
-        let (url, calls) = mock(pairs, reorg.clone()).await;
-        let source = ElfomofiBookSource::new(
-            config(),
-            ElfomofiClient::new(Chain::Base, &url).unwrap(),
-            30,
-            true,
-        );
-        assert!(source.fetch().await.is_err());
-        assert!(source
-            .discovered
-            .lock()
-            .await
-            .is_empty());
-        reorg.store(false, Ordering::SeqCst);
-        assert_eq!(published_pairs(&source.fetch().await.unwrap()).len(), 1);
-        assert_eq!(calls.metadata.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn builder_requires_explicit_matching_endpoints_and_redacts_rpc_credentials() {
-        let url = "https://example.test/private-key".to_owned();
-        assert!(ElfomofiFeedBuilder::new(config(), url.clone())
-            .build()
-            .is_err());
-        let mut universe = config();
-        Arc::make_mut(&mut universe.tokens).insert(
-            Bytes::zero(20),
-            Token::new(&Bytes::zero(20), "NATIVE", 18, 0, &[], Chain::Base, 100),
-        );
-        let feed = ElfomofiFeedBuilder::new(universe, url.clone())
-            .polling()
-            .build()
-            .unwrap();
-        assert!(!format!("{feed:?}").contains("private-key"));
-        assert!(ElfomofiFeedBuilder::new(config(), url.clone())
-            .ws_rpc_url("http://invalid".into())
-            .build()
-            .is_err());
-        let feed = ElfomofiFeedBuilder::new(config(), url)
-            .ws_rpc_url("wss://example.test/websocket-key".into())
-            .build()
-            .unwrap();
-        assert!(!format!("{feed:?}").contains("websocket-key"));
+        assert!(snapshot
+            .books
+            .values()
+            .all(|book| book.updated_at.is_none()));
+        let feed =
+            ElfomofiFeedBuilder::new(config(), "https://example.test/private-provider-key".into())
+                .build()
+                .unwrap();
+        assert!(!format!("{feed:?}").contains("private-provider-key"));
     }
 
     #[test]
@@ -806,17 +697,10 @@ mod tests {
                 .trim_start_matches("0x"),
         )
         .unwrap();
-        let mut snapshot = decode_orderbooks(
-            Chain::Base,
-            &bytes,
-            100,
-            &Bytes::from(vec![1; 32]),
-            timestamp,
-            timestamp,
-            30,
-        )
-        .unwrap()
-        .remove(0);
+        let mut snapshot =
+            decode_orderbooks(Chain::Base, &bytes, 100, &Bytes::from(vec![1; 32]), timestamp, 30)
+                .unwrap()
+                .remove(0);
         snapshot.book.quote_token = usd.clone();
         let base = token(1);
         let quote = Token::new(&usd, "USDC", 0, 0, &[], Chain::Base, 100);
@@ -824,33 +708,24 @@ mod tests {
         let prices = ElfomofiBookSource::priced_pairs(std::slice::from_ref(&snapshot), &known);
         let mut config = config();
         config.min_tvl_usd = 3000.0;
-        let mut source = ElfomofiBookSource::new(
-            config,
-            ElfomofiClient::new(Chain::Base, "https://example.test").unwrap(),
-            30,
-            false,
-        );
+        let mut source = source(config, "https://example.test", 30);
         assert!(source.clears_tvl(&snapshot, &base, &quote, &prices));
         source.book_config.min_tvl_usd = 3001.0;
         assert!(!source.clears_tvl(&snapshot, &base, &quote, &prices));
-        assert!(
-            !source.clears_tvl(&snapshot, &base, &quote, &[]),
-            "unknown USD conversion must not clear a positive floor"
-        );
+        assert!(!source.clears_tvl(&snapshot, &base, &quote, &[]));
     }
+
     #[test]
     fn an_asks_only_robinhood_book_clears_a_positive_usd_floor() {
         use crate::book::component::PairState;
         let usd: Bytes = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
             .parse()
             .unwrap();
-        let timestamp = unix_now().unwrap();
         let snapshot = Snapshot {
             chain: Chain::Robinhood,
             block_number: 100,
             block_hash: Bytes::from(vec![1; 32]),
-            block_timestamp: timestamp,
-            observed_at: timestamp,
+            block_timestamp: unix_now().unwrap(),
             max_age_seconds: 30,
             book: super::super::models::Book {
                 base_token: addr(1),
@@ -868,22 +743,17 @@ mod tests {
         let quote = Token::new(&usd, "USDG", 0, 0, &[], Chain::Robinhood, 100);
         let tokens: HashMap<_, _> = [(addr(1), base.clone()), (usd.clone(), quote.clone())].into();
         let prices = ElfomofiBookSource::priced_pairs(std::slice::from_ref(&snapshot), &tokens);
-        let source = ElfomofiBookSource::new(
+        let source = source(
             BookFeedConfig {
                 chain: Chain::Robinhood,
                 tokens: Arc::new(tokens),
                 min_tvl_usd: 3000.0,
             },
-            ElfomofiClient::new(Chain::Robinhood, "https://example.test").unwrap(),
+            "https://example.test",
             30,
-            false,
         );
         assert!(source.clears_tvl(&snapshot, &base, &quote, &prices));
         let state = ElfomofiState::from_snapshot(snapshot, base, quote).unwrap();
-        assert_eq!(
-            state.directions(),
-            vec![(usd, addr(1))],
-            "TVL normalization must not invent a quotable side"
-        );
+        assert_eq!(state.directions(), vec![(usd, addr(1))]);
     }
 }

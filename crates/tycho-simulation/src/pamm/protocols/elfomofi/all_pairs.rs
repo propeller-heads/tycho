@@ -20,6 +20,13 @@ use crate::book::all_pairs::{AllPairs, SignedByVenue};
 pub struct ElfomofiAllPairsState(AllPairs<ElfomofiState, SignedByVenue>);
 
 impl ElfomofiAllPairsState {
+    pub(super) fn block_timestamp(&self) -> Option<u64> {
+        self.0
+            .books()
+            .first()
+            .map(|book| book.state.snapshot().block_timestamp)
+    }
+
     fn ensure_available(&self) -> Result<(), SimulationError> {
         if self
             .0
@@ -129,7 +136,7 @@ mod tests {
     use super::*;
     use crate::{
         book::{
-            all_pairs::{all_pairs_book, QuoteRule, Venue, VenueBook},
+            all_pairs::{all_pairs_book, Venue, VenueBook},
             decode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE,
         },
         pamm::protocols::elfomofi::{
@@ -150,7 +157,7 @@ mod tests {
             block_number: 100,
             block_hash: Bytes::from(vec![3; 32]),
             block_timestamp: 100,
-            observed_at: 100,
+
             max_age_seconds: 2,
             book: Book {
                 base_token: base.address.clone(),
@@ -285,10 +292,6 @@ mod tests {
                 .into_iter()
                 .flat_map(|(sell, buy)| [sell, buy])
                 .collect()
-        );
-        assert_eq!(
-            QuoteRule::from_attributes(&component.static_attributes).unwrap(),
-            Some(QuoteRule::OncePerVenue)
         );
         assert!(venue()
             .get_amount_out(10u64.into(), &token(1), &token(3))

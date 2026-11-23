@@ -8,10 +8,8 @@ use tycho_common::{models::Chain, Bytes};
 use crate::snapshot_feed::errors::FeedError;
 
 pub const BASE_HELPER: &str = "0xc1b13606fc7227f2554067afb3fb12de75c02d81";
-pub const BASE_ROUTER: &str = "0xf0f0f0f0fb0d738452efd03a28e8be14c76d5f73";
 pub const BSC_HELPER: &str = "0x78015e3544d989f0712a0b9986cb05838c3fe06d";
 pub const ROBINHOOD_HELPER: &str = "0x20d24ee45c9b338ef7acf2eede75183b9e2c9e3c";
-pub const PARTNER_ID: u64 = 299;
 
 #[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
 pub fn helper_for(chain: Chain) -> Result<&'static str, FeedError> {
@@ -23,22 +21,9 @@ pub fn helper_for(chain: Chain) -> Result<&'static str, FeedError> {
     }
 }
 
-#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
-pub fn router_for(chain: Chain) -> Result<&'static str, FeedError> {
-    match chain {
-        Chain::Base | Chain::Bsc | Chain::Robinhood => Ok(BASE_ROUTER),
-        _ => Err(unsupported_chain(chain)),
-    }
-}
-
-#[expect(clippy::wildcard_enum_match_arm, reason = "Chain is non-exhaustive across crates")]
 pub(crate) fn max_snapshot_age(chain: Chain) -> Result<std::time::Duration, FeedError> {
-    let seconds = match chain {
-        Chain::Base | Chain::Robinhood => 2,
-        Chain::Bsc => 1,
-        _ => return Err(unsupported_chain(chain)),
-    };
-    Ok(std::time::Duration::from_secs(seconds))
+    helper_for(chain)?;
+    Ok(std::time::Duration::from_secs(2))
 }
 
 fn unsupported_chain(chain: Chain) -> FeedError {
@@ -70,7 +55,6 @@ pub struct Snapshot {
     pub block_number: u64,
     pub block_hash: Bytes,
     pub block_timestamp: u64,
-    pub observed_at: u64,
     pub max_age_seconds: u64,
     pub book: Book,
 }
@@ -91,37 +75,29 @@ impl Book {
     }
 
     /// Shared book identity with a stable token orientation.
-    pub fn component_id(&self, chain: Chain) -> Result<String, FeedError> {
+    pub fn component_id(&self, chain: Chain) -> Result<Bytes, FeedError> {
         let (first, second) = if self.base_token < self.quote_token {
             (&self.base_token, &self.quote_token)
         } else {
             (&self.quote_token, &self.base_token)
         };
-        router_for(chain)?;
-        Ok(crate::book::component::pair_component_id(super::PROTOCOL_SYSTEM, first, second)
-            .to_string())
+        helper_for(chain)?;
+        Ok(crate::book::component::pair_component_id(super::PROTOCOL_SYSTEM, first, second))
     }
 }
 
 impl Snapshot {
     pub fn validate(&self) -> Result<(), FeedError> {
-        router_for(self.chain)?;
+        helper_for(self.chain)?;
         self.book.validate()?;
         if self.block_hash.len() != 32 ||
             self.max_age_seconds == 0 ||
             self.block_number == 0 ||
-            self.block_timestamp == 0 ||
-            self.observed_at < self.block_timestamp
+            self.block_timestamp == 0
         {
             return Err(FeedError::Parsing("Invalid ElFomoFi snapshot metadata".into()));
         }
         Ok(())
-    }
-
-    /// Requires both the block and the local observation to remain within the configured TTL.
-    pub fn ensure_fresh(&self, now: u64) -> Result<(), FeedError> {
-        ensure_timestamp_fresh(self.block_timestamp, now, self.max_age_seconds)?;
-        ensure_timestamp_fresh(self.observed_at, now, self.max_age_seconds)
     }
 }
 
@@ -139,7 +115,10 @@ pub(crate) fn ensure_timestamp_fresh(
     now: u64,
     max_age: u64,
 ) -> Result<(), FeedError> {
-    if timestamp > now || now - timestamp >= max_age {
+    if max_age == 0 ||
+        timestamp > now.saturating_add(max_age) ||
+        now.saturating_sub(timestamp) >= max_age
+    {
         return Err(FeedError::Connection(format!(
             "ElFomoFi state timestamp {timestamp} is outside the {max_age}s freshness window at {now}"
         )));
@@ -184,16 +163,10 @@ pub(crate) fn decode_orderbooks(
     block_number: u64,
     block_hash: &Bytes,
     block_timestamp: u64,
-    observed_at: u64,
     max_age_seconds: u64,
 ) -> Result<Vec<Snapshot>, FeedError> {
     helper_for(chain)?;
-    if block_number == 0 ||
-        block_hash.len() != 32 ||
-        block_timestamp == 0 ||
-        max_age_seconds == 0 ||
-        observed_at < block_timestamp
-    {
+    if block_number == 0 || block_hash.len() != 32 || block_timestamp == 0 || max_age_seconds == 0 {
         return Err(FeedError::Parsing("Invalid ElFomoFi snapshot metadata".into()));
     }
     let decoded = getAllOrderbooksCall::abi_decode_returns_validate(raw)
@@ -205,6 +178,7 @@ pub(crate) fn decode_orderbooks(
             "ElFomoFi helper metadata differs from pinned header".into(),
         ));
     }
+    let had_books = !decoded.books.is_empty();
     let mut pairs = HashSet::new();
     let mut duplicates = HashSet::new();
     let mut invalid = 0usize;
@@ -223,11 +197,12 @@ pub(crate) fn decode_orderbooks(
             block_number,
             block_hash: block_hash.clone(),
             block_timestamp,
-            observed_at,
             max_age_seconds,
             book,
         };
-        if snapshot.book.validate().is_err() {
+        if let Err(error) = snapshot.book.validate() {
+            tracing::warn!(base = %snapshot.book.base_token, quote = %snapshot.book.quote_token,
+                %error, "Skipping invalid ElFomoFi book");
             invalid += 1;
             continue;
         }
@@ -254,6 +229,9 @@ pub(crate) fn decode_orderbooks(
             duplicate_pairs = duplicates.len(),
             "Skipping invalid ElFomoFi books"
         );
+    }
+    if had_books && snapshots.is_empty() {
+        return Err(FeedError::Parsing("ElFomoFi helper returned books but none were valid".into()));
     }
     Ok(snapshots)
 }
@@ -291,11 +269,11 @@ mod tests {
                 Chain::Bsc,
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../protocols/fixtures/elfomofi/bsc-128939405.hex"
+                    "/../../protocols/fixtures/elfomofi/bsc-135271915.hex"
                 )),
-                128939405,
-                1792586310,
-                13,
+                135271915,
+                1795437317,
+                14,
             ),
             (
                 Chain::Robinhood,
@@ -310,16 +288,9 @@ mod tests {
         ];
         for (chain, fixture, number, timestamp, books) in fixtures {
             let raw = hex::decode(fixture.trim().trim_start_matches("0x")).unwrap();
-            let snapshots = decode_orderbooks(
-                chain,
-                &raw,
-                number,
-                &Bytes::from(vec![1; 32]),
-                timestamp,
-                timestamp + 1,
-                10,
-            )
-            .unwrap();
+            let snapshots =
+                decode_orderbooks(chain, &raw, number, &Bytes::from(vec![1; 32]), timestamp, 10)
+                    .unwrap();
             assert_eq!(snapshots.len(), books);
             for snapshot in snapshots {
                 snapshot.validate().unwrap();
@@ -334,10 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn freshness_rejects_deadline_boundary_and_future_timestamps() {
+    fn freshness_accepts_bounded_clock_skew_and_rejects_expiry() {
         assert!(ensure_timestamp_fresh(100, 109, 10).is_ok());
         assert!(ensure_timestamp_fresh(100, 110, 10).is_err());
-        assert!(ensure_timestamp_fresh(101, 100, 10).is_err());
+        assert!(ensure_timestamp_fresh(101, 100, 10).is_ok());
+        assert!(ensure_timestamp_fresh(110, 100, 10).is_ok());
+        assert!(ensure_timestamp_fresh(111, 100, 10).is_err());
+        assert!(ensure_timestamp_fresh(100, 100, 0).is_err());
+    }
+
+    #[test]
+    fn every_chain_accepts_a_block_from_the_previous_integer_second() {
+        for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
+            let age = max_snapshot_age(chain)
+                .unwrap()
+                .as_secs();
+            assert_eq!(age, 2);
+            assert!(ensure_timestamp_fresh(100, 101, age).is_ok());
+            assert!(ensure_timestamp_fresh(100, 102, age).is_err());
+        }
     }
 
     #[test]
@@ -362,7 +348,7 @@ mod tests {
         };
         let raw = getAllOrderbooksCall::abi_encode_returns(&response);
         let decode = |raw: &[u8], number| {
-            decode_orderbooks(Chain::Base, raw, number, &Bytes::from(vec![1; 32]), 1000, 1000, 2)
+            decode_orderbooks(Chain::Base, raw, number, &Bytes::from(vec![1; 32]), 1000, 2)
         };
         let snapshots = decode(&raw, 100).unwrap();
         assert_eq!(snapshots.len(), 1);

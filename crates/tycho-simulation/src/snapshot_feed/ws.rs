@@ -5,16 +5,12 @@ use std::time::Duration;
 
 use ::http::Request;
 use async_stream::try_stream;
-use futures::{future::BoxFuture, Stream, StreamExt, TryStreamExt};
-use tokio::{
-    net::TcpStream,
-    time::{sleep, timeout, timeout_at, Instant},
-};
+use futures::{Stream, StreamExt};
+use tokio::time::{sleep, timeout};
 pub use tokio_tungstenite::tungstenite::{Bytes as FrameBytes, Utf8Bytes};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{self, Message},
-    MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug_span, error, info, warn};
 
@@ -99,13 +95,7 @@ pub async fn run_ws_feed<S: WsSource>(
     }
 
     let failures = FailureTracker::new(max_consecutive_failures, backoff_unit, max_backoff_exp);
-    let snapshots = connection_events(connect_timeout, read_idle_timeout, failures, source)
-        .try_filter_map(|event| async move {
-            Ok(match event {
-                WsEvent::Snapshot(snapshot) => Some(snapshot),
-                WsEvent::Disconnected(_error) => None,
-            })
-        });
+    let snapshots = streamed_snapshots(connect_timeout, read_idle_timeout, failures, source);
     publisher
         .publishing(max_snapshot_age, snapshots)
         .await
@@ -126,14 +116,6 @@ pub enum WsPayload {
     Binary(FrameBytes),
 }
 
-/// An open WebSocket connection available for subscription setup.
-pub type WsConnection = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-pub(crate) enum WsEvent<T> {
-    Snapshot(T),
-    Disconnected(FeedError),
-}
-
 /// The provider-specific half of a WebSocket feed: it builds the handshake request and decodes
 /// data frames into complete snapshots. [`run_ws_feed`] owns the source and drives it by
 /// reference.
@@ -149,25 +131,6 @@ pub trait WsSource: Send {
     /// the feed. Any other error counts as one failed attempt toward `max_consecutive_failures`,
     /// followed by a backoff wait.
     fn request(&self) -> Result<Request<()>, FeedError>;
-
-    /// Performs optional subscription setup, within the connection deadline. An initial event
-    /// does not reset the connection failure budget; decoded frames establish recovery.
-    fn on_connect<'a>(
-        &'a mut self,
-        _connection: &'a mut WsConnection,
-    ) -> BoxFuture<'a, Result<Option<Self::Snapshot>, FeedError>> {
-        Box::pin(async { Ok(None) })
-    }
-
-    /// Whether only decoded snapshots, rather than incoming frames, reset the read deadline.
-    fn idle_until_snapshot(&self) -> bool {
-        false
-    }
-
-    /// Removes provider-sensitive details before transport errors are logged or returned.
-    fn transport_error(&self, error: FeedError) -> FeedError {
-        error
-    }
 
     /// Turns a data frame into a snapshot.
     ///
@@ -190,12 +153,12 @@ pub trait WsSource: Send {
 /// Connecting, reading and backing off happen in here, so the one who awaits the next snapshot
 /// waits exactly as long as it takes — which is how a published one can go stale on time while a
 /// connection is silent or a reconnect is hanging.
-pub(crate) fn connection_events<S: WsSource>(
+fn streamed_snapshots<S: WsSource>(
     connect_timeout: Duration,
     read_idle_timeout: Duration,
     mut failures: FailureTracker,
     mut source: S,
-) -> impl Stream<Item = Result<WsEvent<S::Snapshot>, FeedError>> {
+) -> impl Stream<Item = Result<S::Snapshot, FeedError>> {
     try_stream! {
         loop {
             // Every way of not getting a usable connection lands here, so each of them reaches
@@ -203,15 +166,9 @@ pub(crate) fn connection_events<S: WsSource>(
             let opened = match source.request() {
                 Err(e) if e.is_fatal() => Err(e)?,
                 Err(e) => Err(e.in_context("request failed")),
-                Ok(request) => match timeout(connect_timeout, async {
-                    let (mut socket, _response) = connect_async(request).await
-                        .map_err(|error| source.transport_error(FeedError::Connection(format!("connect failed: {error}"))))?;
-                    let initial = source.on_connect(&mut socket).await?;
-                    Ok::<_, FeedError>((socket, initial))
-                }).await {
-                    Ok(Ok(connection)) => Ok(connection),
-                    Ok(Err(e)) if e.is_fatal() => Err(e)?,
-                    Ok(Err(e)) => Err(e),
+                Ok(request) => match timeout(connect_timeout, connect_async(request)).await {
+                    Ok(Ok((ws_stream, _))) => Ok(ws_stream),
+                    Ok(Err(e)) => Err(FeedError::Connection(format!("connect failed: {e}"))),
                     Err(_) => Err(FeedError::Connection(format!(
                         "connect timed out after {connect_timeout:?}"
                     ))),
@@ -222,9 +179,8 @@ pub(crate) fn connection_events<S: WsSource>(
             // failure to this loop — a WebSocket that closes is not serving snapshots — so the
             // reason is reported once, here, with the streak it belongs to.
             let ended = match opened {
-                Ok((mut ws_stream, initial)) => {
+                Ok(mut ws_stream) => {
                     info!("connected");
-                    if let Some(initial) = initial { yield WsEvent::Snapshot(initial); }
                     loop {
                         match read_next_snapshot(read_idle_timeout, &mut ws_stream, &mut source).await {
                             Ok(snapshot) => {
@@ -234,7 +190,7 @@ pub(crate) fn connection_events<S: WsSource>(
                                 if cleared > 0 {
                                     info!(after_failures = cleared, "snapshots received again");
                                 }
-                                yield WsEvent::Snapshot(snapshot);
+                                yield snapshot;
                             }
                             Err(e) if e.is_fatal() => Err(e)?,
                             Err(reason) => break reason,
@@ -258,9 +214,8 @@ pub(crate) fn connection_events<S: WsSource>(
                 // classified it: a run of unreadable frames is not a connection failure, and how
                 // long the feed tolerated it is for the log rather than for the caller to act on.
                 .map_err(|consecutive| {
-                    ended.clone().in_context(format_args!("gave up after {consecutive} consecutive failures"))
+                    ended.in_context(format_args!("gave up after {consecutive} consecutive failures"))
                 })?;
-            yield WsEvent::Disconnected(ended);
             sleep(retry.backoff).await;
         }
     }
@@ -276,21 +231,11 @@ async fn read_next_snapshot<S: WsSource>(
     ws_stream: &mut (impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin),
     source: &mut S,
 ) -> Result<S::Snapshot, FeedError> {
-    let snapshot_deadline = Instant::now() + read_idle_timeout;
     loop {
-        let deadline = if source.idle_until_snapshot() {
-            snapshot_deadline
-        } else {
-            Instant::now() + read_idle_timeout
-        };
-        let received = timeout_at(deadline, ws_stream.next()).await;
+        let received = timeout(read_idle_timeout, ws_stream.next()).await;
         let message = match received {
             Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(e))) => {
-                return Err(
-                    source.transport_error(FeedError::Connection(format!("read failed: {e}")))
-                )
-            }
+            Ok(Some(Err(e))) => return Err(FeedError::Connection(format!("read failed: {e}"))),
             Ok(None) => return Err(FeedError::Connection("stream ended".to_string())),
             Err(_) => {
                 return Err(FeedError::Connection(format!(
@@ -306,8 +251,7 @@ async fn read_next_snapshot<S: WsSource>(
             // reaction.
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(Some(frame)) => {
-                return Err(source
-                    .transport_error(FeedError::Connection(format!("closed by server: {frame}"))))
+                return Err(FeedError::Connection(format!("closed by server: {frame}")))
             }
             Message::Close(None) => {
                 return Err(FeedError::Connection(
@@ -397,14 +341,6 @@ mod tests {
                 WsPayload::Text(_) => Ok(None),
             }
         }
-    }
-
-    #[test]
-    fn sources_remain_usable_through_trait_objects() {
-        let mut source: Box<dyn WsSource<Snapshot = u32>> =
-            Box::new(MockSource { url: "ws://localhost:8546".into() });
-        assert!(source.request().is_ok());
-        assert!(matches!(source.decode(WsPayload::Text("notice".into())), Ok(None)));
     }
 
     const BAD_FRAME: &[u8] = &[0xff];

@@ -137,7 +137,25 @@ impl TychoEncoder for TychoRouterEncoder {
         }
 
         let swaps = solution.swaps();
-        super::swap_encoder::validate_elfomofi_swaps(swaps)?;
+        for (index, swap) in swaps.iter().enumerate() {
+            let protocol = &swap.component().protocol_system;
+            if let Some(limit) = self
+                .swap_encoder_registry
+                .get_encoder(protocol)
+                .and_then(|encoder| encoder.max_swaps_per_solution())
+            {
+                if swaps[..=index]
+                    .iter()
+                    .filter(|previous| previous.component().protocol_system == *protocol)
+                    .count() >
+                    limit
+                {
+                    return Err(EncodingError::InvalidInput(format!(
+                        "{protocol} supports at most {limit} swap(s) per solution"
+                    )));
+                }
+            }
+        }
         let mut solution_tokens = vec![];
         let mut split_tokens_already_considered = HashSet::new();
         for (i, swap) in swaps.iter().enumerate() {

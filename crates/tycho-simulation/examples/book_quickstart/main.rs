@@ -67,10 +67,6 @@ pub struct Transaction {
 }
 
 #[derive(Parser)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent command-line switches, not mutually exclusive states"
-)]
 struct Cli {
     #[arg(long)]
     sell_token: Option<String>,
@@ -87,18 +83,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     enable_elfomofi: bool,
 
-    /// Include helper tokens outside the configured token universe.
-    #[arg(long, default_value_t = false)]
-    discover_elfomofi_tokens: bool,
     /// HTTP RPC endpoint on --chain, used by ElFomoFi and swap simulation.
     #[arg(long, env = "RPC_URL", hide_env_values = true)]
     rpc_url: Option<String>,
-    /// WebSocket RPC endpoint on --chain for new block heads.
-    #[arg(long, env = "WS_RPC_URL", hide_env_values = true)]
-    ws_rpc_url: Option<String>,
-    /// Poll ElFomoFi books over HTTP instead of subscribing to new block heads.
-    #[arg(long, default_value_t = false)]
-    book_polling: bool,
     /// Disable the pAMM book feeds, keeping the RFQ venues.
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
@@ -396,13 +383,7 @@ async fn main() {
             use tycho_simulation::pamm::protocols::elfomofi::{self, feed::ElfomofiFeedBuilder};
 
             if let Some(rpc_url) = &cli.rpc_url {
-                let mut builder = ElfomofiFeedBuilder::new(book_config, rpc_url.clone())
-                    .discover_tokens(cli.discover_elfomofi_tokens);
-                if cli.book_polling {
-                    builder = builder.polling();
-                } else if let Some(ws_rpc_url) = &cli.ws_rpc_url {
-                    builder = builder.ws_rpc_url(ws_rpc_url.clone());
-                }
+                let builder = ElfomofiFeedBuilder::new(book_config, rpc_url.clone());
                 match builder.build() {
                     Ok(feed) => {
                         feeds
@@ -1203,9 +1184,6 @@ mod tests {
                 chain,
                 "--rpc-url",
                 "http://localhost:8545",
-                "--ws-rpc-url",
-                "ws://localhost:8546",
-                "--book-polling",
             ])
             .unwrap();
             assert!(!cli.elfomofi_enabled());
