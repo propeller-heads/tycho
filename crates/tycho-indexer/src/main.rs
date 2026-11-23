@@ -560,8 +560,6 @@ async fn run_rpc(
     let chain = Chain::from_str(&rpc_args.chain)
         .map_err(|e| ExtractionError::Setup(format!("Invalid chain '{}': {e}", rpc_args.chain)))?;
 
-    let rpc_client = global_args.rpc.build_client()?;
-
     let direct_gw = GatewayBuilder::new(&global_args.database_url)
         .set_chains(&[chain])
         .enable_token_cache()
@@ -577,19 +575,18 @@ async fn run_rpc(
 
     let plans_config = PlansConfig::from_yaml("./plans.yaml").map_err(ExtractionError::Setup)?;
 
-    let (server_handle, server_task) =
-        ServicesBuilder::new(direct_gw.clone(), rpc_client.clone(), api_key)
-            .prefix(&global_args.server_version_prefix)
-            .bind(&global_args.server_ip)
-            .port(global_args.server_port)
-            .plans_config(plans_config)
-            .disabled_rpc_caches(
-                global_args
-                    .disabled_rpc_caches
-                    .0
-                    .clone(),
-            )
-            .run()?;
+    let (server_handle, server_task) = ServicesBuilder::new(direct_gw.clone(), api_key)
+        .prefix(&global_args.server_version_prefix)
+        .bind(&global_args.server_ip)
+        .port(global_args.server_port)
+        .plans_config(plans_config)
+        .disabled_rpc_caches(
+            global_args
+                .disabled_rpc_caches
+                .0
+                .clone(),
+        )
+        .run()?;
     info!(server_url, "Http and Ws server started");
     let shutdown_task = tokio::spawn(shutdown_handler(server_handle, vec![], None));
     let (res, _, _) = select_all([server_task, shutdown_task]).await;
@@ -674,7 +671,7 @@ async fn create_indexing_tasks(
         }
     };
 
-    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key)
+    let (server_handle, server_task) = ServicesBuilder::new(rpc_gw, api_key)
         .prefix(&global_args.server_version_prefix)
         .bind(&global_args.server_ip)
         .port(global_args.server_port)
