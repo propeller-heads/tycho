@@ -2464,6 +2464,7 @@ mod test {
         "__CONTRACT_IDS__": [
             "0xb4eccE46b8D4e4abFd03C9B806276A6735C9c092"
         ],
+        "__PROTOCOL_SYSTEM__": "uniswap_v2",
         "version": {
             "timestamp": "2069-01-01T04:20:00",
             "block": {
@@ -2475,13 +2476,32 @@ mod test {
     }
     "#;
 
-        let json_str_snake = json_common.replace("\"__CONTRACT_IDS__\"", "\"contract_ids\"");
-        let json_str_camel = json_common.replace("\"__CONTRACT_IDS__\"", "\"contractIds\"");
+        let json_str_snake = json_common
+            .replace("\"__CONTRACT_IDS__\"", "\"contract_ids\"")
+            .replace("\"__PROTOCOL_SYSTEM__\"", "\"protocol_system\"");
+        let json_str_camel = json_common
+            .replace("\"__CONTRACT_IDS__\"", "\"contractIds\"")
+            .replace("\"__PROTOCOL_SYSTEM__\"", "\"protocolSystem\"");
 
         let snake: StateRequestBody = serde_json::from_str(&json_str_snake).unwrap();
         let camel: StateRequestBody = serde_json::from_str(&json_str_camel).unwrap();
 
         assert_eq!(snake, camel);
+        assert_eq!(snake.protocol_system, "uniswap_v2");
+    }
+
+    #[test]
+    fn test_parse_state_request_without_protocol_system_fails() {
+        let err = serde_json::from_str::<StateRequestBody>(
+            r#"{"contract_ids": ["0xb4eccE46b8D4e4abFd03C9B806276A6735C9c092"]}"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("missing field `protocol_system`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

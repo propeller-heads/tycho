@@ -90,6 +90,7 @@ pub(super) struct ApiDoc;
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use serde_json::Value;
     use utoipa::OpenApi;
 
@@ -132,6 +133,24 @@ mod tests {
             missing.is_empty(),
             "unresolved $ref targets present in OpenAPI document: {:?}",
             missing
+        );
+    }
+
+    #[rstest]
+    #[case::contract_state("StateRequestBody")]
+    fn test_openapi_requires_protocol_system(#[case] schema: &str) {
+        let doc = ApiDoc::openapi();
+        let json =
+            serde_json::to_value(&doc).expect("OpenAPI document should serialize to JSON value");
+        let required = json
+            .pointer(&format!("/components/schemas/{schema}/required"))
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{schema} has no required list"));
+        assert!(
+            required
+                .iter()
+                .any(|name| name == "protocol_system"),
+            "{schema} does not require protocol_system: {required:?}"
         );
     }
 }

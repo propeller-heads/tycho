@@ -1789,6 +1789,7 @@ mod tests {
     async fn test_validate_version_priority() {
         let json_str = r#"
     {
+        "protocol_system": "uniswap_v2",
         "version": {
             "timestamp": "2069-01-01T04:20:00",
             "block": {
@@ -1816,6 +1817,7 @@ mod tests {
     async fn test_validate_version_with_block_number() {
         let json_str = r#"
     {
+        "protocol_system": "uniswap_v2",
         "version": {
             "block": {
                 "number": 213,
