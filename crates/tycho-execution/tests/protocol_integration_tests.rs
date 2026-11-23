@@ -5005,7 +5005,7 @@ fn test_single_encoding_strategy_montra_native_quote_buy() {
 }
 
 #[test]
-fn test_single_encoding_strategy_montra_native_quote_sell() {
+fn test_evm_single_encoding_strategy_montra_native_quote_sell() {
     // launch token ───(Montra 0x35bd0e6a)──> HYPE, 1e24 of the token through Permit2
     write_montra_trade(
         "test_single_encoding_strategy_montra_native_quote_sell",
@@ -5025,7 +5025,7 @@ fn test_single_encoding_strategy_montra_native_quote_sell() {
 }
 
 #[test]
-fn test_single_encoding_strategy_montra_erc20_quote_sell() {
+fn test_evm_single_encoding_strategy_montra_erc20_quote_sell() {
     // launch token ───(Montra 0x33f724fd)──> wNVDAx, 1e24 of the token through Permit2
     write_montra_trade(
         "test_single_encoding_strategy_montra_erc20_quote_sell",
@@ -5045,7 +5045,7 @@ fn test_single_encoding_strategy_montra_erc20_quote_sell() {
 }
 
 #[test]
-fn test_single_encoding_strategy_montra_erc20_quote_buy() {
+fn test_evm_single_encoding_strategy_montra_erc20_quote_buy() {
     // wNVDAx ───(Montra 0x33f724fd)──> launch token, 0.01 wNVDAx through Permit2: the hook takes
     // its fee from the ERC-20 input.
     write_montra_trade(
@@ -5081,7 +5081,7 @@ fn test_single_encoding_strategy_montra_erc20_quote_buy() {
     "test_single_encoding_strategy_montra_grouped_sell_then_buy_min_out_one_above",
     "104543771113625167654507160"
 )]
-fn test_single_encoding_strategy_montra_grouped_sell_then_buy(
+fn test_evm_single_encoding_strategy_montra_grouped_sell_then_buy(
     #[case] name: &str,
     #[case] min_amount_out: &'static str,
 ) {
