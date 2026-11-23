@@ -957,9 +957,9 @@ pub struct StateRequestBody {
     #[serde(alias = "contractIds")]
     #[schema(value_type=Option<Vec<String>>)]
     pub contract_ids: Option<Vec<Bytes>>,
-    /// Does not filter response, only required to correctly apply unconfirmed state
-    /// from ReorgBuffers
-    #[serde(alias = "protocolSystem", default)]
+    /// Name of the protocol system of the contracts. Required. Selects the extractor whose
+    /// unconfirmed state applies.
+    #[serde(alias = "protocolSystem")]
     pub protocol_system: String,
     #[serde(default = "VersionParam::default")]
     pub version: VersionParam,
