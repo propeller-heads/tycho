@@ -2002,9 +2002,9 @@ mod tests_transaction_conflict {
 mod tests_ensure_chain {
     use diesel::prelude::*;
     use diesel_async::{AsyncConnection, RunQueryDsl};
-    use tycho_common::models::Chain;
+    use tycho_common::{models::Chain, Bytes};
 
-    use super::{ensure_chain, schema};
+    use super::{ensure_chain, ensure_token_with_price, schema};
 
     async fn setup_conn() -> diesel_async::AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").unwrap();
@@ -2036,6 +2036,66 @@ mod tests_ensure_chain {
             .unwrap();
     }
 
+    /// The id, decimals and price of the token stored with this address.
+    async fn stored_token_with_price(
+        conn: &mut diesel_async::AsyncPgConnection,
+        address: &Bytes,
+    ) -> Vec<(i64, i32, f64)> {
+        schema::token::table
+            .inner_join(schema::token_price::table)
+            .filter(schema::token::address.eq(address.as_ref()))
+            .select((schema::token::id, schema::token::decimals, schema::token_price::price))
+            .load(conn)
+            .await
+            .unwrap()
+    }
+
+    async fn account_count(conn: &mut diesel_async::AsyncPgConnection) -> i64 {
+        schema::account::table
+            .count()
+            .get_result(conn)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price_stores_token_by_address() {
+        let mut conn = setup_conn().await;
+        let native = Chain::Ethereum.native_token();
+
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        let stored = stored_token_with_price(&mut conn, &native.address).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!((stored[0].1, stored[0].2), (18, 1e18));
+        let quality: i32 = schema::token::table
+            .filter(schema::token::address.eq(native.address.as_ref()))
+            .select(schema::token::quality)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(quality, 100);
+        assert_eq!(account_count(&mut conn).await, 0, "a token needs no account row");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price_is_idempotent() {
+        let mut conn = setup_conn().await;
+        let native = Chain::Ethereum.native_token();
+
+        ensure_token_with_price(&native, &mut conn).await;
+        ensure_token_with_price(&native, &mut conn).await;
+
+        assert_eq!(
+            stored_token_with_price(&mut conn, &native.address)
+                .await
+                .len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn test_arc_native_asset_bootstrap_is_idempotent_and_prices_both_representations() {
         let mut conn = setup_conn().await;
@@ -2046,41 +2106,25 @@ mod tests_ensure_chain {
             .await
             .unwrap();
 
-        let chain_id: i64 = schema::chain::table
-            .select(schema::chain::id)
-            .filter(schema::chain::name.eq("arc"))
-            .first(&mut conn)
-            .await
-            .unwrap();
-
-        let account_count: i64 = schema::account::table
-            .filter(schema::account::chain_id.eq(chain_id))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .unwrap();
-        let token_count: i64 = schema::token::table
-            .inner_join(schema::account::table)
-            .filter(schema::account::chain_id.eq(chain_id))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .unwrap();
-        assert_eq!(account_count, 2);
-        assert_eq!(token_count, 2);
-
-        let rows: Vec<(Vec<u8>, i32, f64)> = schema::account::table
-            .inner_join(schema::token::table.inner_join(schema::token_price::table))
-            .filter(schema::account::chain_id.eq(chain_id))
-            .select((schema::account::address, schema::token::decimals, schema::token_price::price))
-            .order(schema::account::address.asc())
-            .load(&mut conn)
-            .await
-            .unwrap();
-
         let mut routable_address = vec![0u8; 20];
         routable_address[0] = 0x36;
-        assert_eq!(rows, vec![(vec![0u8; 20], 18, 1e18), (routable_address, 6, 1e6)]);
+        let native = stored_token_with_price(&mut conn, &Bytes::from(vec![0u8; 20])).await;
+        let routable = stored_token_with_price(&mut conn, &Bytes::from(routable_address)).await;
+        assert_eq!(
+            native
+                .iter()
+                .map(|row| (row.1, row.2))
+                .collect::<Vec<_>>(),
+            vec![(18, 1e18)]
+        );
+        assert_eq!(
+            routable
+                .iter()
+                .map(|row| (row.1, row.2))
+                .collect::<Vec<_>>(),
+            vec![(6, 1e6)]
+        );
+        assert_eq!(account_count(&mut conn).await, 0);
     }
 
     #[tokio::test]
