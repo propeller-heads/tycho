@@ -351,12 +351,14 @@ impl DBCacheWriteExecutor {
 
         debug!("Persisted block: {:?}", persisted_block);
 
-        // Shares the name caches, so both gateways know the same chains and protocols.
+        // Shares the name caches, so both gateways know the same chains and protocols, and the
+        // retention horizon, so both drop the same old versions.
         let instance_gateway = PostgresGatewayNew::with_caches(
             state_gateway.chain_id_cache.clone(),
             state_gateway
                 .protocol_system_id_cache
                 .clone(),
+            state_gateway.retention_horizon,
         );
         Self {
             name,

@@ -36,7 +36,9 @@ postgres/
     │   └── version.rs  — the check that the current tables can answer a version
     ├── write/          — its write methods, one file per domain
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
-    │   └── extraction_state.rs — cursor and last block of each instance
+    │   ├── extraction_state.rs — cursor and last block of each instance
+    │   ├── state.rs    — protocol state rows: their key, history row and table writes for versioning
+    │   └── versioning.rs — VersionedRowNew (renamed to VersionedRow at cut-over) + write_versions(): latest version in the current table, replaced versions in history
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -67,6 +69,12 @@ instances. No table has a DEFAULT partition.
   `tycho.extraction_state` so far; any other op fails the whole batch with
   `StorageError::Unsupported`. At cut-over, `execute_write_op` and the
   old gateway are deleted, and `PostgresGatewayNew` is renamed.
+- `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
+  `instance::write::versioning::VersionedRowNew` (protocol state so far). The module doc of
+  `write/versioning.rs` has the rules. A change that does not start after the version it
+  replaces fails the batch. The old versioning (`postgres/versioning.rs`) compares a change only
+  with the stored row. It skips a change that is not after that row. It does not compare the
+  changes of one key inside a batch, so it applies two changes with the same start.
 
 ## Architecture
 

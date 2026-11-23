@@ -251,20 +251,17 @@ async fn round_trip_catalog_and_components(
         .expect("reading protocol state failed");
     assert_eq!((attribute.attribute_value, attribute.tx_index), (bytes(2), 3));
 
-    let archived = ProtocolStateHistory {
-        instance_id,
-        protocol_component_id: component_id,
-        attribute_name: "reserve0".to_string(),
-        attribute_value: bytes(1),
-        previous_value: None,
-        valid_from: ts - Duration::seconds(12),
-        valid_to: ts,
-        tx_index: 1,
-        inserted_ts: ts,
-        modified_ts: ts,
-    };
     diesel::insert_into(tycho::protocol_state_history::table)
-        .values(&archived)
+        .values(NewProtocolStateHistory {
+            instance_id,
+            protocol_component_id: component_id,
+            attribute_name: "reserve0".to_string(),
+            attribute_value: bytes(1),
+            previous_value: None,
+            valid_from: ts - Duration::seconds(12),
+            valid_to: ts,
+            tx_index: 1,
+        })
         .execute(conn)
         .await
         .expect("inserting protocol state history failed");
@@ -684,8 +681,8 @@ async fn test_leaf_check_rejects_rows_of_another_instance() {
     assert_eq!(database_error_kind(result), DatabaseErrorKind::CheckViolation);
 }
 
-fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> ProtocolStateHistory {
-    ProtocolStateHistory {
+fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> NewProtocolStateHistory {
+    NewProtocolStateHistory {
         instance_id,
         protocol_component_id: 1,
         attribute_name: "reserve0".to_string(),
@@ -694,8 +691,6 @@ fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> ProtocolStat
         valid_from: valid_to - Duration::seconds(12),
         valid_to,
         tx_index: 0,
-        inserted_ts: now(),
-        modified_ts: now(),
     }
 }
 
