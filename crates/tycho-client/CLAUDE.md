@@ -57,7 +57,8 @@ TychoStreamBuilder (stream.rs)
    cannot hold the round to its `block_time` wait. They wait only when no synchronizer is active.
    A synchronizer whose block is more than `max_missed_blocks` behind the tip is stale, from any
    state and at startup, so a replay never holds a round; it leaves stale once it is within that
-   distance.
+   distance. Its messages are held and merged (`SynchronizerStream::release`) until then, so the
+   consumer never sees a replayed block, and gets snapshot plus deltas as one message on catch-up.
 
 ## CLI
 

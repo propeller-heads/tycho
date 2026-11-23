@@ -231,7 +231,8 @@ pub enum SynchronizerState {
     Delayed(BlockHeader),
     /// The synchronizer hasn't emitted messages for > `max_missed_blocks` or has
     /// fallen far behind. At this point we do not wait for it anymore but it can
-    /// still eventually recover.
+    /// still eventually recover. While it is more than `max_missed_blocks` behind the tip, its
+    /// messages are held and the feed sends nothing for it.
     Stale(BlockHeader),
     /// The synchronizer is on future not connected block.
     // For this to happen we must have a gap, and a gap usually means a new snapshot from the
@@ -284,6 +285,9 @@ pub struct SynchronizerStream {
     error: Option<SynchronizerError>,
     modify_ts: NaiveDateTime,
     rx: Receiver<SyncResult<StateSyncMessage<BlockHeader>>>,
+    /// Messages received while replaying, merged into one. The consumer gets them when the
+    /// stream is no longer replaying.
+    held: Option<StateSyncMessage<BlockHeader>>,
 }
 
 impl SynchronizerStream {
@@ -297,6 +301,30 @@ impl SynchronizerStream {
             error: None,
             modify_ts: Local::now().naive_utc(),
             rx,
+            held: None,
+        }
+    }
+
+    /// Merges `msg` into the held messages. Returns them all as one message once `msg` is no more
+    /// than `max_missed_blocks` behind the tip; holds them while it is further behind.
+    ///
+    /// A replay's old blocks never reach the consumer, but its snapshot and deltas are kept, so
+    /// the consumer's state is complete when the stream catches up.
+    fn release(
+        &mut self,
+        msg: StateSyncMessage<BlockHeader>,
+        block_history: &BlockHistory,
+        max_missed_blocks: u64,
+    ) -> Option<StateSyncMessage<BlockHeader>> {
+        let msg = match self.held.take() {
+            Some(held) => held.merge(msg),
+            None => msg,
+        };
+        if is_replaying(block_history, &msg.header, max_missed_blocks) {
+            self.held = Some(msg);
+            None
+        } else {
+            Some(msg)
         }
     }
 
@@ -892,6 +920,7 @@ where
                         "Marking synchronizer as stale during initialization"
                     );
                     stream.state = SynchronizerState::Stale(header);
+                    stream.held = ready_sync_msgs.remove(&stream.extractor_id.name);
                 } else if header.number < start_header.number {
                     debug!(
                         extractor_id=%stream.extractor_id,
@@ -1059,8 +1088,10 @@ where
                         skip_wait,
                     )
                     .await?;
+                let released =
+                    res.and_then(|msg| stream.release(msg, block_history, self.max_missed_blocks));
                 Ok::<_, BlockSynchronizerError>(
-                    res.map(|msg| (stream.extractor_id.name.clone(), msg)),
+                    released.map(|msg| (stream.extractor_id.name.clone(), msg)),
                 )
             });
         ready_sync_msgs.extend(
