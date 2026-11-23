@@ -1852,7 +1852,7 @@ impl TestRunner {
 
         info!("Executing {} simulations ...", inputs.len());
 
-        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data, None)
+        simulate_swap_transaction(&rpc_tools, inputs, block, router_overwrites_data)
             .await
             .map_err(|(error, _, _)| error)
     }
