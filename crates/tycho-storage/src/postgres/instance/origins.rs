@@ -97,7 +97,6 @@ impl BatchOrigins {
     /// Returns the origin of a change made by transaction `tx`.
     ///
     /// Fails with [`StorageError::NotFound`] when the batch doesn't carry the transaction.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no instance write takes versioned rows yet"))]
     pub fn change(&self, tx: &TxHash) -> Result<ChangeOrigin, StorageError> {
         self.txs
             .get(tx)

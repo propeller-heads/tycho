@@ -580,12 +580,16 @@ impl DBCacheWriteExecutor {
                     .insert_tokens(tokens, conn)
                     .await?
             }
+            WriteOp::InsertComponentBalances(balances) => {
+                self.instance_gateway
+                    .insert_component_balances(instance, origins, balances, conn)
+                    .await?
+            }
             WriteOp::InsertContract(_) |
             WriteOp::UpdateContracts(_) |
             WriteOp::InsertAccountBalances(_) |
             WriteOp::InsertProtocolComponents(_) |
             WriteOp::UpdateTokens(_) |
-            WriteOp::InsertComponentBalances(_) |
             WriteOp::UpsertProtocolState(_) |
             WriteOp::InsertEntryPoints(_) |
             WriteOp::InsertEntryPointTracingParams(_) |

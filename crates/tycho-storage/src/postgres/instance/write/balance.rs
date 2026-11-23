@@ -1,24 +1,104 @@
 //! Component balances of an instance: one balance per component and token, versioned.
+use std::collections::{BTreeSet, HashSet};
+
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel::{
     sql_query,
     sql_types::{Array, BigInt, Binary, Int4},
     upsert::excluded,
-    ExpressionMethods,
+    ExpressionMethods, QueryDsl,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::{storage::StorageError, Bytes};
+use tycho_common::{models::protocol, storage::StorageError, Bytes};
 
 use crate::postgres::{
     instance::{
+        gateway::PostgresGatewayNew,
+        origins::BatchOrigins,
         orm::{ComponentBalance, NewComponentBalance, NewComponentBalanceHistory},
         schema::tycho::{component_balance, component_balance_history},
-        write::{versioning::VersionedRow, ROWS_PER_INSERT},
+        write::{
+            versioning::{VersionedChange, VersionedRow},
+            ROWS_PER_INSERT,
+        },
         InstanceId,
     },
+    schema::token,
     storage_error_from_diesel,
 };
+
+impl PostgresGatewayNew {
+    /// Writes the balances of a batch as new versions. Each balance takes the block timestamp and
+    /// index of its transaction from `origins`.
+    ///
+    /// `NotFound` for a component that is not in the instance, a token that is not stored, or a
+    /// transaction that is not in the batch. `Unexpected` for a balance that does not start after
+    /// the stored version of its key.
+    pub(crate) async fn insert_component_balances(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        balances: &[protocol::ComponentBalance],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        // A batch spans many blocks, so the same components and tokens come back many times. Look
+        // up each one once.
+        let external_ids: Vec<&str> = balances
+            .iter()
+            .map(|balance| balance.component_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let component_ids = self
+            .component_ids(instance, &external_ids, conn)
+            .await?;
+        let addresses: HashSet<&Bytes> = balances
+            .iter()
+            .map(|balance| &balance.token)
+            .collect();
+        let stored_tokens: HashSet<Bytes> = token::table
+            .filter(token::address.eq_any(&addresses))
+            .select(token::address)
+            .load::<Bytes>(conn)
+            .await
+            .map_err(|err| storage_error_from_diesel(err, "Token", "batch", None))?
+            .into_iter()
+            .collect();
+        if let Some(missing) = balances
+            .iter()
+            .find(|balance| !stored_tokens.contains(&balance.token))
+        {
+            return Err(StorageError::NotFound("Token".to_string(), missing.token.to_string()));
+        }
+
+        let changes = balances
+            .iter()
+            .map(|balance| {
+                let origin = origins.change(&balance.modify_tx)?;
+                Ok(VersionedChange::Update(NewComponentBalance {
+                    instance_id: instance,
+                    protocol_component_id: component_ids[&balance.component_id],
+                    token: balance.token.clone(),
+                    new_balance: balance.balance.clone(),
+                    // write_versions links every later version to the one it replaces.
+                    previous_value: no_previous_balance(),
+                    balance_float: balance.balance_float,
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        self.write_versions(instance, changes, conn)
+            .await
+    }
+}
+
+/// The previous value of the first version of a key. No balance comes before it, but the column
+/// is NOT NULL, so it holds one zero byte, as on the old path.
+fn no_previous_balance() -> Bytes {
+    Bytes::from("0x00")
+}
 
 #[async_trait]
 impl VersionedRow for NewComponentBalance {
