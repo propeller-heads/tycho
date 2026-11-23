@@ -7,6 +7,7 @@
 /// Rows per insert statement, far below the bind parameter limit of Postgres.
 const ROWS_PER_INSERT: usize = 1000;
 
+mod balance;
 pub mod block;
 mod extraction_state;
 mod state;

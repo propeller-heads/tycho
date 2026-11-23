@@ -211,7 +211,7 @@ pub struct NewProtocolStateHistory {
     pub tx_index: i32,
 }
 
-#[derive(Debug, Identifiable, Queryable, Selectable)]
+#[derive(Debug, Identifiable, Queryable, QueryableByName, Selectable)]
 #[diesel(table_name = tycho::component_balance)]
 #[diesel(primary_key(instance_id, protocol_component_id, token))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -256,6 +256,21 @@ pub struct ComponentBalanceHistory {
     pub valid_to: NaiveDateTime,
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::component_balance_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewComponentBalanceHistory {
+    pub instance_id: InstanceId,
+    pub protocol_component_id: i64,
+    pub token: Bytes,
+    pub new_balance: Bytes,
+    pub previous_value: Bytes,
+    pub balance_float: f64,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
