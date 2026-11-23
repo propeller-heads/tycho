@@ -2839,6 +2839,75 @@ mod tests {
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
     }
 
+    async fn post_to_bare_handler(route: &str, body: serde_json::Value) -> (StatusCode, String) {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/contract_state",
+                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
+                )
+                .route(
+                    "/v1/protocol_state",
+                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
+                )
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(route)
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+
+        let status = response.status();
+        let body = test::read_body(response).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[rstest]
+    #[case::contract_state_missing(
+        "/v1/contract_state",
+        serde_json::json!({"contract_ids": []}),
+        "missing field `protocol_system`"
+    )]
+    #[case::contract_state_empty(
+        "/v1/contract_state",
+        serde_json::json!({"protocol_system": ""}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[case::contract_state_blank(
+        "/v1/contract_state",
+        serde_json::json!({"protocol_system": "  "}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[actix_web::test]
+    async fn test_rejects_a_missing_or_blank_protocol_system(
+        #[case] route: &str,
+        #[case] body: serde_json::Value,
+        #[case] message: &str,
+    ) {
+        let (status, text) = post_to_bare_handler(route, body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains(message), "{text}");
+    }
+
     #[actix_web::test]
     async fn test_contract_state_cache_answer_is_the_json_of_the_dto() {
         let app = test::init_service(
