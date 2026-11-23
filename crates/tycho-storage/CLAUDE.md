@@ -50,9 +50,12 @@ postgres/
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — the check that the current tables can answer a version
     ├── write/          — its write methods, one file per domain
+    │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
+    │   ├── component.rs — the component id of each external id, in one instance
     │   ├── extraction_state.rs — cursor and last block of each instance
     │   ├── state.rs    — protocol state rows: their key, history row and table writes for versioning
+    │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins
     │   └── versioning.rs — VersionedRow + write_versions(): latest version in the current table, replaced versions in history
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
@@ -76,18 +79,19 @@ instances. No table has a DEFAULT partition.
   `drop_expired_partitions()` drops expired days of both the old partitioned tables and the
   history tables.
 - `public.protocol_system.active_instance_id` records which instance readers see.
-  `public.token.address` is how instance tables refer to tokens.
+  `public.token.address` is the key of a token (NOT NULL, UNIQUE; one chain per database), and
+  instance tables refer to tokens by it. A token has no `account` row.
 - `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
-  `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows take their block timestamp and tx index
-  from the batch (`instance::origins`), and `UpsertTx` writes nothing. It writes blocks and
-  `tycho.extraction_state` so far; any other op fails the whole batch with
-  `StorageError::Unsupported`. At cut-over, the old gateway is deleted and
-  `PostgresGatewayNew` is renamed.
+  `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows
+  take their block timestamp and tx index from the batch (`instance::origins`), and `UpsertTx`
+  writes nothing. It writes blocks, tokens, component balances and `tycho.extraction_state` so far;
+  any other op fails the whole batch with `StorageError::Unsupported`. At cut-over, the old
+  gateway is deleted and `PostgresGatewayNew` is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
-  `instance::write::versioning::VersionedRow` (protocol state so far). It applies the changes in
-  the order they start: each replaced version goes to `*_history`, ended at the start of the
-  next one, unless it ends at or before the retention horizon. A change that does not start after
-  the version it replaces fails the batch; the old versioning skips it.
+  `instance::write::versioning::VersionedRow` (protocol state and component balances so far). It
+  applies the changes in the order they start: each replaced version goes to `*_history`, ended at
+  the start of the next one, unless it ends at or before the retention horizon. A change that does
+  not start after the version it replaces fails the batch; the old versioning skips it.
 
 ## Architecture
 
