@@ -16,7 +16,7 @@ use super::reserve_price::spot_price_from_reserves;
 use crate::{
     evm::protocol::{
         safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u512},
-        u256_num::{biguint_to_u256, u256_to_biguint},
+        u256_num::{biguint_to_uint, u256_to_biguint},
         utils::solidity_math::mul_div,
     },
     protocol::errors::InvalidSnapshotError,
@@ -229,8 +229,8 @@ pub fn cpmm_swap_to_price(
     }
 
     // Flip target pool price to swap price
-    let swap_price_num = biguint_to_u256(&target_price.denominator);
-    let swap_price_den = biguint_to_u256(&target_price.numerator);
+    let swap_price_num = biguint_to_uint(&target_price.denominator)?;
+    let swap_price_den = biguint_to_uint(&target_price.numerator)?;
 
     // Check reachability: target price must be above the spot price (with fees)
     // swap_price_num/swap_price_den >= (reserve_in * FEE_PRECISION) / (reserve_out *

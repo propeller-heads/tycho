@@ -212,11 +212,11 @@ async fn simulate_swap_transaction_on(
 
         let token_in = info.solution.token_in();
         let sells_native = token_in == &Bytes::zero(20);
-        let (user_overwrites, metadata) = match token_slots.get(token_in) {
-            None if sells_native => (
-                encoding::setup_native_user_overwrites(info.solution.amount_in()),
-                tenderly::OverwriteMetadata::new(),
-            ),
+        let overwrites = match token_slots.get(token_in) {
+            None if sells_native => {
+                encoding::setup_native_user_overwrites(info.solution.amount_in())
+                    .map(|overwrites| (overwrites, tenderly::OverwriteMetadata::new()))
+            }
             Some(slots) => encoding::setup_user_overwrites(
                 &to_address,
                 token_in,
@@ -228,6 +228,18 @@ async fn simulate_swap_transaction_on(
                     simulation_id.clone(),
                     TychoExecutionResult::Failed {
                         error_msg: format!("Couldn't find storage slots for token {token_in}"),
+                    },
+                );
+                continue;
+            }
+        };
+        let (user_overwrites, metadata) = match overwrites {
+            Ok(overwrites) => overwrites,
+            Err(e) => {
+                tycho_execution_results.insert(
+                    simulation_id.clone(),
+                    TychoExecutionResult::Failed {
+                        error_msg: format!("Failed to override the user's balances: {e}"),
                     },
                 );
                 continue;

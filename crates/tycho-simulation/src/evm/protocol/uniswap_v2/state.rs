@@ -23,7 +23,7 @@ use crate::evm::protocol::{
         cpmm_swap_to_price, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint},
+    u256_num::{biguint_to_uint, u256_to_biguint},
     utils::add_fee_markup,
 };
 
@@ -67,7 +67,7 @@ impl ProtocolSim for UniswapV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let zero2one = token_in.address < token_out.address;
         let (reserve_in, reserve_out) =
             if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
@@ -192,7 +192,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::evm::protocol::u256_num::biguint_to_u256;
+    use crate::evm::protocol::u256_num::biguint_to_uint;
 
     fn token_0() -> Token {
         Token::new(
@@ -273,8 +273,8 @@ mod tests {
             .as_any()
             .downcast_ref::<UniswapV2State>()
             .unwrap();
-        assert_eq!(new_state.reserve0, r0 + biguint_to_u256(&amount_in));
-        assert_eq!(new_state.reserve1, r1 - biguint_to_u256(&exp));
+        assert_eq!(new_state.reserve0, r0 + biguint_to_uint(&amount_in).unwrap());
+        assert_eq!(new_state.reserve1, r1 - biguint_to_uint(&exp).unwrap());
         // Assert that the old state is unchanged
         assert_eq!(state.reserve0, r0);
         assert_eq!(state.reserve1, r1);
@@ -446,6 +446,17 @@ mod tests {
             "Price impact should be approximately 90%. Actual impact: {:.2}%",
             price_impact * 100.0
         );
+    }
+
+    #[rstest]
+    #[case::two_pow_256(BigUint::one() << 256)]
+    #[case::two_pow_300(BigUint::one() << 300)]
+    fn test_get_amount_out_refuses_amount_wider_than_uint256(#[case] amount_in: BigUint) {
+        let state = UniswapV2State::new(U256::from(1000u32), U256::from(2000u32));
+
+        let res = state.get_amount_out(amount_in, &token_0(), &token_1());
+
+        assert!(matches!(res, Err(SimulationError::InvalidInput(..))));
     }
 
     #[test]
@@ -796,7 +807,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            biguint_to_u256(&actual_result.amount),
+            biguint_to_uint(&actual_result.amount).unwrap(),
             U256::from(366839007208379339u128),
             "Should return non-zero amount"
         );

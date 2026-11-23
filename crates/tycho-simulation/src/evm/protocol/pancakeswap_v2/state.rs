@@ -23,7 +23,7 @@ use crate::evm::protocol::{
         cpmm_swap_to_price, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint},
+    u256_num::{biguint_to_uint, u256_to_biguint},
     utils::add_fee_markup,
 };
 
@@ -67,7 +67,7 @@ impl ProtocolSim for PancakeswapV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let zero2one = token_in.address < token_out.address;
         let (reserve_in, reserve_out) =
             if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
@@ -192,6 +192,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::evm::protocol::u256_num::biguint_to_uint;
 
     fn token_0() -> Token {
         Token::new(
@@ -786,7 +787,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            biguint_to_u256(&actual_result.amount),
+            biguint_to_uint(&actual_result.amount).unwrap(),
             U256::from(1376434275718772760u128),
             "Should return non-zero amount"
         );

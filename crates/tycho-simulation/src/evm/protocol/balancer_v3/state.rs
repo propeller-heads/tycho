@@ -39,7 +39,7 @@ use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
         balancer_v3::vm,
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
 };
@@ -639,7 +639,7 @@ impl ProtocolSim for BalancerV3State {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let index_in = self.token_index(&token_in.address)?;
         let index_out = self.token_index(&token_out.address)?;
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let amount_out = self
             .vault_swap_exact_in(amount_in, &token_in.address, &token_out.address)
             .map_err(|e| {

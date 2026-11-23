@@ -19,7 +19,7 @@ use crate::{
         sim::{self, SwapDirection},
     },
     evm::protocol::{
-        u256_num::{biguint_to_u256, u256_to_biguint},
+        u256_num::{biguint_to_uint, u256_to_biguint},
         utils::solidity_math::mul_div,
     },
     pamm::protocols::baibai::math::{invalid, Curve, Side},
@@ -210,10 +210,7 @@ impl ProtocolSim for BaibaiState {
             &token_in.address,
             &token_out.address,
         )?;
-        if amount_in.bits() > 256 {
-            return Err(invalid("amount exceeds uint256"));
-        }
-        let input = biguint_to_u256(&amount_in);
+        let input = biguint_to_uint(&amount_in)?;
         let curve = self.curve(direction)?;
         let (gross, cursor) = curve.quote(input)?;
         let output = self.after_fee(gross)?;
@@ -320,10 +317,13 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::pamm::protocols::baibai::{
-        math::Knot,
-        test_support::{fee_charging_fixture, fixture, fixtures, state, token, weth_state},
-        BASE_DEPLOYMENT,
+    use crate::{
+        evm::protocol::u256_num::biguint_to_uint,
+        pamm::protocols::baibai::{
+            math::Knot,
+            test_support::{fee_charging_fixture, fixture, fixtures, state, token, weth_state},
+            BASE_DEPLOYMENT,
+        },
     };
 
     fn quote() -> Token {
@@ -724,7 +724,11 @@ mod tests {
                     let (max_in, max_out) =
                         assert_tight_limits(&state, direction, beyond_curve, false, &context);
                     if direction == SwapDirection::BaseToQuote {
-                        assert_eq!(biguint_to_u256(&max_in), bid_paying_depth(&state), "{context}");
+                        assert_eq!(
+                            biguint_to_uint(&max_in).unwrap(),
+                            bid_paying_depth(&state),
+                            "{context}"
+                        );
                     }
                     if max_out < BigUint::from(2u32) {
                         continue;
@@ -732,7 +736,7 @@ mod tests {
                     curve_bound += 1;
 
                     let mut short = state.clone();
-                    let available = biguint_to_u256(&max_out) / U256::from(2);
+                    let available = biguint_to_uint(&max_out).unwrap() / U256::from(2);
                     short.available[BaibaiState::custody(direction).1] = available;
                     let (short_in, short_out) = assert_tight_limits(
                         &short,

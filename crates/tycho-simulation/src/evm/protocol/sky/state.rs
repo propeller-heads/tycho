@@ -21,7 +21,7 @@ use crate::{
     evm::{
         protocol::{
             safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-            u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+            u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
         },
         query_pool_swap::is_within_tolerance,
     },
@@ -213,7 +213,7 @@ impl ProtocolSim for SkyState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let mut new_state = self.clone();
         let gem_to_stable = self.is_gem_to_stable(&token_in.address, &token_out.address)?;
 

@@ -19,7 +19,7 @@ use tycho_common::{
 };
 
 use super::decoder::apply_delta;
-use crate::utils::decimals_exponent;
+use crate::{evm::protocol::u256_num::biguint_to_uint, utils::decimals_exponent};
 
 pub type Address = [u8; 20];
 // Pool-call estimate for routing, not a transaction gas limit.
@@ -168,7 +168,7 @@ impl ProtocolSim for LunarBaseState {
             .quote_exact_in(
                 address_from_bytes(token_in.address.as_ref())?,
                 address_from_bytes(token_out.address.as_ref())?,
-                biguint_to_u256(&amount_in)?,
+                biguint_to_uint(&amount_in)?,
             )
             .map_err(|err| map_quote_error(&err))?;
 
@@ -267,7 +267,7 @@ impl ProtocolSim for LunarBaseState {
             .quote_exact_in(
                 address_from_bytes(token_in.address.as_ref())?,
                 address_from_bytes(token_out.address.as_ref())?,
-                biguint_to_u256(&maximum)?,
+                biguint_to_uint(&maximum)?,
             )
             .map_err(|err| map_quote_error(&err))?;
         let amount_out = u256_to_biguint(amount_out);
@@ -401,12 +401,12 @@ fn quote_limit(
     if high == BigUint::ZERO || low > high {
         return Ok((BigUint::ZERO, BigUint::ZERO));
     }
-    match state.quote_exact_in(token_in, token_out, biguint_to_u256(&high)?) {
+    match state.quote_exact_in(token_in, token_out, biguint_to_uint(&high)?) {
         Ok((output, _)) => return Ok((high, u256_to_biguint(output))),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {}
         Err(err) => return Err(map_quote_error(&err)),
     }
-    let mut low_output = match state.quote_exact_in(token_in, token_out, biguint_to_u256(&low)?) {
+    let mut low_output = match state.quote_exact_in(token_in, token_out, biguint_to_uint(&low)?) {
         Ok((output, _)) => u256_to_biguint(output),
         Err(QuoteError::Rejected | QuoteError::ReserveOverflow) => {
             return Ok((BigUint::ZERO, BigUint::ZERO));
@@ -418,7 +418,7 @@ fn quote_limit(
     // Keep low executable and high rejected; at most 112 bisections are needed.
     while &high - &low > BigUint::from(1u32) {
         let middle = (&low + &high) >> 1;
-        match state.quote_exact_in(token_in, token_out, biguint_to_u256(&middle)?) {
+        match state.quote_exact_in(token_in, token_out, biguint_to_uint(&middle)?) {
             Ok((output, _)) => {
                 low = middle;
                 low_output = u256_to_biguint(output);
@@ -439,14 +439,6 @@ fn address_from_bytes(value: &[u8]) -> Result<Address, SimulationError> {
                 None,
             )
         })
-}
-
-fn biguint_to_u256(value: &BigUint) -> Result<U256, SimulationError> {
-    let bytes = value.to_bytes_be();
-    if bytes.len() > 32 {
-        return Err(SimulationError::InvalidInput("amount_in exceeds uint256".to_owned(), None));
-    }
-    Ok(U256::from_be_slice(&bytes))
 }
 
 fn u256_to_biguint(value: U256) -> BigUint {
@@ -1368,7 +1360,7 @@ mod tests {
             assert_eq!(input, BigUint::from(if x_to_y { 3u64 } else { 4u64 }));
             assert_eq!(output, BigUint::from(1u64));
             assert_eq!(
-                state.quote_exact_in(sell, buy, biguint_to_u256(&(input + 1u32)).unwrap()),
+                state.quote_exact_in(sell, buy, biguint_to_uint(&(input + 1u32)).unwrap()),
                 Err(QuoteError::Rejected)
             );
         }

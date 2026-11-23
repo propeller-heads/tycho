@@ -22,7 +22,7 @@ use super::fee_tier::{fee_serde, FeeTier};
 use crate::evm::protocol::{
     clmm::clmm_swap_to_price,
     safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::u256_to_biguint,
+    u256_num::{biguint_to_uint, u256_to_biguint},
     utils::{
         add_fee_markup,
         uniswap::{
@@ -323,13 +323,11 @@ impl ProtocolSim for UniswapV3State {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Positive,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
+        let amount_specified =
+            I256::checked_from_sign_and_abs(Sign::Positive, biguint_to_uint(&amount_in)?)
+                .ok_or_else(|| {
+                    SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+                })?;
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 
@@ -725,6 +723,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.amount, expected);
+    }
+
+    #[test]
+    fn test_get_amount_out_refuses_amount_wider_than_uint256() {
+        let token_x = Token::new(
+            &Bytes::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap(),
+            "X",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let token_y = Token::new(
+            &Bytes::from_str("0xf1ca9cb74685755965c7458528a36934df52a3ef").unwrap(),
+            "Y",
+            18,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        );
+        let pool = UniswapV3State::new(
+            8330443394424070888454257,
+            U256::from_str("188562464004052255423565206602").unwrap(),
+            FeeAmount::Medium,
+            17342,
+            vec![TickInfo::new(0, 0).unwrap(), TickInfo::new(46080, 0).unwrap()],
+        )
+        .unwrap();
+
+        let res = pool.get_amount_out(BigUint::from(1u8) << 256, &token_x, &token_y);
+
+        assert!(matches!(res, Err(SimulationError::InvalidInput(..))));
     }
 
     struct SwapTestCase {

@@ -27,7 +27,7 @@ use tycho_execution::encoding::{
     models::{ClientFeeParams, EncodedSolution, Solution, Swap},
 };
 use tycho_simulation::{
-    evm::protocol::u256_num::biguint_to_u256,
+    evm::protocol::u256_num::biguint_to_uint,
     price_level_stream::overrides::{
         AccountOverride as PammAccountOverride, PammSimulationOverrides,
     },
@@ -177,7 +177,7 @@ fn encode_solution(
             .ok_or_else(|| miette!("Missing solution"))?
     };
     let transaction =
-        encoded_transaction(&encoded_solution, &solution, &chain.native_token().address);
+        encoded_transaction(&encoded_solution, &solution, &chain.native_token().address)?;
     Ok((solution, transaction))
 }
 
@@ -251,10 +251,10 @@ fn encoded_transaction(
     encoded_solution: &EncodedSolution,
     solution: &Solution,
     native_address: &Bytes,
-) -> Transaction {
-    let amount_in = biguint_to_u256(solution.amount_in());
-    let amount_out = biguint_to_u256(solution.expected_amount_out());
-    let min_amount_out = biguint_to_u256(solution.min_amount_out());
+) -> miette::Result<Transaction> {
+    let amount_in: U256 = biguint_to_uint(solution.amount_in()).into_diagnostic()?;
+    let amount_out: U256 = biguint_to_uint(solution.expected_amount_out()).into_diagnostic()?;
+    let min_amount_out: U256 = biguint_to_uint(solution.min_amount_out()).into_diagnostic()?;
     let router_eth = Address::from_slice(ROUTER_ETH_ADDRESS.as_ref());
     let to_router_address = |raw: Address| {
         if raw.as_slice() == native_address.as_ref() {
@@ -287,14 +287,14 @@ fn encoded_transaction(
     } else {
         BigUint::ZERO
     };
-    Transaction::new(
+    Ok(Transaction::new(
         encoded_solution
             .interacting_with()
             .clone(),
         value,
         contract_interaction,
         encoded_solution.estimated_gas().clone(),
-    )
+    ))
 }
 
 /// Encodes the input data for a function call to the given function selector.
@@ -416,13 +416,18 @@ pub(crate) async fn detect_token_slots(
 }
 
 /// Overwrites the sender's native balance so it covers `amount` sent as tx value plus gas.
-pub(crate) fn setup_native_user_overwrites(amount: &BigUint) -> AddressHashMap<AccountOverride> {
-    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
-    let native_balance = biguint_to_u256(amount) + GAS_RESERVE;
-    AddressHashMap::from_iter([(
+pub(crate) fn setup_native_user_overwrites(
+    amount: &BigUint,
+) -> miette::Result<AddressHashMap<AccountOverride>> {
+    let user_address = Address::from_str(USER_ADDR).into_diagnostic()?;
+    let native_balance = biguint_to_uint(amount)
+        .into_diagnostic()?
+        .checked_add(GAS_RESERVE)
+        .ok_or_else(|| miette!("{amount} plus the gas reserve exceeds uint256"))?;
+    Ok(AddressHashMap::from_iter([(
         user_address,
         AccountOverride::default().with_balance(native_balance),
-    )])
+    )]))
 }
 
 /// Set up all state overrides needed for simulation using pre-computed token slots.
@@ -435,12 +440,12 @@ pub(crate) fn setup_user_overwrites(
     token_address: &Bytes,
     amount: &BigUint,
     token_slots: &TokenSlots,
-) -> (AddressHashMap<AccountOverride>, OverwriteMetadata) {
+) -> miette::Result<(AddressHashMap<AccountOverride>, OverwriteMetadata)> {
     let mut overwrites: AddressHashMap<AccountOverride> = AddressHashMap::default();
     let mut metadata = OverwriteMetadata::new();
-    let user_address = Address::from_str(USER_ADDR).expect("Valid user address");
+    let user_address = Address::from_str(USER_ADDR).into_diagnostic()?;
     let spender_address = Address::from_slice(&to_address[..20]);
-    let token_amount = biguint_to_u256(amount);
+    let token_amount = biguint_to_uint(amount).into_diagnostic()?;
     let amount_slot_value = B256::from(token_amount.to_be_bytes::<32>());
 
     debug!(
@@ -479,7 +484,7 @@ pub(crate) fn setup_user_overwrites(
     }
     overwrites.insert(user_address, AccountOverride::default().with_balance(native_balance));
 
-    (overwrites, metadata)
+    Ok((overwrites, metadata))
 }
 
 pub(crate) fn swap_request(
@@ -930,6 +935,7 @@ mod tests {
             &BigUint::from(5_000_000u64),
             slots,
         )
+        .expect("5,000,000 fits uint256")
     }
 
     #[test]

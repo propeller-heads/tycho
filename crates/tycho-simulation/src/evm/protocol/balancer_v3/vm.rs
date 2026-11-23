@@ -29,7 +29,7 @@ use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::{
     engine_db::engine_db_interface::EngineDatabaseInterface,
-    protocol::{u256_num::biguint_to_u256, vm::utils::json_deserialize_be_bigint_list},
+    protocol::{u256_num::biguint_to_uint, vm::utils::json_deserialize_be_bigint_list},
     simulation::{SimulationEngine, SimulationParameters},
 };
 
@@ -605,14 +605,16 @@ fn bigint_list_attribute(
     values
         .iter()
         .map(|value| {
-            value
-                .to_biguint()
-                .map(|value| biguint_to_u256(&value))
-                .ok_or_else(|| {
-                    SimulationError::FatalError(format!(
-                        "balancer_v3 pool {pool} reports a negative `{name}` entry: {value}"
-                    ))
-                })
+            let unsigned = value.to_biguint().ok_or_else(|| {
+                SimulationError::FatalError(format!(
+                    "balancer_v3 pool {pool} reports a negative `{name}` entry: {value}"
+                ))
+            })?;
+            biguint_to_uint(&unsigned).map_err(|e| {
+                SimulationError::FatalError(format!(
+                    "balancer_v3 pool {pool} reports a `{name}` entry wider than uint256: {e}"
+                ))
+            })
         })
         .collect()
 }

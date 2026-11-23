@@ -25,7 +25,7 @@ use crate::{
         protocol::{
             clmm::clmm_swap_to_price,
             safe_math::{safe_add_u256, safe_sub_u256},
-            u256_num::{u256_to_biguint, u256_to_f64},
+            u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
             uniswap_v4::hooks::{
                 hook_handler::HookHandler,
                 models::{
@@ -932,13 +932,11 @@ impl ProtocolSim for UniswapV4State {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Negative,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
+        let amount_specified =
+            I256::checked_from_sign_and_abs(Sign::Negative, biguint_to_uint(&amount_in)?)
+                .ok_or_else(|| {
+                    SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+                })?;
 
         let mut amount_to_swap = amount_specified;
         let mut lp_fee_override: Option<u32> = None;
@@ -1508,7 +1506,7 @@ mod tests {
                 utils::{get_client, get_runtime},
             },
             protocol::{
-                u256_num::biguint_to_u256,
+                u256_num::biguint_to_uint,
                 uniswap_v4::hooks::{
                     angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
                     generic_vm_hook_handler::GenericVMHookHandler,
@@ -3189,7 +3187,7 @@ mod tests {
         assert!(hookless_out > BigUint::zero(), "the reference pool must move some output");
         assert_eq!(limit_in, hookless_in);
         let taken = pons_test_handler()
-            .fee_and_tax(biguint_to_u256(&hookless_out))
+            .fee_and_tax(biguint_to_uint(&hookless_out).unwrap())
             .expect("a pool sized output never overflows");
         assert_eq!(limit_out, &hookless_out - u256_to_biguint(taken));
         assert!(limit_out < hookless_out);

@@ -22,7 +22,7 @@ use crate::evm::{
     protocol::{
         clmm::clmm_swap_to_price,
         safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
+        u256_num::{biguint_to_uint, u256_to_biguint},
         utils::{
             slipstreams::{dynamic_fee_module::ZERO_FEE_INDICATOR, raw_target_price},
             uniswap::{
@@ -365,13 +365,11 @@ impl ProtocolSim for VelodromeSlipstreamsState {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let zero_for_one = token_in < token_out;
-        let amount_specified = I256::checked_from_sign_and_abs(
-            Sign::Positive,
-            U256::from_be_slice(&amount_in.to_bytes_be()),
-        )
-        .ok_or_else(|| {
-            SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
-        })?;
+        let amount_specified =
+            I256::checked_from_sign_and_abs(Sign::Positive, biguint_to_uint(&amount_in)?)
+                .ok_or_else(|| {
+                    SimulationError::InvalidInput("I256 overflow: amount_in".to_string(), None)
+                })?;
 
         let result = self.swap(zero_for_one, amount_specified, None)?;
 

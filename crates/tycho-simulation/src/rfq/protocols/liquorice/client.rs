@@ -5,7 +5,7 @@ use std::{
     time::SystemTime,
 };
 
-use alloy::sol_types::SolValue;
+use alloy::{primitives::U256, sol_types::SolValue};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use itertools::Itertools;
 use num_bigint::BigUint;
@@ -17,7 +17,7 @@ use tycho_common::{
 };
 
 use crate::{
-    evm::protocol::u256_num::biguint_to_u256,
+    evm::protocol::u256_num::biguint_to_uint,
     rfq::{
         errors::RFQError,
         protocols::liquorice::models::{
@@ -362,7 +362,8 @@ impl LiquoriceClient {
         quote_attributes.insert(
             "base_token_amount".to_string(),
             Bytes::from(
-                biguint_to_u256(&amount_in)
+                biguint_to_uint::<{ U256::BITS }, { U256::LIMBS }>(&amount_in)
+                    .map_err(|e| RFQError::InvalidInput(format!("amount in {amount_in}: {e}")))?
                     .to_be_bytes::<32>()
                     .to_vec(),
             ),
@@ -377,14 +378,20 @@ impl LiquoriceClient {
             quote_attributes.insert(
                 "min_base_token_amount".to_string(),
                 Bytes::from(
-                    biguint_to_u256(&BigUint::from_str(&pf.min_base_token_amount).map_err(
-                        |e| {
+                    biguint_to_uint::<{ U256::BITS }, { U256::LIMBS }>(
+                        &BigUint::from_str(&pf.min_base_token_amount).map_err(|e| {
                             RFQError::ParsingError(format!(
                                 "Failed to parse min_base_token_amount: {} ({e})",
                                 pf.min_base_token_amount
                             ))
-                        },
-                    )?)
+                        })?,
+                    )
+                    .map_err(|e| {
+                        RFQError::ParsingError(format!(
+                            "min_base_token_amount {}: {e}",
+                            pf.min_base_token_amount
+                        ))
+                    })?
                     .to_be_bytes::<32>()
                     .to_vec(),
                 ),

@@ -18,7 +18,7 @@ use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
         erc4626::vm,
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
     },
 };
 
@@ -85,7 +85,7 @@ impl ProtocolSim for ERC4626State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         if token_in.address == self.asset_token.address &&
             token_out.address == self.share_token.address
         {

@@ -10,7 +10,7 @@ use tycho_common::{
 };
 
 use crate::{
-    evm::protocol::u256_num::biguint_to_u256,
+    evm::protocol::u256_num::biguint_to_uint,
     rfq::{
         errors::RFQError,
         protocols::hashflow::models::{
@@ -268,7 +268,7 @@ impl HashflowClient {
                         quote_attributes.insert(
                             "base_token_amount".to_string(),
                             Bytes::from(
-                                biguint_to_u256(
+                                biguint_to_uint::<{ U256::BITS }, { U256::LIMBS }>(
                                     &BigUint::from_str(&quote.quote_data.base_token_amount)
                                         .map_err(|e| {
                                             RFQError::ParsingError(format!(
@@ -277,6 +277,12 @@ impl HashflowClient {
                                             ))
                                         })?,
                                 )
+                                .map_err(|e| {
+                                    RFQError::ParsingError(format!(
+                                        "base token amount {}: {e}",
+                                        quote.quote_data.base_token_amount
+                                    ))
+                                })?
                                 .to_be_bytes::<32>()
                                 .to_vec(),
                             ),
@@ -284,7 +290,7 @@ impl HashflowClient {
                         quote_attributes.insert(
                             "quote_token_amount".to_string(),
                             Bytes::from(
-                                biguint_to_u256(
+                                biguint_to_uint::<{ U256::BITS }, { U256::LIMBS }>(
                                     &BigUint::from_str(&quote.quote_data.quote_token_amount)
                                         .map_err(|e| {
                                             RFQError::ParsingError(format!(
@@ -293,6 +299,12 @@ impl HashflowClient {
                                             ))
                                         })?,
                                 )
+                                .map_err(|e| {
+                                    RFQError::ParsingError(format!(
+                                        "quote token amount {}: {e}",
+                                        quote.quote_data.quote_token_amount
+                                    ))
+                                })?
                                 .to_be_bytes::<32>()
                                 .to_vec(),
                             ),

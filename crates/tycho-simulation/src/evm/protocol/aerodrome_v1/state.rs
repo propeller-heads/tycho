@@ -21,7 +21,7 @@ use super::solidly_stable::{StableMath, StablePool};
 use crate::evm::protocol::{
     cpmm::protocol::{cpmm_fee, cpmm_get_limits, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee},
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint},
+    u256_num::{biguint_to_uint, u256_to_biguint},
     utils::add_fee_markup,
 };
 
@@ -141,7 +141,7 @@ impl ProtocolSim for AerodromeV1State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let zero2one = token_in.address < token_out.address;
         let amount_out = if self.stable {
             let decimals_in = token_decimals(token_in)?;
