@@ -34,7 +34,7 @@ use super::{
         protocol_state_default, protocol_system, protocol_type, token, transaction,
     },
     versioning::{StoredVersionedRow, VersionedRow},
-    PostgresError, MAX_TS, MAX_VERSION_TS,
+    InstanceId, PostgresError, MAX_TS, MAX_VERSION_TS,
 };
 use crate::postgres::versioning::PartitionedVersionedRow;
 
@@ -322,6 +322,7 @@ pub struct ProtocolSystem {
     pub name: String,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+    pub active_instance_id: Option<InstanceId>,
 }
 
 #[derive(Insertable, Debug)]
@@ -1380,6 +1381,7 @@ pub struct Token {
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
     pub quality: i32,
+    pub address: Option<Bytes>,
 }
 
 #[derive(AsChangeset, Insertable, Debug)]

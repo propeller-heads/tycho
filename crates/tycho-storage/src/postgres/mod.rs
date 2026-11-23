@@ -128,19 +128,24 @@
 //! into a single transaction. This guarantees preservation of valid state
 //! throughout the application lifetime, even if the process panics during
 //! database operations.
-use std::{collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering, collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
+    time::Duration,
+};
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncPgConnection, RunQueryDsl,
+    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager, ManagerConfig},
+    AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
 };
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use num_bigint::BigUint;
 use tracing::{debug, info};
 use tycho_common::{
     models::{token::Token, Chain, PaginationParams, TxHash},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
+    Bytes,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -153,6 +158,7 @@ mod contract;
 pub mod direct;
 mod entry_point;
 mod extraction_state;
+mod instance;
 mod orm;
 mod pool;
 mod protocol;
@@ -160,6 +166,8 @@ mod schema;
 mod snapshot;
 pub mod token_cache;
 mod versioning;
+
+pub use instance::InstanceId;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
@@ -400,6 +408,12 @@ where
             std::any::type_name::<U>()
         ))
     })
+}
+
+/// Compares two balances by numeric value. Balances are big-endian unsigned integers stored with
+/// varying lengths and leading zeros, so a plain byte comparison would rank `0xfe` above `0x00ff`.
+pub(crate) fn compare_balances(a: &Bytes, b: &Bytes) -> Ordering {
+    BigUint::from_bytes_be(a).cmp(&BigUint::from_bytes_be(b))
 }
 
 /// Converts a collection length to the `i64` of a database count.
@@ -696,6 +710,29 @@ fn new_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
         .map_err(|err| StorageError::Unexpected(err.to_string()))
 }
 
+/// Creates a connection pool whose connections always plan a prepared statement for its actual
+/// values (`plan_cache_mode = force_custom_plan`).
+///
+/// A generic plan locks every partition of an instance table before it skips the ones it does
+/// not read. Under concurrent reads, those locks queue in Postgres' shared lock table.
+fn new_rpc_pool(db_url: &str) -> Result<Pool<AsyncPgConnection>, StorageError> {
+    let mut config = ManagerConfig::<AsyncPgConnection>::default();
+    config.custom_setup = Box::new(|url| {
+        Box::pin(async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            conn.batch_execute("SET plan_cache_mode = force_custom_plan")
+                .await
+                .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        })
+    });
+    let manager =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(db_url, config);
+    Pool::builder(manager)
+        .build()
+        .map_err(|err| StorageError::Unexpected(err.to_string()))
+}
+
 /// Ensures the given chain is present in the database, inserting it if absent.
 ///
 /// Inserts the chain into the `chain` table. If the chain already exists, does nothing.
@@ -836,11 +873,13 @@ pub mod testing {
     //! # Reusable components to write tests against the DB.
     use std::future::Future;
 
-    use diesel::sql_query;
+    use diesel::{sql_query, sql_types::BigInt};
     use diesel_async::{
         pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-        AsyncPgConnection, RunQueryDsl,
+        AsyncConnection, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection,
     };
+
+    const INSTANCE_TESTS_LOCK: i64 = 0x1a57_a9ce;
 
     async fn setup_pool() -> Pool<AsyncPgConnection> {
         let database_url =
@@ -850,6 +889,40 @@ pub mod testing {
     }
 
     async fn teardown(conn: &mut AsyncPgConnection) {
+        // Instances first: protocol_system points at them, and their leaves are real tables.
+        conn.batch_execute(
+            "UPDATE protocol_system SET active_instance_id = NULL;
+             DO $$
+             DECLARE
+                 v_leaf text;
+             BEGIN
+                 FOR v_leaf IN
+                     SELECT tablename FROM pg_tables
+                     WHERE schemaname = 'tycho' AND tablename ~ '_i[0-9]+$'
+                 LOOP
+                     EXECUTE format('DROP TABLE IF EXISTS tycho.%I CASCADE', v_leaf);
+                 END LOOP;
+             END;
+             $$;",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Error dropping instance leaves: {e}"));
+        let instance_tables = [
+            "tycho.protocol_state_history",
+            "tycho.component_balance_history",
+            "tycho.contract_code_history",
+            "tycho.contract_storage_history",
+            "tycho.account_balance_history",
+            "tycho.extraction_state",
+            "tycho.protocol_instance",
+        ];
+        for t in instance_tables {
+            sql_query(format!("DELETE FROM {t};"))
+                .execute(conn)
+                .await
+                .unwrap_or_else(|e| panic!("Error truncating {t} table: {e}"));
+        }
+
         let tables = vec![
             // put block early so most FKs cascade, it would
             // be better to find the correct order tough.
@@ -878,6 +951,25 @@ pub mod testing {
                 .unwrap_or_else(|e| panic!("Error truncating {t} table: {e}"));
         }
         dbg!("Teardown completed");
+    }
+
+    /// A connection in a test transaction that holds the instance-test lock. Tests that create
+    /// instances wait for each other: `ATTACH PARTITION` takes a lock on each parent that
+    /// conflicts with itself, and in a different order two tests deadlock.
+    pub async fn instance_test_connection() -> AsyncPgConnection {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mut conn = AsyncPgConnection::establish(&db_url)
+            .await
+            .expect("connecting to the test database failed");
+        conn.begin_test_transaction()
+            .await
+            .expect("starting the test transaction failed");
+        sql_query("SELECT pg_advisory_xact_lock($1)")
+            .bind::<BigInt, _>(INSTANCE_TESTS_LOCK)
+            .execute(&mut conn)
+            .await
+            .expect("taking the instance-test lock failed");
+        conn
     }
 
     /// Run tests that require committing data to the db.
@@ -982,8 +1074,8 @@ pub mod db_fixtures {
         Bytes,
     };
 
-    use super::{schema, MAX_TS};
-    use crate::postgres::orm;
+    use super::{schema, InstanceId, MAX_TS};
+    use crate::postgres::{instance, orm};
 
     // Insert a new chain
     pub async fn insert_chain(conn: &mut AsyncPgConnection, name: &str) -> i64 {
@@ -1318,6 +1410,351 @@ pub mod db_fixtures {
             .unwrap()
     }
 
+    /// Creates an instance of a protocol system with all of its leaves attached, and returns its
+    /// id. The instance is `ready` but not active.
+    pub async fn insert_instance(
+        conn: &mut AsyncPgConnection,
+        protocol_system_id: i64,
+        label: &str,
+    ) -> InstanceId {
+        use instance::{orm::InstanceStatus, schema::tycho::protocol_instance};
+
+        let id: InstanceId = diesel::insert_into(protocol_instance::table)
+            .values(instance::orm::NewProtocolInstance {
+                protocol_system_id,
+                label: label.to_string(),
+                status: InstanceStatus::Loading,
+                base_block_number: None,
+                base_block_hash: None,
+                base_block_ts: None,
+                source: "extractor".to_string(),
+            })
+            .returning(protocol_instance::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance failed");
+        for function in ["tycho.create_instance_leaves", "tycho.attach_instance_leaves"] {
+            sql_query(format!("SELECT {function}($1)"))
+                .bind::<diesel::sql_types::Int4, _>(id)
+                .execute(conn)
+                .await
+                .unwrap_or_else(|e| panic!("{function}({id}) failed: {e}"));
+        }
+        diesel::update(protocol_instance::table.find(id))
+            .set(protocol_instance::status.eq(InstanceStatus::Ready))
+            .execute(conn)
+            .await
+            .expect("marking the instance ready failed");
+        id
+    }
+
+    /// Points the protocol system at `instance_id`, or clears its pointer for `None`.
+    pub async fn set_active_instance(
+        conn: &mut AsyncPgConnection,
+        protocol_system_id: i64,
+        instance_id: Option<InstanceId>,
+    ) {
+        diesel::update(schema::protocol_system::table.find(protocol_system_id))
+            .set(schema::protocol_system::active_instance_id.eq(instance_id))
+            .execute(conn)
+            .await
+            .expect("setting the active instance failed");
+    }
+
+    /// Inserts a component of the instance, of protocol type "pool", created at 2020-01-01 00:00
+    /// in block 1 by the transaction `0x01`. Its tokens get `token_index` 0..n in the given order.
+    /// Returns the component id.
+    pub async fn insert_instance_component(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        external_id: &str,
+        tokens: &[Bytes],
+    ) -> i64 {
+        use instance::schema::tycho::{protocol_component, protocol_component_holds_token};
+
+        let created_at = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let component_id: i64 = diesel::insert_into(protocol_component::table)
+            .values(instance::orm::NewProtocolComponent {
+                instance_id,
+                external_id: external_id.to_string(),
+                protocol_type: "pool".to_string(),
+                attributes: None,
+                created_at,
+                creation_block: 1,
+                creation_tx_hash: Bytes::from("0x01"),
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(protocol_component::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance component failed");
+        let links: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .map(|(index, token)| instance::orm::NewProtocolComponentHoldsToken {
+                instance_id,
+                protocol_component_id: component_id,
+                token: token.clone(),
+                token_index: i16::try_from(index).expect("fewer than 2^15 tokens"),
+            })
+            .collect();
+        diesel::insert_into(protocol_component_holds_token::table)
+            .values(links)
+            .execute(conn)
+            .await
+            .expect("inserting the component tokens failed");
+        component_id
+    }
+
+    /// Inserts an account of the instance at `address` and links it to the component as a
+    /// contract. Returns the account id.
+    pub async fn insert_instance_contract_link(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        address: Bytes,
+    ) -> i64 {
+        use instance::schema::tycho::{account, protocol_component_holds_contract};
+
+        let account_id: i64 = diesel::insert_into(account::table)
+            .values(instance::orm::NewAccount {
+                instance_id,
+                address,
+                title: String::new(),
+                created_at: None,
+                creation_block: None,
+                creation_tx_hash: None,
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(account::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance account failed");
+        diesel::insert_into(protocol_component_holds_contract::table)
+            .values(instance::orm::NewProtocolComponentHoldsContract {
+                instance_id,
+                protocol_component_id: component_id,
+                account_id,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract link failed");
+        account_id
+    }
+
+    /// Inserts an account of the instance at `address`, with an empty title and no creation or
+    /// deletion data. Returns the account id.
+    pub async fn insert_instance_account(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        address: Bytes,
+    ) -> i64 {
+        use instance::schema::tycho::account;
+
+        diesel::insert_into(account::table)
+            .values(instance::orm::NewAccount {
+                instance_id,
+                address,
+                title: String::new(),
+                created_at: None,
+                creation_block: None,
+                creation_tx_hash: None,
+                deleted_at: None,
+                deletion_tx_hash: None,
+            })
+            .returning(account::id)
+            .get_result(conn)
+            .await
+            .expect("inserting the instance account failed")
+    }
+
+    /// Inserts the balance of `token` in an account of the instance, valid from 2020-01-01 00:00 at
+    /// transaction index 0.
+    pub async fn insert_instance_account_balance(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        token: Bytes,
+        balance: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::account_balance::table)
+            .values(instance::orm::NewAccountBalance {
+                instance_id,
+                account_id,
+                token,
+                balance,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the account balance failed");
+    }
+
+    /// Inserts the code of an account of the instance, valid from 2020-01-01 00:00 at transaction
+    /// index 0.
+    pub async fn insert_instance_code(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        code: Bytes,
+        hash: Bytes,
+        modify_tx_hash: Bytes,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::contract_code::table)
+            .values(instance::orm::NewContractCode {
+                instance_id,
+                account_id,
+                code,
+                hash,
+                modify_tx_hash,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the contract code failed");
+    }
+
+    /// Inserts storage slots of an account of the instance, as `(slot, value)` pairs, valid from
+    /// 2020-01-01 00:00 at transaction index 0, with no previous value.
+    pub async fn insert_instance_slots(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        account_id: i64,
+        slots: &[(Bytes, Bytes)],
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        let rows: Vec<_> = slots
+            .iter()
+            .map(|(slot, value)| instance::orm::NewContractStorage {
+                instance_id,
+                account_id,
+                slot: slot.clone(),
+                value: Some(value.clone()),
+                previous_value: None,
+                valid_from,
+                tx_index: 0,
+            })
+            .collect();
+        diesel::insert_into(instance::schema::tycho::contract_storage::table)
+            .values(rows)
+            .execute(conn)
+            .await
+            .expect("inserting the contract slots failed");
+    }
+
+    /// Inserts the extraction state of the instance at block 1, hash `0x01`, with the given block
+    /// timestamp, no cursor and no attributes.
+    pub async fn set_instance_head(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        block_ts: NaiveDateTime,
+    ) {
+        diesel::insert_into(instance::schema::tycho::extraction_state::table)
+            .values(instance::orm::NewExtractionState {
+                instance_id,
+                cursor: None,
+                block_number: 1,
+                block_hash: Bytes::from("0x01"),
+                block_ts,
+                attributes: None,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the extraction state failed");
+    }
+
+    /// Inserts the balance of `token` in a component of the instance, valid from 2020-01-01 00:00
+    /// at transaction index 0, with previous value `0x00`.
+    pub async fn insert_instance_component_balance(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        balance_float: f64,
+    ) {
+        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date");
+        diesel::insert_into(instance::schema::tycho::component_balance::table)
+            .values(instance::orm::NewComponentBalance {
+                instance_id,
+                protocol_component_id: component_id,
+                token,
+                new_balance: balance,
+                previous_value: Bytes::from("0x00"),
+                balance_float,
+                valid_from,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component balance failed");
+    }
+
+    /// The `valid_from` of the state attributes that [`insert_instance_state`] inserts:
+    /// 2020-01-01 00:00.
+    pub const INSTANCE_STATE_VALID_FROM: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 1)
+        .expect("a valid date")
+        .and_hms_opt(0, 0, 0)
+        .expect("a valid time");
+
+    /// Inserts the state attribute `attribute_name` of a component of the instance, valid from
+    /// [`INSTANCE_STATE_VALID_FROM`] at transaction index 0, with no previous value.
+    pub async fn insert_instance_state(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        attribute_name: &str,
+        value: Bytes,
+    ) {
+        diesel::insert_into(instance::schema::tycho::protocol_state::table)
+            .values(instance::orm::NewProtocolState {
+                instance_id,
+                protocol_component_id: component_id,
+                attribute_name: attribute_name.to_string(),
+                attribute_value: value,
+                previous_value: None,
+                valid_from: INSTANCE_STATE_VALID_FROM,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the protocol state failed");
+    }
+
+    /// Inserts the TVL of a component of the instance.
+    pub async fn insert_instance_tvl(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        tvl: f64,
+    ) {
+        diesel::insert_into(instance::schema::tycho::component_tvl::table)
+            .values(instance::orm::NewComponentTvl {
+                instance_id,
+                protocol_component_id: component_id,
+                tvl,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component TVL failed");
+    }
+
     // Insert a new Protocol Type
     pub async fn insert_protocol_type(
         conn: &mut AsyncPgConnection,
@@ -1489,6 +1926,7 @@ pub mod db_fixtures {
             schema::token::tax.eq(10),
             schema::token::gas.eq(vec![10]),
             schema::token::quality.eq(quality),
+            schema::token::address.eq(hex::decode(address).unwrap()),
         ));
         (
             account_id,
@@ -1826,5 +2264,42 @@ mod tests_partition_retention {
                 .expect("no-work run should succeed");
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests_rpc_pool {
+    use diesel::{sql_query, sql_types::Text, QueryableByName};
+    use diesel_async::RunQueryDsl;
+
+    use super::{new_pool, new_rpc_pool};
+
+    #[derive(QueryableByName)]
+    struct PlanCacheMode {
+        #[diesel(sql_type = Text)]
+        plan_cache_mode: String,
+    }
+
+    async fn plan_cache_mode(pool: super::Pool<super::AsyncPgConnection>) -> String {
+        let mut conn = pool.get().await.unwrap();
+        sql_query("SHOW plan_cache_mode")
+            .get_result::<PlanCacheMode>(&mut conn)
+            .await
+            .unwrap()
+            .plan_cache_mode
+    }
+
+    #[tokio::test]
+    async fn test_rpc_pool_forces_custom_plans() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mode = plan_cache_mode(new_rpc_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "force_custom_plan");
+    }
+
+    #[tokio::test]
+    async fn test_default_pool_keeps_auto_plans() {
+        let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for DB tests");
+        let mode = plan_cache_mode(new_pool(&db_url).unwrap()).await;
+        assert_eq!(mode, "auto");
     }
 }

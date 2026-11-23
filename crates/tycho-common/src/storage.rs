@@ -20,7 +20,7 @@ use crate::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
             ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
-        token::Token,
+        token::{Token, TokenOwner},
         Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
         PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
     },
@@ -290,24 +290,19 @@ pub trait ProtocolGateway {
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<Vec<ProtocolComponent>>, StorageError>;
 
-    /// Retrieves owners of tokens
-    ///
-    /// Queries for owners (protocol components) of tokens that have a certain minimum
-    /// balance and returns a maximum aggregate of those in case there are multiple
-    /// owners.
+    /// Returns, per token, the component with the largest balance of the token, and the
+    /// component's protocol system.
     ///
     /// # Parameters
-    /// - `chain` The chain of the component
-    /// - `tokens` The tokens to query for, any component with at least one of these tokens is
-    ///   returned.
-    /// - `min_balance` A minimum balance we expect the component to have on any of the tokens
-    ///   mentioned in `tokens`.
+    /// - `chain`: the chain of the components.
+    /// - `tokens`: the tokens to find owners for. A token without a matching balance is absent.
+    /// - `min_balance`: only balances whose float value is at least this.
     async fn get_token_owners(
         &self,
         chain: &Chain,
         tokens: &[Address],
         min_balance: Option<f64>,
-    ) -> Result<HashMap<Address, (ComponentId, Bytes)>, StorageError>;
+    ) -> Result<HashMap<Address, TokenOwner>, StorageError>;
 
     async fn add_protocol_components(&self, new: &[ProtocolComponent]) -> Result<(), StorageError>;
 
@@ -457,9 +452,18 @@ pub trait ProtocolGateway {
         target_version: &BlockOrTimestamp,
     ) -> Result<Vec<ComponentBalance>, StorageError>;
 
+    /// Retrieve the token balances of protocol components, keyed by component id and token.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `system` Only components of this protocol system. Required, because the answer is keyed by
+    ///   pool id and a pool id can repeat across protocol systems.
+    /// - `ids` Only components with these ids.
+    /// - `version` The version of the balances. The latest version if `None`.
     async fn get_component_balances(
         &self,
         chain: &Chain,
+        system: &str,
         ids: Option<&[&str]>,
         version: Option<&Version>,
     ) -> Result<HashMap<String, HashMap<Bytes, ComponentBalance>>, StorageError>;
@@ -689,12 +693,15 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters
     /// - `id` The identifier for the contract.
+    /// - `protocol_system`: the protocol system whose copy of the contracts to read. A contract can
+    ///   exist in the instances of several protocol systems.
     /// - `version` Version at which to retrieve state for. None retrieves the latest state.
     /// - `include_slots`: Flag to determine whether to include slot changes. If set to `true`, it
     ///   includes storage slot.
     async fn get_contract(
         &self,
         id: &ContractId,
+        protocol_system: &str,
         version: Option<&Version>,
         include_slots: bool,
     ) -> Result<Account, StorageError>;
@@ -707,6 +714,8 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters:
     /// - `chain`: The blockchain where the contracts reside.
+    /// - `protocol_system`: the protocol system whose copy of the contracts to read. A contract can
+    ///   exist in the instances of several protocol systems.
     /// - `addresses`: Filter for specific addresses. If set to `None`, it retrieves all indexed
     ///   contracts in the chain.
     /// - `version`: Version at which to retrieve state for. If set to `None`, it retrieves the
@@ -721,6 +730,7 @@ pub trait ContractStateGateway {
     async fn get_contracts(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         addresses: Option<&[Address]>,
         version: Option<&Version>,
         include_slots: bool,
@@ -839,6 +849,8 @@ pub trait ContractStateGateway {
     ///
     /// # Parameters
     /// - `chain` The chain of the account balances
+    /// - `protocol_system`: the protocol system whose copy of the accounts to read. An account can
+    ///   exist in the instances of several protocol systems.
     /// - `accounts` The accounts to query for. If set to `None`, it retrieves balances for all
     ///   indexed
     ///  accounts in the chain.
@@ -847,6 +859,7 @@ pub trait ContractStateGateway {
     async fn get_account_balances(
         &self,
         chain: &Chain,
+        protocol_system: &str,
         accounts: Option<&[Address]>,
         version: Option<&Version>,
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError>;
