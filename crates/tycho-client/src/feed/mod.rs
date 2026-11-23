@@ -2459,6 +2459,114 @@ mod tests {
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
+    /// A header message that marks itself with a removed component named `marker`, so a test can
+    /// see which messages a merged message holds.
+    fn marked_message(block: u8, marker: &str) -> StateSyncMessage<BlockHeader> {
+        let mut msg = header_message(block);
+        msg.removed_components.insert(
+            marker.to_string(),
+            tycho_common::models::protocol::ProtocolComponent::default(),
+        );
+        msg
+    }
+
+    /// A Ready stream that starts to replay old blocks sends nothing to the consumer.
+    #[test(tokio::test)]
+    async fn test_replayed_blocks_not_delivered() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, _first) =
+            setup_block_sync_from(block_time, 2, 10, 10).await;
+
+        for (block, old) in [(11, 5), (12, 6), (13, 7)] {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+
+            assert!(
+                !feed
+                    .state_msgs
+                    .contains_key("uniswap-v3"),
+                "replayed block {old} delivered at block {block}"
+            );
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream far behind at startup sends nothing until it is within `max_missed_blocks`. Then
+    /// it sends every message it received, its first one too, merged into one at its latest
+    /// block.
+    #[test(tokio::test)]
+    async fn test_replay_held_until_caught_up() {
+        let block_time = Duration::from_millis(300);
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync = BlockSynchronizer::new(block_time, Duration::from_millis(10), 2)
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                v2_sync.clone(),
+            )
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                v3_sync.clone(),
+            );
+        v2_sync
+            .send_header(header_message(10))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(marked_message(5, "5"))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let first = receive_message(&mut rx).await;
+        assert!(
+            !first
+                .state_msgs
+                .contains_key("uniswap-v3"),
+            "first message delivered"
+        );
+
+        v3_sync
+            .send_header(marked_message(6, "6"))
+            .await
+            .expect("send failed");
+        let feed = v2_round(&v2_sync, &mut rx, 11, block_time / 2).await;
+        assert!(
+            !feed
+                .state_msgs
+                .contains_key("uniswap-v3"),
+            "replayed block 6 delivered"
+        );
+
+        for old in 7..=12 {
+            v3_sync
+                .send_header(marked_message(old, &old.to_string()))
+                .await
+                .expect("send failed");
+        }
+        let feed = v2_round(&v2_sync, &mut rx, 12, block_time / 2).await;
+
+        let v3_msg = feed
+            .state_msgs
+            .get("uniswap-v3")
+            .expect("caught-up stream delivered");
+        assert_eq!(v3_msg.header.number, 12);
+        let mut markers: Vec<u8> = v3_msg
+            .removed_components
+            .keys()
+            .map(|marker| marker.parse().unwrap())
+            .collect();
+        markers.sort_unstable();
+        assert_eq!(markers, (5..=12).collect::<Vec<_>>());
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
     /// With every stream stale there is no round to keep up with, so each round still waits
     /// `block_time` rather than spinning the main loop.
     #[test(tokio::test)]
