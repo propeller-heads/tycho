@@ -159,7 +159,7 @@ impl VersionedRowNew for NewProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, NaiveDate, Timelike, Utc};
+    use chrono::{Duration, Timelike, Utc};
     use tycho_common::Bytes;
 
     use super::*;
@@ -181,8 +181,8 @@ mod tests {
         component: i64,
     }
 
-    /// An instance with one component, whose `reserve` attribute is 1 since 2020-01-01 at
-    /// transaction index 0.
+    /// An instance with one component, whose `reserve` attribute is 1 since
+    /// [`db_fixtures::INSTANCE_STATE_VALID_FROM`] at transaction index 0.
     async fn setup() -> Setup {
         let mut conn = instance_test_connection().await;
         let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
@@ -197,12 +197,6 @@ mod tests {
 
     fn value(value: u64) -> Bytes {
         Bytes::from(value)
-    }
-
-    fn stored_since() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date")
     }
 
     /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
@@ -317,7 +311,7 @@ mod tests {
         assert_eq!(archived.attribute_value, value(1));
         assert_eq!(
             (archived.valid_from, archived.valid_to, archived.tx_index),
-            (stored_since(), at.valid_from, 0)
+            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from, 0)
         );
     }
 
@@ -335,13 +329,16 @@ mod tests {
         assert!(current(&mut setup).await.is_empty());
         let history = history(&mut setup).await;
         assert_eq!(history.len(), 1);
-        assert_eq!((history[0].valid_from, history[0].valid_to), (stored_since(), at.valid_from));
+        assert_eq!(
+            (history[0].valid_from, history[0].valid_to),
+            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from)
+        );
     }
 
     #[tokio::test]
     async fn test_change_before_the_stored_version_fails_and_keeps_it() {
         let mut setup = setup().await;
-        let before = origin(stored_since() - Duration::days(1), 0);
+        let before = origin(db_fixtures::INSTANCE_STATE_VALID_FROM - Duration::days(1), 0);
 
         let change = update(&setup, "reserve", 2, before);
 
