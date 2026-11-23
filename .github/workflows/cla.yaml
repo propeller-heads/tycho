@@ -9,6 +9,7 @@ on:
   # This workflow never checks out or runs code from the pull request.
   pull_request_target:  # zizmor: ignore[dangerous-triggers]
     types: [opened, closed, synchronize]
+  merge_group:
 
 permissions: {}
 
@@ -42,3 +43,13 @@ jobs:
             and sign it by posting the comment below. You only need to do this once.
           create-file-commit-message: "chore(cla): create signature store"
           signed-commit-message: "chore(cla): $contributorName signed the CLA in #$pullRequestNo"
+
+  # "CLA signature" is a required check, and a required check must also report on
+  # the merge queue group's commit. The signature belongs to the PR author and was
+  # checked on the PR before it could enter the queue.
+  cla-merge-group:
+    name: CLA signature
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "CLA checked on the pull request"

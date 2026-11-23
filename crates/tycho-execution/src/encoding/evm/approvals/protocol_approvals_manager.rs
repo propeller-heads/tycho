@@ -61,11 +61,7 @@ impl ProtocolApprovalsManager {
                     ))
                 })?;
 
-                if allowance < U256::MAX / U256::from(2) {
-                    return Ok(true);
-                }
-
-                Ok(false)
+                Ok(allowance < U256::MAX / U256::from(2))
             }
             Err(err) => Err(EncodingError::RecoverableError(format!(
                 "Allowance call failed with error: {err}"

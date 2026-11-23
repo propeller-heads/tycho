@@ -999,11 +999,7 @@ where
                                 retriggered_locations
                                     .entry(location.clone())
                                     .or_default()
-                                    .push(
-                                        entrypoint_with_params
-                                            .entry_point
-                                            .clone(),
-                                    );
+                                    .push(entrypoint_with_params.entry_point);
                             }
                         }
                     }

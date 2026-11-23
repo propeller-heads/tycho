@@ -20,6 +20,7 @@ extractor/
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
+  pause.rs                  PauseRegistry — admin pauses per protocol system, loaded at startup (a failed load stops startup); PauseRefresher re-reads them periodically, queues pause/unpause events for the extracted systems and signals each change
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
   dynamic_contract_indexer/ DCI optional extension (see below)
@@ -41,7 +42,7 @@ extractor/
 
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
-  rpc.rs                    HTTP endpoints: state snapshots, component queries
+  rpc.rs                    HTTP endpoints: state snapshots, component queries; clears the protocol_components and protocol_state response caches on each admin pause change
   off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor

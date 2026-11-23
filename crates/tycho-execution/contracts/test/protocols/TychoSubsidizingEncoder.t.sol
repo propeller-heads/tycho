@@ -35,6 +35,7 @@ contract TychoSubsidizingEncoderTest is TychoRouterTestSetup {
                 SubsidyPayer.Roles({
                     signerSetter: makeAddr("signerSetter"),
                     budgetManager: makeAddr("budgetManager"),
+                    routerSetter: makeAddr("routerSetter"),
                     pauserAdmin: makeAddr("pauserAdmin"),
                     unpauser: makeAddr("unpauser"),
                     pausers: pausers

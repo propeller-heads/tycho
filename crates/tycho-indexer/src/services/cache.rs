@@ -3,7 +3,7 @@ use std::{
     fmt::Debug,
     hash::Hash,
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -73,6 +73,8 @@ pub struct RpcCache<R, V> {
     cache: Cache<R, Arc<ValueWithSize<V>>>,
     /// When `false`, every `get` runs the fallback and stores nothing.
     enabled: bool,
+    /// How many times `clear` ran. A `get` whose fallback overlaps a `clear` stores nothing.
+    clears: AtomicU64,
 }
 
 impl<R, V> RpcCache<R, V>
@@ -99,12 +101,20 @@ where
             .weigher(weigher)
             .build();
 
-        Self { name: name.to_string(), cache, enabled: true }
+        Self { name: name.to_string(), cache, enabled: true, clears: AtomicU64::new(0) }
     }
 
     /// Turns the cache off: every `get` runs the fallback and stores nothing.
     pub fn disable(&mut self) {
         self.enabled = false;
+    }
+
+    /// Drops every cached response, so the next `get` of each request runs the fallback. A `get`
+    /// whose fallback is running does not store its answer.
+    pub fn clear(&self) {
+        self.clears
+            .fetch_add(1, Ordering::SeqCst);
+        self.cache.invalidate_all();
     }
 
     #[instrument(
@@ -157,6 +167,7 @@ where
         gauge!("rpc_cache_entry_count", "cache" => self.name.clone())
             .set(self.cache.entry_count() as f64);
 
+        let clears_before = self.clears.load(Ordering::SeqCst);
         let value = Arc::new(ValueWithSize::placeholder().await);
         let value_update_guard = value.value.lock().await;
 
@@ -178,7 +189,9 @@ where
 
         // PERF: unnecessary lock if we don't cache the value, could be improved
         //  if `should_cache` value can be determined beforehand.
-        if should_cache {
+        // An answer computed across a `clear` may predate it, so it is not stored.
+        let cleared = self.clears.load(Ordering::SeqCst) != clears_before;
+        if should_cache && !cleared {
             tracing::Span::current().record("should_cache", true);
             // Update the placeholder placed in the cache with the actual value
             value.update(arc_response.clone(), value_update_guard);
@@ -201,9 +214,41 @@ mod test {
     use deepsize::DeepSizeOf;
     use futures03::future::try_join_all;
     use mini_moka::sync::ConcurrentCacheExt;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
 
     use crate::services::{cache::RpcCache, rpc::RpcError};
+
+    #[test_log::test(tokio::test)]
+    async fn test_clear_during_fallback() {
+        let cache = Arc::new(RpcCache::<String, i32>::new("test", 100, 3600));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let in_flight = tokio::spawn({
+            let (cache, started, release) = (cache.clone(), started.clone(), release.clone());
+            async move {
+                cache
+                    .get("k0".to_string(), |_| {
+                        let (started, release) = (started.clone(), release.clone());
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<_, RpcError>((1, true))
+                        }
+                    })
+                    .await
+            }
+        });
+        started.notified().await;
+
+        cache.clear();
+        release.notify_one();
+        in_flight
+            .await
+            .expect("task panicked")
+            .expect("fallback failed");
+
+        assert!(!cache.contains(&"k0".to_string()));
+    }
 
     #[test_log::test(tokio::test)]
     async fn test_sequential_access() {
