@@ -117,6 +117,13 @@ impl ProtocolSim for UniswapV2State {
             })?;
         let amount_out =
             amount_out(U256::from(amount_in), U256::from(reserve_in), U256::from(reserve_out))?;
+        if amount_out.is_zero() {
+            // The pair's swap requires a non-zero output: 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT'.
+            return Err(SimulationError::InvalidInput(
+                format!("Amount in {amount_in} is too small to buy any output"),
+                None,
+            ));
+        }
         // The constant-product output is below `reserve_out`, so it fits and the subtraction
         // cannot underflow.
         let new_reserve_out = U112::uint_try_from(amount_out)
@@ -148,7 +155,8 @@ impl ProtocolSim for UniswapV2State {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         // The pair takes any input until the input reserve would pass uint112, so the limit is the
-        // room left below it.
+        // room left below it. A limit that buys no output is zero: output grows with input, so no
+        // smaller amount buys any either.
         let (reserve_in, reserve_out) = self.reserves(sell_token < buy_token);
         // FIXME: the pair checks its token balances against uint112, not its reserves, so tokens
         // sent to it without a `sync` take up part of this room. The state holds only the reserves
@@ -160,6 +168,9 @@ impl ProtocolSim for UniswapV2State {
         }
         let room = U256::from(room);
         let max_out = amount_out(room, U256::from(reserve_in), U256::from(reserve_out))?;
+        if max_out.is_zero() {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
         Ok((u256_to_biguint(room), u256_to_biguint(max_out)))
     }
 
@@ -528,6 +539,36 @@ mod tests {
                 .unwrap();
             assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO), "{reserve0} / {reserve1}");
         }
+    }
+
+    #[test]
+    fn test_get_amount_out_refuses_amount_that_buys_no_output() {
+        let state = UniswapV2State::new(U112::from(1_000_000u32), U112::from(1000u32));
+
+        // floor(1004 * 997 * 1000 / (1_000_000 * 1000 + 1004 * 997))
+        //   = floor(1_000_988_000 / 1_001_000_988) = 0
+        let dust = state.get_amount_out(BigUint::from(1004u32), &token_0(), &token_1());
+        assert!(matches!(dust, Err(SimulationError::InvalidInput(..))));
+
+        // floor(1005 * 997 * 1000 / (1_000_000 * 1000 + 1005 * 997))
+        //   = floor(1_001_985_000 / 1_001_001_985) = 1
+        let smallest = state
+            .get_amount_out(BigUint::from(1005u32), &token_0(), &token_1())
+            .unwrap();
+        assert_eq!(smallest.amount, BigUint::from(1u32));
+    }
+
+    #[test]
+    fn test_get_limits_is_zero_when_no_amount_buys_output() {
+        // An output of reserve_out = 1 or more needs the whole reserve, and the pair pays less
+        // than its reserve, so nothing can be bought.
+        let state = UniswapV2State::new(U112::from(1000u32), U112::from(1u32));
+
+        let limits = state
+            .get_limits(token_0().address, token_1().address)
+            .unwrap();
+
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
     }
 
     #[test]
