@@ -2146,6 +2146,9 @@ mod tests {
 
         let mocked_server = server
             .mock("POST", "/v1/contract_state")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"protocol_system": "uniswap_v2"}),
+            ))
             .expect(1)
             .with_body(server_resp)
             .create_async()
@@ -2155,7 +2158,7 @@ mod tests {
             .expect("create client");
 
         let accounts = client
-            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, "uniswap_v2"))
             .await
             .expect("get state");
 
@@ -2191,8 +2194,12 @@ mod tests {
 
         let accounts = client
             .get_contract_state_paginated(
-                ContractStatePaginatedParams::new(Chain::Ethereum, "", RPC_CLIENT_CONCURRENCY)
-                    .with_contract_ids(ids),
+                ContractStatePaginatedParams::new(
+                    Chain::Ethereum,
+                    "uniswap_v2",
+                    RPC_CLIENT_CONCURRENCY,
+                )
+                .with_contract_ids(ids),
             )
             .await
             .expect("get state");
@@ -2356,7 +2363,7 @@ mod tests {
         .expect("create client");
 
         client
-            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, "uniswap_v2"))
             .await
             .expect("get state");
 
@@ -2380,7 +2387,7 @@ mod tests {
             .expect("create client");
 
         client
-            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, "uniswap_v2"))
             .await
             .expect("get state");
 
@@ -3683,7 +3690,7 @@ mod tests {
         .expect("create client");
 
         let response = client
-            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, "uniswap_v2"))
             .await
             .expect("get state");
         let accounts = response;
@@ -3717,7 +3724,7 @@ mod tests {
         .expect("create client");
 
         let response = client
-            .get_contract_state(ContractStateParams::new(Chain::Ethereum, ""))
+            .get_contract_state(ContractStateParams::new(Chain::Ethereum, "uniswap_v2"))
             .await
             .expect("get state");
         let accounts = response;
