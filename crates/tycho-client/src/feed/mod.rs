@@ -2293,6 +2293,43 @@ mod tests {
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
+    /// A Ready stream that restarts behind the tip, as one subscribed to an extractor that is
+    /// still syncing does, goes stale while it replays. As Delayed it would hold every round of
+    /// the other streams to its `block_time` wait.
+    #[test(tokio::test)]
+    async fn test_ready_synchronizer_restarting_behind_tip() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut block: u8 = 1;
+        for _ in 0..4 {
+            block += 1;
+            v3_sync
+                .send_header(header_message(block))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert_ready_at(&feed, "uniswap-v3", u64::from(block), None);
+        }
+
+        // v3 restarts at block 2 and replays one block per round.
+        for old in 2..=4 {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            block += 1;
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert_ready_at(&feed, "uniswap-v2", u64::from(block), None);
+            assert!(matches!(
+                feed.sync_states.get("uniswap-v3"),
+                Some(SynchronizerState::Stale(_))
+            ));
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
     /// With every stream stale there is no round to keep up with, so each round still waits
     /// `block_time` rather than spinning the main loop.
     #[test(tokio::test)]
