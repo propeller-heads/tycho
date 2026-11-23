@@ -233,6 +233,7 @@ impl PostgresGatewayNew {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use rstest::rstest;
 
     use super::*;
 
@@ -414,23 +415,15 @@ mod tests {
         assert_eq!(writes.history, vec![archived(row(2, 10, 1, 0), 3)]);
     }
 
-    #[test]
-    fn test_change_at_the_stored_version_fails() {
-        let result = plan(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)]);
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))));
-    }
-
-    #[test]
-    fn test_change_before_the_stored_version_fails() {
-        let result = plan(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)]);
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))));
-    }
-
-    #[test]
-    fn test_two_changes_of_one_key_in_one_transaction_fail() {
-        let result = plan(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)]);
+    #[rstest]
+    #[case::at_the_stored_version(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)])]
+    #[case::before_the_stored_version(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)])]
+    #[case::two_changes_in_one_transaction(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)])]
+    fn test_change_not_after_the_replaced_version_fails(
+        #[case] stored: Vec<Row>,
+        #[case] changes: Vec<VersionedChange<Row>>,
+    ) {
+        let result = plan(stored, changes);
 
         assert!(matches!(result, Err(StorageError::Unexpected(_))));
     }
