@@ -262,7 +262,6 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/tokens` | Token metadata (quality, decimals, symbol) |
 | `/protocol_components` | Components by system / TVL / IDs |
 | `/traced_entry_points` | Traced entry point results |
-| `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |
