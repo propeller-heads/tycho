@@ -173,7 +173,7 @@ impl TychoStreamBuilder {
             Chain::Starknet => (2, 8, 50, 100),
             Chain::ZkSync => (3, 12, 50, 150),
             Chain::Arbitrum => (1, 9, 20, 100), // Typically closer to 0.25s
-            Chain::Base => (2, 12, 50, 100),
+            Chain::Base => (1, 5, 20, 100),     // Typically closer to 0.2s
             Chain::Bsc => (1, 12, 50, 50),
             Chain::Unichain => (1, 10, 20, 100),
             Chain::Polygon => (2, 12, 50, 100),  // ~2s block time
@@ -820,6 +820,11 @@ mod tests {
     #[test]
     fn arc_uses_fast_chain_default_timing() {
         assert_eq!(TychoStreamBuilder::default_timing(&Chain::Arc), (1, 5, 20, 100));
+    }
+
+    #[test]
+    fn base_uses_fast_chain_default_timing() {
+        assert_eq!(TychoStreamBuilder::default_timing(&Chain::Base), (1, 5, 20, 100));
     }
 
     #[test]
