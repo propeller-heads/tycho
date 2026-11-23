@@ -1719,6 +1719,53 @@ mod tests {
         assert!(gap < hold + hold / 2, "reconnect waited {:?}", gap - hold);
     }
 
+    /// `max_reconnects` counts consecutive failed connections. A server that closes connections
+    /// after they delivered frames, as one does when it drops a slow subscriber, must not use it
+    /// up over time.
+    #[test_log::test(tokio::test)]
+    async fn test_reconnect_count_resets_after_delivered_frame() {
+        let max_reconnects = 3;
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let mut stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                stream
+                    .send(tungstenite::protocol::Message::Ping(Vec::new()))
+                    .await
+                    .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
+                let _ = accepted_tx.send(());
+                sleep(Duration::from_millis(20)).await;
+                drop(stream);
+            }
+        });
+        let client = WsDeltasClient::new_with_reconnects(
+            &format!("ws://{addr}"),
+            None,
+            max_reconnects,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        let _jh = client.connect().await.unwrap();
+
+        for _ in 0..(max_reconnects * 2) {
+            timeout(Duration::from_secs(2), accepted_rx.recv())
+                .await
+                .expect("client stopped reconnecting")
+                .unwrap();
+        }
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_subscribe_dead_client_after_max_attempts() {
         let (addr, _) = mock_bad_connection_tycho_ws(true).await;
