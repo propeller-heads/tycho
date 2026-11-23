@@ -74,13 +74,13 @@ def test_get_contract_state_returns_expected_result(mock_post, asset_dir):
     mock_post.return_value = mock_response
 
     client = TychoRPCClient()
-    params = ContractStateParams()
+    params = ContractStateParams(protocol_system="vm:balancer_v2")
     result = client.get_contract_state(params)
 
     mock_post.assert_called_once_with(
         "http://0.0.0.0:4242/v1/contract_state",
         headers={"accept": "application/json", "Content-Type": "application/json"},
-        data='{"chain": "ethereum"}',
+        data='{"protocol_system": "vm:balancer_v2", "chain": "ethereum"}',
         params={},
     )
 
