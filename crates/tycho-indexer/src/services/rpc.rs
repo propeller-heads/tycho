@@ -6,7 +6,7 @@ use std::{
 
 use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
 use anyhow::Error;
-use chrono::{Duration, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
 use diesel_async::pooled_connection::deadpool;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -14,7 +14,7 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
-        blockchain::{BlockAggregatedChanges, EntryPoint, TracedEntryPoint, TracingParams},
+        blockchain::{Block, BlockAggregatedChanges, EntryPoint, TracedEntryPoint, TracingParams},
         protocol::QualityRange,
         Address, Chain, ComponentId, EntryPointId, PaginationParams,
     },
@@ -134,6 +134,45 @@ enum StateAnswer<D> {
     Db(Arc<D>),
 }
 
+/// The lag check of `/protocol_systems`: a protocol system whose newest block is more than
+/// `max_lag` old is left out, for example while a new extractor indexes its history.
+pub struct ProtocolLag {
+    max_lag: Duration,
+    /// The time of each system's last committed block when the process started. It stands in for
+    /// the newest block while the system's delta window has none, e.g. before the first block
+    /// or after an extractor restart.
+    committed_block_ts: HashMap<String, NaiveDateTime>,
+}
+
+impl ProtocolLag {
+    pub(crate) fn new(
+        max_lag: Duration,
+        committed_block_ts: HashMap<String, NaiveDateTime>,
+    ) -> Self {
+        Self { max_lag, committed_block_ts }
+    }
+
+    /// Returns whether the newest block of `system` is at most `max_lag` older than `now`. The
+    /// newest block is the one in `newest_blocks` (the tip of each delta window), else the
+    /// committed block. A system with neither is not fresh.
+    fn is_fresh(
+        &self,
+        system: &str,
+        newest_blocks: &HashMap<String, Option<Block>>,
+        now: NaiveDateTime,
+    ) -> bool {
+        newest_blocks
+            .get(system)
+            .and_then(|block| block.as_ref().map(|block| block.ts))
+            .or_else(|| {
+                self.committed_block_ts
+                    .get(system)
+                    .copied()
+            })
+            .is_some_and(|ts| now - ts <= self.max_lag)
+    }
+}
+
 pub struct RpcHandler<G, T> {
     db_gateway: G,
     // TODO: remove use of Arc. It was introduced for ease of testing this deltas buffer, however
@@ -153,6 +192,8 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    /// Leaves lagging systems out of `protocol_systems`. `None` lists every system.
+    protocol_lag: Option<ProtocolLag>,
     /// Which path answers state requests. `Off` without extractors.
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
@@ -219,6 +260,7 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            protocol_lag: None,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
             writer_status,
@@ -230,6 +272,12 @@ where
     /// Sets how old the newest block of a streamed extractor may be on a ready follower.
     pub(crate) fn with_ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
         self.ready_head_tolerance = tolerance;
+        self
+    }
+
+    /// Sets the lag check of `protocol_systems`. `None` lists every system.
+    pub(crate) fn with_protocol_lag(mut self, protocol_lag: Option<ProtocolLag>) -> Self {
+        self.protocol_lag = protocol_lag;
         self
     }
 
@@ -833,14 +881,21 @@ where
         allowed_systems: Option<&HashSet<String>>,
     ) -> Result<dto::ProtocolSystemsRequestResponse, RpcError> {
         info!(?request, "Getting protocol systems.");
-        let filtered: Vec<&String> = match allowed_systems {
-            Some(allowed) => self
-                .protocol_systems
-                .iter()
-                .filter(|ps| allowed.contains(ps.as_str()))
-                .collect(),
-            None => self.protocol_systems.iter().collect(),
+        let newest_blocks = match (&self.protocol_lag, &self.pending_deltas) {
+            (Some(_), Some(pending_deltas)) => pending_deltas.newest_blocks()?,
+            _ => HashMap::new(),
         };
+        let now = Utc::now().naive_utc();
+        let filtered: Vec<&String> = self
+            .protocol_systems
+            .iter()
+            .filter(|ps| allowed_systems.is_none_or(|allowed| allowed.contains(ps.as_str())))
+            .filter(|ps| {
+                self.protocol_lag
+                    .as_ref()
+                    .is_none_or(|lag| lag.is_fresh(ps, &newest_blocks, now))
+            })
+            .collect();
         let total = count_to_i64(filtered.len());
         let page = request.pagination.page;
         let page_size = request.pagination.page_size;
@@ -1565,7 +1620,10 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
 
 /// Retrieve protocol systems
 ///
-/// This endpoint retrieves the protocol systems available in the indexer.
+/// This endpoint retrieves the protocol systems available in the indexer. It leaves out a
+/// protocol system while its newest indexed block is far behind the chain, for example while a
+/// new protocol indexes its history. The other endpoints still accept that protocol system by
+/// name.
 #[utoipa::path(
     post,
     path = "/v1/protocol_systems",
