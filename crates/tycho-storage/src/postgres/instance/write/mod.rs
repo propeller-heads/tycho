@@ -9,6 +9,7 @@ const ROWS_PER_INSERT: usize = 1000;
 
 mod balance;
 pub mod block;
+mod component;
 mod extraction_state;
 mod state;
 mod token;
