@@ -791,62 +791,34 @@ async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), 
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-    let chain_id: i64 = schema::chain::table
-        .select(schema::chain::id)
-        .filter(schema::chain::name.eq(&chain_name))
-        .first(conn)
-        .await
-        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-
     let native_asset = chain.native_asset();
     for token in native_asset.representations() {
-        ensure_token_with_price(chain_id, token, conn).await;
+        ensure_token_with_price(token, conn).await;
     }
 
     debug!("Ensured chain enum and native token presence for: {:?}", chain);
     Ok(())
 }
 
-pub(crate) async fn ensure_token_with_price(
-    chain_id: i64,
-    token: &Token,
-    conn: &mut AsyncPgConnection,
-) {
-    diesel::insert_into(schema::account::table)
-        .values((
-            schema::account::chain_id.eq(chain_id),
-            schema::account::title.eq(format!("{}_{}", token.symbol, token.address)),
-            schema::account::address.eq(token.address.as_ref()),
-        ))
-        .on_conflict_do_nothing()
-        .execute(conn)
-        .await
-        .expect("Could not ensure token account in database");
-
-    let account_id: i64 = schema::account::table
-        .select(schema::account::id)
-        .filter(schema::account::chain_id.eq(chain_id))
-        .filter(schema::account::address.eq(token.address.as_ref()))
-        .first(conn)
-        .await
-        .expect("Account must exist after insert");
-
+/// Stores the token, found by its address, and sets its price to one unit of the token.
+pub(crate) async fn ensure_token_with_price(token: &Token, conn: &mut AsyncPgConnection) {
     diesel::insert_into(schema::token::table)
         .values((
-            schema::token::account_id.eq(account_id),
+            schema::token::address.eq(token.address.as_ref()),
             schema::token::symbol.eq(&token.symbol),
             schema::token::decimals.eq(i32::try_from(token.decimals).unwrap()),
             schema::token::gas.eq(Vec::<Option<i64>>::new()),
             schema::token::quality.eq(100),
         ))
-        .on_conflict_do_nothing()
+        .on_conflict(schema::token::address)
+        .do_nothing()
         .execute(conn)
         .await
         .expect("Could not ensure token in database");
 
     let token_id: i64 = schema::token::table
         .select(schema::token::id)
-        .filter(schema::token::account_id.eq(account_id))
+        .filter(schema::token::address.eq(token.address.as_ref()))
         .first(conn)
         .await
         .expect("Token must exist after insert");
