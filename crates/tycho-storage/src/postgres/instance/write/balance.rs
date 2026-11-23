@@ -239,12 +239,22 @@ mod tests {
     use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
-    use tycho_common::{storage::StorageError, Bytes};
+    use tycho_common::{
+        models::{
+            blockchain::{Block, Transaction},
+            protocol::ComponentBalance as DomainBalance,
+            Chain,
+        },
+        storage::StorageError,
+        Bytes,
+    };
 
     use crate::postgres::{
+        cache::WriteOp,
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
+            origins::BatchOrigins,
             orm::{ComponentBalance, ComponentBalanceHistory, NewComponentBalance},
             schema::tycho::{component_balance, component_balance_history},
             write::versioning::VersionedChange,
@@ -456,5 +466,128 @@ mod tests {
         assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
         assert_eq!(current(&mut setup).await[0].new_balance, value(1));
         assert!(history(&mut setup).await.is_empty());
+    }
+
+    /// A batch of block 10 at `ts`, with the transactions `0xa1` at index 1 and `0xa3` at index 3.
+    fn origins(ts: NaiveDateTime) -> BatchOrigins {
+        let block = Block::new(10, Chain::Ethereum, Bytes::from("0x0a"), Bytes::default(), ts);
+        let tx = |hash: u8, index: u64| {
+            Transaction::new(
+                Bytes::from(vec![hash]),
+                block.hash.clone(),
+                Bytes::default(),
+                None,
+                index,
+            )
+        };
+        let ops = vec![
+            WriteOp::UpsertTx(vec![tx(0xa1, 1), tx(0xa3, 3)]),
+            WriteOp::UpsertBlock(vec![block.clone()]),
+        ];
+        BatchOrigins::from_ops(&ops).expect("a valid batch")
+    }
+
+    fn balance(token_id: u8, new: u64, tx: u8) -> DomainBalance {
+        DomainBalance::new(token(token_id), value(new), 1.0, Bytes::from(vec![tx]), "pool")
+    }
+
+    async fn insert_tokens(setup: &mut Setup, ids: &[u8]) {
+        for id in ids {
+            db_fixtures::insert_token(&mut setup.conn, &hex::encode([*id]), "T", 18, Some(100))
+                .await;
+        }
+    }
+
+    async fn insert_batch(
+        setup: &mut Setup,
+        origins: &BatchOrigins,
+        balances: &[DomainBalance],
+    ) -> Result<(), StorageError> {
+        setup
+            .gateway
+            .insert_component_balances(setup.instance, origins, balances, &mut setup.conn)
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_balances_of_a_batch_take_their_origin() {
+        let mut setup = setup().await;
+        insert_tokens(&mut setup, &[2, 3]).await;
+        let ts = minutes_ago(1);
+
+        insert_batch(&mut setup, &origins(ts), &[balance(2, 20, 0xa1), balance(3, 30, 0xa3)])
+            .await
+            .unwrap();
+
+        let stored: Vec<_> = current(&mut setup)
+            .await
+            .into_iter()
+            .map(|row| (row.token, row.new_balance, row.valid_from, row.tx_index))
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                (token(1), value(1), stored_since(), 0),
+                (token(2), value(20), ts, 1),
+                (token(3), value(30), ts, 3),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_balances_of_one_key_in_a_batch_chain_in_order() {
+        let mut setup = setup().await;
+        insert_tokens(&mut setup, &[2]).await;
+        let ts = minutes_ago(1);
+
+        insert_batch(&mut setup, &origins(ts), &[balance(2, 30, 0xa3), balance(2, 20, 0xa1)])
+            .await
+            .unwrap();
+
+        let current = current(&mut setup).await;
+        let latest = &current[1];
+        assert_eq!(
+            (&latest.new_balance, &latest.previous_value, latest.tx_index),
+            (&value(30), &value(20), 3)
+        );
+        let archived: Vec<_> = history(&mut setup)
+            .await
+            .into_iter()
+            .map(|row| (row.new_balance, row.tx_index))
+            .collect();
+        assert_eq!(archived, vec![(value(20), 1)]);
+    }
+
+    #[tokio::test]
+    async fn test_balance_of_an_unknown_token_fails() {
+        let mut setup = setup().await;
+        insert_tokens(&mut setup, &[2]).await;
+
+        let result = insert_batch(
+            &mut setup,
+            &origins(minutes_ago(1)),
+            &[balance(2, 20, 0xa1), balance(9, 90, 0xa1)],
+        )
+        .await;
+
+        assert_eq!(result, Err(StorageError::NotFound("Token".to_string(), token(9).to_string())));
+        assert_eq!(current(&mut setup).await.len(), 1, "nothing is written");
+    }
+
+    #[tokio::test]
+    async fn test_balance_of_a_tx_outside_the_batch_fails() {
+        let mut setup = setup().await;
+        insert_tokens(&mut setup, &[2]).await;
+
+        let result =
+            insert_batch(&mut setup, &origins(minutes_ago(1)), &[balance(2, 20, 0xff)]).await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound(
+                "Transaction".to_string(),
+                Bytes::from(vec![0xff]).to_string()
+            ))
+        );
     }
 }

@@ -1895,9 +1895,9 @@ mod test_serial_db {
                 .await
                 .expect("Upsert block 1 ok");
             cached_gw
-                .add_component_balances(&[])
+                .update_protocol_states(&[])
                 .await
-                .expect("Staging balances ok");
+                .expect("Staging protocol states ok");
             let res = cached_gw.commit_transaction(0).await;
             handle.abort();
 
