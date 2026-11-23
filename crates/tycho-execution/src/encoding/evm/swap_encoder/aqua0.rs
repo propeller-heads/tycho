@@ -3,6 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use num_bigint::BigUint;
 use tokio::runtime::Handle;
 use tycho_common::{
     models::{protocol::GetAmountOutParams, Chain},
@@ -22,6 +23,19 @@ use crate::encoding::{
 
 /// Fetches Aqua0's binding JIT authorization, then delegates byte packing to Tycho's existing
 /// Uniswap V4 encoder and executor. The only custom payload is V4 `hookData`.
+///
+/// The hook binds the exact input amount, so an Aqua0 swap fills only as the whole route's first
+/// hop. This encoder checks what it can see: the swap is the first of its group, it has no split
+/// of its own, and its `estimated_amount_in` is set and non-zero. The rest is the solver's to keep,
+/// because the encoder sees one swap and not the route:
+///
+/// - the Aqua0 swap is the first hop of the whole route,
+/// - the route has a single Aqua0 swap,
+/// - the route has no splits,
+/// - its `estimated_amount_in` equals the solution's `amount_in`.
+///
+/// A route that breaks one of these is still encoded, and its binding quote reserves Aqua0 backing
+/// until the deadline, but the transaction reverts on chain instead of filling at another amount.
 #[derive(Clone)]
 pub struct Aqua0SwapEncoder {
     executor_address: Bytes,
@@ -50,12 +64,16 @@ impl SwapEncoder for Aqua0SwapEncoder {
         swap: &Swap,
         encoding_context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        // This only checks position within a group. TychoRouterEncoder validates the whole route
-        // before any quote request, including input amounts and the single-Aqua0-leg restriction.
+        // Only what this swap shows is checked here; the route-level rules are in the doc comment.
         if encoding_context.group_token_in != swap.token_in().address {
             return Err(EncodingError::FatalError(
                 "Aqua0 must be the first swap because its JIT authorization binds exact input"
                     .into(),
+            ));
+        }
+        if swap.split() != 0.0 {
+            return Err(EncodingError::InvalidInput(
+                "Aqua0 cannot be split because its JIT authorization binds exact input".into(),
             ));
         }
 
@@ -74,8 +92,11 @@ impl SwapEncoder for Aqua0SwapEncoder {
         let amount_in = swap
             .estimated_amount_in()
             .clone()
+            .filter(|amount| *amount != BigUint::ZERO)
             .ok_or_else(|| {
-                EncodingError::FatalError("estimated amount in is required for Aqua0 RFQ".into())
+                EncodingError::InvalidInput(
+                    "a non-zero estimated amount in is required for Aqua0 RFQ".into(),
+                )
             })?;
         let router = encoding_context
             .router_address
@@ -323,6 +344,25 @@ mod tests {
                 .is_err());
             assert!(quotes.lock().unwrap().is_empty(), "no quote was requested");
         }
+    }
+
+    /// A split swap and a zero input are refused before backing is reserved.
+    #[test]
+    fn refuses_a_split_and_a_zero_amount_before_requesting_a_quote() {
+        let refused = |change: fn(Swap) -> Swap, reason: &str| {
+            let (swap, context, encoder, quotes) =
+                fixture(pool_attributes(), Some(BigUint::from(2_000u32)), u64::MAX, None);
+            let error = encoder
+                .encode_swap(&change(swap), &context)
+                .unwrap_err();
+            assert!(
+                matches!(error, EncodingError::InvalidInput(ref message) if message.contains(reason)),
+                "{error}"
+            );
+            assert!(quotes.lock().unwrap().is_empty(), "no quote was requested");
+        };
+        refused(|swap| swap.with_split(0.5), "cannot be split");
+        refused(|swap| swap.with_estimated_amount_in(BigUint::ZERO), "non-zero");
     }
 
     #[test]
