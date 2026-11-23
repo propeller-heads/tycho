@@ -18,8 +18,8 @@ use crate::postgres::{ChainEnumCache, FromConnection, ProtocolSystemEnumCache};
 pub struct PostgresGatewayNew {
     pub(super) chain_id_cache: Arc<ChainEnumCache>,
     pub(super) protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
-    /// Versions that end at or before this time are not archived: their history day is past the
-    /// retention period.
+    /// The start of the retention period. History keeps only versions that end after this time,
+    /// so `write_versions` does not archive a version that ends at or before it.
     pub(super) retention_horizon: NaiveDateTime,
 }
 

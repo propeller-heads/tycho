@@ -1,14 +1,14 @@
-//! Versions of the versioned entities of an instance: protocol state, component balances, contract
-//! code, contract storage and native balances.
+//! Versions of the rows of an instance's versioned entities.
 //!
-//! The current table of an entity holds one row per key: its latest version. A change that replaces
-//! that row moves the replaced version to the entity's history table, with `valid_to` set to the
-//! start of the change. A deletion moves the row to history and removes it from the current table.
-//! A replaced version that ends at or before the retention horizon is not archived.
+//! The current table of an entity holds one row per key: its latest version. When a change
+//! replaces that row, `write_versions` moves the replaced version to the entity's history table,
+//! with `valid_to` set to the start of the change. When a change deletes a key, `write_versions`
+//! moves its row to history and removes it from the current table. `write_versions` does not
+//! archive a version that ends at or before the retention horizon.
 //!
 //! Each block of an instance starts strictly later than the one before, and a transaction changes
-//! a key at most once. So every change of a key starts after the version it replaces. A change that
-//! doesn't fails the batch: it is never skipped.
+//! a key at most once. So every change of a key must start after the version it replaces. When a
+//! change starts at or before that version, `write_versions` fails the whole batch.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
