@@ -17,7 +17,6 @@ use tycho_common::{
         BlockIdentifier, BlockOrTimestamp, EntryPointFilter, Gateway, StorageError, Version,
         VersionKind,
     },
-    traits::EntryPointTracer,
     Bytes,
 };
 use tycho_storage::postgres::{count_to_i64, page_window};
@@ -111,7 +110,7 @@ enum StateAnswer<D> {
     Db(Arc<D>),
 }
 
-pub struct RpcHandler<G, T> {
+pub struct RpcHandler<G> {
     db_gateway: G,
     // TODO: remove use of Arc. It was introduced for ease of testing this deltas buffer, however
     // it potentially could make this slow. We should consider refactoring this and maybe use
@@ -124,7 +123,6 @@ pub struct RpcHandler<G, T> {
         RpcCache<dto::ProtocolComponentsRequestBody, dto::ProtocolComponentRequestResponse>,
     traced_entry_point_cache:
         RpcCache<dto::TracedEntryPointRequestBody, dto::TracedEntryPointRequestResponse>,
-    tracer: T,
     plans_config: PlansConfig,
     /// Protocol systems that use Dynamic Contract Indexing (DCI). Included in the
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
@@ -136,15 +134,13 @@ pub struct RpcHandler<G, T> {
     off_worker: OffWorker,
 }
 
-impl<G, T> RpcHandler<G, T>
+impl<G> RpcHandler<G>
 where
     G: Gateway,
-    T: EntryPointTracer + Sync,
 {
     pub fn new(
         db_gateway: G,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-        tracer: T,
         plans_config: PlansConfig,
         dci_protocols: Vec<String>,
         protocol_systems: Vec<String>,
@@ -183,7 +179,6 @@ where
             protocol_state_cache,
             component_cache,
             traced_entry_point_cache,
-            tracer,
             plans_config,
             dci_protocols,
             protocol_systems,
@@ -1237,10 +1232,10 @@ fn require_protocol_system(system: &str) -> Result<(), RpcError> {
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
+pub async fn contract_state<G: Gateway>(
     req: actix_web::HttpRequest,
     mut body: web::Json<dto::StateRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Note - filtering by protocol system is not supported on this endpoint. This is due to the
     // complexity of paginating this endpoint with the current design.
@@ -1295,10 +1290,10 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn tokens<G: Gateway, T: EntryPointTracer>(
+pub async fn tokens<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::TokensRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1340,10 +1335,10 @@ pub async fn tokens<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn protocol_components<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_components<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ProtocolComponentsRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1386,10 +1381,10 @@ pub async fn protocol_components<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_state<G: Gateway>(
     req: actix_web::HttpRequest,
     mut body: web::Json<dto::ProtocolStateRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1440,10 +1435,10 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_systems<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ProtocolSystemsRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1484,10 +1479,10 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
+pub async fn component_tvl<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ComponentTvlRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     let mut body = body.into_inner();
     body.protocol_system = body
@@ -1539,10 +1534,10 @@ pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn traced_entry_points<G: Gateway, T: EntryPointTracer>(
+pub async fn traced_entry_points<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::TracedEntryPointRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
