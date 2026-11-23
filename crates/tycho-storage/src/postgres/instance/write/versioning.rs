@@ -90,7 +90,7 @@ impl<R: VersionedRowNew> VersionedChange<R> {
     fn key(&self) -> R::Key {
         match self {
             Self::Update(row) => row.key(),
-            Self::Delete { key, .. } => key.clone(),
+            Self::Delete { key, origin: _ } => key.clone(),
         }
     }
 
@@ -98,7 +98,7 @@ impl<R: VersionedRowNew> VersionedChange<R> {
     fn version(&self) -> (NaiveDateTime, i32) {
         match self {
             Self::Update(row) => row.version(),
-            Self::Delete { origin, .. } => (origin.valid_from, origin.tx_index),
+            Self::Delete { key: _, origin } => (origin.valid_from, origin.tx_index),
         }
     }
 }
@@ -162,14 +162,14 @@ fn plan_writes<R: VersionedRowNew>(
                 }
                 Some(row)
             }
-            VersionedChange::Delete { .. } if replaced.is_none() => {
+            VersionedChange::Delete { key: _, origin: _ } if replaced.is_none() => {
                 return Err(StorageError::Unexpected(format!(
                     "{} {key:?}: a deletion at {version:?} finds no version to end in instance \
                      {instance}",
                     R::ENTITY
                 )));
             }
-            VersionedChange::Delete { .. } => None,
+            VersionedChange::Delete { key: _, origin: _ } => None,
         };
         if let Some(replaced) = replaced {
             let (valid_from, _) = version;
