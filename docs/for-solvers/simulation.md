@@ -81,7 +81,7 @@ fn fee(&self) -> f64;
 `get_limits` returns a tuple containing the maximum amount in and out that can be traded between two tokens.
 
 {% hint style="info" %}
-If there are no hard limits to the swap (for example for Uniswap V2), the returned amount will be a "soft" limit, meaning that the actual amount traded could be higher but it's advised to not exceed it.
+If a venue has no hard limit (for example Aerodrome V1 volatile pools, whose reserves have no bound below uint256), `get_limits` returns a "soft" limit: the venue accepts more, but we advise you not to exceed it.
 {% endhint %}
 
 ```rust

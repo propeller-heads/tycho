@@ -681,7 +681,9 @@ mod tests {
 
     use alloy::primitives::U256;
     use tycho_common::Bytes;
-    use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+    use tycho_simulation::evm::protocol::{
+        aerodrome_v1::state::AerodromeV1State, uniswap_v2::state::UniswapV2State,
+    };
 
     use super::*;
 
@@ -715,10 +717,16 @@ mod tests {
         )
     }
 
-    fn state() -> UniswapV2State {
-        UniswapV2State::new(
+    /// A USDC/WETH constant-product pool whose limit is soft: an Aerodrome V1 volatile pool keeps
+    /// uint256 reserves, so it quotes any input past its ~90% price-impact limit.
+    fn state() -> AerodromeV1State {
+        AerodromeV1State::new(
             U256::from(30_000_000u64) * U256::from(10u64).pow(U256::from(6)),
             U256::from(10_000u64) * U256::from(10u64).pow(U256::from(18)),
+            false,
+            30,
+            6,
+            18,
         )
     }
 
@@ -743,7 +751,7 @@ mod tests {
     /// Probes USDC -> WETH of `state` `turns` times, returning the last probe's swaps.
     fn probe_state(
         strict: &StrictChecks,
-        pool: &UniswapV2State,
+        pool: &dyn ProtocolSim,
         max_input: &BigUint,
         turns: usize,
     ) -> Vec<(String, TychoExecutionInput, Probe)> {
@@ -755,7 +763,7 @@ mod tests {
     fn probe_component(
         strict: &StrictChecks,
         component: &ProtocolComponent,
-        pool: &UniswapV2State,
+        pool: &dyn ProtocolSim,
         max_input: &BigUint,
         turns: usize,
     ) -> Vec<(String, TychoExecutionInput, Probe)> {
@@ -1131,7 +1139,7 @@ mod tests {
     #[test]
     fn a_fraction_that_does_not_quote_fails_the_ladder() {
         let strict = strict(None);
-        let empty = UniswapV2State::new(U256::ZERO, U256::ZERO);
+        let empty = UniswapV2State::new(Default::default(), Default::default());
         drop(probe_state(&strict, &empty, &BigUint::from(1_000_000u32), 1));
         assert_eq!(
             recorded(),
@@ -1369,7 +1377,7 @@ mod tests {
     #[test]
     fn a_limit_that_does_not_quote_leaves_the_rest_not_run() {
         let strict = strict(Some("{kind: hard}"));
-        let empty = UniswapV2State::new(U256::ZERO, U256::ZERO);
+        let empty = UniswapV2State::new(Default::default(), Default::default());
         // The fourth turn is the limit.
         drop(probe_state(&strict, &empty, &BigUint::from(1_000_000u32), 4));
         let outcomes = recorded();

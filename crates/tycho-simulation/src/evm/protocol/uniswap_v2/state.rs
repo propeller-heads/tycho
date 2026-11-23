@@ -1,8 +1,9 @@
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::U256;
+use alloy::primitives::{aliases::U112, U256};
 use num_bigint::BigUint;
 use num_traits::Zero;
+use ruint::UintTryFrom;
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -19,10 +20,8 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     cpmm::protocol::{
-        cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits, cpmm_spot_price,
-        cpmm_swap_to_price, ProtocolFee,
+        cpmm_fee, cpmm_get_amount_out, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee,
     },
-    safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::{biguint_to_uint, u256_to_biguint},
     utils::add_fee_markup,
 };
@@ -34,8 +33,8 @@ const FEE_NUMERATOR: U256 = U256::from_limbs([9970, 0, 0, 0]);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV2State {
-    pub reserve0: U256,
-    pub reserve1: U256,
+    pub reserve0: U112,
+    pub reserve1: U112,
 }
 
 impl UniswapV2State {
@@ -45,9 +44,43 @@ impl UniswapV2State {
     ///
     /// * `reserve0` - Reserve of token 0.
     /// * `reserve1` - Reserve of token 1.
-    pub fn new(reserve0: U256, reserve1: U256) -> Self {
+    pub fn new(reserve0: U112, reserve1: U112) -> Self {
         UniswapV2State { reserve0, reserve1 }
     }
+
+    fn reserves(&self, zero_for_one: bool) -> (U112, U112) {
+        if zero_for_one {
+            (self.reserve0, self.reserve1)
+        } else {
+            (self.reserve1, self.reserve0)
+        }
+    }
+}
+
+/// Reads a reserve attribute, refusing one wider than the pair's `uint112`. The package writes
+/// it as `BigInt::to_signed_bytes_be`, which prefixes a zero sign byte to a reserve whose top
+/// bit is set, so leading zeros are skipped.
+pub(super) fn decode_reserve(name: &str, value: &Bytes) -> Result<U112, String> {
+    let magnitude = &value[value
+        .iter()
+        .take_while(|byte| **byte == 0)
+        .count()..];
+    U112::try_from_be_slice(magnitude)
+        .ok_or_else(|| format!("{name} {value} does not fit the pair's uint112 reserve"))
+}
+
+/// What the pair pays for `amount_in`, after its 0.3% fee.
+fn amount_out(
+    amount_in: U256,
+    reserve_in: U256,
+    reserve_out: U256,
+) -> Result<U256, SimulationError> {
+    cpmm_get_amount_out(
+        amount_in,
+        reserve_in,
+        reserve_out,
+        ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION),
+    )
 }
 
 #[typetag::serde]
@@ -57,7 +90,8 @@ impl ProtocolSim for UniswapV2State {
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-        let price = cpmm_spot_price(base, quote, self.reserve0, self.reserve1)?;
+        let price =
+            cpmm_spot_price(base, quote, U256::from(self.reserve0), U256::from(self.reserve1))?;
         Ok(add_fee_markup(price, self.fee()))
     }
 
@@ -67,20 +101,39 @@ impl ProtocolSim for UniswapV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_uint(&amount_in)?;
+        let amount_in: U112 = biguint_to_uint(&amount_in)?;
         let zero2one = token_in.address < token_out.address;
-        let (reserve_in, reserve_out) =
-            if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
-        let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
-        let amount_out = cpmm_get_amount_out(amount_in, reserve_in, reserve_out, fee)?;
+        let (reserve_in, reserve_out) = self.reserves(zero2one);
+        let new_reserve_in = reserve_in
+            .checked_add(amount_in)
+            .ok_or_else(|| {
+                SimulationError::InvalidInput(
+                    format!(
+                        "Amount in {amount_in} takes reserve {reserve_in} past uint112, where \
+                         the pair reverts"
+                    ),
+                    None,
+                )
+            })?;
+        let amount_out =
+            amount_out(U256::from(amount_in), U256::from(reserve_in), U256::from(reserve_out))?;
+        // The constant-product output is below `reserve_out`, so it fits and the subtraction
+        // cannot underflow.
+        let new_reserve_out = U112::uint_try_from(amount_out)
+            .ok()
+            .and_then(|amount_out| reserve_out.checked_sub(amount_out))
+            .ok_or_else(|| {
+                SimulationError::FatalError(format!(
+                    "Amount out {amount_out} exceeds reserve {reserve_out}"
+                ))
+            })?;
         let mut new_state = self.clone();
-        let (reserve0_mut, reserve1_mut) = (&mut new_state.reserve0, &mut new_state.reserve1);
         if zero2one {
-            *reserve0_mut = safe_add_u256(self.reserve0, amount_in)?;
-            *reserve1_mut = safe_sub_u256(self.reserve1, amount_out)?;
+            new_state.reserve0 = new_reserve_in;
+            new_state.reserve1 = new_reserve_out;
         } else {
-            *reserve0_mut = safe_sub_u256(self.reserve0, amount_out)?;
-            *reserve1_mut = safe_add_u256(self.reserve1, amount_in)?;
+            new_state.reserve0 = new_reserve_out;
+            new_state.reserve1 = new_reserve_in;
         };
         Ok(GetAmountOutResult::new(
             u256_to_biguint(amount_out),
@@ -94,7 +147,20 @@ impl ProtocolSim for UniswapV2State {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        cpmm_get_limits(&sell_token, &buy_token, self.reserve0, self.reserve1, UNISWAP_V2_FEE_BPS)
+        // The pair takes any input until the input reserve would pass uint112, so the limit is the
+        // room left below it.
+        let (reserve_in, reserve_out) = self.reserves(sell_token < buy_token);
+        // FIXME: the pair checks its token balances against uint112, not its reserves, so tokens
+        // sent to it without a `sync` take up part of this room. The state holds only the reserves
+        // (the package indexes `Sync` events), so with such an excess the limit is too high by it,
+        // and `get_amount_out` accepts amounts the pair refuses with `UniswapV2: OVERFLOW`.
+        let room = U112::MAX - reserve_in;
+        if reserve_in.is_zero() || reserve_out.is_zero() || room.is_zero() {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
+        let room = U256::from(room);
+        let max_out = amount_out(room, U256::from(reserve_in), U256::from(reserve_out))?;
+        Ok((u256_to_biguint(room), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -103,8 +169,18 @@ impl ProtocolSim for UniswapV2State {
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let (reserve0_mut, reserve1_mut) = (&mut self.reserve0, &mut self.reserve1);
-        cpmm_delta_transition(&delta, reserve0_mut, reserve1_mut)
+        // Both reserves are in every delta the package emits.
+        let reserve = |name: &str| {
+            let value = delta
+                .updated_attributes
+                .get(name)
+                .ok_or_else(|| TransitionError::MissingAttribute(name.to_string()))?;
+            decode_reserve(name, value).map_err(TransitionError::DecodeError)
+        };
+        let (reserve0, reserve1) = (reserve("reserve0")?, reserve("reserve1")?);
+        self.reserve0 = reserve0;
+        self.reserve1 = reserve1;
+        Ok(())
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
@@ -116,11 +192,8 @@ impl ProtocolSim for UniswapV2State {
                 max_amount_in: _,
             } => {
                 let zero2one = params.token_in().address < params.token_out().address;
-                let (reserve_in, reserve_out) = if zero2one {
-                    (self.reserve0, self.reserve1)
-                } else {
-                    (self.reserve1, self.reserve0)
-                };
+                let (reserve_in, reserve_out) = self.reserves(zero2one);
+                let (reserve_in, reserve_out) = (U256::from(reserve_in), U256::from(reserve_out));
 
                 let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
                 let (amount_in, _) = cpmm_swap_to_price(reserve_in, reserve_out, price, fee)?;
@@ -220,24 +293,24 @@ mod tests {
 
     #[rstest]
     #[case::same_dec(
-        U256::from_str("6770398782322527849696614").unwrap(),
-        U256::from_str("5124813135806900540214").unwrap(),
+        U112::from_str("6770398782322527849696614").unwrap(),
+        U112::from_str("5124813135806900540214").unwrap(),
         18,
         18,
     BigUint::from_str("10000000000000000000000").unwrap(),
     BigUint::from_str("7535635391574243447").unwrap()
     )]
     #[case::diff_dec(
-        U256::from_str("33372357002392258830279").unwrap(),
-        U256::from_str("43356945776493").unwrap(),
+        U112::from_str("33372357002392258830279").unwrap(),
+        U112::from_str("43356945776493").unwrap(),
         18,
         6,
     BigUint::from_str("10000000000000000000").unwrap(),
     BigUint::from_str("12949029867").unwrap()
     )]
     fn test_get_amount_out(
-        #[case] r0: U256,
-        #[case] r1: U256,
+        #[case] r0: U112,
+        #[case] r1: U112,
         #[case] token_0_decimals: u32,
         #[case] token_1_decimals: u32,
         #[case] amount_in: BigUint,
@@ -280,46 +353,13 @@ mod tests {
         assert_eq!(state.reserve1, r1);
     }
 
-    #[test]
-    fn test_get_amount_out_overflow() {
-        let r0 = U256::from_str("33372357002392258830279").unwrap();
-        let r1 = U256::from_str("43356945776493").unwrap();
-        let amount_in = (BigUint::one() << 256) - BigUint::one(); // U256 max value
-        let t0d = 18;
-        let t1d = 16;
-        let t0 = Token::new(
-            &Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
-            "T0",
-            t0d,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        );
-        let t1 = Token::new(
-            &Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
-            "T0",
-            t1d,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        );
-        let state = UniswapV2State::new(r0, r1);
-
-        let res = state.get_amount_out(amount_in, &t0, &t1);
-        assert!(res.is_err());
-        let err = res.err().unwrap();
-        assert!(matches!(err, SimulationError::FatalError(_)));
-    }
-
     #[rstest]
     #[case(true, 0.000823442321727627)] // 0.0008209719947624441 / 0.997
     #[case(false, 1221.7335469177287)] // 1218.0683462769755 / 0.997
     fn test_spot_price(#[case] zero_to_one: bool, #[case] exp: f64) {
         let state = UniswapV2State::new(
-            U256::from_str("36925554990922").unwrap(),
-            U256::from_str("30314846538607556521556").unwrap(),
+            U112::from_str("36925554990922").unwrap(),
+            U112::from_str("30314846538607556521556").unwrap(),
         );
         let usdc = Token::new(
             &Bytes::from_str("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap(),
@@ -352,8 +392,8 @@ mod tests {
     #[test]
     fn test_fee() {
         let state = UniswapV2State::new(
-            U256::from_str("36925554990922").unwrap(),
-            U256::from_str("30314846538607556521556").unwrap(),
+            U112::from_str("36925554990922").unwrap(),
+            U112::from_str("30314846538607556521556").unwrap(),
         );
 
         let res = state.fee();
@@ -364,7 +404,7 @@ mod tests {
     #[test]
     fn test_delta_transition() {
         let mut state =
-            UniswapV2State::new(U256::from_str("1000").unwrap(), U256::from_str("1000").unwrap());
+            UniswapV2State::new(U112::from_str("1000").unwrap(), U112::from_str("1000").unwrap());
         let attributes: HashMap<String, Bytes> = vec![
             ("reserve0".to_string(), Bytes::from(1500_u64.to_be_bytes().to_vec())),
             ("reserve1".to_string(), Bytes::from(2000_u64.to_be_bytes().to_vec())),
@@ -380,14 +420,14 @@ mod tests {
         let res = state.delta_transition(delta, &HashMap::new(), &Balances::default());
 
         assert!(res.is_ok());
-        assert_eq!(state.reserve0, U256::from_str("1500").unwrap());
-        assert_eq!(state.reserve1, U256::from_str("2000").unwrap());
+        assert_eq!(state.reserve0, U112::from_str("1500").unwrap());
+        assert_eq!(state.reserve1, U112::from_str("2000").unwrap());
     }
 
     #[test]
     fn test_delta_transition_missing_attribute() {
         let mut state =
-            UniswapV2State::new(U256::from_str("1000").unwrap(), U256::from_str("1000").unwrap());
+            UniswapV2State::new(U112::from_str("1000").unwrap(), U112::from_str("1000").unwrap());
         let attributes: HashMap<String, Bytes> =
             vec![("reserve0".to_string(), Bytes::from(1500_u64.to_be_bytes().to_vec()))]
                 .into_iter()
@@ -410,49 +450,12 @@ mod tests {
         };
     }
 
-    #[test]
-    fn test_get_limits_price_impact() {
-        let state =
-            UniswapV2State::new(U256::from_str("1000").unwrap(), U256::from_str("100000").unwrap());
-
-        let (amount_in, _) = state
-            .get_limits(
-                Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
-                Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap(),
-            )
-            .unwrap();
-
-        let token_0 = token_0();
-        let token_1 = token_1();
-
-        let result = state
-            .get_amount_out(amount_in, &token_0, &token_1)
-            .unwrap();
-        let new_state = result.new_state;
-
-        let initial_price = state
-            .spot_price(&token_0, &token_1)
-            .unwrap();
-        let new_price = new_state
-            .spot_price(&token_0, &token_1)
-            .unwrap();
-
-        // Price impact should be approximately 90% (new_price ≈ initial_price / 10)
-        // Due to fees being added to pool liquidity, actual impact is slightly less than 90%
-        // (see cpmm_get_limits documentation for details)
-        let price_impact = 1.0 - new_price / initial_price;
-        assert!(
-            (0.899..=0.90).contains(&price_impact),
-            "Price impact should be approximately 90%. Actual impact: {:.2}%",
-            price_impact * 100.0
-        );
-    }
-
     #[rstest]
+    // The smallest amount wider than uint112, which no reserve has room for.
+    #[case::two_pow_112(BigUint::one() << 112)]
     #[case::two_pow_256(BigUint::one() << 256)]
-    #[case::two_pow_300(BigUint::one() << 300)]
-    fn test_get_amount_out_refuses_amount_wider_than_uint256(#[case] amount_in: BigUint) {
-        let state = UniswapV2State::new(U256::from(1000u32), U256::from(2000u32));
+    fn test_get_amount_out_refuses_amount_wider_than_uint112(#[case] amount_in: BigUint) {
+        let state = UniswapV2State::new(U112::ZERO, U112::from(2000u32));
 
         let res = state.get_amount_out(amount_in, &token_0(), &token_1());
 
@@ -460,10 +463,78 @@ mod tests {
     }
 
     #[test]
+    fn test_get_amount_out_refuses_reserve_past_uint112() {
+        // uint112 max is 5192296858534827628530496329220095; 1000 units of room are left.
+        let state = UniswapV2State::new(
+            U112::from_str("5192296858534827628530496329219095").unwrap(),
+            U112::from_str("2596148429267413814265248164610048").unwrap(),
+        );
+
+        // floor(1000 * 9970 * 2^111 / (reserve0 * 10000 + 1000 * 9970))
+        //   = floor(25883599839796115728224524201162178560000
+        //           / 51922968585348276285304963292200920000) = 498
+        let at_room = state
+            .get_amount_out(BigUint::from(1000u32), &token_0(), &token_1())
+            .unwrap();
+        assert_eq!(at_room.amount, BigUint::from(498u32));
+
+        let past_room = state.get_amount_out(BigUint::from(1001u32), &token_0(), &token_1());
+        assert!(matches!(past_room, Err(SimulationError::InvalidInput(..))));
+    }
+
+    #[test]
+    fn test_get_limits_is_room_below_uint112() {
+        let state = UniswapV2State::new(U112::from(1000u32), U112::from(2000u32));
+
+        // uint112 max is 5192296858534827628530496329220095.
+        // token 0 -> token 1, reserve_in = 1000, reserve_out = 2000:
+        // max_in = uint112 max - 1000 = 5192296858534827628530496329219095
+        // max_out = floor(max_in * 9970 * 2000 / (1000 * 10000 + max_in * 9970))
+        //         = floor(103534399359184462912898096804628754300000
+        //                 / 51767199679592231456449048402324377150) = 1999
+        let max_in = BigUint::from_str("5192296858534827628530496329219095").unwrap();
+        let limits = state
+            .get_limits(token_0().address, token_1().address)
+            .unwrap();
+        assert_eq!(limits, (max_in.clone(), BigUint::from(1999u32)));
+        let quote = state
+            .get_amount_out(max_in.clone(), &token_0(), &token_1())
+            .unwrap();
+        assert_eq!(quote.amount, BigUint::from(1999u32));
+        let past = state.get_amount_out(max_in + 1u32, &token_0(), &token_1());
+        assert!(matches!(past, Err(SimulationError::InvalidInput(..))));
+
+        // token 1 -> token 0, reserve_in = 2000, reserve_out = 1000:
+        // max_in = uint112 max - 2000 = 5192296858534827628530496329218095
+        // max_out = floor(max_in * 9970 * 1000 / (2000 * 10000 + max_in * 9970))
+        //         = floor(51767199679592231456449048402304407150000
+        //                 / 51767199679592231456449048402324407150) = 999
+        let max_in = BigUint::from_str("5192296858534827628530496329218095").unwrap();
+        let limits = state
+            .get_limits(token_1().address, token_0().address)
+            .unwrap();
+        assert_eq!(limits, (max_in.clone(), BigUint::from(999u32)));
+        let past = state.get_amount_out(max_in + 1u32, &token_1(), &token_0());
+        assert!(matches!(past, Err(SimulationError::InvalidInput(..))));
+    }
+
+    #[test]
+    fn test_get_limits_is_zero_when_a_reserve_is_empty_or_full() {
+        let max = U112::from_str("5192296858534827628530496329220095").unwrap();
+        for (reserve0, reserve1) in [(U112::ZERO, U112::from(2000u32)), (max, U112::from(2000u32))]
+        {
+            let limits = UniswapV2State::new(reserve0, reserve1)
+                .get_limits(token_0().address, token_1().address)
+                .unwrap();
+            assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO), "{reserve0} / {reserve1}");
+        }
+    }
+
+    #[test]
     fn test_swap_to_price_below_spot() {
         // Pool with reserve0=2000000, reserve1=1000000
         // Current price: reserve1/reserve0 = 1000000/2000000 = 0.5 token_out per token_in
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
 
         let token_in = token_0();
         let token_out = token_1();
@@ -513,7 +584,7 @@ mod tests {
     #[test]
     fn test_swap_to_price_unreachable() {
         // Pool with 2:1 ratio
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
 
         let token_in = token_0();
         let token_out = token_1();
@@ -539,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_swap_to_price_at_spot_price() {
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
 
         let token_in = token_0();
         let token_out = token_1();
@@ -580,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_swap_to_price_slightly_below_spot() {
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
 
         let token_in = token_0();
         let token_out = token_1();
@@ -618,8 +689,8 @@ mod tests {
     fn test_swap_to_price_large_pool() {
         // Test with realistic large reserves
         let state = UniswapV2State::new(
-            U256::from_str("6770398782322527849696614").unwrap(),
-            U256::from_str("5124813135806900540214").unwrap(),
+            U112::from_str("6770398782322527849696614").unwrap(),
+            U112::from_str("5124813135806900540214").unwrap(),
         );
 
         let token_in = token_0();
@@ -629,8 +700,8 @@ mod tests {
         // To target a slightly lower price (move price down 10%), we can use:
         // target_price = (reserve1 * 9) / (reserve0 * 10)
         // This avoids floating point precision issues with large numbers
-        let price_numerator = u256_to_biguint(state.reserve1) * BigUint::from(9u32);
-        let price_denominator = u256_to_biguint(state.reserve0) * BigUint::from(10u32);
+        let price_numerator = BigUint::from(state.reserve1) * BigUint::from(9u32);
+        let price_denominator = BigUint::from(state.reserve0) * BigUint::from(10u32);
 
         let target_price = Price::new(price_numerator, price_denominator);
 
@@ -653,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_swap_to_price_basic() {
-        let state = UniswapV2State::new(U256::from(1_000_000u32), U256::from(2_000_000u32));
+        let state = UniswapV2State::new(U112::from(1_000_000u32), U112::from(2_000_000u32));
 
         let token_in = token_0();
         let token_out = token_1();
@@ -680,8 +751,8 @@ mod tests {
     fn test_swap_to_price_validates_actual_output() {
         // Test that query_supply validates actual_output >= expected_output
         let state = UniswapV2State::new(
-            U256::from(1_000_000u128) * U256::from(1_000_000_000_000_000_000u128),
-            U256::from(2_000_000u128) * U256::from(1_000_000_000_000_000_000u128),
+            U112::from(1_000_000u128) * U112::from(1_000_000_000_000_000_000u128),
+            U112::from(2_000_000u128) * U112::from(1_000_000_000_000_000_000u128),
         );
 
         let token_in = token_0();
@@ -732,8 +803,8 @@ mod tests {
             100,
         );
 
-        let reserve_0 = U256::from_str("735952457913070155214197").unwrap();
-        let reserve_1 = U256::from_str("735997725943000000000000").unwrap();
+        let reserve_0 = U112::from_str("735952457913070155214197").unwrap();
+        let reserve_1 = U112::from_str("735997725943000000000000").unwrap();
 
         let pool = UniswapV2State::new(reserve_0, reserve_1);
 
@@ -743,22 +814,22 @@ mod tests {
 
         // Calculate spot price (USDC/DAI with fee)
         let spot_price_dai_per_usdc_num = reserve_dai
-            .checked_mul(U256::from(1000u32))
+            .checked_mul(U112::from(1000u32))
             .unwrap();
         let spot_price_dai_per_usdc_den = reserve_usdc
-            .checked_mul(U256::from(1003u32))
+            .checked_mul(U112::from(1003u32))
             .unwrap();
 
         // Test 1: Price above reachable limit (more DAI per USDC than pool can provide) -should
         // return error Multiply by 1001/1000 to go above reachable limit
         let above_limit_num = spot_price_dai_per_usdc_num
-            .checked_mul(U256::from(1001u32))
+            .checked_mul(U112::from(1001u32))
             .unwrap();
         let above_limit_den = spot_price_dai_per_usdc_den
-            .checked_mul(U256::from(1000u32))
+            .checked_mul(U112::from(1000u32))
             .unwrap();
         let target_price =
-            Price::new(u256_to_biguint(above_limit_num), u256_to_biguint(above_limit_den));
+            Price::new(BigUint::from(above_limit_num), BigUint::from(above_limit_den));
 
         let swap_above_limit = pool.query_pool_swap(&QueryPoolSwapParams::new(
             usdc.clone(),
@@ -775,13 +846,13 @@ mod tests {
         // Test 2: Price just below reachable limit - should return non-zero
         // Multiply by 100_000/100_001 to go slightly below (more reachable)
         let below_limit_num = spot_price_dai_per_usdc_num
-            .checked_mul(U256::from(100_000u32))
+            .checked_mul(U112::from(100_000u32))
             .unwrap();
         let below_limit_den = spot_price_dai_per_usdc_den
-            .checked_mul(U256::from(100_001u32))
+            .checked_mul(U112::from(100_001u32))
             .unwrap();
         let target_price =
-            Price::new(u256_to_biguint(below_limit_num), u256_to_biguint(below_limit_den));
+            Price::new(BigUint::from(below_limit_num), BigUint::from(below_limit_den));
 
         let swap_below_limit = pool
             .query_pool_swap(&QueryPoolSwapParams::new(
@@ -808,7 +879,7 @@ mod tests {
 
         assert_eq!(
             biguint_to_uint(&actual_result.amount).unwrap(),
-            U256::from(366839007208379339u128),
+            U112::from(366839007208379339u128),
             "Should return non-zero amount"
         );
         assert!(

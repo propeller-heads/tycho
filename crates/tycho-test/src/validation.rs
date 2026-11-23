@@ -322,8 +322,8 @@ impl Validator for UniswapV2State {
         // Decode getReserves return value
         let reserves = IUniswapV2Pair::getReservesCall::abi_decode_returns(result_data)?;
 
-        let onchain_reserve0 = alloy::primitives::U256::from(reserves.reserve0);
-        let onchain_reserve1 = alloy::primitives::U256::from(reserves.reserve1);
+        let onchain_reserve0 = reserves.reserve0;
+        let onchain_reserve1 = reserves.reserve1;
 
         let reserves_match = self.reserve0 == onchain_reserve0 && self.reserve1 == onchain_reserve1;
 
@@ -346,7 +346,7 @@ impl Validator for UniswapV2State {
 mod tests {
     use std::str::FromStr;
 
-    use alloy::primitives::U256;
+    use alloy::primitives::aliases::U112;
 
     use super::*;
 
@@ -359,13 +359,13 @@ mod tests {
         let pool_id_1 = "0x132BC4EA9E5282889fDcfE7Bc7A91Ea901a686D6";
 
         let state_1 = UniswapV2State::new(
-            U256::from(7791135770602459893220844917132_u128),
-            U256::from(80274590426947493401_u128),
+            U112::from(7791135770602459893220844917132_u128),
+            U112::from(80274590426947493401_u128),
         );
         let component_id_1 = Bytes::from_str(pool_id_1).unwrap();
 
         // Component with incorrect reserves to show validation failure
-        let state_2 = UniswapV2State::new(U256::from(1000), U256::from(2000));
+        let state_2 = UniswapV2State::new(U112::from(1000), U112::from(2000));
         let component_id_2 = Bytes::from_str(pool_id_1).unwrap(); // Same component but wrong state
 
         let rpc_url = std::env::var("RPC_URL")

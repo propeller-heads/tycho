@@ -31,7 +31,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use alloy::{
     eips::BlockNumberOrTag,
-    primitives::{Address, U256},
+    primitives::Address,
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     sol,
@@ -112,7 +112,7 @@ async fn a_probe_without_surplus_capture_sees_an_underquote() {
         .await
         .unwrap();
     let reserves = getReservesCall::abi_decode_returns(&returned).unwrap();
-    let state = UniswapV2State::new(U256::from(reserves.reserve0), U256::from(reserves.reserve1));
+    let state = UniswapV2State::new(reserves.reserve0, reserves.reserve1);
 
     let usdc = token(USDC, "USDC", 6);
     let weth = token(WETH, "WETH", 18);

@@ -1565,7 +1565,7 @@ impl crate::book::component::PairState for MockProtocolSim {
 mod tests {
     use std::str::FromStr;
 
-    use alloy::primitives::address;
+    use alloy::primitives::{address, aliases::U112};
     use mockall::predicate::*;
     use rstest::*;
     use tycho_client::feed::BlockHeader;
@@ -1723,8 +1723,8 @@ mod tests {
             (
                 "univ2".to_string(),
                 Box::new(crate::evm::protocol::uniswap_v2::state::UniswapV2State::new(
-                    U256::from(1_000_000u64),
-                    U256::from(1_000_000u64),
+                    U112::from(1_000_000u64),
+                    U112::from(1_000_000u64),
                 )) as Box<dyn ProtocolSim>,
             ),
         ]);
