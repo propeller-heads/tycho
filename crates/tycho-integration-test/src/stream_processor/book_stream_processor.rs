@@ -635,6 +635,17 @@ fn add_pamm_feeds(
                 if let Some(url) = secret("EFFICIENT_PROP_APPROVED_DESKS_URL") {
                     builder = builder.with_approved_desks_url(url.trim());
                 }
+                if let Some(hash) = secret("EFFICIENT_PROP_DOOR_CODEHASH") {
+                    let hash = Bytes::from_str(hash.trim())
+                        .ok()
+                        .filter(|bytes| bytes.len() == 32)
+                        .ok_or_else(|| {
+                            Unavailable::BuildFailed(format!(
+                                "EFFICIENT_PROP_DOOR_CODEHASH {hash} is not a hash of 32 bytes"
+                            ))
+                        })?;
+                    builder = builder.with_door_code_hash(hash);
+                }
                 if let Some(state_urls) = efficient_prop_state_urls(&secret) {
                     builder = builder.state_urls(state_urls);
                 }
@@ -1125,6 +1136,11 @@ mod tests {
         "EFFICIENT_PROP_APPROVED_DESKS",
         Some("0x4f8dd270acE370dE2f6Ac5EBf3230cBE099a0753, desk"),
         "holds desk, not an address"
+    )]
+    #[case::a_door_code_hash_that_is_no_hash(
+        "EFFICIENT_PROP_DOOR_CODEHASH",
+        Some("0x1234"),
+        "not a hash of 32 bytes"
     )]
     #[case::price_sources_that_are_not_ids(
         "EFFICIENT_PROP_PRICE_SOURCES",
