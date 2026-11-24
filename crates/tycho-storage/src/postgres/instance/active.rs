@@ -215,6 +215,67 @@ mod tests {
         );
     }
 
+    fn names(names: &[&str]) -> HashSet<String> {
+        names
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_both_protocols() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        let mut ids = active_instance_ids_of(&names(&["vm:curve", "uniswap_v4"]), &mut conn)
+            .await
+            .unwrap();
+        ids.sort();
+
+        let mut expected = vec![setup.uniswap_v4, setup.curve];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_one_protocol() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["vm:curve"]), &mut conn)
+                .await
+                .unwrap(),
+            vec![setup.curve]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_an_unknown_name_is_empty() {
+        let mut conn = instance_test_connection().await;
+        setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["unknown"]), &mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_a_protocol_without_pointer_is_empty() {
+        let mut conn = instance_test_connection().await;
+        setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["vm:old"]), &mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
     fn day(d: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
