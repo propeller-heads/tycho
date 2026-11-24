@@ -1513,6 +1513,15 @@ impl FlammReader {
             .await?
             .map_or(B256::ZERO, |marks| marks.class);
         let venues = self.venues(router, pool).await?;
+        if !self.settings.gas.measured_on(
+            self.settings.chain_id,
+            &venues,
+            tokens[0].address,
+            tokens[1].address,
+        ) {
+            debug!(%pool, ?venues, "no gas cell was measured on this Efficient pool's two tokens, not served");
+            return Ok(None);
+        }
         let universe = &self.settings.universe;
         let directions: Vec<DirectionPlan> = HOOK_PAIR_DIRECTIONS
             .into_iter()

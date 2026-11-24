@@ -13,8 +13,8 @@
 //! through the rung above. A hole in the middle of a leverage route's span with leverage answers
 //! well above it is not seen.
 //!
-//! A ladder moves only its own direction ([`Ladder::after`]); it does not move the book's other
-//! side.
+//! A fill empties its own direction's ladder (the state drops it until the next poll); it does
+//! not move the book's other side.
 use std::ops::Range;
 
 use alloy::primitives::{U256, U512};
@@ -721,41 +721,6 @@ impl Ladder {
         }
         None
     }
-
-    /// The ladder left once `amount_in` went through it. Empty where any span is flat: a lowered
-    /// rung no longer says what the pool paid, so it bounds nothing that is left. Otherwise the
-    /// pool paid at most the output of the first rung strictly past `amount_in` (a fill that lands
-    /// on a rung leaves no margin, so the next rung bounds it), so each later rung
-    /// keeps its output less that bound: the shifted ladder never quotes more than the pool has
-    /// left on this side.
-    pub fn after(&self, amount_in: U256) -> Self {
-        if self
-            .0
-            .iter()
-            .any(|rung| rung.segment == Segment::Flat)
-        {
-            return Self::default();
-        }
-        let Some(bound) = self
-            .0
-            .iter()
-            .find(|rung| rung.input > amount_in)
-            .map(|rung| rung.output)
-        else {
-            return Self::default();
-        };
-        Self(
-            self.0
-                .iter()
-                .filter(|rung| rung.input > amount_in && rung.output > bound)
-                .map(|rung| Rung {
-                    input: rung.input - amount_in,
-                    output: rung.output - bound,
-                    segment: Segment::Chord,
-                })
-                .collect(),
-        )
-    }
 }
 
 /// The inputs a ladder is quoted at: `count` sizes doubling from `smallest`, never past
@@ -1222,17 +1187,6 @@ mod tests {
     }
 
     #[test]
-    fn a_ladder_with_a_flat_span_has_no_second_fill() {
-        let l = Ladder::from_rungs(vec![
-            rung(100, 100, Segment::Chord),
-            rung(200, 190, Segment::Flat),
-            rung(400, 370, Segment::Chord),
-        ]);
-        assert!(l.after(u(50)).is_empty());
-        assert!(l.after(U256::ZERO).is_empty());
-    }
-
-    #[test]
     fn the_haircut_rounds_down_and_keeps_the_order() {
         let terms = Terms {
             rule: Rule::Step,
@@ -1245,32 +1199,6 @@ mod tests {
         // 1 * 9_998 / 10_000 is 0, so the first rung goes and the next ends no span;
         // 9_999 * 9_998 / 10_000 = 9_997.0002
         assert_eq!(l.rungs(), &[rung(20, 9_997, Segment::Chord), rung(40, 9_997, Segment::Flat)]);
-    }
-
-    #[test]
-    fn the_shifted_ladder_never_quotes_more_than_is_left() {
-        let l = curve_ladder(&[(10_000, 100_000), (20_000, 190_000), (40_000, 350_000)]);
-        // bound: rung 20,000 pays 190,000, so 25,000 more input pays at most 350,000 - 190,000
-        assert_eq!(l.after(u(15_000)).last(), Some(rung(25_000, 160_000, Segment::Chord)));
-        assert!(l.after(u(40_001)).is_empty());
-    }
-
-    #[test]
-    fn a_fill_on_a_rung_is_bounded_by_the_next_rung() {
-        let l = curve_ladder(&[(99, 99), (197, 197), (400, 390), (800, 700)]);
-        // on a rung: the rung above bounds the fill, so none of its output is left unreserved
-        assert_eq!(l.after(u(197)).rungs(), &[rung(603, 310, Segment::Chord)]);
-        assert_eq!(
-            l.after(u(99)).rungs(),
-            &[rung(301, 193, Segment::Chord), rung(701, 503, Segment::Chord)]
-        );
-        // at the last rung nothing is above it
-        assert!(l.after(u(800)).is_empty());
-        // off a rung: the first rung past it bounds the fill, as before
-        assert_eq!(
-            l.after(u(150)).rungs(),
-            &[rung(250, 193, Segment::Chord), rung(650, 503, Segment::Chord)]
-        );
     }
 
     #[test]

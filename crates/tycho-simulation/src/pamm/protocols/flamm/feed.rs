@@ -970,8 +970,9 @@ mod node_tests {
             .get_amount_out(BigUint::from(5_000_000_000_000_000u64), eth_t, usd_t)
             .unwrap();
         assert_eq!(out.amount, BigUint::from(9_988_002u64));
-        // the walk read no legs, so the swap is charged the least its venue's kind allows
-        assert_eq!(out.gas, BigUint::from(100_000u64));
+        // the walk read the pool's legs: it holds none of the output, so the payout is past its
+        // custody and the swap is charged the least of the paths that reach there
+        assert_eq!(out.gas, BigUint::from(300_000u64));
 
         // the 50 ETH cap clips the ladder there, and the limit offers 99 % of it
         let last = state(book).sell_base.last().unwrap();
@@ -2226,8 +2227,9 @@ mod node_tests {
 
     /// Where answers carry a leverage label, the direction reads the pool's request once, as the
     /// router, at the first such answer that pays more than dust; the hook's curve fee with the
-    /// same words, the input zeroed, where every answer carries that one label; and, last, one
-    /// quote just above its top. A sale reads no bid.
+    /// same words, the input zeroed, where every answer carries that one label; and one quote
+    /// just above its top. A sale reads no bid. The other direction, with no such label, reads
+    /// its request last, for its legs alone.
     #[tokio::test]
     async fn a_tier_labelled_sale_reads_its_request_and_curve_fee_once_and_asks_above_its_top() {
         let mut pool = fake::pool(0x01);
@@ -2239,9 +2241,10 @@ mod node_tests {
         let snapshot = first_poll(&feed).await.unwrap();
 
         let seen = node.seen.lock().unwrap();
-        let [request] = seen.pair_requests.as_slice() else {
-            panic!("one request, not {:?}", seen.pair_requests);
+        let [request, legs_only] = seen.pair_requests.as_slice() else {
+            panic!("a request each way, not {:?}", seen.pair_requests);
         };
+        assert_eq!(legs_only.token_in, fake::usd().address);
         assert_eq!(request.token_in, fake::eth().address);
         assert_eq!(request.amount, U256::from(5_000_000_000_000_000u64));
         assert_eq!(request.from, router(Chain::Base));
@@ -2326,9 +2329,9 @@ mod node_tests {
         assert_eq!(sale.rungs(), kept.as_slice());
     }
 
-    /// Where no walk of the pair read its legs, the sale that draws on a minimum position is not
-    /// published, and the buy is; an account that does not say what it holds leaves its venue's
-    /// record unread, and the pool unserved.
+    /// Where no walk of the pair read its legs (the pool refuses its request), the sale that draws
+    /// on a minimum position is not published, and the buy is; an account that does not say what
+    /// it holds leaves its venue's record unread, and the pool unserved.
     #[rstest]
     #[case::says_it_holds_one(Some(560), Some(1))]
     #[case::says_nothing(None, None)]
@@ -2340,6 +2343,7 @@ mod node_tests {
         let mut pool = fake::pool(0x01);
         pool.venue_capabilities = capabilities;
         pool.venue_minimum = Some((true, U256::from(50_000_000u64)));
+        pool.fault = Fault::RequestRefused;
         let node = FakeNode::spawn(CHAIN_ID, 0, vec![pool]).await;
         let feed = builder(&node, config(0.0))
             .build()
@@ -2377,9 +2381,10 @@ mod node_tests {
         let snapshot = first_poll(&feed).await.unwrap();
 
         let seen = node.seen.lock().unwrap();
-        let [request] = seen.pair_requests.as_slice() else {
-            panic!("one request, not {:?}", seen.pair_requests);
+        let [request, legs_only] = seen.pair_requests.as_slice() else {
+            panic!("a request each way, not {:?}", seen.pair_requests);
         };
+        assert_eq!(legs_only.token_in, fake::eth().address);
         assert_eq!(request.token_in, fake::usd().address);
         // the input is token 1
         assert_eq!(request.words[3], U256::from(1));
@@ -2399,10 +2404,11 @@ mod node_tests {
         assert!(!state(book).sell_base.is_empty());
     }
 
-    /// The request is read only for a leverage label on an answer that pays more than dust:
-    /// the rule drops dust, and with it any label it carries.
+    /// The curve's fee and the top bid are read only for a leverage label on an answer that pays
+    /// more than dust: the rule drops dust, and with it any label it carries. The request is
+    /// still read once each way, for its legs.
     #[tokio::test]
-    async fn a_tier_label_on_dust_alone_reads_no_request() {
+    async fn a_tier_label_on_dust_alone_reads_the_legs_and_nothing_of_the_hook() {
         let mut pool = fake::pool(0x01);
         // 0.001 USD of ether pays 999 units, and the first answer over dust is 0.016 USD's
         pool.labels[0] =
@@ -2414,7 +2420,7 @@ mod node_tests {
             .unwrap();
         let snapshot = first_poll(&feed).await.unwrap();
         let seen = node.seen.lock().unwrap();
-        assert!(seen.pair_requests.is_empty(), "{:?}", seen.pair_requests);
+        assert_eq!(seen.pair_requests.len(), 2, "{:?}", seen.pair_requests);
         assert!(seen.hook_reads.is_empty(), "{:?}", seen.hook_reads);
         drop(seen);
         let book = snapshot.books.values().next().unwrap();

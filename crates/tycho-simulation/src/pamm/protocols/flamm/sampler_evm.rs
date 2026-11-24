@@ -55,9 +55,9 @@ const POOL_SOURCE: &[u8] = include_bytes!("testdata/MaxOfTwoPool.sol");
 /// Pinned in every client of the sampler, so that all of them run the same bytes, built from the
 /// same source, and test them against the same pool.
 const SAMPLER_RUNTIME_KECCAK: B256 =
-    b256!("def8a5c6daa5ac664aff33e93625b8ef24d0b23fd041eb57193d3da960212ac5");
+    b256!("bbdf94edbd91824346d073adae889ff0e173649ad0a6235549b77c788b70c918");
 const SAMPLER_SOURCE_KECCAK: B256 =
-    b256!("cf941e0e26687c978ca84ff807257393e5008bb1ce0e08bf9f0a5b6543e6e5fd");
+    b256!("28a7ecd1865a0aaf95cdd0e37e8c5d6a89ee3dba7c8012f4c1b0aeb3741b1162");
 const POOL_RUNTIME_KECCAK: B256 =
     b256!("e9b47028abbbbde6b37871b0bc7383dcd45447c40f072dbd271019abbb678941");
 const POOL_SOURCE_KECCAK: B256 =
@@ -1816,19 +1816,30 @@ fn a_dust_probe_on_the_curve_does_not_block_the_curve_fee() {
     println!("the probe above on the buy at {last}");
 }
 
-/// A buy whose leverage wins only on dust reads nothing; the sale still reads.
+/// A buy whose leverage wins only on dust reads no curve fee and no top bid: its request is
+/// read once, at the end, for its band, prices and legs alone. The sale still reads.
 #[test]
-fn nothing_is_read_where_tier_labels_pay_only_dust() {
+fn only_the_legs_are_read_where_tier_labels_pay_only_dust() {
     let fake = Fake::base()
         .with(BUY + LEVER_R, 7_000u64)
         .with(BUY + LEVER_X, 5_000_000u64);
     let evm = Evm::new(&fake);
     let sampled = evm.sample(taker(), &fake.asks(Seeds::Sweep), &limits(), DEFAULT_SAMPLE_GAS);
     let [sale, buy] = sampled.walks() else { panic!("two walks") };
-    assert_eq!(read(buy), Request::default());
-    assert!(sampled
-        .calls_of(pairRequestCall::SELECTOR, Side::Buy)
-        .is_empty());
+    assert_ne!(buy.bandWad, 0);
+    assert_ne!(buy.legs, [U256::ZERO; 8]);
+    assert_eq!((buy.curveFeeWad, buy.bidWad), (U256::ZERO, U256::ZERO));
+    assert_eq!(
+        sampled
+            .calls_of(pairRequestCall::SELECTOR, Side::Buy)
+            .len(),
+        1
+    );
+    for selector in [QUOTE_PAIR_SELECTOR, LEV_STATE_SELECTOR] {
+        assert!(sampled
+            .calls_of(selector, Side::Buy)
+            .is_empty());
+    }
     assert_ne!(sale.bandWad, 0);
 }
 

@@ -14,7 +14,8 @@ pragma solidity 0.8.35;
 ///      3. bisection of each label change;
 ///      4. bisection towards the first refusal;
 ///      5. splits of the same-label spans whose chord may lose most, only with a non-zero `gapPpm`;
-///      6. one probe above a tier-labelled top.
+///      6. one probe above a tier-labelled top;
+///      7. on a walk whose request step 2 did not read, the request's band, USD prices and legs alone.
 ///      Before each call to the pool or hook the gas gate requires `gasleft() >= probeGas * 64 / 63 + reserveGas`, so
 ///      the child really gets its cap; where it fails, the walk stops and reads `truncated`. Only priced probes paying
 ///      at least `DUST_OUT` count towards the fall, third-label, request, flip, edge and probe-above logic, since the
@@ -147,6 +148,9 @@ contract FlammSampler {
                 _above(pool, limits, walks[i], runs[i], buf);
             }
             for (uint256 i; i < count; ++i) {
+                _legs(pool, limits, walks[i], runs[i], buf);
+            }
+            for (uint256 i; i < count; ++i) {
                 Probe[] memory ps = walks[i].probes;
                 uint256 n = runs[i].n;
                 assembly ("memory-safe") {
@@ -239,25 +243,40 @@ contract FlammSampler {
         }
     }
 
-    /// @dev `pool.pairRequest` at `ask`: words 10-12 and 15-22. Then, where the probes counted so far carry one label
-    ///      and it is a tier, `hook.quotePair` on those 26 words with word 13 zeroed, keeping word 3 of the fill, the
-    ///      curve's fee; and on a buy (word 3 of the request is 1) `hook.levState` on the 26 words as answered,
-    ///      keeping word 6, the lever-up's top bid. Its calls together take one probe from the budget, and run even on
-    ///      none. Each copies only what it keeps, and any failure leaves its words zero.
-    function _read(address pool, Limits calldata l, Walk memory w, Run memory r, uint256 buf, uint256 ask)
+    /// @dev On a walk whose request was never read (no hook, no row, or no probe with a tier label), the request at
+    ///      the lowest ask of a probe priced or clipped at or above DUST_OUT: its band, USD prices and legs alone,
+    ///      which say how far a payout reaches past the pool's custody whatever labels the walk saw.
+    function _legs(address pool, Limits calldata l, Walk memory w, Run memory r, uint256 buf) private view {
+        unchecked {
+            if (r.read || r.stopped) return;
+            Probe[] memory ps = w.probes;
+            uint256 n = r.n;
+            for (uint256 k; k < n; ++k) {
+                if (_counts(ps[k])) {
+                    _request(pool, l, w, r, buf, ps[k].ask);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// @dev `pool.pairRequest` at `ask`, its 26 words kept at `buf`: words 10-12 and 15-22 are recorded. It takes one
+    ///      probe from the budget, and runs even on none. False where the gate stops it or the answer is not a
+    ///      request, which leaves the words zero.
+    function _request(address pool, Limits calldata l, Walk memory w, Run memory r, uint256 buf, uint256 ask)
         private
         view
+        returns (bool ok)
     {
         unchecked {
             r.read = true;
             if (r.budget != 0) --r.budget;
             if (!_open(l)) {
                 _stop(w, r);
-                return;
+                return false;
             }
             uint256 cap = l.probeGas;
-            (address tokenIn, address tokenOut, address hook) = (r.tokenIn, r.tokenOut, r.hook);
-            bool ok;
+            (address tokenIn, address tokenOut) = (r.tokenIn, r.tokenOut);
             assembly ("memory-safe") {
                 mstore(buf, shl(224, 0x6a198209)) // pairRequest(address,address,uint256)
                 mstore(add(buf, 4), tokenIn)
@@ -267,9 +286,9 @@ contract FlammSampler {
                 ok := and(called, eq(returndatasize(), 832))
                 if ok { returndatacopy(add(buf, 4), 0, 832) }
             }
-            if (!ok) return;
+            if (!ok) return false;
             uint256 band = _word(buf, 10);
-            if (band > type(uint64).max) return; // a request's band is a uint64: this answer is not one
+            if (band > type(uint64).max) return false; // a request's band is a uint64: this answer is not one
             w.bandWad = uint64(band);
             w.usdIn = _word(buf, 11);
             w.usdOut = _word(buf, 12);
@@ -277,6 +296,21 @@ contract FlammSampler {
             for (uint256 j; j < 8; ++j) {
                 legs[j] = _word(buf, 15 + j);
             }
+        }
+    }
+
+    /// @dev The request at `ask` (`_request`). Then, where the probes counted so far carry one label and it is a
+    ///      tier, `hook.quotePair` on those 26 words with word 13 zeroed, keeping word 3 of the fill, the curve's fee;
+    ///      and on a buy (word 3 of the request is 1) `hook.levState` on the 26 words as answered, keeping word 6, the
+    ///      lever-up's top bid. Each call copies only what it keeps, and any failure leaves its words zero.
+    function _read(address pool, Limits calldata l, Walk memory w, Run memory r, uint256 buf, uint256 ask)
+        private
+        view
+    {
+        unchecked {
+            if (!_request(pool, l, w, r, buf, ask)) return;
+            uint256 cap = l.probeGas;
+            address hook = r.hook;
             if (_oneTierLabel(w, r)) {
                 if (!_open(l)) {
                     _stop(w, r);

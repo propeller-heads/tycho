@@ -9,7 +9,7 @@
 //! ([`hook_class`]), the chain, the venue kind, the side, how the fill pays its output and whether
 //! it repays a debt in its input. The reads are ones the feed makes anyway: the pool's venue
 //! records at discovery, each one's kind, status and tokens and whether it lets the pool repay
-//! now, and at each poll the legs the sampler reads beside a walk, the pool's custody, supply,
+//! now, and at each poll the legs the sampler reads beside every walk, the pool's custody, supply,
 //! posted collateral and debt in the pair's two tokens, which count as read where the walk's band
 //! word is not zero. With the legs:
 //! - a payout within the output's custody may take any path, one past it calls a venue for the
@@ -33,9 +33,10 @@
 //!
 //! A pair is served only where every live venue on it is of a kind its chain routes, with cells, a
 //! second-fill charge and a limit for the pair's class, chain and side: not with a live venue of
-//! any other kind, with a venue record that did not read, or with no live venue. Limits are worst
-//! case instead: [`gas_limit_addition`].
-use alloy::primitives::{keccak256, B256, U256};
+//! any other kind, with a venue record that did not read, or with no live venue. Nor is a pool
+//! whose tokens 0 and 1 are not the two its venues' kinds were measured on ([`MEASURED_POOLS`]).
+//! Limits are worst case instead: [`gas_limit_addition`].
+use alloy::primitives::{address, keccak256, Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use tycho_common::models::Chain;
 
@@ -60,6 +61,38 @@ const FREED_SLACK: u64 = 10_000;
 /// cells; an Aave V4 venue holds no minimum position. A pair with a live venue of another kind is
 /// not served there.
 const ROUTED_KINDS: [(u64, &[u8]); 3] = [(1, &[0, 1, 16, 17]), (8453, &[0, 1]), (56, &[1, 2, 3])];
+/// The pool each chain's kinds were measured on: its tokens 0 and 1. A cell holds no token, and a
+/// fill spends what its own tokens' transfers cost (a transfer of WETH costs about 10,700 less
+/// than one of USDC, one of cbBTC up to about 21,000 more), so a pool of any other two tokens is
+/// not served on those kinds: a measured pair's figure could be over what its fill spends.
+/// Ethereum's kinds 0, 1 and 16 were measured on cbBTC and USDC and its kind 17 on WETH and USDC,
+/// Base's on cbBTC and USDC, BSC's on BTCB and USDT.
+const MEASURED_POOLS: [(u64, &[u8], Address, Address); 4] = [
+    (
+        1,
+        &[0, 1, 16],
+        address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+        address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+    ),
+    (
+        1,
+        &[17],
+        address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+        address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+    ),
+    (
+        8453,
+        &[0, 1],
+        address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+        address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+    ),
+    (
+        56,
+        &[1, 2, 3],
+        address!("7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c"),
+        address!("55d398326f99059fF775485246999027B3197955"),
+    ),
+];
 /// How far over a minimum position an owing venue's debt must stay for a draw or a partial repay
 /// to pass it (`RELEASE_SLACK`).
 pub(super) const RELEASE_SLACK: u64 = 4;
@@ -239,6 +272,9 @@ pub(super) struct GasTable {
     limits: Vec<Limit>,
     second_fills: Vec<SecondFill>,
     routed: Vec<(u64, Vec<u8>)>,
+    /// The pool each chain's kinds were measured on (chain, kind, token 0, token 1), where the
+    /// table names them: see [`MEASURED_POOLS`].
+    measured: Option<Vec<(u64, u8, Address, Address)>>,
 }
 
 impl Default for GasTable {
@@ -252,6 +288,16 @@ impl Default for GasTable {
                 .iter()
                 .map(|(chain, kinds)| (*chain, kinds.to_vec()))
                 .collect(),
+            measured: Some(
+                MEASURED_POOLS
+                    .iter()
+                    .flat_map(|(chain, kinds, token0, token1)| {
+                        kinds
+                            .iter()
+                            .map(move |kind| (*chain, *kind, *token0, *token1))
+                    })
+                    .collect(),
+            ),
         }
     }
 }
@@ -264,7 +310,25 @@ impl GasTable {
         second_fills: Vec<SecondFill>,
         routed: Vec<(u64, Vec<u8>)>,
     ) -> Self {
-        Self { cells, limits, second_fills, routed }
+        Self { cells, limits, second_fills, routed, measured: None }
+    }
+
+    /// Whether the cells of every live venue of `venues` were measured on a pool of `token0` and
+    /// `token1`, in that order, on `chain`: a pool of other tokens is not served, since a cell's
+    /// figure holds its own tokens' transfers ([`MEASURED_POOLS`]).
+    pub(super) fn measured_on(
+        &self,
+        chain: u64,
+        venues: &Venues,
+        token0: Address,
+        token1: Address,
+    ) -> bool {
+        let Some(measured) = &self.measured else { return true };
+        venues
+            .records
+            .iter()
+            .filter(|venue| venue.live)
+            .all(|venue| measured.contains(&(chain, venue.kind, token0, token1)))
     }
 
     /// What the charge of a swap selling a pool's token `token_in` for its token `token_out`
@@ -1078,6 +1142,38 @@ pub(super) mod tests {
 
     /// A class the table holds no cell of is served on no chain, kind or side: the pair has no
     /// key, so the feed leaves it out and never charges it another class's figure.
+    const CBBTC: Address = address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf");
+    const USDC: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+    const WETH: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+
+    /// The generated table serves a pool only on the two tokens its venues' kinds were measured
+    /// on, in their order: a cell's figure holds those tokens' transfers. A table that names no
+    /// measured pool serves any.
+    #[rstest]
+    #[case::the_measured_pool(1, &[0, 1, 16], CBBTC, USDC, true)]
+    #[case::a_kind_measured_on_another_pool(1, &[0, 17], CBBTC, USDC, false)]
+    #[case::the_prime_hubs_pool(1, &[17], WETH, USDC, true)]
+    #[case::other_tokens(1, &[1], WETH, USDC, false)]
+    #[case::the_other_way_round(1, &[0], USDC, CBBTC, false)]
+    #[case::another_chain(8453, &[0], CBBTC, USDC, false)]
+    fn a_pool_is_served_only_on_the_tokens_its_kinds_were_measured_on(
+        #[case] chain: u64,
+        #[case] kinds: &[u8],
+        #[case] token0: Address,
+        #[case] token1: Address,
+        #[case] served: bool,
+    ) {
+        let records = venues(
+            kinds
+                .iter()
+                .copied()
+                .map(venue)
+                .collect(),
+        );
+        assert_eq!(GasTable::default().measured_on(chain, &records, token0, token1), served);
+        assert!(table().measured_on(chain, &records, token0, token1));
+    }
+
     #[test]
     fn a_class_with_no_cells_is_served_nowhere() {
         let unmeasured = B256::repeat_byte(0x11);

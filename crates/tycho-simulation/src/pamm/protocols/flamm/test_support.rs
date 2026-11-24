@@ -947,6 +947,9 @@ impl FakeChain {
         for walk in &mut walks {
             walk.probe_above(pool, &mut run);
         }
+        for walk in &mut walks {
+            walk.read_legs(pool, &mut run);
+        }
         walks
             .into_iter()
             .map(Walking::finish)
@@ -1032,6 +1035,8 @@ struct Walking<'a> {
     last: Option<(U256, U256)>,
     /// The labels of the priced answers paying at least dust.
     labels: Vec<U256>,
+    /// Whether the request read has run.
+    read: bool,
     /// The walk's words, its probes left out until it ends.
     words: FlammSampler::Walk,
 }
@@ -1045,6 +1050,7 @@ impl<'a> Walking<'a> {
             seeding: true,
             last: None,
             labels: Vec::new(),
+            read: false,
             words: FlammSampler::Walk {
                 probes: Vec::new(),
                 curveFeeWad: U256::ZERO,
@@ -1126,31 +1132,9 @@ impl<'a> Walking<'a> {
         else {
             return;
         };
-        if run.spend(CALL_GAS).is_none() {
-            self.words.truncated = true;
-            return;
-        }
-        if pool.fault == Fault::RequestRefused {
-            return;
-        }
-        let Some(words) = pool.request(Some(run.taker), ask.tokenIn, ask.tokenOut, first.ask)
-        else {
+        let Some(words) = self.request(pool, run, first.ask) else {
             return;
         };
-        run.seen
-            .pair_requests
-            .push(RequestSeen {
-                from: Some(run.taker),
-                token_in: ask.tokenIn,
-                amount: first.ask,
-                words,
-            });
-        self.words.bandWad = u64::try_from(words[10]).unwrap_or_default();
-        self.words.usdIn = words[11];
-        self.words.usdOut = words[12];
-        self.words
-            .legs
-            .copy_from_slice(&words[15..23]);
         let Some(hook) = chain.hooks.get(&ask.hook) else {
             return;
         };
@@ -1193,6 +1177,47 @@ impl<'a> Walking<'a> {
                 });
                 self.words.bidWad = state[6];
             }
+        }
+    }
+
+    /// The pool's request at `amount`, its band, USD prices and legs recorded: `None` where the
+    /// gate stops it or the pool does not answer, which leaves the words zero.
+    fn request(&mut self, pool: &FakePool, run: &mut Run<'_>, amount: U256) -> Option<[U256; 26]> {
+        let ask = self.ask;
+        self.read = true;
+        if run.spend(CALL_GAS).is_none() {
+            self.words.truncated = true;
+            return None;
+        }
+        if pool.fault == Fault::RequestRefused {
+            return None;
+        }
+        let words = pool.request(Some(run.taker), ask.tokenIn, ask.tokenOut, amount)?;
+        run.seen
+            .pair_requests
+            .push(RequestSeen { from: Some(run.taker), token_in: ask.tokenIn, amount, words });
+        self.words.bandWad = u64::try_from(words[10]).unwrap_or_default();
+        self.words.usdIn = words[11];
+        self.words.usdOut = words[12];
+        self.words
+            .legs
+            .copy_from_slice(&words[15..23]);
+        Some(words)
+    }
+
+    /// On a walk whose request was never read, the request at the first priced or clipped answer
+    /// paying at least dust: its band, USD prices and legs alone.
+    fn read_legs(&mut self, pool: &FakePool, run: &mut Run<'_>) {
+        if self.read || self.words.truncated {
+            return;
+        }
+        let first = self
+            .probes
+            .iter()
+            .map(|(probe, _)| *probe)
+            .find(|probe| probe.qualifies());
+        if let Some(first) = first {
+            self.request(pool, run, first.ask);
         }
     }
 

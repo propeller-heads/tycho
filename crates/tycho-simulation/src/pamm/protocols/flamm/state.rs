@@ -142,8 +142,8 @@ impl ProtocolSim for FlammPairState {
     /// The output of `amount_in` on its side's ladder: a quoted fill's own at its input, the fill
     /// below's inside a span that changes route, and the chord between the two fills around it
     /// elsewhere, rounded down. Refused under the smallest quoted fill and past the largest. The
-    /// next state's ladder on this side is what the pool has left past the fill, and empty where
-    /// the ladder has a span quoted at the fill below, as that fill no longer says what is left.
+    /// next state quotes nothing more on this side: the pool prices a fill at the fee it read
+    /// before it, and what a fill leaves of the side was not sampled.
     ///
     /// The gas is a charge, never more than the swap costs inside the pool's `swap()` net of its
     /// refund, in the state the feed read: the least measured over the paths that state allows a
@@ -183,10 +183,12 @@ impl ProtocolSim for FlammPairState {
         let gas = self
             .side_gas(direction)
             .charge(output, self.moved);
+        // The pool prices a whole fill at the fee it read before the fill, and that fee rises as
+        // the fill moves the pool: what is left of this side after it was not sampled.
         let mut next = self.clone();
         match direction {
-            SwapDirection::BaseToQuote => next.sell_base = ladder.after(input),
-            SwapDirection::QuoteToBase => next.sell_quote = ladder.after(input),
+            SwapDirection::BaseToQuote => next.sell_base = Ladder::default(),
+            SwapDirection::QuoteToBase => next.sell_quote = Ladder::default(),
         }
         next.moved = true;
         Ok(GetAmountOutResult::new(u256_to_biguint(output), BigUint::from(gas), Box::new(next)))
@@ -343,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_swap_fills_its_rung_and_leaves_the_rest_of_the_ladder() {
+    fn a_swap_fills_its_rung_and_leaves_its_side_empty() {
         let state = FlammPairState {
             sell_base: ladder(&[(10_000, 7_990_000), (20_000, 15_970_000), (40_000, 31_800_000)]),
             ..state()
@@ -362,7 +364,7 @@ mod tests {
             .as_any()
             .downcast_ref::<FlammPairState>()
             .unwrap();
-        assert_eq!(next.sell_base.rungs().len(), 1);
+        assert!(next.sell_base.is_empty());
         assert_eq!(next.sell_quote, state.sell_quote);
         assert!(state
             .get_amount_out(BigUint::from(40_001u64), &btc(), &usdc())
@@ -410,13 +412,17 @@ mod tests {
         assert!(error(20_001).contains("past the largest"), "{}", error(20_001));
     }
 
-    #[test]
-    fn a_swap_inside_a_span_quoted_at_the_rung_below_leaves_no_second_fill() {
+    /// A fill leaves its own side with no second fill, on a flat span or a chord, and the other
+    /// side as it was.
+    #[rstest]
+    #[case::a_flat_span(Segment::Flat)]
+    #[case::a_chord(Segment::Chord)]
+    fn a_swap_leaves_its_side_no_second_fill(#[case] segment: Segment) {
         let sell_base =
-            rungs(&[(10_000, 7_990_000, Segment::Chord), (20_000, 15_970_000, Segment::Flat)]);
+            rungs(&[(10_000, 7_990_000, Segment::Chord), (20_000, 15_970_000, segment)]);
         let state = FlammPairState { sell_base, ..state() };
         let result = state
-            .get_amount_out(BigUint::from(15_000u64), &btc(), &usdc())
+            .get_amount_out(BigUint::from(10_000u64), &btc(), &usdc())
             .unwrap();
         assert_eq!(result.amount, BigUint::from(7_990_000u64));
         let next = result
@@ -475,8 +481,9 @@ mod tests {
     }
 
     /// A payout within the output's custody is charged a custody fill, one past it a borrow; a
-    /// state a swap returned is charged its side's second-fill charge, on either side, as the fill
-    /// moved what the feed read and warmed what the next touches.
+    /// state a swap returned quotes nothing more on the fill's side, and on the other side is
+    /// charged its second-fill charge, as the fill moved what the feed read and warmed what the
+    /// next touches.
     #[test]
     fn a_swap_is_charged_by_its_payout_then_its_next_state_its_second_fill_charge() {
         let state = FlammPairState {
@@ -502,8 +509,9 @@ mod tests {
             .downcast_ref::<FlammPairState>()
             .unwrap();
         assert!(next.moved);
-        // what is left of the ladder: 30,000 more sells for 15,830,000, past custody
-        assert_eq!(charge(next, 30_000).gas, BigUint::from(60_000u64));
+        assert!(next
+            .get_amount_out(BigUint::from(10_000u64), &btc(), &usdc())
+            .is_err());
         let other_side = next
             .get_amount_out(BigUint::from(8_010_000u64), &usdc(), &btc())
             .unwrap();

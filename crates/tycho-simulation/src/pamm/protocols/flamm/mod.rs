@@ -29,8 +29,10 @@
 //! executor asks the pool for no minimum output
 //! (`crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol:29-42`), so such a swap
 //! fills below its quote rather than failing: only the router's minimum for the whole route
-//! (`crates/tycho-execution/contracts/src/TychoRouterV3.sol:194`) bounds it. A swap moves only its
-//! own side of the book.
+//! (`crates/tycho-execution/contracts/src/TychoRouterV3.sol:194`) bounds it. A swap leaves its own
+//! side of the book empty until the next poll, and the other side as it was: the hook prices a
+//! whole fill at the fee before it and the fee rises with what the fill moved, so a second fill
+//! the same way is not what the rest of the first ladder says.
 //!
 //! The haircut, 2 bps by default, is kept back from every quoted output, so a swap that fills at
 //! the pool's own answer pays out about that much more than its quote. A route passes the quote to
