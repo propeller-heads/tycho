@@ -4520,12 +4520,24 @@ plans:
 
     #[rstest]
     #[case::restricted_plan_passes_its_protocols(
+        None,
         Some("restricted"),
         Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
     )]
-    #[case::no_plan_passes_no_allowlist(None, None)]
+    #[case::no_plan_passes_no_allowlist(None, None, None)]
+    #[case::empty_counts_as_no_protocol(
+        Some(""),
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
+    #[case::blank_counts_as_no_protocol(
+        Some("  "),
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
     #[actix_web::test]
     async fn test_component_tvl_without_protocol_passes_the_plan_allowlist(
+        #[case] protocol_system: Option<&str>,
         #[case] plan_header: Option<&str>,
         #[case] expected_allowed: Option<HashSet<String>>,
     ) {
@@ -4555,7 +4567,10 @@ plans:
         )
         .await;
 
-        let request_body = dto::ComponentTvlRequestBody::default();
+        let request_body = dto::ComponentTvlRequestBody {
+            protocol_system: protocol_system.map(str::to_string),
+            ..Default::default()
+        };
         let mut req_builder = test::TestRequest::post()
             .uri("/v1/component_tvl")
             .set_json(&request_body);
