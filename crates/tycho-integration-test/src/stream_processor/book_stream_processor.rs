@@ -14,10 +14,11 @@ use tycho_execution::encoding::evm::get_router_address;
 use tycho_simulation::{
     book::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
-        BookFeedEvent, BookFeedOutcome, BookFeedStreams, BookSnapshot,
+        BookFeedEvent, BookFeedOutcome, BookFeedStreams, BookSnapshot, ReceivedAt,
     },
     pamm::protocols::{
         baibai::{self, BaibaiFeedBuilder},
+        hanji::{self, HanjiFeedBuilder},
         metric::{self, feed::MetricFeedBuilder},
     },
     rfq::protocols::{
@@ -27,7 +28,7 @@ use tycho_simulation::{
         liquorice::{self, feed::LiquoriceFeedBuilder},
         native::{self, feed::NativeFeedBuilder},
     },
-    snapshot_feed::http::HttpFeedConfig,
+    snapshot_feed::{errors::FeedError, http::HttpFeedConfig, SnapshotFeed},
 };
 use tycho_test::execution::encoding::USER_ADDR;
 
@@ -66,6 +67,9 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
+    /// Base only. Lists its markets from Hanji's public API and reads their books from the chain
+    /// over `--rpc-url`, so it needs no credentials.
+    Hanji,
 }
 
 impl PammVenue {
@@ -88,6 +92,7 @@ impl Display for PammVenue {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
             PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
+            PammVenue::Hanji => write!(f, "{}", hanji::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -567,6 +572,21 @@ impl BookStreamProcessor {
 /// # Errors
 /// Returns an error when a venue listed in `--pamm` lacks its credentials or its feed fails to
 /// build. A default venue that cannot run is logged and skipped instead.
+/// Adds the feed a builder `built` under `venue`'s name: `Ok(false)` when that name is taken.
+fn add_built<F>(
+    feeds: &mut BookFeedStreams,
+    venue: PammVenue,
+    built: Result<F, FeedError>,
+) -> Result<bool, Unavailable>
+where
+    F: SnapshotFeed<Snapshot = BookSnapshot<ReceivedAt>, Error = FeedError>,
+{
+    let feed = built.map_err(|e| Unavailable::BuildFailed(e.to_string()))?;
+    Ok(feeds
+        .add(venue.to_string(), feed)
+        .is_ok())
+}
+
 fn add_pamm_feeds(
     selection: &PammSelection,
     book_config: &BookFeedConfig,
@@ -583,24 +603,23 @@ fn add_pamm_feeds(
         let added = match venue {
             PammVenue::Metric => match secret("METRIC_API_KEY") {
                 // Metric's own defaults already set its cadence and withdrawal age.
-                Some(api_key) => MetricFeedBuilder::new(book_config.clone(), api_key)
-                    .build()
-                    .map_err(|e| Unavailable::BuildFailed(e.to_string()))
-                    .map(|feed| {
-                        feeds
-                            .add(venue.to_string(), feed)
-                            .is_ok()
-                    }),
+                Some(api_key) => add_built(
+                    feeds,
+                    venue,
+                    MetricFeedBuilder::new(book_config.clone(), api_key).build(),
+                ),
                 None => Err(Unavailable::MissingSecret("METRIC_API_KEY")),
             },
-            PammVenue::Baibai => BaibaiFeedBuilder::new(book_config.clone(), rpc_url.to_string())
-                .build()
-                .map_err(|e| Unavailable::BuildFailed(e.to_string()))
-                .map(|feed| {
-                    feeds
-                        .add(venue.to_string(), feed)
-                        .is_ok()
-                }),
+            PammVenue::Baibai => add_built(
+                feeds,
+                venue,
+                BaibaiFeedBuilder::new(book_config.clone(), rpc_url.to_string()).build(),
+            ),
+            PammVenue::Hanji => add_built(
+                feeds,
+                venue,
+                HanjiFeedBuilder::new(book_config.clone(), rpc_url.to_string()).build(),
+            ),
         };
         match added {
             Ok(true) => info!("Added {venue} feed"),
@@ -708,6 +727,8 @@ mod tests {
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
         assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
         assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Hanji.cli_name(), "hanji");
+        assert_eq!(PammVenue::Hanji.to_string(), hanji::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -752,6 +773,8 @@ mod tests {
     async fn a_listed_venue_that_needs_no_credentials_is_added_without_them() {
         let listed = PammSelection::Listed(vec![PammVenue::Baibai]);
         assert_eq!(added(&listed, None).unwrap(), [baibai::PROTOCOL_SYSTEM]);
+        let listed = PammSelection::Listed(vec![PammVenue::Hanji]);
+        assert_eq!(added(&listed, None).unwrap(), [hanji::PROTOCOL_SYSTEM]);
     }
 
     #[tokio::test]
