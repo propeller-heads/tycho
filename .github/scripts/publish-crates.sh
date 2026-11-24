@@ -48,12 +48,14 @@ index_path() {
 }
 
 # Succeeds when crates.io's index lists version $2 of crate $1. A crate never published returns
-# 404, which counts as not listed; any other HTTP error fails the script.
+# 404, which counts as not listed. curl retries a request that times out, is refused or gets a
+# transient HTTP error (408, 429, 500, 502, 503, 504); any other HTTP error, or one that
+# persists, fails the script.
 is_indexed() {
     local body status
     body=$(mktemp)
-    status=$(curl -sS -o "$body" -w '%{http_code}' -H 'Cache-Control: no-cache' \
-        "$INDEX_URL/$(index_path "$1")")
+    status=$(curl -sS --max-time 120 --retry 3 --retry-connrefused -o "$body" -w '%{http_code}' \
+        -H 'Cache-Control: no-cache' "$INDEX_URL/$(index_path "$1")")
     case $status in
     200) jq -e --arg version "$2" 'select(.vers == $version)' "$body" >/dev/null ;;
     404) false ;;
