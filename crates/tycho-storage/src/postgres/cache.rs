@@ -1126,6 +1126,7 @@ impl ProtocolGateway for CachedGateway {
         &self,
         chain: &Chain,
         system: Option<String>,
+        allowed: Option<&HashSet<String>>,
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError> {

@@ -497,6 +497,7 @@ pub trait ProtocolGateway {
     /// # Parameters
     /// - `chain` The chain for which to retrieve the total value locked
     /// - `system` The protocol system for which to retrieve the total value locked
+    /// - `allowed` Without `system`, only the TVL of these protocol systems. `None` means all.
     /// - `ids` The ids of the components to retrieve the total value locked for
     /// - `pagination_params` Optional pagination parameters to control the number of results.
     ///
@@ -506,6 +507,7 @@ pub trait ProtocolGateway {
         &self,
         chain: &Chain,
         system: Option<String>,
+        allowed: Option<&HashSet<String>>,
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError>;

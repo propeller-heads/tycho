@@ -827,6 +827,7 @@ where
             .get_component_tvls(
                 &chain,
                 request.protocol_system.clone(),
+                None,
                 ids_slice,
                 Some(&pagination_params),
             )
