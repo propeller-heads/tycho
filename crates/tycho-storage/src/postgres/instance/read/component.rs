@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -10,7 +10,7 @@ use tycho_common::{
 
 use crate::postgres::{
     instance::{
-        active::{active_instance, active_instance_ids},
+        active::{active_instance, active_instance_ids, active_instance_ids_of},
         gateway::PostgresGatewayNew,
         orm as iorm,
         schema::tycho::{
@@ -73,6 +73,8 @@ impl PostgresGatewayNew {
     ///   name. A protocol system without an active instance has no TVL. `None` reads the TVL of
     ///   every active instance. Pool IDs are unique across active instances, so the answer has one
     ///   value per pool ID.
+    /// - `allowed`: without `system`, only the TVL of these protocol systems; `None` means all.
+    ///   Ignored with `system`.
     /// - `component_ids`: only components with these external ids.
     /// - `pagination_params`: the page to return, ordered by instance and component id.
     ///
@@ -81,6 +83,7 @@ impl PostgresGatewayNew {
         &self,
         chain: &Chain,
         system: Option<String>,
+        allowed: Option<&HashSet<String>>,
         component_ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
         conn: &mut AsyncPgConnection,
@@ -96,7 +99,10 @@ impl PostgresGatewayNew {
                     .into_iter()
                     .collect()
             }
-            None => active_instance_ids(conn).await?,
+            None => match allowed {
+                Some(allowed) => active_instance_ids_of(allowed, conn).await?,
+                None => active_instance_ids(conn).await?,
+            },
         };
         if instances.is_empty() {
             return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
