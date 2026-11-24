@@ -9,6 +9,11 @@
 //! instances, and so do external ids, so a query that leaves out `instance_id` returns other
 //! instances' rows.
 //!
+//! An external id is unique across the active instances, and the reads without a protocol system
+//! rely on this. It can repeat between an active and an inactive instance: two instances can hold
+//! two versions of the same protocol. The database does not guarantee the rule: the extractor must
+//! check each new pool, and activation must check each instance it activates.
+//!
 //! Instance leaves are created with the SQL functions `tycho.create_instance_leaves(id)` and
 //! `tycho.attach_instance_leaves(id)` (see the migration `2026-11-09-000000_instance_schema`).
 //! Tables in `public` (tokens, blocks, protocol types and names) stay shared; instance tables

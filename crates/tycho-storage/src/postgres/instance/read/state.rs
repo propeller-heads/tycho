@@ -27,9 +27,8 @@ impl PostgresGatewayNew {
     /// Returns the token balances of the components of `system`'s active instance, by external id
     /// and token address.
     ///
-    /// - `system`: the protocol system, because the answer is keyed by external id and an external
-    ///   id can repeat across protocol systems. `NotFound` for an unknown name. A protocol system
-    ///   without an active instance has no balances.
+    /// - `system`: the protocol system. `NotFound` for an unknown name. A protocol system without
+    ///   an active instance has no balances.
     /// - `ids`: only components with these external ids.
     /// - `at`: the version. `Unsupported` for a version before the head of the instance.
     ///
@@ -72,9 +71,8 @@ impl PostgresGatewayNew {
     /// `None`.
     ///
     /// - `at`: the version. `Unsupported` for a version before the head of the instance.
-    /// - `system`: the protocol system. Required, because a pool id can repeat across protocol
-    ///   systems: `None` is `Unsupported`. `NotFound` for an unknown name. A protocol system
-    ///   without an active instance has no states.
+    /// - `system`: the protocol system. Required: `None` is `Unsupported`. `NotFound` for an
+    ///   unknown name. A protocol system without an active instance has no states.
     /// - `ids`: only components with these external ids.
     /// - `retrieve_balances`: add the token balances of each component.
     /// - `pagination_params`: `Unsupported` when set. Page the component ids instead.
@@ -95,8 +93,7 @@ impl PostgresGatewayNew {
         self.get_chain_id(chain)?;
         let Some(system) = system else {
             return Err(StorageError::Unsupported(
-                "protocol states need a protocol system: a pool id can repeat across protocols"
-                    .to_string(),
+                "protocol states need a protocol system".to_string(),
             ));
         };
         self.get_protocol_system_id(&system)?;

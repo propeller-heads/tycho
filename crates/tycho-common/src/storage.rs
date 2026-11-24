@@ -456,8 +456,7 @@ pub trait ProtocolGateway {
     ///
     /// # Parameters
     /// - `chain` The chain of the components.
-    /// - `system` Only components of this protocol system. Required, because the answer is keyed by
-    ///   pool id and a pool id can repeat across protocol systems.
+    /// - `system` Only components of this protocol system.
     /// - `ids` Only components with these ids.
     /// - `version` The version of the balances. The latest version if `None`.
     async fn get_component_balances(

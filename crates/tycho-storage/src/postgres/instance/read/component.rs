@@ -29,8 +29,8 @@ impl PostgresGatewayNew {
     ///
     /// - `system`: only components of this protocol system. `NotFound` for an unknown name. A
     ///   protocol system without an active instance has no components.
-    /// - `ids`: only components with these external ids. Needs `system`, because an external id can
-    ///   repeat across protocol systems: `ids` without `system` is `Unsupported`.
+    /// - `ids`: only components with these external ids. Needs `system`: `ids` without `system` is
+    ///   `Unsupported`.
     /// - `min_tvl`: only components with a TVL greater than this value. A component without a TVL
     ///   row never matches.
     /// - `pagination_params`: the page to return, ordered by instance and component id. Without it,
@@ -54,8 +54,7 @@ impl PostgresGatewayNew {
             }
             (None, Some(_)) => {
                 return Err(StorageError::Unsupported(
-                    "component ids need a protocol system: a pool id can repeat across protocols"
-                        .to_string(),
+                    "component ids need a protocol system".to_string(),
                 ));
             }
             (None, None) => load_active_components(min_tvl, pagination_params, conn).await?,

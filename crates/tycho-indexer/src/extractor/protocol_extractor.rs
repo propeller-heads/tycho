@@ -1949,7 +1949,7 @@ pub trait ExtractorGateway: Send + Sync {
 
 impl ExtractorPgGateway {
     /// `name` keys the extraction state. `protocol_system` limits the reads by component id to
-    /// the extractor's own components, because a component id can repeat across protocol systems.
+    /// the extractor's own components.
     pub fn new(
         name: &str,
         protocol_system: &str,
