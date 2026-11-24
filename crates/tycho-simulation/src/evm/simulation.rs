@@ -1,16 +1,20 @@
-use std::{clone::Clone, collections::HashMap, default::Default, env, fmt::Debug};
+use std::{
+    clone::Clone, collections::HashMap, default::Default, env, fmt::Debug, marker::PhantomData,
+};
 
 use alloy::primitives::{Address, Bytes, U256};
 use revm::{
     context::{
-        result::{EVMError, ExecutionResult, Output, ResultAndState},
+        result::{EVMError, ExecutionResult, HaltReason, Output, ResultAndState},
         BlockEnv, CfgEnv, Context, TxEnv,
     },
-    context_interface::JournalTr,
-    interpreter::{return_ok, InstructionResult},
+    context_interface::{ContextTr, JournalTr},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, Handler, MainnetHandler},
+    inspector::{InspectorEvmTr, InspectorHandler},
+    interpreter::{interpreter::EthInterpreter, return_ok, InstructionResult},
     primitives::{hardfork::SpecId, TxKind},
     state::EvmState,
-    DatabaseRef, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
+    Database, DatabaseRef, ExecuteEvm, Inspector, Journal, MainBuilder, MainContext,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use strum_macros::Display;
@@ -50,7 +54,8 @@ pub struct SimulationResult {
     pub state_updates: HashMap<Address, StateUpdate>,
     /// Gas used by the transaction (already reduced by the refunded gas)
     pub gas_used: u64,
-    /// Transient storage changes captured during the simulation
+    /// Transient storage at the end of the call: the given slots, with the call's changes. A slot
+    /// set to zero is not in it.
     pub transient_storage: HashMap<Address, HashMap<U256, U256>>,
 }
 
@@ -155,7 +160,7 @@ where
             .with_cfg(cfg_env)
             .with_ref_db(db_ref)
             .with_block(block_env)
-            .with_tx(tx_env.clone())
+            .with_tx(tx_env)
             .modify_journal_chained(|journal| {
                 if let Some(transient_storage) = params.transient_storage.clone() {
                     for (address, slots) in transient_storage {
@@ -174,32 +179,39 @@ where
                 }
             });
 
-        let evm_result = if self.trace {
+        let (evm_result, transient_storage) = if self.trace {
             let mut tracer = TracingInspector::new(TracingInspectorConfig::default());
 
-            let res = {
+            let (res, transient_storage) = {
                 let mut vm = context.build_mainnet_with_inspector(&mut tracer);
 
                 debug!(
                     "Starting simulation with tx parameters: {:#?} {:#?}",
                     vm.ctx.tx, vm.ctx.block
                 );
-                vm.inspect_tx(tx_env)
+                let mut handler = TransientStorageHandler::default();
+                let res = handler
+                    .inspect_run(&mut vm)
+                    .map(|result| ResultAndState::new(result, vm.finalize()));
+                (res, handler.transient_storage)
             };
 
             Self::print_traces(tracer, res.as_ref().ok())?;
 
-            res
+            (res, transient_storage)
         } else {
             let mut vm = context.build_mainnet();
 
             debug!("Starting simulation with tx parameters: {:#?} {:#?}", vm.ctx.tx, vm.ctx.block);
 
-            vm.replay()
+            let mut handler = TransientStorageHandler::default();
+            let res = handler
+                .run(&mut vm)
+                .map(|result| ResultAndState::new(result, vm.finalize()));
+            (res, handler.transient_storage)
         };
 
-        // TODO: update revm to 25.0.0 and get transient storage from the journaled state
-        interpret_evm_result(evm_result, HashMap::new())
+        interpret_evm_result(evm_result, transient_storage)
     }
 
     pub fn clear_temp_storage(&mut self) -> Result<(), <D as EngineDatabaseInterface>::Error> {
@@ -276,6 +288,64 @@ where
 
         Ok(())
     }
+}
+
+/// Runs a transaction as revm's `MainnetHandler` does, and copies the transient storage that the
+/// transaction leaves before `execution_result` clears it with `commit_tx`. It only reads the
+/// journal, so execution is the same as with `MainnetHandler`.
+///
+/// A successful simulation returns the copy in [`SimulationResult::transient_storage`].
+struct TransientStorageHandler<EVM, ERROR> {
+    transient_storage: HashMap<Address, HashMap<U256, U256>>,
+    types: PhantomData<(EVM, ERROR)>,
+}
+
+impl<EVM, ERROR> Default for TransientStorageHandler<EVM, ERROR> {
+    fn default() -> Self {
+        Self { transient_storage: HashMap::new(), types: PhantomData }
+    }
+}
+
+impl<EVM, ERROR, DB> Handler for TransientStorageHandler<EVM, ERROR>
+where
+    DB: Database,
+    EVM: EvmTr<Context: ContextTr<Journal = Journal<DB>>, Frame = EthFrame>,
+    ERROR: EvmTrError<EVM>,
+{
+    type Evm = EVM;
+    type Error = ERROR;
+    type HaltReason = HaltReason;
+
+    fn execution_result(
+        &mut self,
+        evm: &mut EVM,
+        result: FrameResult,
+    ) -> Result<ExecutionResult, ERROR> {
+        for ((address, slot), value) in &evm
+            .ctx_ref()
+            .journal()
+            .inner
+            .transient_storage
+        {
+            self.transient_storage
+                .entry(*address)
+                .or_default()
+                .insert(*slot, *value);
+        }
+        MainnetHandler::default().execution_result(evm, result)
+    }
+}
+
+impl<EVM, ERROR, DB> InspectorHandler for TransientStorageHandler<EVM, ERROR>
+where
+    DB: Database,
+    EVM: InspectorEvmTr<
+        Context: ContextTr<Journal = Journal<DB>>,
+        Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
+    >,
+    ERROR: EvmTrError<EVM>,
+{
+    type IT = EthInterpreter;
 }
 
 /// Convert a complex EVMResult into a simpler structure
