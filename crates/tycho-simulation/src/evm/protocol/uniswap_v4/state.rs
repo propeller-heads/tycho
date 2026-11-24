@@ -946,8 +946,11 @@ impl ProtocolSim for UniswapV4State {
         let result =
             self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, fee_accrual.as_mut())?;
 
-        // Create BalanceDelta from swap result using the proper constructor
-        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
+        let mut swap_delta = BalanceDelta::from_swap_result(
+            result.amount_specified - result.amount_remaining,
+            result.amount_calculated,
+            zero_for_one,
+        );
 
         // Get deltas (change in the specified/given and unspecified/computed token balances after
         // calling before swap)
