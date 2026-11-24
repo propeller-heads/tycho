@@ -11,6 +11,7 @@ use tycho_execution::encoding::{
     evm::{
         testing_utils::MockRFQState,
         utils::{biguint_to_u256, write_calldata_to_file},
+        HANJI_ORDERBOOK_ATTRIBUTE, HANJI_PROTOCOL_SYSTEM,
     },
     models::{default_token, Solution, Swap, UserTransferType},
 };
@@ -4400,22 +4401,14 @@ fn test_sequential_encoding_strategy_sky() {
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
 }
 
-/// Writes the calldata of a single BaiBai swap on the WETH pair under `name`.
-fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
-    let base = Bytes::from("0x4200000000000000000000000000000000000006");
-    let quote = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-    let (token_in, token_out) =
-        if sell_base { (base.clone(), quote.clone()) } else { (quote.clone(), base.clone()) };
-    let swap = Swap::new(
-        ProtocolComponent {
-            protocol_system: "baibai".into(),
-            static_attributes: HashMap::from([("base".into(), base), ("quote".into(), quote)]),
-            ..Default::default()
-        },
-        default_token(token_in.clone()),
-        default_token(token_out.clone()),
-        BigUint::ZERO,
-    );
+/// Writes the calldata of `swaps`, encoded as one route on Base for Bob, under `name`. The route
+/// sells `amount` of the first swap's input for the last swap's output, with a minimum of 1.
+fn write_base_route(name: &str, amount: u64, swaps: Vec<Swap>) {
+    let token_in = swaps[0].token_in().address.clone();
+    let token_out = swaps[swaps.len() - 1]
+        .token_out()
+        .address
+        .clone();
     let solution = Solution::new(
         bob_address(),
         bob_address(),
@@ -4424,7 +4417,7 @@ fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
         BigUint::from(amount),
         BigUint::from(1u8),
         BigUint::from(1u8),
-        vec![swap],
+        swaps,
     );
     let encoded = get_tycho_router_encoder(Chain::Base)
         .encode_solutions(vec![solution.clone()])
@@ -4445,75 +4438,155 @@ fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
     write_calldata_to_file(name, &encode(calldata));
 }
 
+fn base_weth() -> Bytes {
+    Bytes::from("0x4200000000000000000000000000000000000006")
+}
+
+fn base_usdc() -> Bytes {
+    Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
+}
+
+fn base_cbbtc() -> Bytes {
+    Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf")
+}
+
+/// A swap on BaiBai's `base` pair, selling `token_in` for `token_out`.
+fn baibai_swap(base: Bytes, token_in: Bytes, token_out: Bytes) -> Swap {
+    Swap::new(
+        ProtocolComponent {
+            protocol_system: "baibai".into(),
+            static_attributes: HashMap::from([
+                ("base".into(), base),
+                ("quote".into(), base_usdc()),
+            ]),
+            ..Default::default()
+        },
+        default_token(token_in),
+        default_token(token_out),
+        BigUint::ZERO,
+    )
+}
+
 #[test]
 fn test_single_encoding_strategy_baibai_sell_base() {
-    write_baibai_single_swap(
+    write_base_route(
         "test_single_encoding_strategy_baibai_sell_base",
-        true,
         10_000_000_000_000_000,
+        vec![baibai_swap(base_weth(), base_weth(), base_usdc())],
     );
 }
 
 #[test]
 fn test_single_encoding_strategy_baibai_buy_base() {
-    write_baibai_single_swap("test_single_encoding_strategy_baibai_buy_base", false, 10_000_000);
+    write_base_route(
+        "test_single_encoding_strategy_baibai_buy_base",
+        10_000_000,
+        vec![baibai_swap(base_weth(), base_usdc(), base_weth())],
+    );
 }
 
 #[test]
 fn test_sequential_encoding_strategy_baibai() {
     // WETH -> (BaiBai WETH pair) -> USDC -> (BaiBai cbBTC pair) -> cbBTC
-    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
-    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
-    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
-    let pair = |base: &Bytes| ProtocolComponent {
-        protocol_system: "baibai".into(),
-        static_attributes: HashMap::from([
-            ("base".into(), base.clone()),
-            ("quote".into(), usdc.clone()),
-        ]),
+    write_base_route(
+        "test_sequential_encoding_strategy_baibai",
+        10_000_000_000_000_000,
+        vec![
+            baibai_swap(base_weth(), base_weth(), base_usdc()),
+            baibai_swap(base_cbbtc(), base_usdc(), base_cbbtc()),
+        ],
+    );
+}
+
+const HANJI_ETH_USDC: &str = "0x6a6951db3bb99f76a8ccb9f8a8399b613666298b";
+const HANJI_CBBTC_USDC: &str = "0x15c8cb4e336b1e478d155d813830129fb225eee3";
+const HANJI_CBBTC_ETH: &str = "0xf455b3c0756908c6a2f44a7f7390053cfe354eea";
+
+/// A swap on the Hanji market behind `orderbook`, whose tokens are `base` then `quote` (native ETH
+/// as the zero address, as the book feed publishes it), selling base when `sell_base`.
+fn hanji_swap(orderbook: &str, base: Bytes, quote: Bytes, sell_base: bool) -> Swap {
+    let (token_in, token_out) =
+        if sell_base { (base.clone(), quote.clone()) } else { (quote.clone(), base.clone()) };
+    let market = ProtocolComponent {
+        protocol_system: HANJI_PROTOCOL_SYSTEM.into(),
+        tokens: vec![base, quote],
+        static_attributes: HashMap::from([(
+            HANJI_ORDERBOOK_ATTRIBUTE.into(),
+            Bytes::from(orderbook),
+        )]),
         ..Default::default()
     };
-    let sell_weth = Swap::new(
-        pair(&weth),
-        default_token(weth.clone()),
-        default_token(usdc.clone()),
-        BigUint::ZERO,
-    );
-    let buy_cbbtc = Swap::new(
-        pair(&cbbtc),
-        default_token(usdc.clone()),
-        default_token(cbbtc.clone()),
-        BigUint::ZERO,
-    );
-    let encoder = get_tycho_router_encoder(Chain::Base);
-    let solution = Solution::new(
-        bob_address(),
-        bob_address(),
-        weth,
-        cbbtc,
-        BigUint::from(10_000_000_000_000_000u64),
-        BigUint::from(1u8),
-        BigUint::from(1u8),
-        vec![sell_weth, buy_cbbtc],
-    );
+    Swap::new(market, default_token(token_in), default_token(token_out), BigUint::ZERO)
+}
 
-    let encoded = encoder
-        .encode_solutions(vec![solution.clone()])
-        .unwrap()
-        .remove(0);
-    let calldata = encode_tycho_router_call(
-        Chain::Base.id(),
-        &encoded,
-        &solution,
-        &eth(),
-        None,
-        0,
-        &Bytes::zero(20),
-        &BigUint::ZERO,
-    )
-    .unwrap()
-    .data;
-    write_calldata_to_file("test_sequential_encoding_strategy_baibai", &encode(calldata));
+#[test]
+fn test_single_encoding_strategy_hanji_sell_eth() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_sell_eth",
+        1_000_000_000_000_000_000,
+        vec![hanji_swap(HANJI_ETH_USDC, eth(), base_usdc(), true)],
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_hanji_buy_eth() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_buy_eth",
+        1_000_000_000,
+        vec![hanji_swap(HANJI_ETH_USDC, eth(), base_usdc(), false)],
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_hanji_sell_cbbtc() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_sell_cbbtc",
+        1_000_000,
+        vec![hanji_swap(HANJI_CBBTC_USDC, base_cbbtc(), base_usdc(), true)],
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_hanji_buy_cbbtc() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_buy_cbbtc",
+        1_000_000_000,
+        vec![hanji_swap(HANJI_CBBTC_USDC, base_cbbtc(), base_usdc(), false)],
+    );
+}
+
+/// cbBTC/ETH has native ETH as its quote: selling cbBTC pays out native ETH.
+#[test]
+fn test_single_encoding_strategy_hanji_sell_cbbtc_for_eth() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_sell_cbbtc_for_eth",
+        1_000_000,
+        vec![hanji_swap(HANJI_CBBTC_ETH, base_cbbtc(), eth(), true)],
+    );
+}
+
+/// Buying cbBTC with native ETH sends it as `msg.value`.
+#[test]
+fn test_single_encoding_strategy_hanji_buy_cbbtc_with_eth() {
+    write_base_route(
+        "test_single_encoding_strategy_hanji_buy_cbbtc_with_eth",
+        100_000_000_000_000_000,
+        vec![hanji_swap(HANJI_CBBTC_ETH, base_cbbtc(), eth(), false)],
+    );
+}
+
+/// ETH -> (Hanji ETH/USDC) -> USDC -> (Hanji cbBTC/USDC) -> cbBTC: the second hop is funded by
+/// the first hop's output at the router, which it approves to the second orderbook.
+#[test]
+fn test_sequential_encoding_strategy_hanji() {
+    write_base_route(
+        "test_sequential_encoding_strategy_hanji",
+        1_000_000_000_000_000_000,
+        vec![
+            hanji_swap(HANJI_ETH_USDC, eth(), base_usdc(), true),
+            hanji_swap(HANJI_CBBTC_USDC, base_cbbtc(), base_usdc(), false),
+        ],
+    );
 }
 
 /// Infinity static attributes: LP fee and the `parameters` word with the low byte of the tick

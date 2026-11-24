@@ -179,6 +179,11 @@ pub const BAIBAI_BASE_ATTRIBUTE: &str = "base";
 /// Static attribute of a BaiBai component naming the pair's quote token.
 pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
 
+/// Protocol system of Hanji components.
+pub const HANJI_PROTOCOL_SYSTEM: &str = "hanji";
+/// Static attribute of a Hanji component holding the market's proxy orderbook.
+pub const HANJI_ORDERBOOK_ATTRIBUTE: &str = "orderbook";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 

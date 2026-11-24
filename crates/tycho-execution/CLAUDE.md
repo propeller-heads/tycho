@@ -170,7 +170,7 @@ simple: they just call the protocol. All balance tracking, output verification, 
 Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
-Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
+Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, Hanji, RingSwapV2, Sky,
 Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Euclid (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi,
 NativeWrap (ETH↔WETH and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing
 the standard `IPropAMM` interface; the pAMM address travels in the swap data), Fallback (runs one leg through
@@ -361,8 +361,9 @@ Constraints:
   `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
   built before the base-router split, so their verified sources are named `TychoFallbackRouter` and
   `FallbackExecutor`. A redeploy from `executor_deployments.json` builds `PropAMMFallbackExecutor` at a new address.
-- The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
-  transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
+- The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, the input a
+  Hanji orderbook leaves below one share, a mistaken transfer) is claimable by anyone through the permissionless `swap`
+  and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
 
 ### Subsidies (`executors/TychoSubsidizingExecutor.sol`)
@@ -417,7 +418,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
 | **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice, Euclid                                                                      | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice, Euclid, Hanji                                                               | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
