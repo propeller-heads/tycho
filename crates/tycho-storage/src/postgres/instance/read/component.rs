@@ -66,14 +66,15 @@ impl PostgresGatewayNew {
         Ok(WithTotal { entity, total: Some(total) })
     }
 
-    /// Returns the TVL of the components of `system`'s active instance, by external id, and the
-    /// number of matching components on all pages.
+    /// Returns the TVL of the components of the active instances, by external id, and the number of
+    /// matching components on all pages.
     ///
-    /// - `system`: the protocol system. Required, because the answer is keyed by external id and an
-    ///   external id can repeat across protocol systems: `None` is `Unsupported`. `NotFound` for an
-    ///   unknown name. A protocol system without an active instance has no TVL.
+    /// - `system`: only the active instance of this protocol system. `NotFound` for an unknown
+    ///   name. A protocol system without an active instance has no TVL. `None` reads the TVL of
+    ///   every active instance. Pool IDs are unique across active instances, so the answer has one
+    ///   value per pool ID.
     /// - `component_ids`: only components with these external ids.
-    /// - `pagination_params`: the page to return, in component id order.
+    /// - `pagination_params`: the page to return, ordered by instance and component id.
     ///
     /// Components without a TVL row are absent. `NotFound` for an unknown chain.
     pub async fn get_component_tvls(
@@ -87,16 +88,19 @@ impl PostgresGatewayNew {
         if !self.chain_id_cache.value_exists(chain) {
             return Err(StorageError::NotFound("Chain".to_string(), chain.to_string()));
         }
-        let Some(system) = system else {
-            return Err(StorageError::Unsupported(
-                "component TVL needs a protocol system: the response is keyed by pool id"
-                    .to_string(),
-            ));
+        let instances = match system {
+            Some(system) => {
+                self.get_protocol_system_id(&system)?;
+                active_instance(&system, conn)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
+            None => active_instance_ids(conn).await?,
         };
-        self.get_protocol_system_id(&system)?;
-        let Some(instance) = active_instance(&system, conn).await? else {
+        if instances.is_empty() {
             return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
-        };
+        }
 
         let filtered = || {
             let mut query = component_tvl::table
@@ -105,7 +109,7 @@ impl PostgresGatewayNew {
                         .eq(component_tvl::instance_id)
                         .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
                 )
-                .filter(component_tvl::instance_id.eq(instance))
+                .filter(component_tvl::instance_id.eq_any(&instances))
                 .into_boxed::<Pg>();
             if let Some(ids) = component_ids {
                 query = query.filter(protocol_component::external_id.eq_any(ids));
@@ -122,7 +126,7 @@ impl PostgresGatewayNew {
         let mut query = filtered().select((protocol_component::external_id, component_tvl::tvl));
         if let Some(pagination) = pagination_params {
             query = query
-                .order_by(component_tvl::protocol_component_id)
+                .order_by((component_tvl::instance_id, component_tvl::protocol_component_id))
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }
