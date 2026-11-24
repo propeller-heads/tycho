@@ -12,11 +12,13 @@ use crate::{
     protocol::errors::InvalidSnapshotError,
 };
 
-/// Updating the incentive's virtual pool: about 60k in Base swap traces of Nami pools, for swaps
-/// that crossed a tick. A swap that stays inside its tick spends less.
+/// Updating the incentive's virtual pool (`crossTo`) for a swap that stays inside its tick:
+/// 2.8k in swaps of Nami's Base pool `0x0E8AF367…7237` between blocks 61560000 and 61622000. A
+/// swap that crosses a tick spent 27.7k there, and one that crossed several 62k on pool
+/// `0x337bEA70…B122`, which a quote does not count: a gas module does not know the ticks crossed.
 ///
 /// Re-measure when the farming contracts change.
-const INCENTIVE_GAS: u64 = 60_000;
+const INCENTIVE_GAS: u64 = 3_000;
 
 /// Whether a plugin's farming module has an incentive to update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +64,7 @@ mod tests {
 
     #[rstest]
     // Plugin 0xb0918bddea10fcc127bbe816725b2be536cebb8a on Robinhood at block 118127446.
-    #[case::incentive_set(attributes(&alloy::hex!("d877d4a9ffddd1b03fdfe709b9b0770a4d5dd3fe")), 60_000)]
+    #[case::incentive_set(attributes(&alloy::hex!("d877d4a9ffddd1b03fdfe709b9b0770a4d5dd3fe")), 3_000)]
     #[case::incentive_cleared(attributes(&[0; 20]), 0)]
     fn incentive_adds_gas(#[case] attributes: HashMap<String, Bytes>, #[case] gas: u64) {
         let module = Farming::from_attributes(&attributes).expect("the incentive should decode");

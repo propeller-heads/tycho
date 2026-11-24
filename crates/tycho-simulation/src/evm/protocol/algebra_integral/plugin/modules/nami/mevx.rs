@@ -2,6 +2,12 @@
 //!
 //! `afterSwap` asks the module's router for a backrun when one is set, and returns after its
 //! checks otherwise.
+//!
+//! A backrun is a state effect no quote models. When the router finds one, `afterSwap` swaps
+//! this same pool again, and possibly other venues, inside the user's swap. The user's output is
+//! unchanged, but the pool ends at another price than the state a quote returns, so a route that
+//! uses the pool twice prices its second hop from a state the backrun has moved. The backrun's
+//! gas, up to the module's call gas budget (5M at most), is not in the quote either.
 
 use std::collections::HashMap;
 
@@ -15,14 +21,17 @@ use crate::{
 
 /// `afterSwap` with no router set, including the pool's call into the plugin it already called
 /// before the swap. Measured at 9.1k on Nami's Base WETH/USDC pool `0x0E8AF367…7237`, traced on
-/// a fork at block 52562900.
+/// a fork at block 52562900, under the implementation before the registered one: every pool has
+/// had a router since.
 const AFTER_SWAP_GAS: u64 = 9_000;
-/// `afterSwap` with a router set whose backrun check finds nothing. Measured at 65.8k to 66.8k
-/// on the same pool at block 52924436. When the check finds a backrun the plugin spends up to
-/// its call gas budget more, which a quote does not count.
+/// `afterSwap` with a router set whose backrun check finds nothing. Measured at 44.3k on the
+/// registered Base implementation `0xd1dfA0…a642`: 47.1k for the hook in 8 of 9 swaps of pool
+/// `0x0E8AF367…7237` between blocks 61560000 and 61622000, less the 2.8k its farming incentive
+/// takes there. Swaps of Base pool `0x337bEA70…B122` ranged from 36k to 63k. See the module docs
+/// for the backrun itself.
 ///
 /// Re-measure both when the plugin implementation or the router changes.
-const AFTER_SWAP_ROUTER_GAS: u64 = 66_000;
+const AFTER_SWAP_ROUTER_GAS: u64 = 44_000;
 
 /// Whether a plugin's MEVX module has a router to ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +77,7 @@ mod tests {
 
     #[rstest]
     // Plugin 0xb0918bddea10fcc127bbe816725b2be536cebb8a on Robinhood at block 118127446.
-    #[case::router_set(attributes(&alloy::hex!("011242bf9f5c4832f152be5a5838daae40e0405c")), 66_000)]
+    #[case::router_set(attributes(&alloy::hex!("011242bf9f5c4832f152be5a5838daae40e0405c")), 44_000)]
     #[case::router_cleared(attributes(&[0; 20]), 9_000)]
     fn after_swap_gas_depends_on_the_router(
         #[case] attributes: HashMap<String, Bytes>,

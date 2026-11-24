@@ -292,6 +292,7 @@ Tests an adopter ships:
 | Module storage layout | fixed in `src/plugin/modules/` | a new implementation that moves a module's slots or repacks a word needs a new table entry, a new spkg and a resync; until then the old attributes go stale |
 | The beacon a plugin is bound to | the plugin's later `BeaconUpgraded` logs, read with `plugin_beacon` | as for a beacon upgrade |
 | A pool's plugin address | the pool's `Plugin` event | a plugin created before the transaction that names it pauses the pool |
+| Contracts a plugin calls in `beforeSwap` (DCI chains, VM handler) | the trace of the `beforeSwap` entrypoint, registered when the pool enables the hook | the indexer does not retrace an entrypoint whose trace succeeded, so a plugin that starts calling another contract later (a fee source enabled after the first trace) fails its VM quotes with a missing account until the entrypoint is traced again |
 | Nami's fee source contracts | not indexed: simulation ports them and looks them up by the address in `fee_override/source` | a new source contract needs a simulation entry before a pool is pointed at it |
 
 A DEX opens the registry PR for a new implementation before it upgrades its beacon.

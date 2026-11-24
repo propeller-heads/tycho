@@ -7,18 +7,26 @@
 //!
 //! `afterSwap` is not run: it needs the pool's state after the swap, which a quote does not
 //! write anywhere. Its gas is a fixed estimate.
+//!
+//! The engine holds only the accounts the indexer traced `beforeSwap` into. The indexer does not
+//! retrace an entrypoint whose trace succeeded, so a plugin that starts calling another contract
+//! later (a fee source enabled after the first trace, say) fails every quote with a missing
+//! account until its entrypoint is traced again.
 
 use alloy::{
     core::sol,
     primitives::{Address, Bytes as AlloyBytes, U160, U256},
     sol_types::SolCall,
 };
-use revm::DatabaseRef;
+use revm::{state::AccountInfo, DatabaseRef};
 use tycho_common::simulation::{errors::SimulationError, protocol_sim::BlockContext};
 
 use crate::{
     evm::{
-        engine_db::{create_engine, engine_db_interface::EngineDatabaseInterface, SHARED_TYCHO_DB},
+        engine_db::{
+            create_engine, engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB,
+            SHARED_TYCHO_DB,
+        },
         protocol::{
             algebra_integral::plugin::{
                 modules::field_bytes,
@@ -56,10 +64,12 @@ const GLOBAL_STATE_SLOT: u64 = 2;
 const PRICE_AND_TICK_BITS: usize = 184;
 /// The pool's cold `CALL` into the plugin, on top of the gas the hook itself reports.
 const PLUGIN_CALL_OVERHEAD_GAS: u64 = 2_600;
-/// `afterSwap` of a plugin whose code is not modelled. The figure is the dearer branch measured
-/// on Nami's plugin (its back-run check with a router set, 65.8k to 66.8k on Base at block
-/// 52924436), so a quote does not understate the hook.
-const AFTER_SWAP_GAS: u64 = 66_000;
+/// An estimate of `afterSwap` for a plugin the simulation has no figures for: the generic
+/// handler's plugins, and a registered plugin on a pool that calls only `afterSwap`. It is the
+/// one `afterSwap` measured, Nami's with a MEVX router and a farming incentive on a swap that
+/// stays inside its tick: 47.1k in 8 of 9 swaps of Base pool `0x0E8AF367…7237` between blocks
+/// 61560000 and 61622000. Another plugin's hook can cost more or less.
+pub(crate) const AFTER_SWAP_ESTIMATE_GAS: u64 = 47_000;
 
 /// Gas every simulated transaction is charged up front: the base cost and its calldata. In a real
 /// swap the pool calls the plugin from inside the transaction, so neither part is spent.
@@ -85,6 +95,9 @@ pub struct VmPlugin {
     /// Whether the pool also calls `afterSwap`.
     calls_after_swap: bool,
     block: BlockContext,
+    /// Built once per handler: building an engine takes the shared database's write lock, which
+    /// stalls every other VM simulation.
+    engine: SimulationEngine<PreCachedDB>,
 }
 
 impl VmPlugin {
@@ -94,17 +107,11 @@ impl VmPlugin {
     /// `overrides` and with the pool's `globalState` price and tick replaced by the swap's, so a
     /// quote chained onto a simulated swap is priced from the post-swap tick and sees what that
     /// swap's hook wrote.
-    fn before_swap<D>(
+    fn before_swap(
         &self,
-        engine: &SimulationEngine<D>,
         swap: &PluginSwap,
         overrides: &StorageOverrides,
-    ) -> Result<PluginQuote, SimulationError>
-    where
-        D: EngineDatabaseInterface + Clone + std::fmt::Debug,
-        <D as DatabaseRef>::Error: std::fmt::Debug,
-        <D as EngineDatabaseInterface>::Error: std::fmt::Debug,
-    {
+    ) -> Result<PluginQuote, SimulationError> {
         let (pool, plugin) = (self.pool, self.plugin);
         let data = beforeSwapCall {
             // A plugin may price by sender (Nami's charges its MEVX executor another fee). A
@@ -121,27 +128,27 @@ impl VmPlugin {
 
         let mut overrides = overrides.clone();
         let global_state_slot = U256::from(GLOBAL_STATE_SLOT);
-        let global_state = match overrides
+        let global_state = overrides
             .get(&pool)
             .and_then(|slots| slots.get(&global_state_slot))
-        {
-            Some(value) => *value,
-            None => engine
-                .state
-                .storage_ref(pool, global_state_slot)
-                .map_err(|err| {
-                    SimulationError::RecoverableError(format!(
-                        "algebra pool {pool} globalState missing from the simulation DB: {err:?}"
-                    ))
-                })?,
-        };
-        overrides
-            .entry(pool)
-            .or_default()
-            .insert(
-                global_state_slot,
-                with_price_and_tick(global_state, swap.sqrt_price, swap.tick),
-            );
+            .copied()
+            // An indexed pool holds the slot. Without it there is nothing to replace: the hook
+            // did not read the pool when it was traced.
+            .or_else(|| {
+                self.engine
+                    .state
+                    .storage_ref(pool, global_state_slot)
+                    .ok()
+            });
+        if let Some(global_state) = global_state {
+            overrides
+                .entry(pool)
+                .or_default()
+                .insert(
+                    global_state_slot,
+                    with_price_and_tick(global_state, swap.sqrt_price, swap.tick),
+                );
+        }
 
         let intrinsic_gas = intrinsic_gas(&data);
         let params = SimulationParameters {
@@ -155,7 +162,8 @@ impl VmPlugin {
             }),
             ..Default::default()
         };
-        let result = engine
+        let result = self
+            .engine
             .simulate(&params)
             .map_err(|err| {
                 let reason = match &err {
@@ -196,7 +204,7 @@ impl VmPlugin {
             }
         }
         let override_fee = decoded.feeOverride.to::<u32>();
-        let after_swap_gas = if self.calls_after_swap { AFTER_SWAP_GAS } else { 0 };
+        let after_swap_gas = if self.calls_after_swap { AFTER_SWAP_ESTIMATE_GAS } else { 0 };
         Ok(PluginQuote {
             override_fee: (override_fee != 0).then_some(override_fee),
             plugin_fee: decoded.pluginFee.to::<u32>(),
@@ -216,8 +224,7 @@ impl PluginHandler for VmPlugin {
         swap: &PluginSwap,
         overrides: &StorageOverrides,
     ) -> Result<PluginQuote, SimulationError> {
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false)?;
-        self.before_swap(&engine, swap, overrides)
+        self.before_swap(swap, overrides)
     }
 
     /// The hook may read the clock, so a new timestamp can change every quote.
@@ -241,11 +248,31 @@ impl PluginHandlerCreator for VmPluginCreator {
         params: PluginCreationParams<'_>,
     ) -> Result<Box<dyn PluginHandler>, InvalidSnapshotError> {
         let [plugin_config] = field_bytes::<1>(params.attributes, PLUGIN_CONFIG_ATTRIBUTE)?;
+        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).map_err(|error| {
+            InvalidSnapshotError::ValueError(format!(
+                "no simulation engine for algebra plugin {}: {error}",
+                params.plugin
+            ))
+        })?;
+        // The hook is called as the pool, and the engine refuses a caller it has no account for.
+        // The pool is indexed only if the traced hook touched it, so a pool the hook never reads
+        // gets an empty account. This leaves an account the indexer sent as it is, and a later
+        // one from the indexer replaces it.
+        engine
+            .state
+            .init_account(params.pool, AccountInfo::default(), None, false)
+            .map_err(|error| {
+                InvalidSnapshotError::ValueError(format!(
+                    "no caller account for algebra pool {}: {error:?}",
+                    params.pool
+                ))
+            })?;
         Ok(Box::new(VmPlugin {
             pool: params.pool,
             plugin: params.plugin,
             calls_after_swap: plugin_config & AFTER_SWAP_FLAG != 0,
             block: params.block,
+            engine,
         }))
     }
 }
@@ -339,6 +366,24 @@ pub(crate) mod test_support {
             0xFD,
         ]);
         code
+    }
+
+    /// Loads a plugin running `plugin_code` into the shared simulation DB, and no pool: what the
+    /// indexer tracks for a hook that never touches its pool.
+    pub fn load_plugin(plugin: Address, plugin_code: Vec<u8>) {
+        SHARED_TYCHO_DB
+            .update(
+                vec![AccountUpdate::new(
+                    plugin,
+                    Chain::Ethereum,
+                    HashMap::new(),
+                    Some(U256::ZERO),
+                    Some(plugin_code),
+                    ChangeType::Creation,
+                )],
+                Some(BlockHeader { number: 100, timestamp: 1_000, ..Default::default() }),
+            )
+            .expect("the account should load");
     }
 
     /// Loads a pool with a `globalState` slot and a plugin running `plugin_code`, with
@@ -443,6 +488,18 @@ mod tests {
     }
 
     #[test]
+    fn hook_that_never_reads_its_pool_is_quoted_without_the_pool() {
+        let (pool, plugin) = (Address::repeat_byte(0xAD), Address::repeat_byte(0xAE));
+        load_plugin(plugin, fee_plugin_code(700, 700));
+
+        let quote = plugin_at(pool, plugin, BEFORE_SWAP_FLAG)
+            .quote(&swap(true), &StorageOverrides::new())
+            .expect("the hook does not need the pool");
+
+        assert_eq!(quote.override_fee, Some(700));
+    }
+
+    #[test]
     fn after_swap_adds_its_estimate() {
         let (pool, plugin) = (Address::repeat_byte(0xA5), Address::repeat_byte(0xA6));
         load_pool_and_plugin(pool, plugin, fee_plugin_code(500, 500), HashMap::new());
@@ -454,7 +511,7 @@ mod tests {
             .quote(&swap(true), &StorageOverrides::new())
             .expect("the hook should answer");
 
-        assert_eq!(both.gas, before_only.gas + AFTER_SWAP_GAS);
+        assert_eq!(both.gas, before_only.gas + AFTER_SWAP_ESTIMATE_GAS);
     }
 
     #[test]

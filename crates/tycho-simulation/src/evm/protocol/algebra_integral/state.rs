@@ -27,7 +27,8 @@ use crate::{
             algebra_integral::{
                 plugin::{
                     registry::{instantiate_plugin_handler, PluginCreationParams},
-                    PluginHandler, PluginSwap, StorageOverrides, BEFORE_SWAP_FLAG,
+                    vm::AFTER_SWAP_ESTIMATE_GAS,
+                    PluginHandler, PluginSwap, StorageOverrides, AFTER_SWAP_FLAG, BEFORE_SWAP_FLAG,
                     DYNAMIC_FEE_FLAG, PLUGIN_CONFIG_ATTRIBUTE,
                 },
                 swap_math::{
@@ -372,7 +373,14 @@ impl AlgebraIntegralState {
     ) -> Result<(ResolvedFee, StorageOverrides), SimulationError> {
         match &self.plugin_slot {
             PluginSlot::NotCalled => {
-                Ok((ResolvedFee { fee: self.last_fee, gas: 0 }, StorageOverrides::new()))
+                // The pool still calls `afterSwap` when that flag is set. No handler is built for
+                // such a pool, so the hook's gas is the estimate for an unmeasured plugin.
+                let gas = if self.plugin.config & AFTER_SWAP_FLAG != 0 {
+                    AFTER_SWAP_ESTIMATE_GAS
+                } else {
+                    0
+                };
+                Ok((ResolvedFee { fee: self.last_fee, gas }, StorageOverrides::new()))
             }
             PluginSlot::Unsupported(reason) => Err(SimulationError::RecoverableError(format!(
                 "algebra pool {} is not quoted: {reason}",
@@ -1106,7 +1114,7 @@ mod tests {
     const LIQUIDITY_NET: i128 = 1_000_000_000_000_000_000_000;
     /// Hook gas of the Robinhood plugin: `beforeSwap` with a fee source, `afterSwap` with a MEVX
     /// router, and the farming incentive.
-    const ROBINHOOD_HOOK_GAS: u64 = 67_000 + 6_000 + 66_000 + 60_000;
+    const ROBINHOOD_HOOK_GAS: u64 = 67_000 + 6_000 + 44_000 + 3_000;
 
     /// A pool at price 1 (tick 0) with one position over [-600, 600] and a stored fee of 0.3%.
     fn pool(chain: Option<Chain>, plugin: PluginSetup, timestamp: u64) -> AlgebraIntegralState {
@@ -1565,6 +1573,23 @@ mod tests {
         assert_eq!(pool.fee(), 0.003);
     }
 
+    #[test]
+    fn pool_that_calls_only_after_swap_carries_the_hooks_estimated_gas() {
+        let plugin =
+            PluginSetup { config: AFTER_SWAP_ONLY, implementation: None, ..robinhood_plugin() };
+        let amount = one_token() / BigUint::from(1_000u32);
+
+        let with_hook = pool(None, plugin, SESSION)
+            .get_amount_out(amount.clone(), &token0(), &token1())
+            .expect("the pool's own fee applies");
+        let without = static_fee_pool()
+            .get_amount_out(amount, &token0(), &token1())
+            .expect("the pool's own fee applies");
+
+        assert_eq!(with_hook.amount, without.amount);
+        assert_eq!(with_hook.gas, without.gas + BigUint::from(AFTER_SWAP_ESTIMATE_GAS));
+    }
+
     /// AFTER_SWAP without BEFORE_SWAP.
     const AFTER_SWAP_ONLY: u8 = 2;
 
@@ -1607,7 +1632,7 @@ mod tests {
         assert_eq!(pool.fee(), 0.001);
         assert_eq!(
             quote.gas,
-            BigUint::from(54_000u64 + 5_400 + 30_000 + 67_000 + 9_000 + 66_000 + 60_000)
+            BigUint::from(54_000u64 + 5_400 + 30_000 + 67_000 + 9_000 + 44_000 + 3_000)
         );
     }
 
