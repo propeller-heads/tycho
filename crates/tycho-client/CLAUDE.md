@@ -48,6 +48,8 @@ TychoStreamBuilder (stream.rs)
    snapshot it stops tracking the paused components and starts tracking the unpaused ones that
    pass the filter. When no snapshot follows, it queues those for a background snapshot instead.
    On a restart it reports the stopped ones as removed in the first message.
+   Until the next subscription, a pause or unpause event outweighs the server's answer about
+   that component, since the server process answering can lag behind the one that sent it.
 2. `HttpRPCClient` fetches initial snapshot at that block synchronously; all subsequent new
    components are fetched via background tasks (`spawn_snapshot_task`) so the delta loop never
    blocks on RPC. Each component moves through `SnapshotStatus` (`Deferred` → `InFlight`
