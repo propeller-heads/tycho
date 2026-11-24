@@ -303,6 +303,11 @@ for any protocol indexed by Tycho.
   quoted in a token no listing sells for a USD quote token is valued through its own base.
   `PLAN_ONLY` needs the deployed build's front. Signed firm quotes (`fillQuote`) are not served; an
   update carrying the desk's firm state is accepted.
+  `EfficientPropFeedBuilder::with_fallback_router()` (off by default) stamps the components
+  `fallback:efficient_prop` (in the id too), so tycho-execution settles them through
+  `PropAMMFallbackRouter`: where a door quotes nothing (`NoWord`), the solver's fallback pool
+  fills instead of the route reverting. A credit listing is refused with it (the router's quote
+  runs its route once more). `flamm` has no such option: its pools answer no `quote`.
   `ladder.rs` holds a side's samples and quotes them exactly, along floored chords between them, and
   nothing outside them; the quote layout, front, factory, desk contract code hash (Ethereum) and
   allow-list are builder arguments (`EfficientPropDeployment`), never constants.

@@ -51,7 +51,9 @@
 //! doors, which other components serve. Swaps run through the generic `PropAMMExecutor`, which
 //! sends the pool the whole input before its swap
 //! (`crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol:16-19`): a ladder ends at
-//! the input a pool clips a quote to, so no quoted input is clipped.
+//! the input a pool clips a quote to, so no quoted input is clipped. That direct path is the only
+//! one: a pool answers no `IPropAMM.quote`, which Tycho's `PropAMMFallbackRouter` reads as nothing
+//! to fill, so this feed has no fallback-router option.
 use alloy::primitives::{address, Address};
 use tycho_common::models::Chain;
 

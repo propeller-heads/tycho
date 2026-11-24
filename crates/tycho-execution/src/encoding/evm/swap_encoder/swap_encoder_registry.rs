@@ -496,6 +496,26 @@ mod tests {
         }
     }
 
+    /// The listing doors published as `fallback:efficient_prop` resolve to Ethereum's deployed
+    /// fallback executor through the family entry, not to the doors' own PropAMMExecutor.
+    #[test]
+    fn test_efficient_prop_fallback_resolves_on_ethereum() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
+        let executor = |system: &str| {
+            registry
+                .get_encoder(system)
+                .unwrap_or_else(|| panic!("no encoder resolved for {system}"))
+                .executor_address()
+                .clone()
+        };
+
+        assert_eq!(
+            executor(&format!("{FALLBACK_PREFIX}{EFFICIENT_PROP_PROTOCOL_SYSTEM}")),
+            Bytes::from_str("0x355d1D7bd40330c235e1132de8D2314b956584c9").unwrap()
+        );
+        assert_ne!(executor("fallback:efficient_prop"), executor(EFFICIENT_PROP_PROTOCOL_SYSTEM));
+    }
+
     /// Base lists no executor for the listing doors or the Efficient pools yet: neither is served
     /// there, so Base's default registry resolves no encoder for them. Each returns as a row at
     /// the address of Base's PropAMMExecutor once it is.

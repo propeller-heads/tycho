@@ -303,6 +303,18 @@
 //! therefore says nothing of what a door fills next, so each poll reads the doors at the next
 //! block, as the state maps for it describe that block.
 //!
+//! A route through a door therefore reverts whole where it lands in a block without the update.
+//! [`EfficientPropFeedBuilder::with_fallback_router`] (off by default) publishes the same books as
+//! [`FALLBACK_PROTOCOL_SYSTEM`] instead, which tycho-execution settles through Tycho's
+//! `PropAMMFallbackRouter`: it asks the door's `quote` in the block the swap lands in, fills there
+//! unless the pool the solver names quotes more, and swaps on that pool where the door quotes
+//! nothing. On fork fills through the router deployed on Ethereum, a custody fill at the door cost
+//! its transaction 68,336 to 74,415 gas more than the direct path (the door's quote, a Uniswap V3
+//! pool's and the router's own work), against the 40,000 tycho-execution adds to the book's gas.
+//! Where the pool fills instead, the gas is that pool's swap and the door's refused quote (about
+//! 40,000), not the book's. A credit listing is not served this way: the router's quote runs its
+//! route a second time.
+//!
 //! Each poll reads, at once, the listings at the node's latest block (the first request, as on
 //! Base, less BaseTime: that predeploy is Base's and has no code on Ethereum) and the next block's
 //! state map from every URL given to [`EfficientPropFeedBuilder::state_urls`] (required on
@@ -558,6 +570,12 @@ pub use state::{CreditGas, DirectionGas, EfficientPropState};
 /// generic pAMM encoder on it.
 pub const PROTOCOL_SYSTEM: &str = "efficient_prop";
 
+/// The protocol system of components whose swaps settle through Tycho's `PropAMMFallbackRouter`,
+/// which quotes the listing door in the block the swap lands in and runs a solver-named fallback
+/// pool where the door quotes less or cannot fill. A feed carries it instead of
+/// [`PROTOCOL_SYSTEM`] when its builder was given `with_fallback_router()`.
+pub const FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:efficient_prop";
+
 /// Component type stamped on every listing this integration emits.
 pub(crate) const PROTOCOL_TYPE: &str = "efficient_prop_listing";
 
@@ -601,7 +619,9 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    use tycho_execution::encoding::evm::{EFFICIENT_PROP_PROTOCOL_SYSTEM, PAMM_ADDRESS_ATTRIBUTE};
+    use tycho_execution::encoding::evm::{
+        EFFICIENT_PROP_PROTOCOL_SYSTEM, FALLBACK_PREFIX, PAMM_ADDRESS_ATTRIBUTE,
+    };
 
     /// tycho-execution keys the generic pAMM encoder on the protocol system and reads the door
     /// from the attribute, keeping its own copy of each; this holds the two crates to one
@@ -610,5 +630,15 @@ mod tests {
     fn the_component_carries_the_names_the_encoder_reads() {
         assert_eq!(super::PROTOCOL_SYSTEM, EFFICIENT_PROP_PROTOCOL_SYSTEM);
         assert_eq!(super::PAMM_ADDRESS_ATTRIBUTE, PAMM_ADDRESS_ATTRIBUTE);
+    }
+
+    /// tycho-execution resolves a `fallback:` system with no entry of its own to the generic
+    /// fallback encoder, so the fallback system is that prefix before the listings' own.
+    #[test]
+    fn the_fallback_system_is_the_fallback_prefix_before_the_listings_own() {
+        assert_eq!(
+            super::FALLBACK_PROTOCOL_SYSTEM,
+            format!("{FALLBACK_PREFIX}{EFFICIENT_PROP_PROTOCOL_SYSTEM}")
+        );
     }
 }

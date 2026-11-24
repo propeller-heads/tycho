@@ -27,8 +27,8 @@ use crate::{
         overrides::NextBlockReader,
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
-        EfficientPropDeployment, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
-        QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE,
+        EfficientPropDeployment, FALLBACK_PROTOCOL_SYSTEM, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM,
+        PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -101,6 +101,7 @@ pub struct EfficientPropFeedBuilder {
     state_urls: Vec<String>,
     usd_quote_tokens: HashSet<Bytes>,
     feed_config: HttpFeedConfig,
+    protocol_system: &'static str,
 }
 
 impl EfficientPropFeedBuilder {
@@ -122,6 +123,7 @@ impl EfficientPropFeedBuilder {
             state_urls: Vec::new(),
             usd_quote_tokens,
             feed_config: Self::default_feed_config(),
+            protocol_system: PROTOCOL_SYSTEM,
         }
     }
 
@@ -191,6 +193,22 @@ impl EfficientPropFeedBuilder {
     pub fn credit_listing(mut self, listing: u32, gas: CreditGas) -> Self {
         self.credit_listings
             .push((listing, gas));
+        self
+    }
+
+    /// Settles the listings' swaps through Tycho's `PropAMMFallbackRouter`, which quotes the door
+    /// in the block the swap lands in and runs a solver-named fallback pool where the door quotes
+    /// less or cannot fill, as in a block without the maker's update, where the direct path
+    /// reverts the route. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`](super::FALLBACK_PROTOCOL_SYSTEM) rather than
+    /// [`PROTOCOL_SYSTEM`](super::PROTOCOL_SYSTEM), which is what selects the fallback encoder.
+    /// Off by default.
+    ///
+    /// The books and their gas are the direct path's, and tycho-execution adds the router's own
+    /// work to a `fallback:` swap. A credit listing is refused with it: the router's quote runs
+    /// the listing's route once more, which no figure named for the direct path covers.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
         self
     }
 
@@ -368,6 +386,13 @@ impl EfficientPropFeedBuilder {
             };
         let mut credit = BTreeMap::new();
         for (listing, gas) in self.credit_listings {
+            if self.protocol_system == FALLBACK_PROTOCOL_SYSTEM {
+                return Err(FeedError::InvalidInput(format!(
+                    "Efficient PropAMM credit listing {listing} is not served through the fallback \
+                     router, whose quote of the door runs the listing's route once more: its gas \
+                     is measured on the direct path"
+                )));
+            }
             if gas_chain != GasChain::Ethereum {
                 return Err(FeedError::InvalidInput(format!(
                     "Efficient PropAMM credit listing {listing} is served on Ethereum only, where each \
@@ -480,6 +505,7 @@ impl EfficientPropFeedBuilder {
             source: EfficientPropBookSource {
                 reader,
                 assembler: EfficientPropBookAssembler {
+                    protocol_system: self.protocol_system,
                     book_config: self.book_config,
                     usd_quote_tokens: Arc::new(self.usd_quote_tokens),
                     landing_ms: millis(landing_allowance),
@@ -619,6 +645,9 @@ fn unix_now_ms() -> u64 {
 /// one side and clears the TVL floor.
 #[derive(Debug, Clone)]
 pub(super) struct EfficientPropBookAssembler {
+    /// The protocol system stamped on the components: the listings' own, or the fallback-router
+    /// one for a feed built with `with_fallback_router()`.
+    pub(super) protocol_system: &'static str,
     pub(super) book_config: BookFeedConfig,
     pub(super) usd_quote_tokens: Arc<HashSet<Bytes>>,
     /// The landing allowance, ms: how long a route sent takes to land.
@@ -639,7 +668,7 @@ impl EfficientPropBookAssembler {
         let mut books = Books::new();
         for state in &states {
             let (base, quote) = (&state.base_token.address, &state.quote_token.address);
-            let component_id = door_component_id(base, quote, &state.door);
+            let component_id = component_id(self.protocol_system, base, quote, &state.door);
             let Some(usd_per_quote) = self
                 .usd_per_token(quote, &states)
                 .or_else(|| self.usd_per_quote_through_base(state, &states))
@@ -666,7 +695,7 @@ impl EfficientPropBookAssembler {
                 .find(|read| read.door.as_slice() == door.as_ref())
                 .and_then(|read| read.tip_cap_wei);
             let mut book = pair_book(
-                PROTOCOL_SYSTEM,
+                self.protocol_system,
                 PROTOCOL_TYPE,
                 self.book_config.chain,
                 component_id,
@@ -845,10 +874,10 @@ impl EfficientPropBookAssembler {
     }
 }
 
-/// The id of a listing door's book: the protocol system, the pair's base and quote, then the door,
-/// since two listings may trade one pair.
-pub(super) fn door_component_id(base: &Bytes, quote: &Bytes, door: &Bytes) -> Bytes {
-    let pair = pair_component_id(PROTOCOL_SYSTEM, base, quote);
+/// The id of a listing door's book: the protocol system its feed stamps on its components, the
+/// pair's base and quote, then the door, since two listings may trade one pair.
+fn component_id(protocol_system: &str, base: &Bytes, quote: &Bytes, door: &Bytes) -> Bytes {
+    let pair = pair_component_id(protocol_system, base, quote);
     Bytes::from([pair.as_ref(), door.as_ref()].concat())
 }
 
@@ -916,12 +945,48 @@ mod tests {
             .unwrap()
     }
 
+    /// A door's book id on the direct path.
+    fn door_component_id(base: &Bytes, quote: &Bytes, door: &Bytes) -> Bytes {
+        component_id(PROTOCOL_SYSTEM, base, quote, door)
+    }
+
     fn id(listing: u32) -> Bytes {
         door_component_id(&bytes(weth_address()), &bytes(usdc_address()), &bytes(door_of(listing)))
     }
 
     fn eth(value: u64) -> BigUint {
         BigUint::from(value) * BigUint::from(10u64).pow(15)
+    }
+
+    /// A feed built with the fallback router labels its books for it, in the system and in the
+    /// id, the door still the pAMM the router quotes and fills.
+    #[tokio::test]
+    async fn a_fallback_feed_labels_its_components_for_the_fallback_router() {
+        let node = FakeNode::new(vec![FakeListing::weth_usdc(1)]);
+        let now = node.timestamp * 1000;
+        let server = node.spawn().await;
+        let mut source = EfficientPropFeedBuilder::new(book_config(), server.url(), deployment())
+            .approved_price_sources([APPROVED_SOURCE])
+            .with_fallback_router()
+            .build_path()
+            .unwrap()
+            .source;
+        source.clock = Arc::new(move || now);
+
+        let books = source.fetch().await.unwrap().books;
+
+        let door = bytes(door_of(1));
+        let fallback_id = component_id(
+            "fallback:efficient_prop",
+            &bytes(weth_address()),
+            &bytes(usdc_address()),
+            &door,
+        );
+        assert_ne!(fallback_id, id(1));
+        let book = &books[&fallback_id.to_string()];
+        assert_eq!(book.component.protocol_system, "fallback:efficient_prop");
+        assert_eq!(book.component.protocol_type_name, "efficient_prop_listing");
+        assert_eq!(book.component.static_attributes["pamm_address"], door);
     }
 
     /// One book per open door, labelled for the generic pAMM encoder with the door, priced
@@ -5026,6 +5091,27 @@ mod tests {
 
             assert!(
                 matches!(&error, FeedError::InvalidInput(message) if message.contains(reason)),
+                "{error}"
+            );
+        }
+
+        /// The fallback router's quote runs a credit listing's route once more than the direct
+        /// path its gas is named for, so the builder serves no credit listing through it.
+        #[test]
+        fn the_builder_refuses_a_credit_listing_through_the_fallback_router() {
+            let error = EfficientPropFeedBuilder::new(
+                BookFeedConfig { chain: Chain::Ethereum, ..book_config() },
+                "http://node".to_string(),
+                ethereum_deployment(),
+            )
+            .credit_listing(1, credit_gas())
+            .with_fallback_router()
+            .state_urls(vec!["http://state".to_string()])
+            .build_path()
+            .unwrap_err();
+
+            assert!(
+                matches!(&error, FeedError::InvalidInput(m) if m.contains("fallback router")),
                 "{error}"
             );
         }
