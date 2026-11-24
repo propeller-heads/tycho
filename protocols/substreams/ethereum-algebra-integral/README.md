@@ -207,12 +207,27 @@ plugin: later upgrades of that beacon are applied only to pools that have a `plu
 |---|---|---|
 | No plugin, or `BEFORE_SWAP` off | the pool's last fee | same |
 | `plugin_impl` is registered | native handler | native handler |
-| `plugin_impl` is unknown or missing | VM handler through DCI | decoding fails, the pool is not quoted |
-| A field a module reads is missing | decoding fails, the pool is not quoted | same |
-| A module meets a value it cannot model | decoding fails, the pool is not quoted | same |
+| `plugin_impl` is unknown or missing | VM handler through DCI | the pool decodes and is not quoted |
+| A field a module reads is missing | the pool decodes and is not quoted | same |
+| A module meets a value it cannot model | the pool decodes and is not quoted | same |
 
 A pool is never quoted with a guessed fee. Modules read every field strictly and do not default
-a missing one, since every field is emitted when the pool names its plugin.
+a missing one, since every field is emitted when the pool names its plugin. A pool that is not
+quoted stays in the stream: its snapshot decodes, every quote returns an error, and it is quoted
+again once a delta brings its plugin back to something the simulation reproduces.
+
+### What a quote of a Nami pool assumes
+
+- **The block.** The fee moves with `block.timestamp`: by the minute around the NYSE open and
+  close on a pool with a fee source, and by the second while a keeper's fee override fades. A
+  quote is for the block it was made for.
+- **The sender.** The plugin charges its MEVX executor a fee of 1. Quotes are for any other
+  sender.
+- **No backrun.** With a MEVX router set, `afterSwap` may swap the same pool again when it finds
+  an arbitrage (about 0.5% of Base swap transactions). The swap's own output is as quoted, but
+  the pool ends at another price than the state a quote returns, so a route that uses the pool
+  twice prices its second hop from a moved state. The backrun's gas, up to the module's call gas
+  budget of 5M at most, is not in the quote.
 
 ## Adding a module
 

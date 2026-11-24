@@ -123,6 +123,18 @@ pub struct PluginSetup {
 /// Swap math runs natively. When the pool's plugin config enables `beforeSwap`, the fee and the
 /// hook gas of every quote come from the pool's [`PluginHandler`], built from the plugin's
 /// implementation and module attributes; otherwise the pool's stored fee applies.
+///
+/// # What a quote assumes
+///
+/// - **The block.** A plugin's fee can move with `block.timestamp`. Nami's moves by the minute
+///   around the NYSE open and close on a pool with a fee source, and by the second while a keeper's
+///   fee override fades. A quote is priced for the execution block the state was last pointed at,
+///   and a swap that lands in a later block can pay another fee.
+/// - **The sender.** A plugin can price by sender. Nami's charges its MEVX executor a fee of 1;
+///   quotes are for any other sender.
+/// - **No backrun.** With a MEVX router set, Nami's `afterSwap` may swap the same pool again when
+///   it finds an arbitrage. The swap's own output is as quoted, but the pool ends at another price
+///   than the state a quote returns, and the backrun's gas is not in the quote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "StateData", into = "StateData")]
 pub struct AlgebraIntegralState {
