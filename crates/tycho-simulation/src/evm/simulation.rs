@@ -712,6 +712,7 @@ mod tests {
             Account, AccountInfo, AccountStatus, Bytecode, EvmState as rState, EvmStorageSlot,
         },
     };
+    use rstest::rstest;
     use tycho_client::feed::BlockHeader;
 
     use super::*;
@@ -989,6 +990,51 @@ mod tests {
             .expect("simulation should apply the native balance override");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
+    }
+
+    /// The result holds the transient storage at the end of the call: the input slots, with the
+    /// call's TSTOREs applied. A slot set to zero is not in it.
+    #[rstest]
+    #[case::without_tracing(false)]
+    #[case::with_tracing(true)]
+    fn test_simulate_transient_storage(#[case] trace: bool) {
+        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
+        let contract =
+            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
+        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+            0x60, 0x2a, // PUSH1 42
+            0x60, 0x07, // PUSH1 7
+            0x5d, // TSTORE: slot 7 = 42
+            0x60, 0x00, // PUSH1 0
+            0x60, 0x09, // PUSH1 9
+            0x5d, // TSTORE: slot 9 = 0
+            0x00, // STOP
+        ]));
+        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
+        state
+            .init_account(contract, account, None, true)
+            .expect("contract account init succeeds");
+        state
+            .init_account(Address::ZERO, AccountInfo::default(), None, true)
+            .expect("caller account init succeeds");
+        state
+            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
+            .expect("block header update succeeds");
+        let input = HashMap::from([(U256::from(8), U256::from(3)), (U256::from(9), U256::from(5))]);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            transient_storage: Some(HashMap::from([(contract, input)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, trace)
+            .simulate(&sim_params)
+            .expect("simulation should succeed");
+
+        let expected =
+            HashMap::from([(U256::from(7), U256::from(42)), (U256::from(8), U256::from(3))]);
+        assert_eq!(result.transient_storage, HashMap::from([(contract, expected)]));
     }
 
     #[test]

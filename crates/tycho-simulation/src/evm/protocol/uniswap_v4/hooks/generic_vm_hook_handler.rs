@@ -657,19 +657,34 @@ mod tests {
             expected_pool_manager_overwrites
         );
 
-        // TODO: once transient storage is retrieved in the simulation, uncomment this
-        // let expected_pool_manager_transient_storage =            HashMap::from([
-        //         (U256::from_str("55705082733434384960622358509877205174921948415007105780397939750626106833531").unwrap(), U256::from_str("56868629622924134286587").unwrap()),
-        //         (U256::from_str("72349358219047000942299849320276948455843849691036087799430587987856838543874").unwrap(), U256::from_str("115792089237316195423570985008687907853269984665640564039457384007913129639936").unwrap()),
-        //         (U256::from_str("87100234046427240614499661373387320107015461065347489303548037305558901893923").unwrap(), U256::from_str("1").unwrap()),
-        //         (U256::from_str("56671960505278111519104690822132496699113179860588238901689140059013086026251").unwrap(), U256::from_str("2").unwrap()),
-        //     ]);
-        // assert_eq!(
-        //     *res.transient_storage
-        //         .get(&pool_manager)
-        //         .unwrap(),
-        //     expected_pool_manager_transient_storage
-        // );
+        let expected_pool_manager_transient_storage = HashMap::from([
+            // CurrencyDelta(hook, BUNNI)
+            (
+                U256::from_str("55705082733434384960622358509877205174921948415007105780397939750626106833531").unwrap(),
+                U256::from_str("56868629622924134286587").unwrap(),
+            ),
+            // CurrencyDelta(hook, ETH): -0.2 ETH
+            (
+                U256::from_str("72349358219047000942299849320276948455843849691036087799430587987856838543874").unwrap(),
+                U256::from_str("115792089237316195423570985008687907853269984665640564039457384007913129639936").unwrap(),
+            ),
+            // Unlocked
+            (
+                U256::from_str("87100234046427240614499661373387320107015461065347489303548037305558901893923").unwrap(),
+                U256::from_str("1").unwrap(),
+            ),
+            // NonzeroDeltaCount
+            (
+                U256::from_str("56671960505278111519104690822132496699113179860588238901689140059013086026251").unwrap(),
+                U256::from_str("2").unwrap(),
+            ),
+        ]);
+        assert_eq!(
+            *res.transient_storage
+                .get(&pool_manager)
+                .unwrap(),
+            expected_pool_manager_transient_storage
+        );
     }
 
     #[test]
@@ -843,13 +858,13 @@ mod tests {
         // Setting the sender in UniversalRouter transient storage
         let sender = Address::from_str("0xceeb96f4733ba07ca56d0052fb132ffa1e0d7b16").unwrap();
         let is_unlocked_slot = U256::from_be_bytes(keccak256("Locker").0) - U256::from(1);
-        let mut transient_storage = HashMap::from([(
+        let transient_storage = HashMap::from([(
             universal_router,
             HashMap::from([(is_unlocked_slot, U256::from_be_slice(sender.as_slice()))]),
         )]);
 
         let result = hook_handler
-            .before_swap(params, None, Some(transient_storage.clone()))
+            .before_swap(params, None, Some(transient_storage))
             .unwrap();
 
         assert_eq!(result.result.amount_delta, BeforeSwapDelta(I256::from_dec_str("0").unwrap()));
@@ -866,11 +881,10 @@ mod tests {
             pool_after_swap: PoolAfterSwap::default(),
         };
 
-        transient_storage.extend(result.result.transient_storage);
         let result = hook_handler.after_swap(
             after_swap_params,
             Some(result.result.overwrites),
-            Some(transient_storage),
+            Some(result.result.transient_storage),
         );
 
         let res = result.unwrap().result;
