@@ -936,7 +936,15 @@ impl ProtocolSim for UniswapV4State {
         }
 
         // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, None)?;
+        let mut fee_accrual = self
+            .hook
+            .as_ref()
+            .filter(|hook| {
+                hook.has_permission(HookOptions::AfterSwap) && hook.needs_swap_fee_accrual()
+            })
+            .map(|_| SwapFeeAccrual::default());
+        let result =
+            self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, fee_accrual.as_mut())?;
 
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
@@ -954,7 +962,12 @@ impl ProtocolSim for UniswapV4State {
                     swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
-                    pool_after_swap: PoolAfterSwap::default(),
+                    pool_after_swap: PoolAfterSwap {
+                        sqrt_price: result.sqrt_price,
+                        tick: result.tick.value(),
+                        liquidity: result.liquidity,
+                        fees: fee_accrual,
+                    },
                 };
 
                 let after_swap_result = hook
