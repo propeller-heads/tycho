@@ -5,9 +5,7 @@ use substreams_ethereum::{
 };
 
 use crate::{
-    abi::pool::events::{
-        Burn, Collect, Fee, Flash, Initialize, Mint, Plugin, PluginConfig, Skim, Swap,
-    },
+    abi::pool::events::{Burn, Fee, Initialize, Mint, Plugin, PluginConfig, Swap},
     pb::algebra::integral::v1::{
         events::{
             pool_event::{self, Typ},
@@ -36,6 +34,8 @@ pub fn map_events(block: eth::Block, pools_store: StoreGetProto<Pool>) -> Events
     Events { pool_events }
 }
 
+// `Collect`, `Flash` and `Skim` are not decoded: they change no liquidity, tick, price or plugin
+// setting, and balances come from `Transfer` logs.
 // The symmetric `else if let Some(..)` chain reads better here than the `?` form clippy wants.
 #[allow(clippy::question_mark)]
 fn maybe_pool_event(log: &Log, tx: &TransactionTrace) -> Option<PoolEvent> {
@@ -46,8 +46,6 @@ fn maybe_pool_event(log: &Log, tx: &TransactionTrace) -> Option<PoolEvent> {
         })
     } else if let Some(swap) = Swap::match_and_decode(log) {
         Typ::Swap(pool_event::Swap {
-            amount_0: swap.amount0.to_signed_bytes_be(),
-            amount_1: swap.amount1.to_signed_bytes_be(),
             sqrt_price: swap.price.to_bytes_be().1,
             liquidity: swap.liquidity.to_bytes_be().1,
             tick: swap.tick.into(),
@@ -57,29 +55,12 @@ fn maybe_pool_event(log: &Log, tx: &TransactionTrace) -> Option<PoolEvent> {
             tick_lower: mint.bottom_tick.into(),
             tick_upper: mint.top_tick.into(),
             amount: mint.liquidity_amount.to_bytes_be().1,
-            amount_0: mint.amount0.to_bytes_be().1,
-            amount_1: mint.amount1.to_bytes_be().1,
         })
     } else if let Some(burn) = Burn::match_and_decode(log) {
         Typ::Burn(pool_event::Burn {
             tick_lower: burn.bottom_tick.into(),
             tick_upper: burn.top_tick.into(),
             amount: burn.liquidity_amount.to_bytes_be().1,
-        })
-    } else if let Some(collect) = Collect::match_and_decode(log) {
-        Typ::Collect(pool_event::Collect {
-            amount_0: collect.amount0.to_bytes_be().1,
-            amount_1: collect.amount1.to_bytes_be().1,
-        })
-    } else if let Some(flash) = Flash::match_and_decode(log) {
-        Typ::Flash(pool_event::Flash {
-            paid_0: flash.paid0.to_bytes_be().1,
-            paid_1: flash.paid1.to_bytes_be().1,
-        })
-    } else if let Some(skim) = Skim::match_and_decode(log) {
-        Typ::Skim(pool_event::Skim {
-            amount_0: skim.amount0.to_bytes_be().1,
-            amount_1: skim.amount1.to_bytes_be().1,
         })
     } else if let Some(fee) = Fee::match_and_decode(log) {
         Typ::Fee(pool_event::Fee { fee: fee.fee.to_u64() as u32 })

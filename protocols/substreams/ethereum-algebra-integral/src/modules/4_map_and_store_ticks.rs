@@ -77,14 +77,9 @@ fn maybe_tick_deltas(ty: Typ) -> Option<[(i32, BigInt, BigInt); 2]> {
             ]
         }
         // Spelled out so a new event type must be classified here.
-        Typ::Initialize(_) |
-        Typ::Collect(_) |
-        Typ::Swap(_) |
-        Typ::Flash(_) |
-        Typ::Skim(_) |
-        Typ::Fee(_) |
-        Typ::Plugin(_) |
-        Typ::PluginConfig(_) => return None,
+        Typ::Initialize(_) | Typ::Swap(_) | Typ::Fee(_) | Typ::Plugin(_) | Typ::PluginConfig(_) => {
+            return None
+        }
     })
 }
 
@@ -113,8 +108,6 @@ mod tests {
             tick_lower: -60,
             tick_upper: 60,
             amount: amount(1_000),
-            amount_0: amount(1),
-            amount_1: amount(2),
         }))
         .unwrap();
 
@@ -147,13 +140,8 @@ mod tests {
 
     #[test]
     fn test_other_events_move_no_ticks() {
-        let swap = Typ::Swap(pool_event::Swap {
-            amount_0: amount(1),
-            amount_1: amount(2),
-            sqrt_price: amount(3),
-            liquidity: amount(4),
-            tick: 5,
-        });
+        let swap =
+            Typ::Swap(pool_event::Swap { sqrt_price: amount(3), liquidity: amount(4), tick: 5 });
         let setting = Typ::PluginConfig(pool_event::PluginConfig { plugin_config: 195 });
 
         assert!(maybe_tick_deltas(swap).is_none());

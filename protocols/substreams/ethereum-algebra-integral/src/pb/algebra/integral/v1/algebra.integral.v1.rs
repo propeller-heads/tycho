@@ -60,7 +60,9 @@ pub struct LiquidityChanges {
     #[prost(message, repeated, tag="1")]
     pub changes: ::prost::alloc::vec::Vec<LiquidityChange>,
 }
-/// All numeric amounts below are BigInt values encoded as big-endian bytes; signed where noted.
+/// The pool events the modules read. Events that change nothing the package indexes (`Collect`,
+/// `Flash`, `Skim`) and token amounts, which balances take from `Transfer` logs, are left out.
+/// All numeric values below are BigInt values encoded as big-endian bytes.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Events {
     #[prost(message, repeated, tag="1")]
@@ -76,7 +78,7 @@ pub mod events {
         pub pool_address: ::prost::alloc::vec::Vec<u8>,
         #[prost(message, optional, tag="15")]
         pub transaction: ::core::option::Option<::tycho_substreams::prelude::Transaction>,
-        #[prost(oneof="pool_event::Typ", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+        #[prost(oneof="pool_event::Typ", tags="1, 2, 4, 5, 8, 9, 10")]
         pub typ: ::core::option::Option<pool_event::Typ>,
     }
     /// Nested message and enum types in `PoolEvent`.
@@ -96,17 +98,6 @@ pub mod events {
             pub tick_upper: i32,
             #[prost(bytes="vec", tag="3")]
             pub amount: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="4")]
-            pub amount_0: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="5")]
-            pub amount_1: ::prost::alloc::vec::Vec<u8>,
-        }
-        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-        pub struct Collect {
-            #[prost(bytes="vec", tag="1")]
-            pub amount_0: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="2")]
-            pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct Burn {
@@ -117,33 +108,14 @@ pub mod events {
             #[prost(bytes="vec", tag="3")]
             pub amount: ::prost::alloc::vec::Vec<u8>,
         }
-        /// amount_0 and amount_1 are signed pool balance deltas.
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct Swap {
-            #[prost(bytes="vec", tag="1")]
-            pub amount_0: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="2")]
-            pub amount_1: ::prost::alloc::vec::Vec<u8>,
             #[prost(bytes="vec", tag="3")]
             pub sqrt_price: ::prost::alloc::vec::Vec<u8>,
             #[prost(bytes="vec", tag="4")]
             pub liquidity: ::prost::alloc::vec::Vec<u8>,
             #[prost(int32, tag="5")]
             pub tick: i32,
-        }
-        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-        pub struct Flash {
-            #[prost(bytes="vec", tag="1")]
-            pub paid_0: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="2")]
-            pub paid_1: ::prost::alloc::vec::Vec<u8>,
-        }
-        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-        pub struct Skim {
-            #[prost(bytes="vec", tag="1")]
-            pub amount_0: ::prost::alloc::vec::Vec<u8>,
-            #[prost(bytes="vec", tag="2")]
-            pub amount_1: ::prost::alloc::vec::Vec<u8>,
         }
         /// The pool's stored fee, used when the plugin does not override it.
         #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -167,16 +139,10 @@ pub mod events {
             Initialize(Initialize),
             #[prost(message, tag="2")]
             Mint(Mint),
-            #[prost(message, tag="3")]
-            Collect(Collect),
             #[prost(message, tag="4")]
             Burn(Burn),
             #[prost(message, tag="5")]
             Swap(Swap),
-            #[prost(message, tag="6")]
-            Flash(Flash),
-            #[prost(message, tag="7")]
-            Skim(Skim),
             #[prost(message, tag="8")]
             Fee(Fee),
             #[prost(message, tag="9")]

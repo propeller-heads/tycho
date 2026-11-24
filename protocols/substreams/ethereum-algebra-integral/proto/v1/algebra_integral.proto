@@ -54,7 +54,9 @@ enum LiquidityChangeType {
   ABSOLUTE = 1;
 }
 
-// All numeric amounts below are BigInt values encoded as big-endian bytes; signed where noted.
+// The pool events the modules read. Events that change nothing the package indexes (`Collect`,
+// `Flash`, `Skim`) and token amounts, which balances take from `Transfer` logs, are left out.
+// All numeric values below are BigInt values encoded as big-endian bytes.
 message Events {
   repeated PoolEvent pool_events = 1;
 
@@ -62,15 +64,13 @@ message Events {
     oneof typ {
       Initialize initialize = 1;
       Mint mint = 2;
-      Collect collect = 3;
       Burn burn = 4;
       Swap swap = 5;
-      Flash flash = 6;
-      Skim skim = 7;
       Fee fee = 8;
       Plugin plugin = 9;
       PluginConfig plugin_config = 10;
     }
+    reserved 3, 6, 7;
     uint64 log_ordinal = 11;
     bytes pool_address = 12;
     tycho.evm.v1.Transaction transaction = 15;
@@ -84,13 +84,6 @@ message Events {
       int32 tick_lower = 1;
       int32 tick_upper = 2;
       bytes amount = 3;
-      bytes amount_0 = 4;
-      bytes amount_1 = 5;
-    }
-
-    message Collect {
-      bytes amount_0 = 1;
-      bytes amount_1 = 2;
     }
 
     message Burn {
@@ -99,23 +92,11 @@ message Events {
       bytes amount = 3;
     }
 
-    // amount_0 and amount_1 are signed pool balance deltas.
     message Swap {
-      bytes amount_0 = 1;
-      bytes amount_1 = 2;
+      reserved 1, 2;
       bytes sqrt_price = 3;
       bytes liquidity = 4;
       int32 tick = 5;
-    }
-
-    message Flash {
-      bytes paid_0 = 1;
-      bytes paid_1 = 2;
-    }
-
-    message Skim {
-      bytes amount_0 = 1;
-      bytes amount_1 = 2;
     }
 
     // The pool's stored fee, used when the plugin does not override it.

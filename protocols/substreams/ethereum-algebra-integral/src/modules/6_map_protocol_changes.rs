@@ -623,7 +623,7 @@ fn event_to_attributes_updates(ty: Typ) -> Vec<Attribute> {
                     .1,
             )]
         }
-        Typ::Mint(_) | Typ::Burn(_) | Typ::Collect(_) | Typ::Flash(_) | Typ::Skim(_) => vec![],
+        Typ::Mint(_) | Typ::Burn(_) => vec![],
     }
 }
 

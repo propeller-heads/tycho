@@ -18,11 +18,8 @@ fn variant_name(typ: &Typ) -> &'static str {
     match typ {
         Typ::Initialize(_) => "Initialize",
         Typ::Mint(_) => "Mint",
-        Typ::Collect(_) => "Collect",
         Typ::Burn(_) => "Burn",
         Typ::Swap(_) => "Swap",
-        Typ::Flash(_) => "Flash",
-        Typ::Skim(_) => "Skim",
         Typ::Fee(_) => "Fee",
         Typ::Plugin(_) => "Plugin",
         Typ::PluginConfig(_) => "PluginConfig",
@@ -33,24 +30,9 @@ fn variant_name(typ: &Typ) -> &'static str {
 fn sample_typs() -> Vec<Typ> {
     vec![
         Typ::Initialize(pool_event::Initialize { sqrt_price: vec![1, 2, 3], tick: -7 }),
-        Typ::Mint(pool_event::Mint {
-            tick_lower: -60,
-            tick_upper: 60,
-            amount: vec![4],
-            amount_0: vec![5],
-            amount_1: vec![6],
-        }),
-        Typ::Collect(pool_event::Collect { amount_0: vec![7], amount_1: vec![8] }),
+        Typ::Mint(pool_event::Mint { tick_lower: -60, tick_upper: 60, amount: vec![4] }),
         Typ::Burn(pool_event::Burn { tick_lower: -120, tick_upper: 120, amount: vec![9] }),
-        Typ::Swap(pool_event::Swap {
-            amount_0: vec![10],
-            amount_1: vec![11],
-            sqrt_price: vec![12],
-            liquidity: vec![13],
-            tick: 14,
-        }),
-        Typ::Flash(pool_event::Flash { paid_0: vec![15], paid_1: vec![16] }),
-        Typ::Skim(pool_event::Skim { amount_0: vec![17], amount_1: vec![18] }),
+        Typ::Swap(pool_event::Swap { sqrt_price: vec![12], liquidity: vec![13], tick: 14 }),
         Typ::Fee(pool_event::Fee { fee: 500 }),
         Typ::Plugin(pool_event::Plugin { plugin: vec![0xAA; 20] }),
         Typ::PluginConfig(pool_event::PluginConfig { plugin_config: 195 }),

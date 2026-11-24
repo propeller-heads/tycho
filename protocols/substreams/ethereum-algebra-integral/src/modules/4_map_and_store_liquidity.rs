@@ -76,14 +76,7 @@ fn maybe_current_tick(ty: Typ) -> Option<i32> {
         Typ::Initialize(init) => Some(init.tick),
         Typ::Swap(swap) => Some(swap.tick),
         // Spelled out so a new event type must be classified here.
-        Typ::Mint(_) |
-        Typ::Collect(_) |
-        Typ::Burn(_) |
-        Typ::Flash(_) |
-        Typ::Skim(_) |
-        Typ::Fee(_) |
-        Typ::Plugin(_) |
-        Typ::PluginConfig(_) => None,
+        Typ::Mint(_) | Typ::Burn(_) | Typ::Fee(_) | Typ::Plugin(_) | Typ::PluginConfig(_) => None,
     }
 }
 
@@ -117,12 +110,6 @@ fn maybe_liquidity_change(
             LiquidityChangeType::Absolute,
         )),
         // Spelled out so a new event type must be classified here.
-        Typ::Initialize(_) |
-        Typ::Collect(_) |
-        Typ::Flash(_) |
-        Typ::Skim(_) |
-        Typ::Fee(_) |
-        Typ::Plugin(_) |
-        Typ::PluginConfig(_) => None,
+        Typ::Initialize(_) | Typ::Fee(_) | Typ::Plugin(_) | Typ::PluginConfig(_) => None,
     }
 }
