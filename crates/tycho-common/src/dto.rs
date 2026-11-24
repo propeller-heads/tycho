@@ -1799,8 +1799,9 @@ impl From<models::blockchain::DCIUpdate> for DCIUpdate {
 pub struct ComponentTvlRequestBody {
     #[serde(default)]
     pub chain: Chain,
-    /// Filters protocol components by protocol system
-    /// Useful when `component_ids` is omitted to fetch all components under a specific system.
+    /// Name of the protocol system whose components' TVL is returned. Optional: without it, or
+    /// with an empty or blank value, the TVL of all active protocol systems, limited to the
+    /// plan's protocol systems on a restricted plan.
     #[serde(alias = "protocolSystem")]
     pub protocol_system: Option<String>,
     #[serde(default)]

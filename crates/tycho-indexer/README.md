@@ -62,9 +62,7 @@ Tycho's RPC service allows clients to query historical data and current state in
 
 #### Protocol System Requirement
 
-In the current design, specifying the `protocol_system` in your RPC requests is optional. However, it plays a critical role in ensuring accurate data retrieval. The protocol_system determines which extractor is used to calculate where to query states from (the buffer or the database). If not provided, the system defaults to using a random extractor, which may not always be fully synchronized. This can lead to inconsistencies or faulty responses.
-
-In a future version of Tycho, the protocol_system parameter will become mandatory to eliminate these risks and ensure reliable, consistent data retrieval. Therefore, it is strongly recommended to always include protocol_system in your requests to guarantee accurate results.
+`/contract_state`, `/protocol_state`, `/protocol_components` and `/traced_entry_points` require `protocol_system`. Use a name from `/v1/protocol_systems`. A request without the field gets a 400. On `/contract_state` and `/protocol_state`, an empty or blank value also gets a 400, and the response includes the changes of that protocol system that the server has not yet written to the database. On `/component_tvl` the field is optional: with it, the response holds the TVL of that protocol system's components; without it, the TVL of all active protocol systems, or of your plan's protocol systems if your plan limits them. An empty or blank value counts as no value.
 
 #### Cache Management
 
