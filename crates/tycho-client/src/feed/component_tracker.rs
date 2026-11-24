@@ -1005,9 +1005,16 @@ mod test {
         assert!(tracker.paused.contains("pool"));
     }
 
+    /// The server reports "pool" as paused; an event of this subscription may have unpaused it.
+    #[rstest::rstest]
+    #[case::no_event(false)]
+    #[case::unpaused_by_event(true)]
     #[tokio::test]
-    async fn test_start_tracking_skips_paused() {
+    async fn test_start_tracking_skips_paused(#[case] unpaused_by_event: bool) {
         let mut tracker = new_tracker(tvl_filter(), &[]);
+        if unpaused_by_event {
+            tracker.record_pause_events(&block_changes(&[], &["pool"], &[]));
+        }
         let paused = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
         tracker
             .rpc_client
@@ -1030,16 +1037,26 @@ mod test {
             .await
             .expect("start tracking");
 
-        assert!(tracker.components.is_empty());
-        assert!(tracker.paused.contains("pool"));
+        assert_eq!(tracker.components.contains_key("pool"), unpaused_by_event);
+        assert_eq!(tracker.paused.contains("pool"), !unpaused_by_event);
     }
 
     /// With a TVL filter, a paused component is not tracked, so the refresh asks about it only
-    /// because it is recorded as paused.
+    /// because it is recorded as paused. The server reports it as not paused, which only counts
+    /// when the event that paused it came before the last subscription.
+    #[rstest::rstest]
+    #[case::earlier_subscription(true, &["pool"])]
+    #[case::this_subscription(false, &[])]
     #[tokio::test]
-    async fn test_refresh_paused_untracked_pool() {
+    async fn test_refresh_paused_untracked_pool(
+        #[case] resubscribed: bool,
+        #[case] expected_unpaused: &[&str],
+    ) {
         let mut tracker = new_tracker(tvl_filter(), &[]);
         tracker.record_pause_events(&block_changes(&["pool"], &[], &[]));
+        if resubscribed {
+            tracker.forget_pause_events();
+        }
         let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
         tracker
             .rpc_client
@@ -1051,8 +1068,12 @@ mod test {
             .await
             .expect("refresh paused");
 
-        assert_eq!(unpaused, HashSet::from(["pool".to_string()]));
-        assert!(!tracker.paused.contains("pool"));
+        let expected_unpaused: HashSet<String> = expected_unpaused
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+        assert_eq!(unpaused, expected_unpaused);
+        assert_eq!(tracker.paused.contains("pool"), !resubscribed);
     }
 
     #[rstest::rstest]
@@ -1079,12 +1100,22 @@ mod test {
         assert_eq!(to_track, expected);
     }
 
+    /// The pause check after a restart found "pool" unpaused, or an event of this subscription
+    /// unpaused it.
     #[rstest::rstest]
-    #[case::above_add_tvl(false, &["pool"])]
-    #[case::still_paused(true, &[])]
+    #[case::above_add_tvl(false, false, &["pool"])]
+    #[case::still_paused(false, true, &[])]
+    #[case::unpaused_by_event(true, true, &["pool"])]
     #[tokio::test]
-    async fn test_unpaused_to_track_tvl(#[case] server_paused: bool, #[case] expected: &[&str]) {
+    async fn test_unpaused_to_track_tvl(
+        #[case] unpaused_by_event: bool,
+        #[case] server_paused: bool,
+        #[case] expected: &[&str],
+    ) {
         let mut tracker = new_tracker(tvl_filter(), &[]);
+        if unpaused_by_event {
+            tracker.record_pause_events(&block_changes(&[], &["pool"], &[]));
+        }
         let expected_params = ProtocolComponentsPaginatedParams::new(
             Chain::Ethereum,
             "uniswap-v2",
@@ -1112,6 +1143,6 @@ mod test {
             .expect("unpaused to track");
 
         assert_eq!(to_track, expected);
-        assert_eq!(tracker.paused.contains("pool"), server_paused);
+        assert_eq!(tracker.paused.contains("pool"), expected.is_empty());
     }
 }

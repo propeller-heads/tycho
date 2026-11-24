@@ -5388,6 +5388,10 @@ mod test {
         state_sync
             .component_tracker
             .record_pause_events(&pause);
+        // The restart subscribes again, so the pause event belongs to the earlier subscription.
+        state_sync
+            .component_tracker
+            .forget_pause_events();
         state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
 
         state_sync
@@ -5748,10 +5752,11 @@ mod test {
             .is_empty());
     }
 
-    /// The fetch ran at block 1 and reported "Paused" as paused. A buffered block may unpause it.
+    /// The fetch ran at block 1 and reported "Paused" as paused. A block may unpause it, at the
+    /// snapshot block or after it.
     #[rstest::rstest]
     #[case::still_paused(None, true)]
-    #[case::unpaused_at_snapshot_block(Some(1), true)]
+    #[case::unpaused_at_snapshot_block(Some(1), false)]
     #[case::unpaused_since(Some(2), false)]
     #[tokio::test]
     async fn test_drain_snapshot_records_paused(
@@ -5764,7 +5769,9 @@ mod test {
         if let Some(block) = unpaused_at {
             let mut unpause = make_block_changes(block, None);
             unpause.unpaused_components = HashSet::from(["Paused".to_string()]);
-            state_sync.buffered_deltas.push(unpause);
+            state_sync
+                .component_tracker
+                .record_pause_events(&unpause);
         }
 
         #[expect(
@@ -5946,9 +5953,16 @@ mod test {
         assert_eq!(account.code, Bytes::from("0x0c0d"));
     }
 
+    /// The server reports "Paused" as paused; an event may have unpaused it.
+    #[rstest::rstest]
+    #[case::no_event(false)]
+    #[case::unpaused_by_event(true)]
     #[tokio::test]
-    async fn test_fetch_snapshot_background_skips_paused() {
+    async fn test_fetch_snapshot_background_skips_paused(#[case] unpaused_by_event: bool) {
         let mut rpc_client = MockRPCClient::new();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_, _, _| Ok(Snapshot::default()));
         rpc_client
             .expect_get_protocol_components()
             .returning(|_| {
@@ -5971,11 +5985,67 @@ mod test {
             include_tvl: false,
         };
 
-        let result = fetch_snapshot_background(rpc_client, vec!["Paused".to_string()], params)
-            .await
-            .expect("fetch snapshot");
+        let unpaused =
+            if unpaused_by_event { HashSet::from(["Paused".to_string()]) } else { HashSet::new() };
 
-        assert!(result.components.is_empty());
-        assert_eq!(result.paused_component_ids, HashSet::from(["Paused".to_string()]));
+        let result =
+            fetch_snapshot_background(rpc_client, vec!["Paused".to_string()], unpaused, params)
+                .await
+                .expect("fetch snapshot");
+
+        assert_eq!(result.components.contains_key("Paused"), unpaused_by_event);
+        assert_eq!(result.paused_component_ids.is_empty(), unpaused_by_event);
+    }
+
+    /// Block 1 may unpause "pool", whose snapshot the synchronizer then fetches at block 1 from a
+    /// server that still reports it as paused.
+    #[rstest::rstest]
+    #[case::no_event(false)]
+    #[case::unpaused_at_snapshot_block(true)]
+    #[tokio::test]
+    async fn test_snapshot_unpaused_by_event(#[case] unpaused_by_event: bool) {
+        let mut rpc_client = MockRPCClient::new();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    ComponentsWithPauses::new(
+                        vec![ProtocolComponent { id: "pool".to_string(), ..Default::default() }],
+                        HashSet::from(["pool".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_, _, _| Ok(Snapshot::default()));
+        let mut state_sync = with_mocked_clients(true, false, Some(rpc_client), None);
+        let mut block = make_block_changes(1, None);
+        if unpaused_by_event {
+            block.unpaused_components = HashSet::from(["pool".to_string()]);
+        }
+        state_sync
+            .component_tracker
+            .record_pause_events(&block);
+
+        state_sync.spawn_snapshot_task(
+            vec!["pool".to_string()],
+            &BlockHeader { number: 1, ..Default::default() },
+            &block,
+        );
+        for _ in 0..100 {
+            if state_sync.snapshot_tasks.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            state_sync.drain_completed_snapshots();
+        }
+
+        assert!(state_sync.snapshot_tasks.is_empty());
+        let tracker = &state_sync.component_tracker;
+        assert_eq!(tracker.components.contains_key("pool"), unpaused_by_event);
+        assert_eq!(tracker.unpaused_by_event(&"pool".to_string()), unpaused_by_event);
     }
 }
