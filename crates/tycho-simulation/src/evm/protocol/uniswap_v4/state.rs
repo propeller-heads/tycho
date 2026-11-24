@@ -2996,6 +2996,132 @@ mod tests {
         );
     }
 
+    /// Hook that charges a fee as `EpochHook` (`0x3af656de4507e822ccd86acf235198c3bba3e0cc` on
+    /// mainnet) does. `beforeSwap` stores the fee with TSTORE. When token 0 goes in, `beforeSwap`
+    /// also takes the fee from the input, and `afterSwap` refuses the swap unless the pool took
+    /// the rest of the input. When token 1 goes in, `afterSwap` takes the fee from the output.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TransientFeeTestHook;
+
+    const TRANSIENT_FEE_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
+    const TRANSIENT_FEE: u64 = 4_321;
+
+    impl HookHandler for TransientFeeTestHook {
+        fn address(&self) -> Address {
+            construct_hook_address(&[
+                HookOptions::BeforeSwap,
+                HookOptions::AfterSwap,
+                HookOptions::AfterSwapReturnsDelta,
+            ])
+        }
+
+        fn before_swap(
+            &self,
+            params: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            let stored_fee = HashMap::from([(TRANSIENT_FEE_SLOT, U256::from(TRANSIENT_FEE))]);
+            // A positive specified delta: the hook keeps the fee out of the input.
+            let input_fee = if params.swap_params.zero_for_one {
+                BeforeSwapDelta(I256::from_raw(U256::from(TRANSIENT_FEE) << 128))
+            } else {
+                BeforeSwapDelta(I256::ZERO)
+            };
+            Ok(WithGasEstimate {
+                gas_estimate: 0,
+                result: BeforeSwapOutput {
+                    amount_delta: input_fee,
+                    fee: U24::ZERO,
+                    overwrites: HashMap::new(),
+                    transient_storage: HashMap::from([(self.address(), stored_fee)]),
+                },
+            })
+        }
+
+        fn after_swap(
+            &self,
+            params: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            let fee = transient_storage
+                .unwrap_or_default()
+                .get(&self.address())
+                .and_then(|slots| slots.get(&TRANSIENT_FEE_SLOT))
+                .map_or(0, |fee| fee.to::<u64>());
+            if !params.swap_params.zero_for_one {
+                return Ok(WithGasEstimate { gas_estimate: 0, result: I128::unchecked_from(fee) });
+            }
+            let requested = params
+                .swap_params
+                .amount_specified
+                .unsigned_abs();
+            let taken = params.delta.amount0().unsigned_abs();
+            if U256::from(taken) + U256::from(fee) != requested {
+                return Err(SimulationError::FatalError("PartialFill()".into()));
+            }
+            Ok(WithGasEstimate { gas_estimate: 0, result: I128::ZERO })
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    /// On chain, `beforeSwap` and `afterSwap` run in one transaction, so `afterSwap` reads the
+    /// fee that `beforeSwap` stored with TSTORE. Its delta holds the input that the pool took, as
+    /// `Pool.swap` returns it.
+    #[rstest]
+    #[case::fee_from_input(true)]
+    #[case::fee_from_output(false)]
+    fn test_after_swap_transient_storage(#[case] zero_for_one: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(zero_for_one);
+        let amount_in = 1_000_000_000_000_000u64;
+        let (pool_input, output_fee) =
+            if zero_for_one { (amount_in - TRANSIENT_FEE, 0) } else { (amount_in, TRANSIENT_FEE) };
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(BigUint::from(pool_input), &token_in, &token_out)
+            .expect("hookless swap should succeed");
+
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(TransientFeeTestHook));
+        let hooked = pool
+            .get_amount_out(BigUint::from(amount_in), &token_in, &token_out)
+            .expect("hooked swap should succeed");
+
+        assert_eq!(hooked.amount, hookless.amount - BigUint::from(output_fee));
+    }
+
     /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
     /// does: only when the taker's price limit reaches the order's price.
     #[derive(Debug, Clone, PartialEq, Eq)]
