@@ -67,6 +67,13 @@ The package emits, on the pool's component:
 
 | Attribute | Value | From |
 |---|---|---|
+| `sqrt_price_x96`, `tick` | the pool's price, big-endian, and its current tick, signed big-endian | `Initialize` and `Swap` events; zero at creation |
+| `liquidity` | the pool's active liquidity, big-endian | `Mint` and `Burn` over the current tick, and `Swap`; zero at creation |
+| `ticks/<i>` | net liquidity of initialized tick `i`, signed big-endian; created when the tick's gross liquidity turns positive, deleted when it returns to zero | `Mint` and `Burn` events |
+| `fee` | the pool's stored fee, used when the plugin does not override it | `Fee` events; zero at creation |
+| `plugin` | 20-byte address of the pool's plugin: absent until the pool's first `Plugin` event, zero after one that names no plugin | `Plugin` events |
+| `plugin_config` | the pool's plugin flags, one byte | `PluginConfig` events; zero at creation |
+| `paused` | present, with value `1`, while the pool names a plugin whose configuration is not known | see [Wiring the pool modules](#wiring-the-pool-modules) |
 | `plugin_impl` | 20-byte address of the implementation the plugin runs | the plugin's read of `beacon.implementation()` in its creation transaction, then the beacon's `Upgraded` events |
 | `<module>/<field>` | the field's bytes: big-endian, exactly as wide as the field | the plugin's storage writes, decoded through the module slot table |
 
@@ -128,6 +135,16 @@ block.
 ## Layout
 
 ```
+src/modules/       the pool modules, numbered by their stage in the module graph
+  1_map_pool_created.rs               components from the factory's Pool events
+  2_store_pools.rs                    each pool's tokens
+  3_map_events.rs                     the pool events the later modules read
+  4_map_and_store_balance_changes.rs  balances from Transfer logs
+  4_map_and_store_ticks.rs            net and gross liquidity per tick
+  4_map_and_store_liquidity.rs        active liquidity
+  4_store_pool_plugins.rs             each pool's plugin, and the reverse
+  5_store_plugin_beacons.rs           beacon links, and what each pool carries
+  6_map_protocol_changes.rs           everything above as BlockChanges, and the plugin wiring
 src/plugin/
   storage.rs       StorageField: slot, offset and width of one value, checked at compile time
   attributes.rs    creation_attributes, update_attributes: writes and modules to attributes
@@ -137,6 +154,11 @@ src/plugin/
     mod.rs         PluginModule, MODULES (every indexed module), modules_named
     algebra/       modules Algebra publishes
       dynamic_fee.rs
+      farming.rs
+    nami/          modules only Nami deploys
+      anti_sniper.rs
+      fee_override.rs
+      mevx.rs
     <dex>/         modules only that DEX deploys
 ```
 
