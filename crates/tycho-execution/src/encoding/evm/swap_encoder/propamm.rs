@@ -5,16 +5,15 @@ use tycho_common::{models::Chain, Bytes};
 
 use crate::encoding::{
     errors::EncodingError,
-    evm::utils::bytes_to_address,
+    evm::{constants::PAMM_ADDRESS_ATTRIBUTE, utils::bytes_to_address},
     models::{EncodingContext, Swap},
     swap_encoder::SwapEncoder,
 };
 
-/// Static attribute under which pAMM components carry their venue address.
-const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
-
 /// Encodes a swap on any pAMM implementing the standard `IPropAMM` interface pushed by Titan,
-/// whether its components come from the price level stream or are indexed natively (`biconomy`).
+/// whether its components come from the price level stream, are indexed natively (`biconomy`) or
+/// come from a book feed (`efficient_prop`, one listing door per component). Efficient pools
+/// (`flamm`, a book feed too) take the same `swap` call and implement nothing else of `IPropAMM`.
 ///
 /// A single generic executor serves all such venues, so the pAMM address travels in the swap data
 /// (packed `pamm ++ token_in ++ token_out`), taken from the component's `pamm_address` static
@@ -80,12 +79,19 @@ impl SwapEncoder for PropAMMSwapEncoder {
 
 #[cfg(test)]
 mod tests {
-    use alloy::hex::encode;
+    use alloy::{hex::encode, primitives::keccak256};
     use num_bigint::BigUint;
     use tycho_common::models::protocol::ProtocolComponent;
 
     use super::*;
-    use crate::encoding::{evm::utils::write_calldata_to_file, models::default_token};
+    use crate::encoding::{
+        evm::{
+            constants::EFFICIENT_PROP_PROTOCOL_SYSTEM,
+            swap_encoder::swap_encoder_registry::SwapEncoderRegistry,
+            utils::write_calldata_to_file,
+        },
+        models::default_token,
+    };
 
     // Must match what the Solidity integration test decodes the generated calldata against
     // (`contracts/test/protocols/PropAMM.t.sol`: `MOCK_PAMM`, `WETH_ADDR`, `USDC_ADDR`).
@@ -138,6 +144,67 @@ mod tests {
 
         assert_eq!(hex_swap, format!("{PAMM}{WETH}{USDC}"));
         write_calldata_to_file("test_encode_propamm_weth_usdc", hex_swap.as_str());
+    }
+
+    /// A listing door on Base, encoded through the encoder a Base registry resolves for the
+    /// listing doors from the test addresses: Base's executor addresses list no executor for the
+    /// doors until Base is served. `contracts/test/protocols/EfficientProp.t.sol` fills `DOOR`
+    /// with these calldata through Base's `PropAMMExecutor`, both directions.
+    #[test]
+    fn test_encode_efficient_prop_listing_door_on_base() {
+        // No door is pinned: the encoding names a placeholder, which the fork test that reads
+        // these calldata replaces with the door it is given.
+        let door = encode(&keccak256("efficient-prop-door")[12..]);
+        const TEST_EXECUTOR: &str = "92a6649fdcc044da968d94202465578a9371c7b1";
+        const BASE_WETH: &str = "4200000000000000000000000000000000000006";
+        const BASE_USDC: &str = "833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(Some(
+                std::fs::read_to_string("config/test_executor_addresses.json").unwrap(),
+            ))
+            .unwrap();
+        let encoder = registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .unwrap();
+        assert_eq!(encoder.executor_address(), &Bytes::from(format!("0x{TEST_EXECUTOR}").as_str()));
+
+        for (token_in, token_out, identifier) in [
+            (BASE_WETH, BASE_USDC, "test_encode_efficient_prop_weth_usdc"),
+            (BASE_USDC, BASE_WETH, "test_encode_efficient_prop_usdc_weth"),
+        ] {
+            let component = ProtocolComponent {
+                id: format!("0x{door}"),
+                protocol_system: EFFICIENT_PROP_PROTOCOL_SYSTEM.to_string(),
+                static_attributes: HashMap::from([(
+                    PAMM_ADDRESS_ATTRIBUTE.to_string(),
+                    Bytes::from(format!("0x{door}").as_str()),
+                )]),
+                ..Default::default()
+            };
+            let token_in = Bytes::from(format!("0x{token_in}").as_str());
+            let token_out = Bytes::from(format!("0x{token_out}").as_str());
+            let swap = Swap::new(
+                component,
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            );
+            let encoding_context = EncodingContext {
+                router_address: Some(Bytes::zero(20)),
+                group_token_in: token_in.clone(),
+                group_token_out: token_out.clone(),
+                origin: None,
+            };
+
+            let hex_swap = encode(
+                encoder
+                    .encode_swap(&swap, &encoding_context)
+                    .unwrap(),
+            );
+
+            assert_eq!(hex_swap, format!("{door}{}{}", encode(&token_in), encode(&token_out)));
+            write_calldata_to_file(identifier, hex_swap.as_str());
+        }
     }
 
     #[test]

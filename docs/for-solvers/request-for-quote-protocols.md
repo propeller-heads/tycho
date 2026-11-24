@@ -309,6 +309,32 @@ BaiBai books do not include it, because the priority fee is set when the transac
 These values were measured on Base at block 53,545,000. The venue owner can change the threshold and the cap without a contract upgrade, and Tycho does not read them.
 {% endhint %}
 
+{% hint style="warning" %}
+**Efficient PropAMM: taker tip cap**
+
+Each Efficient PropAMM listing door refuses a swap whose transaction pays a priority fee (gas price minus basefee) above its listing's taker tip cap, and the whole route reverts. The listing's operator sets the cap and can change it, and you choose the priority fee after the route is priced, so the books cannot hold a route to it.
+
+Each book carries its listing's cap at the read, in wei per gas, in the `tip_cap_wei` static attribute, which a listing with no cap leaves out. Send a route through listing doors with a priority fee at or under the lowest cap among them. If you always send above some priority fee, `EfficientPropFeedBuilder::min_tip_cap_wei` leaves out the listings that would refuse it.
+{% endhint %}
+
+{% hint style="warning" %}
+**Efficient PropAMM: fills that borrow, and gas limits**
+
+A listing with a credit mode fills its larger sizes through its pool's credit route: the pool borrows or repays at its lender inside the swap. On the first Ethereum pool's wstETH/WETH listing such a fill uses about 0.93M to 1.13M gas before refunds, against about 0.14M for a fill the pool's custody pays. Each fill is charged the figure of its path, measured on that listing's pool; the route's gas moves with the pool's state by several percent.
+
+The figures are what a fill costs its transaction after refunds, not a gas limit. The call uses more before the transaction ends: the figure plus its refund, 19,900 on a fill the pool's custody pays and 84,400 to 99,500 on the first pool's route. A fill also forwards its gas through three contracts, each keeping a 64th back, so the least limit that lets a fill through is above what it uses: 11% to 20% above the gas before refunds, measured through the `PropAMMExecutor`. Give a route through a listing door at least 25% over its estimate plus those refunds, or it can run out of gas and revert.
+
+On a listing that has a route, size the limit from the route's gas before refunds whatever the size: each figure is the least a first fill in a fresh block pays, and a size quoted inside custody fills through the route when another fill of the same block takes the pool's balance first.
+{% endhint %}
+
+{% hint style="warning" %}
+**Efficient PropAMM on Ethereum: `NoWord`**
+
+On Ethereum a maker's update reaches the chain only inside a builder's block, and a listing door fills only in the block that carries its maker's update, or, where the listing and the update carry, in the block after. In any other block the door reverts `NoWord`, the whole route reverts, and the taker pays the gas. The books are read from the `/state` answers for the next block (`EfficientPropFeedBuilder::state_urls`) and only quote a listing whose update an answer holds, but a book cannot know which builder wins the block: a route sent to a builder that does not carry the update, or one that lands a block late, reverts.
+
+Send routes through Ethereum listing doors only to the builders that carry the makers' updates, and only for the block the books were read for. Each side quotes until its last block's time less a 1 s landing allowance; a route sent after that is refused by the book, not by the chain. Keep listing doors out of a route you cannot afford to revert, or send them as a route of their own.
+{% endhint %}
+
 ## pAMM Price Level Stream
 
 Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.

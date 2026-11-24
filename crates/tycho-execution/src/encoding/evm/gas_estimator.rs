@@ -2,9 +2,9 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-        UNISWAP_V3_FORKS,
+        BAIBAI_PROTOCOL_SYSTEM, EFFICIENT_PROP_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
+        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -62,6 +62,8 @@ pub fn is_callback_protocol(protocol_system: &str) -> bool {
 /// [`optimizable_transfer_in`] for the full classification.
 pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
     "biconomy",
+    EFFICIENT_PROP_PROTOCOL_SYSTEM,
+    "flamm",
     "erc4626",
     "maverick_v2",
     "uniswap_v2",
@@ -444,6 +446,20 @@ mod tests {
     }
 
     #[test]
+    fn test_single_efficient_prop_listing_door() {
+        // A listing door is push-payment like any IPropAMM venue: the router funds the door
+        // directly, so the router-to-pool input transfer is skipped.
+        let solution = make_solution(vec![make_swap(EFFICIENT_PROP_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← push-payment, funds sent directly
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
     fn test_single_fallback_router() {
         // Routing a pAMM through the TychoFallbackRouter keeps the leg push-payment (the funded
         // address is the fallback router), so no input transfer; the wrapper overhead is extra.
@@ -709,6 +725,33 @@ mod tests {
         // user transfer: 0 (first group is callback + TransferFrom)
         // fee output transfer: 60_000 (last swap is uniswap_v2, not in OUTPUT_TO_ROUTER)
         assert_eq!(gas, BigUint::from(240_000u64));
+    }
+
+    #[test]
+    fn test_single_flamm() {
+        // An Efficient pool is paid directly and finds its input, so the router neither hops the
+        // input through itself nor approves the pool.
+        let solution = make_solution(vec![make_swap("flamm")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // input transfer                            0  ← push-payment, funds sent directly
+        // pool gas                            100_000
+        // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(200_000u64));
+    }
+
+    #[test]
+    fn test_sequential_two_flamm_pools() {
+        // One Efficient pool pays the next directly: no router hop and no approval on either.
+        let solution = make_solution(vec![make_swap("flamm"), make_swap("flamm")]);
+        let gas = estimate_gas_usage(&solution, Strategy::Sequential);
+
+        // user transfer (first hop, TransferFrom) 40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // hop1 pool gas                        100_000
+        // hop2 pool gas                        100_000
+        // fee output transfer (last hop)        60_000  ← not in OUTPUT_TO_ROUTER
+        assert_eq!(gas, BigUint::from(300_000u64));
     }
 
     #[test]

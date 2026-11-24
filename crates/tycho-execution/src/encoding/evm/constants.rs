@@ -179,6 +179,13 @@ pub const BAIBAI_BASE_ATTRIBUTE: &str = "base";
 /// Static attribute of a BaiBai component naming the pair's quote token.
 pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
 
+/// Protocol system of the Efficient PropAMM listing doors: one `IPropAMM` door per listing,
+/// executed through the generic `PropAMMExecutor`.
+pub const EFFICIENT_PROP_PROTOCOL_SYSTEM: &str = "efficient_prop";
+
+/// Static attribute under which pAMM components carry the venue address a swap goes to.
+pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 

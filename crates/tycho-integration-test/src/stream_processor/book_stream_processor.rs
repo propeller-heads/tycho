@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fmt::Display, str::FromStr, sync::Arc, time::Duration};
 
+use alloy::primitives::B256;
 use clap::ValueEnum;
 use futures::StreamExt as _;
 use miette::{miette, IntoDiagnostic, WrapErr};
@@ -18,6 +19,8 @@ use tycho_simulation::{
     },
     pamm::protocols::{
         baibai::{self, BaibaiFeedBuilder},
+        efficient_prop::{self, CreditGas, EfficientPropDeployment, EfficientPropFeedBuilder},
+        flamm::{self, FlammFeed, FlammFeedBuilder},
         metric::{self, feed::MetricFeedBuilder},
     },
     rfq::protocols::{
@@ -66,6 +69,20 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
+    /// Efficient PropAMM listing doors, on Ethereum; the feed refuses to build on Base for now.
+    /// Reads every door's quotes over
+    /// `--rpc-url`; the front, the listing-door factory, the desk contract code hash (Ethereum
+    /// only) and the front implementations it was checked against come from
+    /// `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY`, `EFFICIENT_PROP_CELL_CODEHASH` and
+    /// `EFFICIENT_PROP_IMPLEMENTATIONS` (comma-separated), the price sources a listing reading a
+    /// print may be served on from `EFFICIENT_PROP_PRICE_SOURCES` (comma-separated ids, none when
+    /// unset), and on Ethereum the URLs of the next block's state map from
+    /// `EFFICIENT_PROP_STATE_URLS` (comma-separated, required there) and the credit listings
+    /// served with their gas from `EFFICIENT_PROP_CREDIT_LISTINGS` (none when unset).
+    EfficientProp,
+    /// Efficient pools, on Base, Ethereum and BSC. Reads its books from the chain over
+    /// `--rpc-url` and needs no credentials, but serves only what the `FLAMM_*` variables name.
+    Flamm,
 }
 
 impl PammVenue {
@@ -88,6 +105,8 @@ impl Display for PammVenue {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
             PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
+            PammVenue::EfficientProp => write!(f, "{}", efficient_prop::PROTOCOL_SYSTEM),
+            PammVenue::Flamm => write!(f, "{}", flamm::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -601,6 +620,37 @@ fn add_pamm_feeds(
                         .add(venue.to_string(), feed)
                         .is_ok()
                 }),
+            PammVenue::EfficientProp => efficient_prop_deployment(&secret).and_then(|deployment| {
+                let sources = efficient_prop_price_sources(&secret)?;
+                let mut builder = EfficientPropFeedBuilder::new(
+                    book_config.clone(),
+                    rpc_url.to_string(),
+                    deployment,
+                )
+                .approved_price_sources(sources);
+                if let Some(state_urls) = efficient_prop_state_urls(&secret) {
+                    builder = builder.state_urls(state_urls);
+                }
+                for (listing, gas) in efficient_prop_credit_listings(&secret)? {
+                    builder = builder.credit_listing(listing, gas);
+                }
+                builder
+                    .build()
+                    .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                    .map(|feed| {
+                        feeds
+                            .add(venue.to_string(), feed)
+                            .is_ok()
+                    })
+            }),
+            // no default venue, so a feed that will not build always fails the run
+            PammVenue::Flamm => flamm_feed(book_config, rpc_url, &secret)
+                .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                .map(|feed| {
+                    feeds
+                        .add(venue.to_string(), feed)
+                        .is_ok()
+                }),
         };
         match added {
             Ok(true) => info!("Added {venue} feed"),
@@ -609,6 +659,162 @@ fn add_pamm_feeds(
         }
     }
     Ok(())
+}
+
+/// The Efficient PropAMM quote layout, front, listing-door factory, desk contract code hash and
+/// front implementations, from `EFFICIENT_PROP_QUOTE_LAYOUT` and `EFFICIENT_PROP_CELL_CODEHASH`
+/// (none when unset: the feed requires both on Ethereum, where the quote contract is read, and
+/// refuses both on Base), `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY` and
+/// `EFFICIENT_PROP_IMPLEMENTATIONS` (comma-separated). `secret` looks up an environment variable.
+/// The doors' code hash is not configured: the feed reads it from the factory.
+fn efficient_prop_deployment(
+    secret: impl Fn(&str) -> Option<String>,
+) -> Result<EfficientPropDeployment, Unavailable> {
+    let read = |name: &'static str| secret(name).ok_or(Unavailable::MissingSecret(name));
+    let parse = |name: &str, value: &str| {
+        Bytes::from_str(value.trim())
+            .map_err(|e| Unavailable::BuildFailed(format!("{name} {value} is not an address: {e}")))
+    };
+    let quote_layout =
+        secret("EFFICIENT_PROP_QUOTE_LAYOUT").map(|layout| layout.trim().to_string());
+    let front = parse("EFFICIENT_PROP_FRONT", &read("EFFICIENT_PROP_FRONT")?)?;
+    let factory = parse("EFFICIENT_PROP_FACTORY", &read("EFFICIENT_PROP_FACTORY")?)?;
+    let cell_codehash = secret("EFFICIENT_PROP_CELL_CODEHASH")
+        .map(|hash| {
+            Bytes::from_str(hash.trim())
+                .ok()
+                .filter(|bytes| bytes.len() == 32)
+                .ok_or_else(|| {
+                    Unavailable::BuildFailed(format!(
+                        "EFFICIENT_PROP_CELL_CODEHASH {hash} is not a hash of 32 bytes"
+                    ))
+                })
+        })
+        .transpose()?;
+    let implementations = read("EFFICIENT_PROP_IMPLEMENTATIONS")?
+        .split(',')
+        .map(|implementation| parse("EFFICIENT_PROP_IMPLEMENTATIONS", implementation))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(EfficientPropDeployment { quote_layout, front, factory, cell_codehash, implementations })
+}
+
+/// The price sources a listing door reading a print may be served on, from
+/// `EFFICIENT_PROP_PRICE_SOURCES` (comma-separated ids, as the front's `registerSource` numbered
+/// them): none when it is unset, so only listings reading no print are served.
+fn efficient_prop_price_sources(
+    secret: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<u32>, Unavailable> {
+    let Some(list) = secret("EFFICIENT_PROP_PRICE_SOURCES") else {
+        return Ok(Vec::new());
+    };
+    list.split(',')
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| {
+            id.trim().parse::<u32>().map_err(|e| {
+                Unavailable::BuildFailed(format!(
+                    "EFFICIENT_PROP_PRICE_SOURCES {list} holds {id}, not a source id: {e}"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// The credit listings served, each with the gas its fills are charged, from
+/// `EFFICIENT_PROP_CREDIT_LISTINGS` (comma-separated `listing=custody sell:custody buy:route
+/// sell:route buy`, the four figures measured on that listing's pool): none when it is unset, so
+/// no listing with a credit mode is served. The feed refuses one on Base.
+fn efficient_prop_credit_listings(
+    secret: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(u32, CreditGas)>, Unavailable> {
+    let Some(list) = secret("EFFICIENT_PROP_CREDIT_LISTINGS") else {
+        return Ok(Vec::new());
+    };
+    list.split(',')
+        .filter(|entry| !entry.trim().is_empty())
+        .map(|entry| {
+            let refused = |why: String| {
+                Unavailable::BuildFailed(format!(
+                    "EFFICIENT_PROP_CREDIT_LISTINGS {list} holds {entry}: {why}"
+                ))
+            };
+            let (listing, gas) = entry
+                .split_once('=')
+                .ok_or_else(|| refused("not listing=gas".into()))?;
+            let listing = listing
+                .trim()
+                .parse::<u32>()
+                .map_err(|e| refused(format!("not a listing id: {e}")))?;
+            let gas = gas
+                .parse::<CreditGas>()
+                .map_err(refused)?;
+            Ok((listing, gas))
+        })
+        .collect()
+}
+
+/// The URLs the listing doors read the next block's state map from on Ethereum, from
+/// `EFFICIENT_PROP_STATE_URLS` (comma-separated): none when it is unset, which the feed refuses
+/// on Ethereum, and a URL set on Base fails the feed's build.
+fn efficient_prop_state_urls(secret: impl Fn(&str) -> Option<String>) -> Option<Vec<String>> {
+    secret("EFFICIENT_PROP_STATE_URLS").map(|list| {
+        list.split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+/// The Efficient pools feed the environment configures. Its factories differ by chain and what it
+/// may serve is the run's to say, so nothing defaults: `FLAMM_FACTORIES`, then `FLAMM_POOLS` to
+/// name pools, or `FLAMM_HOOK_CLASSES` with `FLAMM_PRICE_FEEDS` or `FLAMM_PRICE_FEED_CODE_HASHES`
+/// to admit them by what they run. Every listed class is an Efficient pools hook, of the one shape
+/// there is.
+///
+/// # Errors
+/// Returns an error when a variable does not parse or the feed refuses what they add up to.
+fn flamm_feed(
+    book_config: &BookFeedConfig,
+    rpc_url: &str,
+    secret: impl Fn(&str) -> Option<String>,
+) -> miette::Result<FlammFeed> {
+    let mut builder = FlammFeedBuilder::new(book_config.clone(), rpc_url.to_string())
+        .factories(listed::<Bytes>("FLAMM_FACTORIES", &secret)?)
+        .hook_classes(
+            listed::<B256>("FLAMM_HOOK_CLASSES", &secret)?
+                .into_iter()
+                .map(|class| (class, flamm::HookShape::Everlong))
+                .collect(),
+        )
+        .price_feeds(listed::<Bytes>("FLAMM_PRICE_FEEDS", &secret)?)
+        .price_feed_code_hashes(listed::<B256>("FLAMM_PRICE_FEED_CODE_HASHES", &secret)?);
+    let pools = listed::<Bytes>("FLAMM_POOLS", &secret)?;
+    if !pools.is_empty() {
+        builder = builder.pools(pools);
+    }
+    builder.build().into_diagnostic()
+}
+
+/// The comma-separated values of the variable `name`, none where it is not set.
+///
+/// # Errors
+/// Returns an error naming the variable and the value that does not parse.
+fn listed<T>(name: &str, secret: &impl Fn(&str) -> Option<String>) -> miette::Result<Vec<T>>
+where
+    T: FromStr,
+    T::Err: Display,
+{
+    secret(name)
+        .iter()
+        .flat_map(|values| values.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|e| miette!("{name} holds {value}, which does not parse: {e}"))
+        })
+        .collect()
 }
 
 /// What a pAMM venue that cannot run does to the run.
@@ -666,30 +872,48 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
-    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
-        added_on(Chain::Base, selection, key)
-    }
+    /// The variables an Efficient pools feed needs to admit pools by what they run.
+    const FLAMM_LISTS: [(&str, &str); 3] = [
+        ("FLAMM_FACTORIES", "0x1111111111111111111111111111111111111111"),
+        (
+            "FLAMM_HOOK_CLASSES",
+            "0x2222222222222222222222222222222222222222222222222222222222222222",
+        ),
+        ("FLAMM_PRICE_FEEDS", "0x3333333333333333333333333333333333333333"),
+    ];
 
-    /// The labels of the feeds `selection` adds on `chain` when `METRIC_API_KEY` holds `key`.
+    /// The labels of the feeds `selection` adds on `chain` with `variables` set.
     fn added_on(
         chain: Chain,
         selection: &PammSelection,
-        key: Option<&str>,
+        variables: &[(&str, &str)],
     ) -> miette::Result<Vec<String>> {
         let book_config =
             BookFeedConfig { chain, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 };
         let mut feeds = BookFeedStreams::new();
         add_pamm_feeds(selection, &book_config, "http://127.0.0.1:8545", &mut feeds, |name| {
-            key.filter(|_| name == "METRIC_API_KEY")
-                .map(str::to_string)
+            variables
+                .iter()
+                .find(|(variable, _)| *variable == name)
+                .map(|(_, value)| (*value).to_string())
         })?;
         Ok(feeds
             .labels()
             .map(str::to_string)
             .collect())
+    }
+
+    /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
+    fn added(selection: &PammSelection, key: Option<&str>) -> miette::Result<Vec<String>> {
+        let variables: Vec<(&str, &str)> = key
+            .into_iter()
+            .map(|key| ("METRIC_API_KEY", key))
+            .collect();
+        added_on(Chain::Base, selection, &variables)
     }
 
     #[test]
@@ -708,6 +932,10 @@ mod tests {
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
         assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
         assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::EfficientProp.cli_name(), "efficient-prop");
+        assert_eq!(PammVenue::EfficientProp.to_string(), efficient_prop::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Flamm.cli_name(), "flamm");
+        assert_eq!(PammVenue::Flamm.to_string(), flamm::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -755,6 +983,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_listed_flamm_feed_is_added_when_its_lists_are_set() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        assert_eq!(added_on(Chain::Base, &listed, &FLAMM_LISTS).unwrap(), [flamm::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn the_flamm_feed_takes_named_pools_in_place_of_its_lists() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let variables = [
+            FLAMM_LISTS[0],
+            (
+                "FLAMM_POOLS",
+                "0x4444444444444444444444444444444444444444, \
+                 0x5555555555555555555555555555555555555555",
+            ),
+        ];
+        assert_eq!(added_on(Chain::Base, &listed, &variables).unwrap(), [flamm::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
     async fn the_listed_venues_are_added_together() {
         let listed = PammSelection::Listed(vec![PammVenue::Metric, PammVenue::Baibai]);
         let mut labels = added(&listed, Some("key")).unwrap();
@@ -765,11 +1013,319 @@ mod tests {
     #[tokio::test]
     async fn a_listed_venue_off_its_chain_fails_the_run() {
         let listed = PammSelection::Listed(vec![PammVenue::Baibai]);
-        let message = added_on(Chain::Ethereum, &listed, None)
+        let message = added_on(Chain::Ethereum, &listed, &[])
             .unwrap_err()
             .to_string();
         assert!(message.contains("--pamm"), "{message}");
         assert!(message.contains(baibai::PROTOCOL_SYSTEM), "{message}");
+    }
+
+    /// The listing doors' deployment, as the environment names it.
+    fn efficient_prop_env(name: &str) -> Option<String> {
+        match name {
+            "EFFICIENT_PROP_FRONT" => Some("0x00000000000000000000000000000000000000f0".into()),
+            "EFFICIENT_PROP_FACTORY" => Some("0x00000000000000000000000000000000000000fa".into()),
+            "EFFICIENT_PROP_IMPLEMENTATIONS" => Some(
+                "0x00000000000000000000000000000000000000a1, \
+                 0x00000000000000000000000000000000000000a2"
+                    .into(),
+            ),
+            "EFFICIENT_PROP_PRICE_SOURCES" => Some("1, 2".into()),
+            _ => None,
+        }
+    }
+
+    /// The labels of the feeds `--pamm efficient-prop` adds on Base when the environment holds
+    /// `env`'s variables.
+    fn efficient_prop_added(env: impl Fn(&str) -> Option<String>) -> miette::Result<Vec<String>> {
+        efficient_prop_added_on(Chain::Base, env)
+    }
+
+    /// The labels of the feeds `--pamm efficient-prop` adds on `chain` when the environment holds
+    /// `env`'s variables.
+    fn efficient_prop_added_on(
+        chain: Chain,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> miette::Result<Vec<String>> {
+        let book_config =
+            BookFeedConfig { chain, tokens: Arc::new(HashMap::new()), min_tvl_usd: 0.0 };
+        let mut feeds = BookFeedStreams::new();
+        let listed = PammSelection::Listed(vec![PammVenue::EfficientProp]);
+        add_pamm_feeds(&listed, &book_config, "http://127.0.0.1:8545", &mut feeds, env)?;
+        Ok(feeds
+            .labels()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// The listing doors are not served on Base yet: with a whole deployment in the environment
+    /// the feed refuses to build there, which fails the run and says why.
+    #[tokio::test]
+    async fn the_listing_doors_fail_the_run_on_base_until_it_is_served() {
+        let message = efficient_prop_added(efficient_prop_env)
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains("not served on Base yet"), "{message}");
+    }
+
+    #[rstest::rstest]
+    #[case::no_front("EFFICIENT_PROP_FRONT", None, "EFFICIENT_PROP_FRONT")]
+    #[case::no_allow_list("EFFICIENT_PROP_IMPLEMENTATIONS", None, "EFFICIENT_PROP_IMPLEMENTATIONS")]
+    #[case::a_quote_layout_on_base(
+        "EFFICIENT_PROP_QUOTE_LAYOUT",
+        Some("builder"),
+        "not served on Base yet"
+    )]
+    #[case::a_cell_code_hash_that_is_no_hash(
+        "EFFICIENT_PROP_CELL_CODEHASH",
+        Some("cell"),
+        "not a hash of 32 bytes"
+    )]
+    #[case::a_factory_that_is_no_address(
+        "EFFICIENT_PROP_FACTORY",
+        Some("factory"),
+        "not an address"
+    )]
+    #[case::price_sources_that_are_not_ids(
+        "EFFICIENT_PROP_PRICE_SOURCES",
+        Some("1, lane"),
+        "not a source id"
+    )]
+    #[tokio::test]
+    async fn the_listing_doors_without_their_deployment_fail_the_run(
+        #[case] variable: &str,
+        #[case] value: Option<&str>,
+        #[case] reason: &str,
+    ) {
+        let env = |name: &str| {
+            if name == variable {
+                value.map(str::to_string)
+            } else {
+                efficient_prop_env(name)
+            }
+        };
+
+        let message = efficient_prop_added(env)
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains(reason), "{message}");
+    }
+
+    /// On Ethereum the listing doors serve the credit listings `EFFICIENT_PROP_CREDIT_LISTINGS`
+    /// names with their gas; an entry that is not `listing=four figures` fails the run, and so
+    /// does any on Base.
+    #[rstest::rstest]
+    #[case::one_listing(Chain::Ethereum, "1=137909:133427:925544:1035811", None)]
+    #[case::two_listings(
+        Chain::Ethereum,
+        "1=137909:133427:925544:1035811, 7=187000:192000:610501:610501",
+        None
+    )]
+    #[case::no_gas(Chain::Ethereum, "1", Some("not listing=gas"))]
+    #[case::three_figures(Chain::Ethereum, "1=137909:133427:925544", Some("not four gas figures"))]
+    #[case::a_listing_that_is_no_id(Chain::Ethereum, "one=1:2:3:4", Some("not a listing id"))]
+    #[case::named_twice(Chain::Ethereum, "1=1:2:3:4,1=1:2:3:4", Some("named twice"))]
+    #[case::on_base(Chain::Base, "1=137909:133427:925544:1035811", Some("not served on Base yet"))]
+    #[tokio::test]
+    async fn the_listing_doors_read_their_credit_listings_from_the_environment(
+        #[case] chain: Chain,
+        #[case] credit: &str,
+        #[case] refused: Option<&str>,
+    ) {
+        let env = |name: &str| match name {
+            "EFFICIENT_PROP_CREDIT_LISTINGS" => Some(credit.to_string()),
+            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+                Some("http://127.0.0.1:29222/v1/1/state".into())
+            }
+            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
+                Some(format!("0x{}", "cc".repeat(32)))
+            }
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
+            name => efficient_prop_env(name),
+        };
+
+        let added = efficient_prop_added_on(chain, env);
+
+        match refused {
+            None => assert_eq!(added.unwrap(), [efficient_prop::PROTOCOL_SYSTEM]),
+            Some(reason) => {
+                let message = added.unwrap_err().to_string();
+                assert!(message.contains(reason), "{message}");
+            }
+        }
+    }
+
+    /// On Ethereum the listing doors read the next block's state map from the URLs
+    /// `EFFICIENT_PROP_STATE_URLS` names, and fail the run without them; on Base a state URL
+    /// fails it.
+    #[rstest::rstest]
+    #[case::ethereum_with_state_urls(
+        Chain::Ethereum,
+        Some("http://127.0.0.1:29222/v1/1/state, http://127.0.0.1:29223/v1/1/state"),
+        None
+    )]
+    #[case::ethereum_without(Chain::Ethereum, None, Some("state URL"))]
+    #[case::base_with_one(
+        Chain::Base,
+        Some("http://127.0.0.1:29222/v1/1/state"),
+        Some("not served on Base yet")
+    )]
+    #[tokio::test]
+    async fn the_listing_doors_read_their_state_urls_from_the_environment(
+        #[case] chain: Chain,
+        #[case] state_urls: Option<&str>,
+        #[case] refused: Option<&str>,
+    ) {
+        let env = |name: &str| match name {
+            "EFFICIENT_PROP_STATE_URLS" => state_urls.map(str::to_string),
+            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
+                Some(format!("0x{}", "cc".repeat(32)))
+            }
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
+            name => efficient_prop_env(name),
+        };
+
+        let added = efficient_prop_added_on(chain, env);
+
+        match refused {
+            None => assert_eq!(added.unwrap(), [efficient_prop::PROTOCOL_SYSTEM]),
+            Some(reason) => {
+                let message = added.unwrap_err().to_string();
+                assert!(message.contains("--pamm"), "{message}");
+                assert!(message.contains(reason), "{message}");
+            }
+        }
+    }
+
+    /// The desk contract code hash, `EFFICIENT_PROP_CELL_CODEHASH`, is required on Ethereum, where
+    /// a maker's quote is placed by it, must be 32 bytes, and fails the run on Base. No door code
+    /// hash is read from the environment: the feed reads it from the factory.
+    #[rstest::rstest]
+    #[case::ethereum_with_it(Chain::Ethereum, Some(format!("0x{}", "cc".repeat(32))), None)]
+    #[case::ethereum_without(Chain::Ethereum, None, Some("desk contract code hash"))]
+    #[case::ethereum_not_32_bytes(Chain::Ethereum, Some("0x1234".to_string()), Some("32 bytes"))]
+    #[case::base_with_it(
+        Chain::Base,
+        Some(format!("0x{}", "cc".repeat(32))),
+        Some("not served on Base yet")
+    )]
+    #[tokio::test]
+    async fn the_listing_doors_read_their_desk_code_hash_from_the_environment(
+        #[case] chain: Chain,
+        #[case] cell_codehash: Option<String>,
+        #[case] refused: Option<&str>,
+    ) {
+        let env = |name: &str| match name {
+            "EFFICIENT_PROP_CELL_CODEHASH" => cell_codehash.clone(),
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
+            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+                Some("http://127.0.0.1:29222/v1/1/state".to_string())
+            }
+            name => efficient_prop_env(name),
+        };
+
+        let added = efficient_prop_added_on(chain, env);
+
+        match refused {
+            None => assert_eq!(added.unwrap(), [efficient_prop::PROTOCOL_SYSTEM]),
+            Some(reason) => {
+                let message = added.unwrap_err().to_string();
+                assert!(message.contains("--pamm"), "{message}");
+                assert!(message.contains(reason), "{message}");
+            }
+        }
+    }
+
+    /// The quote layout, `EFFICIENT_PROP_QUOTE_LAYOUT`, is read on Ethereum only, where it must be
+    /// `builder`; on Base, which reads no quote contract, it fails the run.
+    #[rstest::rstest]
+    #[case::ethereum_builder(Chain::Ethereum, Some("builder"), None)]
+    #[case::ethereum_without(Chain::Ethereum, None, Some("is not one this integration reads"))]
+    #[case::ethereum_another(
+        Chain::Ethereum,
+        Some("storage"),
+        Some("is not one this integration reads")
+    )]
+    #[case::base_builder(Chain::Base, Some("builder"), Some("not served on Base yet"))]
+    #[tokio::test]
+    async fn the_listing_doors_read_their_quote_layout_on_ethereum_only(
+        #[case] chain: Chain,
+        #[case] layout: Option<&str>,
+        #[case] refused: Option<&str>,
+    ) {
+        let env = |name: &str| match name {
+            "EFFICIENT_PROP_QUOTE_LAYOUT" => layout.map(str::to_string),
+            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
+                Some(format!("0x{}", "cc".repeat(32)))
+            }
+            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+                Some("http://127.0.0.1:29222/v1/1/state".to_string())
+            }
+            name => efficient_prop_env(name),
+        };
+
+        let added = efficient_prop_added_on(chain, env);
+
+        match refused {
+            None => assert_eq!(added.unwrap(), [efficient_prop::PROTOCOL_SYSTEM]),
+            Some(reason) => {
+                let message = added.unwrap_err().to_string();
+                assert!(message.contains("--pamm"), "{message}");
+                assert!(message.contains(reason), "{message}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_and_the_flamm_feed_are_added_together() {
+        let listed = PammSelection::Listed(vec![PammVenue::Metric, PammVenue::Flamm]);
+        let mut variables = FLAMM_LISTS.to_vec();
+        variables.push(("METRIC_API_KEY", "key"));
+        let mut labels = added_on(Chain::Base, &listed, &variables).unwrap();
+        labels.sort();
+        assert_eq!(labels, [flamm::PROTOCOL_SYSTEM, metric::PROTOCOL_SYSTEM]);
+    }
+
+    #[tokio::test]
+    async fn the_flamm_feed_is_no_default_venue() {
+        let labels = added_on(Chain::Base, &PammSelection::Defaults, &FLAMM_LISTS).unwrap();
+        assert!(labels.is_empty(), "{labels:?}");
+    }
+
+    #[rstest]
+    #[case::no_factory(&FLAMM_LISTS[1..], "factory")]
+    #[case::no_hook_class(&[FLAMM_LISTS[0], FLAMM_LISTS[2]], "nothing admits a pool")]
+    #[case::no_price_feed(&FLAMM_LISTS[..2], "nothing admits a pool")]
+    #[case::a_value_that_does_not_parse(
+        &[("FLAMM_FACTORIES", "not hex")],
+        "FLAMM_FACTORIES holds not hex"
+    )]
+    #[case::a_hash_of_the_wrong_length(
+        &[FLAMM_LISTS[0], ("FLAMM_HOOK_CLASSES", "0x22"), FLAMM_LISTS[2]],
+        "FLAMM_HOOK_CLASSES holds 0x22"
+    )]
+    #[tokio::test]
+    async fn a_listed_flamm_feed_that_cannot_build_fails_the_run(
+        #[case] variables: &[(&str, &str)],
+        #[case] reason: &str,
+    ) {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let error = added_on(Chain::Base, &listed, variables).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("--pamm lists"), "{message}");
+        assert!(message.contains(reason), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_listed_flamm_feed_off_its_chains_fails_the_run() {
+        let listed = PammSelection::Listed(vec![PammVenue::Flamm]);
+        let error = added_on(Chain::Arbitrum, &listed, &FLAMM_LISTS).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Ethereum, Base and BSC"), "{message}");
     }
 
     #[tokio::test]
