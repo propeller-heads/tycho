@@ -14,7 +14,8 @@ const CONFIG_SLOT: [u8; 32] =
 /// `Layout.source`, the word after.
 const SOURCE_SLOT: [u8; 32] =
     hex!("4e6a83909802af262770f859c245d2a01fddbd871c0bec861e01a093143bd601");
-/// `Layout.segmentFees`: sixteen `uint16`, segment `id` at bit `16 * id`.
+/// `Layout.segmentFees`: sixteen `uint16`, segment `id` at bit `16 * id`. Emitted whole, as
+/// `fee_override/segment_fees`.
 const SEGMENT_FEES_SLOT: [u8; 32] =
     hex!("4e6a83909802af262770f859c245d2a01fddbd871c0bec861e01a093143bd602");
 
@@ -35,22 +36,8 @@ pub const MODULE: PluginModule = PluginModule {
         StorageField::new("fee_override/source_enabled", CONFIG_SLOT, 21, 1),
         StorageField::new("fee_override/max_discount_bps", CONFIG_SLOT, 22, 2),
         StorageField::new("fee_override/source", SOURCE_SLOT, 0, 20),
-        StorageField::new("fee_override/segment_fee/0", SEGMENT_FEES_SLOT, 0, 2),
-        StorageField::new("fee_override/segment_fee/1", SEGMENT_FEES_SLOT, 2, 2),
-        StorageField::new("fee_override/segment_fee/2", SEGMENT_FEES_SLOT, 4, 2),
-        StorageField::new("fee_override/segment_fee/3", SEGMENT_FEES_SLOT, 6, 2),
-        StorageField::new("fee_override/segment_fee/4", SEGMENT_FEES_SLOT, 8, 2),
-        StorageField::new("fee_override/segment_fee/5", SEGMENT_FEES_SLOT, 10, 2),
-        StorageField::new("fee_override/segment_fee/6", SEGMENT_FEES_SLOT, 12, 2),
-        StorageField::new("fee_override/segment_fee/7", SEGMENT_FEES_SLOT, 14, 2),
-        StorageField::new("fee_override/segment_fee/8", SEGMENT_FEES_SLOT, 16, 2),
-        StorageField::new("fee_override/segment_fee/9", SEGMENT_FEES_SLOT, 18, 2),
-        StorageField::new("fee_override/segment_fee/10", SEGMENT_FEES_SLOT, 20, 2),
-        StorageField::new("fee_override/segment_fee/11", SEGMENT_FEES_SLOT, 22, 2),
-        StorageField::new("fee_override/segment_fee/12", SEGMENT_FEES_SLOT, 24, 2),
-        StorageField::new("fee_override/segment_fee/13", SEGMENT_FEES_SLOT, 26, 2),
-        StorageField::new("fee_override/segment_fee/14", SEGMENT_FEES_SLOT, 28, 2),
-        StorageField::new("fee_override/segment_fee/15", SEGMENT_FEES_SLOT, 30, 2),
+        // The whole word: one attribute for sixteen fees of one kind.
+        StorageField::new("fee_override/segment_fees", SEGMENT_FEES_SLOT, 0, 32),
     ],
 };
 
@@ -94,7 +81,7 @@ mod tests {
             .map(|attribute| (attribute.name.as_str(), attribute.value.as_slice()))
             .collect();
         assert_eq!(decoded.len(), MODULE.fields.len());
-        let expected: [(&str, &[u8]); 27] = [
+        let expected: [(&str, &[u8]); 12] = [
             ("fee_override/floor", &hex!("03e8")),
             ("fee_override/cap", &hex!("4e20")),
             ("fee_override/premium_zero_for_one", &hex!("0000")),
@@ -106,22 +93,10 @@ mod tests {
             ("fee_override/source_enabled", &hex!("01")),
             ("fee_override/max_discount_bps", &hex!("0000")),
             ("fee_override/source", &hex!("622b1971f9792a2d410b14b8108d5481c1d2c362")),
-            ("fee_override/segment_fee/0", &hex!("03e8")),
-            ("fee_override/segment_fee/1", &hex!("044c")),
-            ("fee_override/segment_fee/2", &hex!("0578")),
-            ("fee_override/segment_fee/3", &hex!("0960")),
-            ("fee_override/segment_fee/4", &hex!("0bb8")),
-            ("fee_override/segment_fee/5", &hex!("0640")),
-            ("fee_override/segment_fee/6", &hex!("04b0")),
-            ("fee_override/segment_fee/7", &hex!("0bb8")),
-            ("fee_override/segment_fee/8", &hex!("0000")),
-            ("fee_override/segment_fee/9", &hex!("0000")),
-            ("fee_override/segment_fee/10", &hex!("0000")),
-            ("fee_override/segment_fee/11", &hex!("0000")),
-            ("fee_override/segment_fee/12", &hex!("0000")),
-            ("fee_override/segment_fee/13", &hex!("0000")),
-            ("fee_override/segment_fee/14", &hex!("0000")),
-            ("fee_override/segment_fee/15", &hex!("0000")),
+            (
+                "fee_override/segment_fees",
+                &hex!("000000000000000000000000000000000bb804b006400bb809600578044c03e8"),
+            ),
         ];
         for (name, value) in expected {
             assert_eq!(decoded.get(name), Some(&value), "{name}");

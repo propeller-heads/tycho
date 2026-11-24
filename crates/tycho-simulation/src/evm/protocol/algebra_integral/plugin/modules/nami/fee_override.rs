@@ -116,9 +116,15 @@ impl FeeOverride {
         // pool names its plugin, so a missing one means the pool is not fully indexed.
         let source_enabled = field_bytes::<1>(attributes, "fee_override/source_enabled")? != [0];
         let address = Address::from(field_bytes::<20>(attributes, "fee_override/source")?);
+        // One storage word, big-endian: the fee of segment `id` is the `u16` whose low byte is
+        // `2 * id` bytes above the word's low end.
+        let word = field_bytes::<{ 2 * MAX_SEGMENTS }>(attributes, "fee_override/segment_fees")?;
         let mut fees = [0u16; MAX_SEGMENTS];
-        for (id, fee) in fees.iter_mut().enumerate() {
-            *fee = u16_field(&format!("fee_override/segment_fee/{id}"))?;
+        for (fee, bytes) in fees
+            .iter_mut()
+            .zip(word.rchunks_exact(2))
+        {
+            *fee = u16::from_be_bytes([bytes[0], bytes[1]]);
         }
         let segments = if source_enabled {
             let mut known = None;
@@ -314,9 +320,13 @@ mod tests {
                     .unwrap_or_default()
                     .as_slice(),
             );
-            for (id, fee) in self.segment_fees.iter().enumerate() {
-                set(&format!("fee_override/segment_fee/{id}"), &fee.to_be_bytes());
-            }
+            let word: Vec<u8> = self
+                .segment_fees
+                .iter()
+                .rev()
+                .flat_map(|fee| fee.to_be_bytes())
+                .collect();
+            set("fee_override/segment_fees", &word);
             attributes
         }
 
@@ -422,13 +432,13 @@ mod tests {
     #[test]
     fn missing_field_is_rejected() {
         let mut attributes = Config { base: 500, ..Default::default() }.attributes();
-        attributes.remove("fee_override/segment_fee/15");
+        attributes.remove("fee_override/segment_fees");
 
         let error = FeeOverride::from_attributes(&attributes, &SOURCES)
             .expect_err("every field should be required");
 
         assert!(
-            matches!(&error, InvalidSnapshotError::MissingAttribute(name) if name == "fee_override/segment_fee/15"),
+            matches!(&error, InvalidSnapshotError::MissingAttribute(name) if name == "fee_override/segment_fees"),
             "{error:?}"
         );
     }

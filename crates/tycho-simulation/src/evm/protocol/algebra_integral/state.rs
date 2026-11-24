@@ -1042,7 +1042,7 @@ pub(super) mod test_support {
     /// block 118127446: base fee 500, floor 1000, cap 20000, the NYSE source with a fee per
     /// segment, a MEVX router and a farming incentive.
     pub fn robinhood_module_attributes() -> HashMap<String, Bytes> {
-        let fields: [(&str, &str); 34] = [
+        let fields: [(&str, &str); 19] = [
             ("dynamic_fee/alpha1", "0000"),
             ("dynamic_fee/alpha2", "0000"),
             ("dynamic_fee/base_fee", "01f4"),
@@ -1057,22 +1057,11 @@ pub(super) mod test_support {
             ("fee_override/source_enabled", "01"),
             ("fee_override/max_discount_bps", "0000"),
             ("fee_override/source", "622b1971f9792a2d410b14b8108d5481c1d2c362"),
-            ("fee_override/segment_fee/0", "03e8"),
-            ("fee_override/segment_fee/1", "044c"),
-            ("fee_override/segment_fee/2", "0578"),
-            ("fee_override/segment_fee/3", "0960"),
-            ("fee_override/segment_fee/4", "0bb8"),
-            ("fee_override/segment_fee/5", "0640"),
-            ("fee_override/segment_fee/6", "04b0"),
-            ("fee_override/segment_fee/7", "0bb8"),
-            ("fee_override/segment_fee/8", "0000"),
-            ("fee_override/segment_fee/9", "0000"),
-            ("fee_override/segment_fee/10", "0000"),
-            ("fee_override/segment_fee/11", "0000"),
-            ("fee_override/segment_fee/12", "0000"),
-            ("fee_override/segment_fee/13", "0000"),
-            ("fee_override/segment_fee/14", "0000"),
-            ("fee_override/segment_fee/15", "0000"),
+            // Segment 0 is the low 16 bits of the word.
+            (
+                "fee_override/segment_fees",
+                "000000000000000000000000000000000bb804b006400bb809600578044c03e8",
+            ),
             ("mevx/router", "011242bf9f5c4832f152be5a5838daae40e0405c"),
             ("farming/incentive", "d877d4a9ffddd1b03fdfe709b9b0770a4d5dd3fe"),
             // The AntiSniper module of Base plugin 0x53ce1d109b8ffe35010baaac91a3d839f4b05fea:
