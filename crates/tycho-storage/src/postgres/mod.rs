@@ -128,10 +128,7 @@
 //! into a single transaction. This guarantees preservation of valid state
 //! throughout the application lifetime, even if the process panics during
 //! database operations.
-use std::{
-    cmp::Ordering, collections::HashMap, hash::Hash, ops::Deref, str::FromStr, sync::Arc,
-    time::Duration,
-};
+use std::{cmp::Ordering, collections::HashMap, hash::Hash, str::FromStr, time::Duration};
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -143,28 +140,39 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use num_bigint::BigUint;
 use tracing::{debug, info};
 use tycho_common::{
-    models::{token::Token, Chain, PaginationParams, TxHash},
+    models::{token::Token, Chain, PaginationParams},
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     Bytes,
 };
-use unicode_segmentation::UnicodeSegmentation;
 
 pub mod builder;
 pub mod cache;
+// The old gateway is off on this branch: the instance tables replace its tables, and the cut-over
+// deletes it. `old_gateway` is never set, so nothing marked with it is compiled.
+#[cfg(old_gateway)]
 mod chain;
+#[cfg(old_gateway)]
 mod component_index;
+#[cfg(old_gateway)]
 mod component_pause;
+#[cfg(old_gateway)]
 mod contract;
+#[cfg(old_gateway)]
 pub mod direct;
+#[cfg(old_gateway)]
 mod entry_point;
+#[cfg(old_gateway)]
 mod extraction_state;
 mod instance;
 mod orm;
 mod pool;
+#[cfg(old_gateway)]
 mod protocol;
 mod schema;
 mod snapshot;
+#[cfg(old_gateway)]
 pub mod token_cache;
+#[cfg(old_gateway)]
 mod versioning;
 
 pub use instance::InstanceId;
@@ -235,6 +243,7 @@ where
     /// # Arguments
     ///
     /// * `id` - The database ID to lookup.
+    #[cfg(old_gateway)]
     fn try_get_value(&self, id: &i64) -> Result<E, StorageError> {
         self.map_enum
             .get(id)
@@ -255,6 +264,7 @@ where
 
 type ChainEnumCache = ValueIdTableCache<Chain>;
 // Maps the chain to the DB id of the native token
+#[cfg(old_gateway)]
 type NativeTokenEnumCache = ValueIdTableCache<Chain>;
 /// ProtocolSystem is not handled as an Enum, because that would require us to restart the whole
 /// application every time we want to add another System. Hence, to diverge from the implementation
@@ -322,11 +332,13 @@ impl FromConnection<ProtocolSystemEnumCache> for ProtocolSystemEnumCache {
 
 // Helper type to retrieve entities with their associated tx hashes.
 #[derive(Debug)]
+#[cfg(old_gateway)]
 struct WithTxHash<T> {
     entity: T,
     tx: Option<TxHash>,
 }
 
+#[cfg(old_gateway)]
 impl<T> Deref for WithTxHash<T> {
     type Target = T;
 
@@ -337,11 +349,13 @@ impl<T> Deref for WithTxHash<T> {
 
 // Helper type to wrap entities with their associated ordinal.
 #[derive(Debug)]
+#[cfg(old_gateway)]
 struct WithOrdinal<T, O> {
     entity: T,
     ordinal: O,
 }
 
+#[cfg(old_gateway)]
 impl<T, O> WithOrdinal<T, O> {
     pub fn new(entity: T, ordinal: O) -> Self {
         Self { entity, ordinal }
@@ -377,6 +391,7 @@ fn is_transaction_conflict(message: &str) -> bool {
     message.contains("deadlock detected") || message.contains("could not serialize access")
 }
 
+#[cfg(old_gateway)]
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     let mut result = String::new();
     let mut byte_count = 0;
@@ -509,6 +524,7 @@ async fn maybe_lookup_version_ts(
     maybe_lookup_block_ts(&version.0, conn).await
 }
 
+#[cfg(old_gateway)]
 #[derive(Clone)]
 pub(crate) struct PostgresGateway {
     protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
@@ -528,6 +544,7 @@ pub(crate) struct PostgresGateway {
     retention_horizon: NaiveDateTime,
 }
 
+#[cfg(old_gateway)]
 impl PostgresGateway {
     pub fn with_cache(
         chain_cache: Arc<ChainEnumCache>,

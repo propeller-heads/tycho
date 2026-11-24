@@ -1465,6 +1465,7 @@ pub mod fixtures {
         }
     }
 
+    #[cfg(old_gateway)]
     pub fn pb_native_block_changes(version: u8) -> BlockChanges {
         match version {
             0 => BlockChanges {

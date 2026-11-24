@@ -2,6 +2,21 @@
 
 PostgreSQL backend implementing the storage traits defined in `tycho-common`.
 
+## Old gateway: off
+
+The gateway on the old tables is off. The modules `chain`, `contract`, `protocol`,
+`component_pause`, `token_cache`, `component_index`, `entry_point`, `extraction_state`,
+`versioning` and `direct`, the `PostgresGateway` type, the entity-cache reads in `snapshot`, and
+their tests are marked `#[cfg(old_gateway)]`. That cfg is never set, so this code is not compiled.
+The cut-over deletes it.
+
+`CachedGateway` keeps the buffered write path and sends every batch to
+`execute_instance_write_op`. These fail with `StorageError::Unsupported`: a batch without an
+instance, every read, and every direct write that only the old gateway served.
+`GatewayBuilder::enable_token_cache` and `set_component_index` still set their flags, but nothing
+reads them until the token cache and the component index are ported. The module map
+and the Architecture section below still describe the old gateway.
+
 ## Module Map
 
 ```
@@ -63,12 +78,11 @@ instances. No table has a DEFAULT partition.
 - `public.protocol_system.active_instance_id` records which instance readers see.
   `public.token.address` is how instance tables refer to tokens.
 - `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
-  `execute_instance_write_op` on `PostgresGatewayNew`, instead of `execute_write_op` on the old
-  gateway. No transactions are stored: versioned rows take their block timestamp and tx index
+  `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows take their block timestamp and tx index
   from the batch (`instance::origins`), and `UpsertTx` writes nothing. It writes blocks and
   `tycho.extraction_state` so far; any other op fails the whole batch with
-  `StorageError::Unsupported`. At cut-over, `execute_write_op` and the
-  old gateway are deleted, and `PostgresGatewayNew` is renamed.
+  `StorageError::Unsupported`. At cut-over, the old gateway is deleted and
+  `PostgresGatewayNew` is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
   `instance::write::versioning::VersionedRowNew` (protocol state so far). The module doc of
   `write/versioning.rs` has the rules. A change that does not start after the version it
