@@ -1580,6 +1580,12 @@ pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     body: web::Json<dto::ComponentTvlRequestBody>,
     handler: web::Data<RpcHandler<G, T>>,
 ) -> Result<HttpResponse, RpcError> {
+    let mut body = body.into_inner();
+    body.protocol_system = body
+        .protocol_system
+        .take()
+        .filter(|system| !system.trim().is_empty());
+
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
     tracing::Span::current().record("page_size", body.pagination.page_size);
