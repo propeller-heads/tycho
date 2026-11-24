@@ -204,17 +204,18 @@ where
         if let Some(input_params) = transient_storage {
             transient_storage_params.extend(input_params);
         }
+        let pool_key = (
+            params.context.currency_0,
+            params.context.currency_1,
+            Uint::<24, 1>::from(params.context.fees.lp_fee),
+            Signed::<24, 1>::try_from(params.context.tick_spacing).map_err(|e| {
+                SimulationError::FatalError(format!("Failed to convert tick: {e:?}"))
+            })?,
+            self.address,
+        );
         let args = (
             params.sender,
-            (
-                params.context.currency_0,
-                params.context.currency_1,
-                Uint::<24, 1>::from(params.context.fees.lp_fee),
-                Signed::<24, 1>::try_from(params.context.tick_spacing).map_err(|e| {
-                    SimulationError::FatalError(format!("Failed to convert tick: {e:?}"))
-                })?,
-                self.address,
-            ),
+            pool_key,
             (
                 params.swap_params.zero_for_one,
                 params.swap_params.amount_specified,
