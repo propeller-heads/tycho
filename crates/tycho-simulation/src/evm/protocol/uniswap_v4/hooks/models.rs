@@ -161,6 +161,7 @@ pub struct AfterSwapParameters {
     pub swap_params: SwapParams,
     pub delta: BalanceDelta,
     pub hook_data: Bytes,
+    pub pool_after_swap: PoolAfterSwap,
 }
 
 /// The pool state `Pool.swap` has stored when the PoolManager calls `afterSwap`, so a hook that
