@@ -8,7 +8,9 @@ use tycho_common::models::{
 };
 
 use crate::{
-    rpc::{ProtocolComponentsPaginatedParams, RPCClient, RPC_CLIENT_CONCURRENCY},
+    rpc::{
+        ComponentsWithPauses, ProtocolComponentsPaginatedParams, RPCClient, RPC_CLIENT_CONCURRENCY,
+    },
     RPCError,
 };
 
@@ -163,6 +165,10 @@ pub struct ComponentTracker<R: RPCClient> {
     /// Ids of the components the server reported as paused and nothing has unpaused since:
     /// neither a block nor the pause check after a restart. The tracker does not track them.
     paused: HashSet<ComponentId>,
+    /// Ids of the components a pause or unpause event decided since the stream was last
+    /// subscribed. A server answer does not change whether they are paused: the event is at least
+    /// as new, and a server process can lag behind the one that sent it.
+    decided_by_event: HashSet<ComponentId>,
     /// Client to retrieve necessary protocol components from the rpc.
     rpc_client: R,
 }
@@ -181,6 +187,7 @@ where
             rpc_client: rpc,
             entrypoints: Default::default(),
             paused: Default::default(),
+            decided_by_event: Default::default(),
         }
     }
 
@@ -205,13 +212,12 @@ where
             paginated_params = paginated_params.with_tvl_gt(tvl);
         }
 
-        let (components, paused) = self
+        let response = self
             .rpc_client
             .get_protocol_components_paginated(paginated_params)
-            .await?
-            .into_parts();
-        self.record_paused(paused);
-        self.components = components
+            .await?;
+        self.components = self
+            .not_paused(response)
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
@@ -294,7 +300,7 @@ where
             return Ok(());
         }
 
-        let (components, paused) = self
+        let response = self
             .rpc_client
             .get_protocol_components(
                 crate::rpc::ProtocolComponentsParams::new(
@@ -309,10 +315,9 @@ where
                 ),
             )
             .await?
-            .into_data()
-            .into_parts();
-        self.record_paused(paused);
-        let components = components
+            .into_data();
+        let components = self
+            .not_paused(response)
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();
@@ -426,19 +431,48 @@ where
     }
 
     /// Records the ids a components response reported as paused, so the tracker does not track
-    /// them until they are unpaused.
+    /// them until they are unpaused. Skips the ids a pause or unpause event decided.
     pub(crate) fn record_paused(&mut self, paused: HashSet<ComponentId>) {
+        let paused: HashSet<ComponentId> = paused
+            .into_iter()
+            .filter(|id| !self.decided_by_event.contains(id))
+            .collect();
         if !paused.is_empty() {
             self.log_paused(&paused, "Recorded paused components");
         }
         self.paused.extend(paused);
     }
 
+    /// Records the components `response` reported as paused, and returns the components the
+    /// tracker does not consider paused.
+    fn not_paused(&mut self, response: ComponentsWithPauses) -> Vec<ProtocolComponent> {
+        self.record_paused(response.paused_component_ids().clone());
+        response
+            .into_components()
+            .into_iter()
+            .filter(|component| !self.paused.contains(&component.id))
+            .collect()
+    }
+
+    /// Whether the latest pause or unpause event since the stream was last subscribed unpaused
+    /// component `id`.
+    pub(crate) fn unpaused_by_event(&self, id: &ComponentId) -> bool {
+        self.decided_by_event.contains(id) && !self.paused.contains(id)
+    }
+
+    /// Forgets which components a pause or unpause event decided, so server answers apply to
+    /// them again. Call it on every new subscription, since the events sent between two
+    /// subscriptions never reach the client.
+    pub(crate) fn forget_pause_events(&mut self) {
+        self.decided_by_event.clear();
+    }
+
     /// Asks the server which components are paused now, and records the answer. Call it after
     /// missing blocks, since their pause and unpause events are lost.
     ///
     /// Asks about every tracked component and every component recorded as paused. Returns the
-    /// ids that were recorded as paused and no longer are.
+    /// ids that were recorded as paused and no longer are. Keeps what a pause or unpause event
+    /// decided.
     pub(crate) async fn refresh_paused(&mut self) -> Result<HashSet<ComponentId>, RPCError> {
         let mut ids: HashSet<ComponentId> = self
             .components
@@ -455,16 +489,21 @@ where
             RPC_CLIENT_CONCURRENCY,
         )
         .with_component_ids(ids.into_iter().collect());
-        let (not_paused, paused) = self
+        let response = self
             .rpc_client
             .get_protocol_components_paginated(params)
-            .await?
-            .into_parts();
+            .await?;
+        let paused = response.paused_component_ids().clone();
 
-        let unpaused: HashSet<ComponentId> = not_paused
+        let unpaused: HashSet<ComponentId> = response
+            .into_components()
             .into_iter()
             .map(|component| component.id)
-            .filter(|id| self.paused.contains(id))
+            .filter(|id| {
+                !paused.contains(id) &&
+                    self.paused.contains(id) &&
+                    !self.decided_by_event.contains(id)
+            })
             .collect();
         for id in &unpaused {
             self.paused.remove(id);
@@ -504,13 +543,12 @@ where
         )
         .with_component_ids(untracked)
         .with_tvl_gt(add_tvl);
-        let (above_add_tvl, paused) = self
+        let response = self
             .rpc_client
             .get_protocol_components_paginated(params)
-            .await?
-            .into_parts();
-        self.record_paused(paused);
-        Ok(above_add_tvl
+            .await?;
+        Ok(self
+            .not_paused(response)
             .into_iter()
             .map(|component| component.id)
             .filter(|id| !self.filter.is_blocklisted(id))
@@ -524,6 +562,13 @@ where
         }
         self.paused
             .extend(deltas.paused_components.iter().cloned());
+        self.decided_by_event.extend(
+            deltas
+                .unpaused_components
+                .iter()
+                .chain(&deltas.paused_components)
+                .cloned(),
+        );
     }
 
     /// Removes the paused components from `components`, logs them, and returns their ids.

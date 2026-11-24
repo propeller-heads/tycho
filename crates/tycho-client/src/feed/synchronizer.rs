@@ -422,9 +422,13 @@ async fn fetch_snapshot<R: RPCClient>(
 
 /// Fetches a snapshot for new components not yet in the tracker. Calls `get_protocol_components`
 /// to resolve the components, then delegates to `fetch_snapshot`.
+///
+/// Leaves out the components the server reports as paused, except those in `unpaused_by_event`:
+/// an unpause event is at least as new as the server's answer.
 async fn fetch_snapshot_background<R: RPCClient>(
     rpc_client: R,
     component_ids: Vec<String>,
+    unpaused_by_event: HashSet<String>,
     params: FetchSnapshotParams,
 ) -> Result<SnapshotFetchResult, SynchronizerError> {
     if component_ids.is_empty() {
@@ -440,13 +444,20 @@ async fn fetch_snapshot_background<R: RPCClient>(
 
     let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
         .with_component_ids(component_ids);
-    let (components, paused_component_ids) = rpc_client
+    let response = rpc_client
         .get_protocol_components(request)
         .await?
-        .into_data()
-        .into_parts();
-    let components: HashMap<String, ProtocolComponent> = components
+        .into_data();
+    let paused_component_ids: HashSet<String> = response
+        .paused_component_ids()
+        .iter()
+        .filter(|id| !unpaused_by_event.contains(*id))
+        .cloned()
+        .collect();
+    let components: HashMap<String, ProtocolComponent> = response
+        .into_components()
         .into_iter()
+        .filter(|pc| !paused_component_ids.contains(&pc.id))
         .map(|pc| (pc.id.clone(), pc))
         .collect();
 
@@ -595,6 +606,8 @@ where
             Ok(result) => result,
             Err(e) => return Err(Box::new((e.into(), Some(end_rx)))),
         };
+        self.component_tracker
+            .forget_pause_events();
 
         let result = async {
             info!("Waiting for deltas...");
@@ -1137,12 +1150,21 @@ where
             include_tvl: self.include_tvl,
         };
         let ids = component_ids.clone();
+        let unpaused_by_event: HashSet<String> = component_ids
+            .iter()
+            .filter(|id| {
+                self.component_tracker
+                    .unpaused_by_event(id)
+            })
+            .cloned()
+            .collect();
         tokio::spawn(async move {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "the receiver is dropped only when the synchronizer has shut down"
             )]
-            let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
+            let _ =
+                tx.send(fetch_snapshot_background(rpc, ids, unpaused_by_event, bg_params).await);
         });
         for id in &component_ids {
             self.snapshot_queue
@@ -1323,20 +1345,16 @@ where
     /// found paused. It queues the components unpaused that way, so the next block fetches them
     /// again.
     fn apply_fetch_pauses(&mut self, fetch_result: &mut SnapshotFetchResult) {
-        let unpaused_since: HashSet<&String> = self
-            .buffered_deltas
-            .iter()
-            .filter(|d| d.block.number > fetch_result.snapshot_block)
-            .flat_map(|d| d.unpaused_components.iter())
-            .collect();
-        let (refetch, still_paused): (HashSet<String>, HashSet<String>) = fetch_result
-            .paused_component_ids
-            .iter()
-            .cloned()
-            .partition(|id| unpaused_since.contains(id));
+        let (refetch, paused): (HashSet<String>, HashSet<String>) =
+            std::mem::take(&mut fetch_result.paused_component_ids)
+                .into_iter()
+                .partition(|id| {
+                    self.component_tracker
+                        .unpaused_by_event(id)
+                });
         self.component_tracker
-            .record_paused(still_paused);
-        // The fetch left these out and the block that unpaused them found them in flight, so
+            .record_paused(paused);
+        // The fetch left these out and the event that unpaused them found them in flight, so
         // queue them like components whose backoff has ended: the next block fetches them again.
         for id in refetch {
             self.snapshot_queue
