@@ -886,6 +886,12 @@ pub(super) struct DoorsReader {
     /// The desk contracts whose listings are served, on a chain whose makers have one: see
     /// [`ApprovedDesks`].
     desks: ApprovedDesks,
+    /// The doors' creation code hash, where the caller pins it: see
+    /// [`EfficientPropFeedBuilder::with_door_code_hash`].
+    ///
+    /// [`EfficientPropFeedBuilder::with_door_code_hash`]:
+    /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::with_door_code_hash
+    pub(super) door_codehash: Option<B256>,
     /// Each guarded source's lane's `HOLD_MS` once it answered: an immutable of the lane's code,
     /// so it is asked once per lane.
     holds_ms: Arc<Mutex<BTreeMap<Address, u64>>>,
@@ -934,6 +940,7 @@ impl DoorsReader {
             price_sources,
             credit,
             desks,
+            door_codehash: None,
             holds_ms: Arc::default(),
             next_block,
             stepping_back: Arc::new(AtomicBool::new(false)),
@@ -1426,9 +1433,20 @@ impl DoorsReader {
                 self.factory, self.front
             )));
         }
-        // The doors' creation code hash is the factory's own answer, never configured: every
-        // door's address moves with its code.
+        // The doors' creation code hash is the factory's own answer: every door's address moves
+        // with its code. Where the caller pinned one, a factory answering another is not the one
+        // the caller checked.
         let door_codehash = setting::<DOOR_CODEHASHCall>(door_codehash, "factory's DOOR_CODEHASH")?;
+        if let Some(pinned) = self
+            .door_codehash
+            .filter(|pinned| *pinned != door_codehash)
+        {
+            return Err(FeedError::Fatal(format!(
+                "Efficient PropAMM: the listing-door factory {} creates doors of code hash \
+                 {door_codehash}, not the pinned {pinned}",
+                self.factory
+            )));
+        }
         if let (Some(configured), Some(answer)) = (self.cell_codehash, front_cell_codehash) {
             let found = setting::<CELL_CODEHASHCall>(answer, "front's CELL_CODEHASH")?;
             if found != configured {

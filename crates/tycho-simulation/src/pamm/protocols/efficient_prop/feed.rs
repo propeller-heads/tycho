@@ -102,6 +102,7 @@ pub struct EfficientPropFeedBuilder {
     approved_desks: Vec<Bytes>,
     approved_desks_url: Option<String>,
     approved_desks_max_age: Duration,
+    door_code_hash: Option<Bytes>,
     landing_allowance: Option<Duration>,
     state_urls: Vec<String>,
     usd_quote_tokens: HashSet<Bytes>,
@@ -127,6 +128,7 @@ impl EfficientPropFeedBuilder {
             approved_desks: Vec::new(),
             approved_desks_url: None,
             approved_desks_max_age: DEFAULT_MAX_AGE,
+            door_code_hash: None,
             landing_allowance: None,
             state_urls: Vec::new(),
             usd_quote_tokens,
@@ -233,6 +235,14 @@ impl EfficientPropFeedBuilder {
     /// Ten minutes by default.
     pub fn with_approved_desks_max_age(mut self, max_age: Duration) -> Self {
         self.approved_desks_max_age = max_age;
+        self
+    }
+
+    /// Pins the listing doors' creation code hash. Without it the factory's own `DOOR_CODEHASH`
+    /// answer is taken each poll, and a door's code is only as trusted as the configured factory
+    /// address; with it, a poll that finds the factory answering another hash ends the feed.
+    pub fn with_door_code_hash(mut self, hash: Bytes) -> Self {
+        self.door_code_hash = Some(hash);
         self
     }
 
@@ -556,7 +566,17 @@ impl EfficientPropFeedBuilder {
         let served = max_snapshot_age + landing_allowance;
         let millis = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
         let hold_ms = millis(self.feed_config.request_timeout + served);
-        let reader = DoorsReader::new(
+        let door_codehash = self
+            .door_code_hash
+            .map(|hash| {
+                B256::try_from(hash.as_ref()).map_err(|e| {
+                    FeedError::InvalidInput(format!(
+                        "Efficient PropAMM door code hash {hash} is not a hash of 32 bytes: {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let mut reader = DoorsReader::new(
             rpc_url,
             self.book_config.chain,
             address(front, "front")?,
@@ -570,6 +590,7 @@ impl EfficientPropFeedBuilder {
             desks,
             next_block,
         );
+        reader.door_codehash = door_codehash;
         Ok(EfficientPropFeed {
             feed_config: self.feed_config,
             source: EfficientPropBookSource {
@@ -4844,6 +4865,52 @@ mod tests {
             );
         }
 
+        /// A pinned door code hash holds the factory to it: a factory answering another ends the
+        /// feed, the pinned one's is served, and a pin that is no hash does not build.
+        #[tokio::test]
+        async fn a_factory_of_another_door_code_hash_than_the_pinned_ends_the_feed() {
+            let node = FakeNode::ethereum(vec![FakeListing::ethereum(1)])
+                .spawn()
+                .await;
+            let state = spawn_state_server(next_map(&[(1, false)])).await;
+            let source = |pinned: B256| {
+                let mut source = ethereum_source(&node.url(), vec![state.url()], NOW_MS);
+                source.reader.door_codehash = Some(pinned);
+                source
+            };
+
+            let error = source(B256::repeat_byte(0x99))
+                .fetch()
+                .await
+                .unwrap_err();
+            let served =
+                source(crate::pamm::protocols::efficient_prop::test_support::DOOR_CODEHASH)
+                    .fetch()
+                    .await
+                    .unwrap();
+            let unbuilt =
+                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
+                    .state_urls([state.url()])
+                    .with_door_code_hash(Bytes::from(vec![1u8; 31]))
+                    .build()
+                    .unwrap_err();
+
+            assert!(error.is_fatal(), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("doors of code hash"),
+                "{error}"
+            );
+            assert_eq!(served.books.len(), 1);
+            assert!(
+                unbuilt
+                    .to_string()
+                    .contains("not a hash of 32 bytes"),
+                "{unbuilt}"
+            );
+        }
+
         /// A map whose entry writes a listing's quote contract stamped for another block carries
         /// no update of it for the next block, and its door is not asked: a stamp of the latest
         /// block serves only a listing that carries, through the next block alone, since the
@@ -6489,6 +6556,35 @@ mod tests {
             assert_eq!(gas, BigUint::from(95_825u64));
         }
 
+        /// A recorded poll as `testdata/` holds it: one field a line, and one entry a line of
+        /// its calls, maps, listings and sides.
+        fn recording_text(poll: &RecordedEthereumPoll) -> String {
+            let poll = serde_json::to_value(poll).unwrap();
+            let fields: Vec<String> = poll
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| {
+                    let entries = value.as_array().filter(|list| {
+                        list.iter()
+                            .any(|entry| entry.is_object() || entry.is_array())
+                    });
+                    let text = match entries {
+                        Some(list) => {
+                            let lines: Vec<String> = list
+                                .iter()
+                                .map(|entry| format!("  {entry}"))
+                                .collect();
+                            format!("[\n{}\n]", lines.join(",\n"))
+                        }
+                        None => value.to_string(),
+                    };
+                    format!("{}:{text}", serde_json::Value::from(name.as_str()))
+                })
+                .collect();
+            format!("{{\n{}\n}}\n", fields.join(",\n"))
+        }
+
         /// Polls an Ethereum node and its state URLs, such as a fork with the listing doors and a
         /// stub of the next block's state map, and holds the books to the doors in that block:
         /// - the map is for the block after the node's latest, and no call of the poll names
@@ -7139,7 +7235,7 @@ mod tests {
                     credit: credit.clone(),
                     sides: recorded_sides,
                 };
-                std::fs::write(&path, serde_json::to_string_pretty(&poll).unwrap() + "\n").unwrap();
+                std::fs::write(&path, recording_text(&poll)).unwrap();
                 println!("recorded the poll in {path}");
             }
         }
@@ -7200,24 +7296,24 @@ mod tests {
         /// block the map is for, wei for wei.
         ///
         /// - `ethereum_fork_26482068.json`: a local fork of Ethereum at its block 26,482,055 with
-        ///   the 23 November deployment as it stands there (front, listing-door factory, the first
-        ///   maker's desk contract and the four price contracts are Ethereum's own), the first
-        ///   pool's launch replayed on the fork from the operator's previewed calls, and the four
-        ///   listing doors opened on the fork, at the addresses they take on Ethereum. Its maps are
-        ///   empty: it holds the poll's reads of the deployed front, the factory and the doors, and
-        ///   that it serves no listing without its maker's update.
+        ///   the deployment as it stands there (front, listing-door factory, the first maker's desk
+        ///   contract and the four price contracts are Ethereum's own), the first pool's launch
+        ///   replayed on the fork from the operator's previewed calls, and the four listing doors
+        ///   opened on the fork, at the addresses they take on Ethereum. Its maps are empty: it
+        ///   holds the poll's reads of the deployed front, the factory and the doors, and that it
+        ///   serves no listing without its maker's update.
         /// - `ethereum_fork_26479480_served.json`: a local fork of Ethereum at its block 26,479,360
         ///   holding the same deployment and two pools launched through the deployed launcher: a
-        ///   rehearsal's pool of wstETH, WETH, USDC and USDT with its four listings (the credit
-        ///   path on), and a pool of wstETH and WETH alone with no lender, whose one listing (the
-        ///   fifth the front handed out, in no credit mode) is bound to the same maker's desk at
-        ///   another word index and to the wstETH/WETH price contract the first pool's listing
-        ///   reads. The map writes each listing's quote word and its price contract's print as the
-        ///   maker's update for the next block does (a test maker's quotes, and prints Pyth's
-        ///   verifier checked against a test signer). Nothing names a listing: the scan finds the
-        ///   fifth, the three listings paid from the first pool's buffers and the second pool's are
-        ///   served at their classes' gas, and the first pool's wstETH/WETH listing, in credit mode
-        ///   2, is left out.
+        ///   first pool, of wstETH, WETH, USDC and USDT with its four listings (the credit path
+        ///   on), and a pool of wstETH and WETH alone with no lender, whose one listing (the fifth
+        ///   the front handed out, in no credit mode) is bound to the same maker's desk at another
+        ///   word index and to the wstETH/WETH price contract the first pool's listing reads. The
+        ///   map writes each listing's quote word and its price contract's print as the maker's
+        ///   update for the next block does (a test maker's quotes, and prints Pyth's verifier
+        ///   checked against a test signer). Nothing names a listing: the scan finds the fifth, the
+        ///   three listings paid from the first pool's buffers and the second pool's are served at
+        ///   their classes' gas, and the first pool's wstETH/WETH listing, in credit mode 2, is
+        ///   left out.
         /// - `ethereum_fork_26479480_credit.json`: the same fork and map, the first pool's
         ///   wstETH/WETH listing named with its gas: its bid is served through the credit route (a
         ///   borrow at the lender) and its ask from custody up to what the pool holds and through
