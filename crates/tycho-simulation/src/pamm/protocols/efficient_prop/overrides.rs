@@ -39,6 +39,62 @@ pub(super) const BEACON_GENESIS: u64 = 1_606_824_023;
 /// Seconds per beacon slot.
 pub(super) const SLOT_SECS: u64 = 12;
 
+/// The largest `/state` answer read, bytes.
+pub(super) const MAX_STATE_BODY: usize = 4 * 1024 * 1024;
+
+/// The body of `response`, read up to `cap` bytes: an answer announcing or sending more fails.
+pub(super) async fn capped_body(
+    mut response: reqwest::Response,
+    cap: usize,
+    what: &str,
+) -> Result<Vec<u8>, FeedError> {
+    let over = || FeedError::Parsing(format!("{what}: the answer is over {cap} bytes"));
+    if response
+        .content_length()
+        .is_some_and(|length| length > cap as u64)
+    {
+        return Err(over());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| FeedError::Connection(format!("{what}: {}", e.without_url())))?
+    {
+        if body.len() + chunk.len() > cap {
+            return Err(over());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// A hex quantity of up to 32 bytes as a `/state` answer may write it, compact (`0x1`) or padded:
+/// the reader forwards what it parsed, re-encoded, never the answer's own text.
+fn hex_number(text: &str) -> Result<U256, String> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .ok_or_else(|| format!("{text} is not 0x-prefixed hex"))?;
+    if digits.is_empty() || digits.len() > 64 {
+        return Err(format!("{text} is not a hex number of up to 32 bytes"));
+    }
+    U256::from_str_radix(digits, 16).map_err(|e| format!("{text}: {e}"))
+}
+
+/// A storage word as an answer writes it: [`hex_number`], held as the 32 bytes a node takes.
+#[derive(Debug, Clone, Copy)]
+struct Word(B256);
+
+impl<'de> Deserialize<'de> for Word {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        hex_number(&text)
+            .map(|word| Self(B256::from(word)))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// How long a poll keeps collecting the other URLs' maps after the first map carrying an entry
 /// answers.
 pub(super) const MERGE_WINDOW: Duration = Duration::from_millis(300);
@@ -48,7 +104,7 @@ pub(super) const MERGE_WINDOW: Duration = Duration::from_millis(300);
 #[derive(Debug, Clone, Deserialize)]
 struct RawAccount {
     #[serde(rename = "stateDiff", default, deserialize_with = "pairs")]
-    state_diff: Vec<(B256, B256)>,
+    state_diff: Vec<(B256, Word)>,
     #[serde(default)]
     balance: Option<String>,
     #[serde(default)]
@@ -86,12 +142,12 @@ where
 }
 
 /// One account's override, merged over the entries of one answer. A `balance` or `nonce` that is
-/// absent or empty is not overridden.
+/// absent or empty is not overridden; one given is held as the number it reads as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AccountOverride {
     state_diff: BTreeMap<B256, B256>,
-    balance: Option<String>,
-    nonce: Option<String>,
+    balance: Option<U256>,
+    nonce: Option<u64>,
     /// The slots two writes of one answer gave different values, or that an entry left out
     /// writes: the first value is the one kept in `state_diff`, and a listing owning such a slot
     /// is dropped.
@@ -103,11 +159,12 @@ impl AccountOverride {
     fn to_json(&self) -> Value {
         let mut fields = serde_json::Map::new();
         fields.insert("stateDiff".into(), serde_json::json!(self.state_diff));
-        if let Some(balance) = given(self.balance.as_deref()) {
-            fields.insert("balance".into(), Value::from(balance));
+        // Each as the hex quantity a node takes, whatever spelling the answer gave it.
+        if let Some(balance) = self.balance {
+            fields.insert("balance".into(), Value::from(format!("{balance:#x}")));
         }
-        if let Some(nonce) = given(self.nonce.as_deref()) {
-            fields.insert("nonce".into(), Value::from(nonce));
+        if let Some(nonce) = self.nonce {
+            fields.insert("nonce".into(), Value::from(format!("{nonce:#x}")));
         }
         Value::Object(fields)
     }
@@ -477,7 +534,8 @@ pub(super) struct NextBlockReader {
 }
 
 impl NextBlockReader {
-    /// A reader of `urls`, each request given `timeout`.
+    /// A reader of `urls`, each request given `timeout`, which the feed sets under its poll's own
+    /// so that one URL that hangs does not fail the poll.
     pub(super) fn new(urls: Vec<Url>, timeout: Duration) -> Result<Self, FeedError> {
         let client = Client::builder()
             .timeout(timeout)
@@ -560,9 +618,9 @@ impl NextBlockReader {
                 "Efficient PropAMM state map: HTTP {status}"
             )));
         }
-        let answer: Answer = response.json().await.map_err(|e| {
-            FeedError::Parsing(format!("Efficient PropAMM state map: {}", e.without_url()))
-        })?;
+        let body = capped_body(response, MAX_STATE_BODY, "Efficient PropAMM state map").await?;
+        let answer: Answer = serde_json::from_slice(&body)
+            .map_err(|e| FeedError::Parsing(format!("Efficient PropAMM state map: {e}")))?;
         if let Some(error) = answer.error {
             return Err(FeedError::Connection(format!(
                 "Efficient PropAMM state map refused: {error}"
@@ -576,8 +634,10 @@ impl NextBlockReader {
 }
 
 /// A map from a `/state` answer's result: its `blockNumber` (hex), its `slot` (a number, whose
-/// start must be a Unix second) and every other key an entry. An entry that does not parse is left
-/// out, with a warning naming how many and the first reason; the rest are kept. The entries'
+/// start must be a Unix second) and every other key naming a `stateOverride` an entry; a key that
+/// names none (a `timestamp`, say) is passed over. A slot's value, a balance and a nonce are read
+/// as hex numbers, compact or padded, and forwarded re-encoded. An entry that does not parse is
+/// left out, with a warning naming how many and the first reason; the rest are kept. The entries'
 /// accounts are gathered per account: one answer may write an account from several entries, and
 /// where two writes of the same slot (in two entries, or an account or slot named twice in one)
 /// differ, the first in key order is kept and the slot is marked in conflict, which drops the
@@ -610,6 +670,11 @@ fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
     // Whether any entry could not be read whole: the answer then covers no listing.
     let mut malformed = false;
     for (key, entry) in result {
+        // Only an object naming a `stateOverride` is an entry: any other key of the answer (a
+        // `timestamp`, say) writes nothing and is passed over.
+        if entry.get("stateOverride").is_none() {
+            continue;
+        }
         let parsed = match serde_json::from_value::<Entry>(entry) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -618,12 +683,19 @@ fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
                 continue;
             }
         };
-        if let Err(reason) = valid(&parsed) {
-            malformed = true;
-            dropped.push((key, reason));
-            continue;
-        }
-        for (address, state) in parsed.state_override {
+        let numbers = match numbers(&parsed) {
+            Ok(numbers) => numbers,
+            Err(reason) => {
+                malformed = true;
+                dropped.push((key, reason));
+                continue;
+            }
+        };
+        for ((address, state), (balance, nonce)) in parsed
+            .state_override
+            .into_iter()
+            .zip(numbers)
+        {
             if state.state_diff.is_empty() {
                 continue;
             }
@@ -635,7 +707,7 @@ fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
                     nonce: None,
                     conflicts: BTreeSet::new(),
                 });
-            for (slot, value) in state.state_diff {
+            for (slot, Word(value)) in state.state_diff {
                 match account.state_diff.entry(slot) {
                     std::collections::btree_map::Entry::Vacant(vacant) => {
                         vacant.insert(value);
@@ -647,12 +719,8 @@ fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
                     }
                 }
             }
-            if given(account.balance.as_deref()).is_none() {
-                account.balance = state.balance;
-            }
-            if given(account.nonce.as_deref()).is_none() {
-                account.nonce = state.nonce;
-            }
+            account.balance = account.balance.or(balance);
+            account.nonce = account.nonce.or(nonce);
         }
     }
     if let Some((key, reason)) = dropped.first() {
@@ -666,20 +734,27 @@ fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
     Ok(Map { number: number.to(), time, accounts, malformed })
 }
 
-/// Whether an entry's balances and nonces are hex numbers where given.
-fn valid(entry: &Entry) -> Result<(), String> {
-    for (account, state) in &entry.state_override {
-        if let Some(balance) = given(state.balance.as_deref()) {
-            balance
-                .parse::<U256>()
-                .map_err(|e| format!("{account}'s balance {balance}: {e}"))?;
-        }
-        if let Some(nonce) = given(state.nonce.as_deref()) {
-            serde_json::from_value::<U64>(Value::from(nonce))
-                .map_err(|e| format!("{account}'s nonce {nonce}: {e}"))?;
-        }
-    }
-    Ok(())
+/// An account's balance and nonce, where an entry gives them.
+type BalanceAndNonce = (Option<U256>, Option<u64>);
+
+/// Each account's balance and nonce where an entry gives them, in the entry's order. Fails where
+/// one given is not a hex number, a nonce one of 64 bits.
+fn numbers(entry: &Entry) -> Result<Vec<BalanceAndNonce>, String> {
+    entry
+        .state_override
+        .iter()
+        .map(|(account, state)| {
+            let balance = given(state.balance.as_deref())
+                .map(hex_number)
+                .transpose()
+                .map_err(|e| format!("{account}'s balance: {e}"))?;
+            let nonce = given(state.nonce.as_deref())
+                .map(|nonce| u64::try_from(hex_number(nonce)?).map_err(|e| format!("{nonce}: {e}")))
+                .transpose()
+                .map_err(|e| format!("{account}'s nonce: {e}"))?;
+            Ok((balance, nonce))
+        })
+        .collect()
 }
 
 /// A value the map gives, where it is not empty.
@@ -1019,6 +1094,94 @@ mod tests {
         assert!(taken.state[cell.to_string()]
             .get("nonce")
             .is_none());
+    }
+
+    /// A key of the answer that names no `stateOverride` is not an entry, and costs the answer
+    /// nothing: the builder's own sample carries a `timestamp`.
+    #[test]
+    fn a_key_that_is_no_entry_is_passed_over() {
+        let cell = Address::repeat_byte(1);
+        let mut value = map(HEAD + 1, &[("desk", cell, 1)]);
+        value["timestamp"] = Value::from(1_792_115_920_127_487_452u64);
+        value["venues"] = serde_json::json!([]);
+        value["note"] = serde_json::json!({ "maker": "none" });
+
+        let taken = next_block(vec![value]).take(&[quote_contract(cell)]);
+
+        assert_eq!(taken.listings, [Ok(())]);
+    }
+
+    /// A slot's value, a balance and a nonce are read as hex numbers however they are padded, and
+    /// reach the node as a 32-byte word and two compact quantities.
+    #[test]
+    fn numbers_are_forwarded_re_encoded() {
+        let (cell, price) = (Address::repeat_byte(1), Address::repeat_byte(5));
+        let mut value = map(HEAD + 1, &[("desk", cell, 1), ("price", price, 1)]);
+        let account = &mut value["price"]["stateOverride"][price.to_string()];
+        account["stateDiff"][quote_key()] = Value::from("0x1");
+        account["balance"] = Value::from("0x0003e8");
+        account["nonce"] = Value::from("0x01");
+        let wanted = Wanted { needs: vec![price], ..quote_contract(cell) };
+
+        let taken = next_block(vec![value]).take(&[wanted]);
+
+        assert_eq!(taken.listings, [Ok(())]);
+        let state = &taken.state[price.to_string()];
+        assert_eq!(state["stateDiff"][quote_key()], B256::with_last_byte(1).to_string());
+        assert_eq!(state["balance"], "0x3e8");
+        assert_eq!(state["nonce"], "0x1");
+    }
+
+    /// A number with no `0x`, one over its width and one that is not hex leave their entry out.
+    #[rstest::rstest]
+    #[case::a_decimal_balance("balance", "1000")]
+    #[case::a_nonce_over_64_bits("nonce", "0x10000000000000000")]
+    #[case::a_bare_prefix("balance", "0x")]
+    fn a_number_that_does_not_read_marks_the_answer_malformed(
+        #[case] field: &str,
+        #[case] text: &str,
+    ) {
+        let (cell, price) = (Address::repeat_byte(1), Address::repeat_byte(5));
+        let mut value = map(HEAD + 1, &[("desk", cell, 1), ("price", price, 1)]);
+        value["price"]["stateOverride"][price.to_string()][field] = Value::from(text);
+
+        let taken = next_block(vec![value]).take(&[quote_contract(cell)]);
+
+        assert_eq!(taken.listings, [Err(NotTaken::Malformed)]);
+    }
+
+    /// An answer over the cap is not read, and a URL that hangs past the reader's timeout costs
+    /// the read that long and no more: the other URL's map is served.
+    #[tokio::test]
+    async fn a_large_or_a_hung_answer_does_not_hold_the_read() {
+        use crate::snapshot_feed::http::test_support::{spawn_http_server, MockResponse};
+        let answer =
+            |value: Value| serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": value });
+        let good = map(HEAD + 1, &[("desk", Address::repeat_byte(1), 1)]);
+        let mut large = good.clone();
+        large["pad"] = Value::from("0".repeat(MAX_STATE_BODY));
+        let (good, large) = (answer(good).to_string(), answer(large).to_string());
+        let served = good.clone();
+        let hung = spawn_http_server(move |_| {
+            Some(MockResponse {
+                status: "200 OK",
+                body: served.clone(),
+                delay: Duration::from_secs(30),
+            })
+        })
+        .await;
+        let large = spawn_http_server(move |_| Some(("200 OK", large.clone()))).await;
+        let good = spawn_http_server(move |_| Some(("200 OK", good.clone()))).await;
+        let urls = [&hung, &large, &good]
+            .map(|server| Url::parse(&server.url()).unwrap())
+            .to_vec();
+        let reader = NextBlockReader::new(urls, Duration::from_millis(300)).unwrap();
+
+        let started = std::time::Instant::now();
+        let maps = reader.read().await.unwrap();
+
+        assert_eq!(maps.0.len(), 1);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     /// The block the tests' maps are for.

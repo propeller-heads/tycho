@@ -195,6 +195,12 @@
 //! read. Listings that read no print are not asked, and a side whose print outlives the book's
 //! life keeps the book's.
 //!
+//! A component names what its quotes hold for in static attributes, big-endian integers: on
+//! Ethereum [`VALID_FROM_BLOCK_ATTRIBUTE`], the block the book was read for and the first its
+//! quotes fill in, and on either chain [`BID_VALID_UNTIL_MS_ATTRIBUTE`] and
+//! [`ASK_VALID_UNTIL_MS_ATTRIBUTE`], the Unix millisecond from which the state refuses that
+//! side, where the side has such an end.
+//!
 //! # Fills between polls
 //!
 //! A fill walks the listing's depth, so after another taker's fill the door quotes a larger input
@@ -229,12 +235,16 @@
 //! more, not charged); a source other than those spends what its own code spends. A listing of an
 //! asset-module pair is charged no class figure: see Stock listings below.
 //!
-//! On Ethereum the class reading a source that is not guarded was measured with real transactions
-//! on an Ethereum fork, at three places: the hook pair, past it with the pool's asset (its token 0)
-//! one of the pair's tokens, and past it with neither token the asset, each charged its own (a
-//! USDT/USDC fill buying USDT spends about 18,300 more than wstETH/USDT's). Past the hook pair with
-//! the asset, the figure follows whether the input is the asset, not which token is the base: a
-//! pair whose quote is the asset is charged the asset-in figure where the swap pays the asset in.
+//! On Ethereum no class figure is charged: a token's own transfer moves a fill's gas by thousands,
+//! so a figure holds only for the pair it was measured on. A listing in no credit mode is charged
+//! the figures measured on its own two tokens, with the same base, at the same place in its pool,
+//! reading a source that is not guarded (`ETHEREUM_MEASURED` in [`state`]): wstETH/WETH on its
+//! pool's hook pair (105,899 selling the base, 106,520 buying it), wstETH/USDC and wstETH/USDT
+//! past the hook pair with the pool's asset, its token 0, as the base (126,434 and 125,271;
+//! 131,620 and 126,449), and USDT/USDC past it with neither token the asset (134,412 and
+//! 138,945). Any other listing, one reading only its word among them, is served only where
+//! [`EfficientPropFeedBuilder::credit_listing`] names it with gas measured on it, and is left out
+//! otherwise. Each fill was sent right behind its block's
 //! It was measured with the asset as the base only. Each fill was sent right behind its block's
 //! relay entries, the only fill of its side there, through Ethereum's `PropAMMExecutor`, with
 //! wstETH, USDC and USDT, from a pool whose custody holds the output; each figure is the least
@@ -244,17 +254,13 @@
 //! what the taker's transaction pays for the fill and never more. Same-size first fills vary by up
 //! to about 500 gas from run to run, and other sizes cost up to about 1,100 more, so a fill may
 //! spend up to about that much more than it is charged, and a later run may come in under its
-//! charge. A listing reading only its word was measured the same way and is charged its own
-//! figures, 10,074 to 10,287 under the print figures at the same place and direction. A listing
+//! charge. A listing
 //! reading a guarded source is not served there. A fill of a word carried into the block after its
 //! update's costs about 2,400 more than a first fill in the update's block; that is not charged. A
 //! credit listing is charged the four figures its caller measured on its pool instead (see
 //! [On Ethereum](#on-ethereum)).
 //!
-//! Where two pairs of one class were measured more than the fill's swing apart, the dearer is
-//! charged its own figures (`ETHEREUM_PRINT_PAIRS` in [`state`]): wstETH/USDT past the hook pair
-//! spends 5,186 more selling wstETH than wstETH/USDC, the cost of the pool's USDT payout over its
-//! USDC one. Every figure is of a pool that holds some of both the pair's tokens. A custody fill
+//! Every figure is of a pool that holds some of both the pair's tokens. A custody fill
 //! that pays into its pool a token the pool holds none of writes the pool's balance of it from
 //! zero and is charged 16,964 more (`FIRST_BALANCE_WRITE_GAS`, the least of the 16,964 to 17,100
 //! measured; the balance stays, so nothing is refunded): each Ethereum poll reads what each
@@ -308,12 +314,17 @@
 //! [`FALLBACK_PROTOCOL_SYSTEM`] instead, which tycho-execution settles through Tycho's
 //! `PropAMMFallbackRouter`: it asks the door's `quote` in the block the swap lands in, fills there
 //! unless the pool the solver names quotes more, and swaps on that pool where the door quotes
-//! nothing. On fork fills through the router deployed on Ethereum, a custody fill at the door cost
-//! its transaction 68,336 to 74,415 gas more than the direct path (the door's quote, a Uniswap V3
-//! pool's and the router's own work), against the 40,000 tycho-execution adds to the book's gas.
-//! Where the pool fills instead, the gas is that pool's swap and the door's refused quote (about
-//! 40,000), not the book's. A credit listing is not served this way: the router's quote runs its
-//! route a second time.
+//! nothing. Which of the two fills is not known when the book is read, so every swap of such a
+//! component is charged the cheaper branch (`FALLBACK_SWAP_GAS` in [`state`]: 50,445, to which
+//! tycho-execution adds its 40,000 for the router, 90,445 in all): the least a fill on the
+//! fallback pool cost its transaction on fork fills through the router deployed on Ethereum,
+//! counted as the charge of the same swap sent direct plus the difference of the two receipts,
+//! over Uniswap V2 pairs (90,445 to 102,984) and Uniswap V3 pools (105,181 to 109,541). A fill at
+//! the door cost 154,693 at the least (the door's fill and its quote, the pool's quote and the
+//! router's work), so a door fill spends about 64,000 to 121,000 more than it is charged. The
+//! router's other fallback protocols, and a door refusing sooner than `NoWord`, were not
+//! measured. On this path a listing needs no measured or named figure. A credit listing is not
+//! served this way: the router's quote runs its route a second time.
 //!
 //! Each poll reads, at once, the listings at the node's latest block (the first request, as on
 //! Base, less BaseTime: that predeploy is Base's and has no code on Ethereum) and the next block's
@@ -322,7 +333,10 @@
 //! JSON-RPC POST of `titan_getPammStateOverrides` a URL. A map names a block, its beacon slot and,
 //! for each account the block's updates write, the storage they write. The poll waits up to 300 ms
 //! for the other URLs once a map carrying an update has answered, and fails where every URL fails,
-//! without logging a URL.
+//! without logging a URL. Each URL is given half the request timeout, so one that hangs does not
+//! fail the poll, and an answer over 4 MiB is not read. A key of an answer that names no
+//! `stateOverride` (a `timestamp`) is passed over; a slot's value, a balance and a nonce are read
+//! as hex numbers, compact or padded, and reach the node re-encoded.
 //!
 //! Only a map for the block after the node's latest is used, and only at the slot right after the
 //! latest block's, its time 12 s after the latest block's: a map at or behind the latest block is
@@ -365,10 +379,10 @@
 //!   the listing is served. The rule sees the answers that arrive within the poll's merge window; a
 //!   later one is seen at the next poll;
 //! - no entry of the answer was left out as unreadable: an answer with any entry the parser cannot
-//!   read whole (a bad balance or nonce, a slot key or value that does not parse, a stateOverride
-//!   that is not an object, an address that does not parse) covers no listing for that block, since
-//!   the entry may write anything, a desk word or a firm word among it. A later clean answer for
-//!   the block still covers;
+//!   read whole (a balance, nonce, slot key or value that is no hex number, a stateOverride that is
+//!   not an object, an address that does not parse) covers no listing for that block, since the
+//!   entry may write anything, a desk word or a firm word among it. A later clean answer for the
+//!   block still covers;
 //! - a word stamped with the head block (carried into the next block) is the head's own word, read
 //!   from the desk contract in the same batch, byte for byte (its firm word too where its firm bit
 //!   is set): no landing in the next block can write a stamp of the head block.
@@ -479,20 +493,26 @@
 //! at the main contract's `fillQuote`, are not served by this integration: no door has a firm
 //! entry.
 //!
-//! # Every desk's listings
+//! # The makers served
 //!
-//! Nothing here names a maker. Listing ids are the front's own, handed out in order to every pool
-//! and desk, and each poll scans `doorView` past the highest seen, so a new maker's listing is
-//! found at the next poll. Its door is the factory's CREATE2 child at the listing's id under the
-//! code hash the factory answers, and must name this front and that listing; its desk contract is
-//! the front's CREATE2 child at its desk id, which the front's `deskCellOf` must confirm. Anyone
-//! may open a listing's door (`open`), and the door is the same code for every listing, so a door
-//! cannot be a hostile one: what a listing's operator and maker choose is its tokens, its price
-//! source and its asset module, and each is served only as the caller allows (the book
-//! configuration's tokens, [`EfficientPropFeedBuilder::approved_price_sources`], and the listings
-//! named with their gas, below). A second maker listing a pair whose price source is approved
-//! and whose tokens are known is served with no change here or in configuration, where its
-//! listing has no credit mode and is no stock listing.
+//! Anyone can reserve a listing and post quotes to it, so a listing is served only where its
+//! maker's desk contract is approved: one of [`EfficientPropFeedBuilder::with_approved_desks`]'s,
+//! or of the list read from [`EfficientPropFeedBuilder::with_approved_desks_url`] while that
+//! read is fresh (ten minutes; past it the builder's desks rule less those the list left out, so
+//! a URL that fails brings no desk in). With neither, nothing is served. Listing ids are the
+//! front's own, handed out in order to every pool and desk, and each poll scans `doorView` past
+//! the highest id holding a pool, served or not, so an approved maker's new listing is found at
+//! the next poll, whatever listings were reserved before it. Its door is the factory's CREATE2
+//! child at the listing's id under the code hash the factory answers, and must name this front and
+//! that listing; its desk contract is the front's CREATE2 child at its desk id, which the front's
+//! `deskCellOf` must confirm. Anyone may open a listing's door (`open`), and the door is the same
+//! code for every listing, so a door cannot be a hostile one: what a listing's operator and maker
+//! choose is its tokens, its price source and its asset module, and each is served only as the
+//! caller allows (the book configuration's tokens,
+//! [`EfficientPropFeedBuilder::approved_price_sources`], and the listings named with their gas,
+//! below). A second maker listing a pair whose price source is approved and whose tokens are known
+//! is served once its desk contract is approved, where its listing has no credit mode, is no stock
+//! listing and has a measured or named gas figure.
 //!
 //! # Stock listings
 //!
@@ -556,6 +576,7 @@
 
 use tycho_common::Bytes;
 
+mod desks;
 mod feed;
 mod ladder;
 mod overrides;
@@ -585,6 +606,20 @@ pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 /// Static attribute holding the listing's taker tip cap, wei per gas above the base fee,
 /// big-endian: a swap sent with a higher priority fee reverts. Absent where the listing has no cap.
 pub const TIP_CAP_WEI_ATTRIBUTE: &str = "tip_cap_wei";
+
+/// Static attribute holding the first block the book's quotes fill in, big-endian, on a chain
+/// whose makers' updates land in a builder's block (Ethereum): the block after the one the book
+/// was read at. A swap landing in an earlier block, or after the side's `*_valid_until_ms`,
+/// reverts or fills at another price.
+pub const VALID_FROM_BLOCK_ATTRIBUTE: &str = "valid_from_block";
+
+/// Static attribute holding the Unix time in milliseconds, big-endian, from which the state
+/// refuses the bid (a sale of the base): the end of the last block the side was sampled for, less
+/// the landing allowance. Absent where the side quotes for as long as the book is served.
+pub const BID_VALID_UNTIL_MS_ATTRIBUTE: &str = "bid_valid_until_ms";
+
+/// The same for the ask (a purchase of the base): see [`BID_VALID_UNTIL_MS_ATTRIBUTE`].
+pub const ASK_VALID_UNTIL_MS_ATTRIBUTE: &str = "ask_valid_until_ms";
 
 /// The one quote contract layout this integration reads: see
 /// [`EfficientPropDeployment::quote_layout`].

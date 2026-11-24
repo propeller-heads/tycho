@@ -23,12 +23,14 @@ use crate::{
         sim, BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
     pamm::protocols::efficient_prop::{
+        desks::{ApprovedDesks, DEFAULT_MAX_AGE},
         ladder::Ladder,
         overrides::NextBlockReader,
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
-        EfficientPropDeployment, FALLBACK_PROTOCOL_SYSTEM, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM,
-        PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE,
+        EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BID_VALID_UNTIL_MS_ATTRIBUTE,
+        FALLBACK_PROTOCOL_SYSTEM, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
+        QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -97,6 +99,9 @@ pub struct EfficientPropFeedBuilder {
     min_tip_cap_wei: U256,
     price_sources: BTreeSet<u32>,
     credit_listings: Vec<(u32, CreditGas)>,
+    approved_desks: Vec<Bytes>,
+    approved_desks_url: Option<String>,
+    approved_desks_max_age: Duration,
     landing_allowance: Option<Duration>,
     state_urls: Vec<String>,
     usd_quote_tokens: HashSet<Bytes>,
@@ -119,6 +124,9 @@ impl EfficientPropFeedBuilder {
             min_tip_cap_wei: U256::ZERO,
             price_sources: BTreeSet::new(),
             credit_listings: Vec::new(),
+            approved_desks: Vec::new(),
+            approved_desks_url: None,
+            approved_desks_max_age: DEFAULT_MAX_AGE,
             landing_allowance: None,
             state_urls: Vec::new(),
             usd_quote_tokens,
@@ -193,6 +201,38 @@ impl EfficientPropFeedBuilder {
     pub fn credit_listing(mut self, listing: u32, gas: CreditGas) -> Self {
         self.credit_listings
             .push((listing, gas));
+        self
+    }
+
+    /// The desk contracts whose listings are served, replacing any given before. Anyone can
+    /// reserve a listing and post quotes to it, so a listing is served only where its maker's
+    /// desk contract (the front's `deskCellOf` of the listing's desk id) is one of these. Empty by
+    /// default: a feed built without them, and without a list from
+    /// [`Self::with_approved_desks_url`], serves nothing.
+    pub fn with_approved_desks(mut self, desks: impl IntoIterator<Item = Bytes>) -> Self {
+        self.approved_desks = desks.into_iter().collect();
+        self
+    }
+
+    /// A URL answering a GET with the approved desk contracts,
+    /// `{"chainId": 1, "updatedAt": <Unix seconds>, "desks": ["0x…"]}` (`updatedAt` when the list
+    /// last changed; other fields are ignored). The list is read every 15 s at most, each read
+    /// given half the request timeout, and the last one taken replaces
+    /// [`Self::with_approved_desks`]'s set, an empty list approving nobody, until its read is ten
+    /// minutes old ([`Self::with_approved_desks_max_age`]). Past that age that set rules less
+    /// every desk the list left out, and before any answer that set alone: a URL that fails
+    /// brings no desk in. An answer is refused whole where its status is not 200, it is for
+    /// another chain, over 64 KiB or 1,024 desks, names the zero address, or is stamped zero,
+    /// before the one held or ahead of the clock.
+    pub fn with_approved_desks_url(mut self, url: impl Into<String>) -> Self {
+        self.approved_desks_url = Some(url.into());
+        self
+    }
+
+    /// How old the read of [`Self::with_approved_desks_url`]'s list may be while the list rules.
+    /// Ten minutes by default.
+    pub fn with_approved_desks_max_age(mut self, max_age: Duration) -> Self {
+        self.approved_desks_max_age = max_age;
         self
     }
 
@@ -381,7 +421,9 @@ impl EfficientPropFeedBuilder {
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    Some(NextBlockReader::new(urls, self.feed_config.request_timeout)?)
+                    // Half the poll's own timeout, so a URL that hangs leaves the poll time
+                    // to read the doors from the others' maps.
+                    Some(NextBlockReader::new(urls, self.feed_config.request_timeout / 2)?)
                 }
             };
         let mut credit = BTreeMap::new();
@@ -410,6 +452,33 @@ impl EfficientPropFeedBuilder {
                 )));
             }
         }
+        if gas_chain == GasChain::Base &&
+            (!self.approved_desks.is_empty() || self.approved_desks_url.is_some())
+        {
+            return Err(FeedError::InvalidInput(
+                "Efficient PropAMM approved desks are desk contracts, which Ethereum's makers \
+                 have and Base's do not"
+                    .into(),
+            ));
+        }
+        let desks = ApprovedDesks::new(
+            self.approved_desks
+                .iter()
+                .map(|desk| address(desk, "approved desk"))
+                .collect::<Result<_, _>>()?,
+            self.approved_desks_url
+                .as_deref()
+                .map(Url::parse)
+                .transpose()
+                .map_err(|e| {
+                    FeedError::InvalidInput(format!(
+                        "Efficient PropAMM approved desks URL is not one: {e}"
+                    ))
+                })?,
+            chain.id(),
+            self.approved_desks_max_age,
+            self.feed_config.request_timeout / 2,
+        )?;
         let landing_allowance = self
             .landing_allowance
             .unwrap_or(default_landing_allowance);
@@ -498,6 +567,7 @@ impl EfficientPropFeedBuilder {
             self.min_tip_cap_wei,
             self.price_sources,
             credit,
+            desks,
             next_block,
         );
         Ok(EfficientPropFeed {
@@ -711,6 +781,24 @@ impl EfficientPropBookAssembler {
                     Bytes::from(cap.to_be_bytes_trimmed_vec()),
                 );
             }
+            let number = |number: u64| Bytes::from(U256::from(number).to_be_bytes_trimmed_vec());
+            // On a builder chain the read's block is the one its quotes were sampled for: the
+            // block after the node's latest.
+            if read.block_lives {
+                book.component
+                    .static_attributes
+                    .insert(VALID_FROM_BLOCK_ATTRIBUTE.to_string(), number(read.block_number));
+            }
+            for (attribute, until) in [
+                (BID_VALID_UNTIL_MS_ATTRIBUTE, state.bid_until),
+                (ASK_VALID_UNTIL_MS_ATTRIBUTE, state.ask_until),
+            ] {
+                if let Some(until) = until {
+                    book.component
+                        .static_attributes
+                        .insert(attribute.to_string(), number(until.unix_ms));
+                }
+            }
             books.insert(book);
         }
         books
@@ -811,23 +899,31 @@ impl EfficientPropBookAssembler {
             );
             return None;
         }
-        Some(
-            EfficientPropState::new(
-                base_token.clone(),
-                quote_token.clone(),
-                Bytes::from(door.door.to_vec()),
-                bid,
-                ask,
-                door.reads,
-                door.pair,
-                self.gas_chain,
-                credit
-                    .map(|credit| credit.gas)
-                    .or(door.module_gas),
-            )
-            .with_pool_lacking(door.pool_lacks.0, door.pool_lacks.1)
-            .with_deadlines(bid_until, ask_until),
+        let state = EfficientPropState::new(
+            base_token.clone(),
+            quote_token.clone(),
+            Bytes::from(door.door.to_vec()),
+            bid,
+            ask,
+            door.reads,
+            door.pair,
+            self.gas_chain,
+            credit
+                .map(|credit| credit.gas)
+                .or(door.named_gas),
         )
+        .with_pool_lacking(door.pool_lacks.0, door.pool_lacks.1)
+        .with_fallback_router(self.protocol_system == FALLBACK_PROTOCOL_SYSTEM)
+        .with_deadlines(bid_until, ask_until);
+        if !state.has_gas() {
+            debug!(
+                listing = door.listing,
+                door = %door.door,
+                "skipping listing whose pair's gas was not measured, with no gas configured"
+            );
+            return None;
+        }
+        Some(state)
     }
 
     /// What one whole `token` is worth in USD: one when it is a USD quote token, else
@@ -2535,7 +2631,7 @@ mod tests {
     ) {
         use crate::{
             book::sim::SwapDirection,
-            pamm::protocols::efficient_prop::state::{swap_gas, FillReads, GasChain},
+            pamm::protocols::efficient_prop::{state::FillReads, test_support::base_gas},
         };
         let mut node = FakeNode::new(Vec::new());
         node.clock = FakeClock::counted(0);
@@ -2562,9 +2658,9 @@ mod tests {
                 )
                 .unwrap()
                 .gas;
-            assert_eq!(gas, BigUint::from(swap_gas(GasChain::Base, direction, reads, pair)));
+            assert_eq!(gas, BigUint::from(base_gas(direction, reads, pair)));
         }
-        let gas = |pair| swap_gas(GasChain::Base, SwapDirection::BaseToQuote, reads, pair);
+        let gas = |pair| base_gas(SwapDirection::BaseToQuote, reads, pair);
         assert_eq!(gas(pair) > gas(PairPlace::HookPair), pair != PairPlace::HookPair);
         assert_eq!(gas(PairPlace::PastWithAsset), gas(PairPlace::PastWithoutAsset));
         assert_eq!(gas(PairPlace::PastWithAssetAsQuote), gas(PairPlace::PastWithoutAsset));
@@ -4200,13 +4296,13 @@ mod tests {
             book::sim::SwapDirection,
             pamm::protocols::efficient_prop::{
                 overrides::{MERGE_WINDOW, SLOT_SECS},
-                state::{swap_gas, FillReads, GasChain},
+                state::GasChain,
                 test_support::{
-                    credit_gas, desk_cell, ethereum_deployment, left_out_of_a_poll, price_contract,
-                    quote_word, read_state_map, spawn_state_server, state_map, state_map_of,
-                    with_account, FakeAging, RecordedEthereumPoll, RecordedListing, RecordedSide,
-                    ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME, ETHEREUM_SLOT, FENCE_NONE, QUOTE_BASE,
-                    VECTOR_WORDS,
+                    approved_desks, credit_gas, desk_cell, ethereum_deployment, left_out_of_a_poll,
+                    named_gas, price_contract, quote_word, read_state_map, spawn_state_server,
+                    state_map, state_map_of, with_account, FakeAging, RecordedEthereumPoll,
+                    RecordedListing, RecordedSide, ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME,
+                    ETHEREUM_SLOT, FENCE_NONE, QUOTE_BASE, VECTOR_WORDS,
                 },
             },
             snapshot_feed::http::test_support::{spawn_http_server, MockRequest, MockResponse},
@@ -4232,17 +4328,21 @@ mod tests {
             state_urls: Vec<String>,
             now_ms: u64,
         ) -> EfficientPropBookSource {
-            let mut source = EfficientPropFeedBuilder::new(
+            let source = EfficientPropFeedBuilder::new(
                 ethereum_config(),
                 node_url.to_string(),
                 ethereum_deployment(),
             )
             .approved_price_sources([APPROVED_SOURCE])
+            .with_approved_desks(approved_desks())
             .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
-            .state_urls(state_urls)
-            .build()
-            .unwrap()
-            .source;
+            .state_urls(state_urls);
+            // The fake listings trade test tokens, which no figure was measured for.
+            let mut source = (1..=64)
+                .fold(source, |builder, listing| builder.credit_listing(listing, named_gas()))
+                .build()
+                .unwrap()
+                .source;
             source.clock = Arc::new(move || now_ms);
             source
         }
@@ -4334,6 +4434,170 @@ mod tests {
                     deadline
                 );
             }
+            // The component names the block its quotes fill in and when each side stops quoting.
+            let attributes = &books
+                .values()
+                .next()
+                .unwrap()
+                .component
+                .static_attributes;
+            let number = |number: u64| Bytes::from(U256::from(number).to_be_bytes_trimmed_vec());
+            assert_eq!(attributes["valid_from_block"], number(ETHEREUM_BLOCK + 1));
+            assert_eq!(attributes["bid_valid_until_ms"], number(deadline));
+            assert_eq!(attributes["ask_valid_until_ms"], number(deadline));
+        }
+
+        /// Through the fallback router every swap is charged that path's one figure, the least
+        /// either of the router's branches costs less the estimator's own overhead: a listing of
+        /// a pair no figure was measured for is served without its gas named.
+        #[tokio::test]
+        async fn a_fallback_feed_charges_the_fallback_paths_gas() {
+            let listing = FakeListing::ethereum(1);
+            let node = FakeNode::ethereum(vec![listing.clone()])
+                .spawn()
+                .await;
+            let state = spawn_state_server(next_map(&[(1, false)])).await;
+            let mut source =
+                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
+                    .with_approved_desks(approved_desks())
+                    .with_fallback_router()
+                    .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
+                    .state_urls([state.url()])
+                    .build()
+                    .unwrap()
+                    .source;
+            source.clock = Arc::new(|| NOW_MS);
+
+            let books = source.fetch().await.unwrap().books;
+
+            let book = books.values().next().unwrap();
+            assert_eq!(book.component.protocol_system, "fallback:efficient_prop");
+            let state = book
+                .state
+                .as_any()
+                .downcast_ref::<EfficientPropState>()
+                .unwrap();
+            for (direction, token_in, token_out) in [
+                (SwapDirection::BaseToQuote, weth(), usdc()),
+                (SwapDirection::QuoteToBase, usdc(), weth()),
+            ] {
+                let (smallest, _) = state.side(direction).first().unwrap();
+                let gas = state
+                    .get_amount_out(
+                        BigUint::from_bytes_be(&smallest.to_be_bytes::<32>()),
+                        &token_in,
+                        &token_out,
+                    )
+                    .unwrap()
+                    .gas;
+                assert_eq!(gas, BigUint::from(50_445u64));
+            }
+        }
+
+        /// The books of two polls of listings 1 and 2, each with its update in the map, by a feed
+        /// the builder was given `desks` and, where `list` is one, a desk list answering it.
+        async fn books_approving(desks: Vec<Bytes>, list: Option<serde_json::Value>) -> Vec<Bytes> {
+            let node = FakeNode::ethereum(vec![FakeListing::ethereum(1), FakeListing::ethereum(2)])
+                .spawn()
+                .await;
+            let state = spawn_state_server(next_map(&[(1, false), (2, false)])).await;
+            let mut builder =
+                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
+                    .approved_price_sources([APPROVED_SOURCE])
+                    .with_approved_desks(desks)
+                    .credit_listing(1, named_gas())
+                    .credit_listing(2, named_gas())
+                    .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
+                    .state_urls([state.url()]);
+            let server = match list {
+                Some(list) => {
+                    Some(spawn_http_server(move |_| Some(("200 OK", list.to_string()))).await)
+                }
+                None => None,
+            };
+            if let Some(server) = &server {
+                builder = builder.with_approved_desks_url(server.url());
+            }
+            let mut source = builder.build().unwrap().source;
+            source.clock = Arc::new(|| NOW_MS);
+            let books = source.fetch().await.unwrap().books;
+            let mut doors: Vec<Bytes> = books
+                .values()
+                .map(|book| book.component.static_attributes["pamm_address"].clone())
+                .collect();
+            doors.sort();
+            doors
+        }
+
+        /// A listing is served only where its maker's desk contract is approved, and a feed built
+        /// with no desk serves nothing: anyone can reserve a listing and post quotes to it.
+        #[tokio::test]
+        async fn only_an_approved_desks_listings_are_served() {
+            let door = |listing: u32| bytes(door_of(listing));
+
+            assert_eq!(books_approving(vec![], None).await, Vec::<Bytes>::new());
+            assert_eq!(books_approving(vec![bytes(desk_cell(2))], None).await, [door(2)]);
+            assert_eq!(
+                books_approving(vec![bytes(desk_cell(1)), bytes(desk_cell(2))], None).await,
+                {
+                    let mut both = vec![door(1), door(2)];
+                    both.sort();
+                    both
+                }
+            );
+        }
+
+        /// A list from the desks URL rules in place of the builder's set, however long ago it
+        /// last changed, and one for another chain leaves the builder's set ruling.
+        #[tokio::test]
+        async fn a_desk_list_rules_and_a_refused_one_falls_back() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let list = |chain: u64, updated_at: u64| {
+                Some(serde_json::json!({
+                    "chainId": chain, "updatedAt": updated_at, "desks": [desk_cell(2)],
+                }))
+            };
+            let own = vec![bytes(desk_cell(1))];
+
+            assert_eq!(books_approving(own.clone(), list(1, now)).await, [bytes(door_of(2))]);
+            assert_eq!(
+                books_approving(own.clone(), list(1, now - 86_400)).await,
+                [bytes(door_of(2))]
+            );
+            assert_eq!(books_approving(own, list(8453, now)).await, [bytes(door_of(1))]);
+        }
+
+        /// A listing a poll leaves out still counts as reserved: sixteen listings in a credit mode
+        /// nobody named, then one open listing, which the second poll finds and serves. Counting
+        /// served listings alone, the scan would stop sixteen past none for ever.
+        #[tokio::test]
+        async fn listings_left_out_do_not_hide_the_ones_reserved_after_them() {
+            let mut listings: Vec<_> = (1..=LISTING_LOOKAHEAD)
+                .map(FakeListing::ethereum_credit)
+                .collect();
+            let open = FakeListing::ethereum(LISTING_LOOKAHEAD + 1);
+            listings.push(open.clone());
+            let node = FakeNode::ethereum(listings)
+                .spawn()
+                .await;
+            let state = spawn_state_server(next_map(&[(open.id, false)])).await;
+            let source = ethereum_source(&node.url(), vec![state.url()], NOW_MS);
+
+            let first = source.fetch().await.unwrap().books;
+            let second = source.fetch().await.unwrap().books;
+
+            assert!(first.is_empty());
+            assert_eq!(
+                source
+                    .highest_listing
+                    .load(Ordering::Relaxed),
+                LISTING_LOOKAHEAD + 1
+            );
+            assert_eq!(second.len(), 1);
+            state_for(&second, &open);
         }
 
         /// Without its update in the map a listing is not served, even where its maker's last
@@ -4758,7 +5022,8 @@ mod tests {
             assert_eq!(calls[0], calls[1]);
         }
 
-        /// A book on Ethereum charges Ethereum's gas for its class, not Base's.
+        /// A book on Ethereum of a pair no figure was measured for charges the gas named for its
+        /// listing, not a class's.
         #[tokio::test]
         async fn a_book_on_ethereum_charges_its_gas() {
             let listing = FakeListing::ethereum(1);
@@ -4779,11 +5044,7 @@ mod tests {
                 )
                 .unwrap()
                 .gas;
-            let charged = |chain| {
-                swap_gas(chain, SwapDirection::BaseToQuote, FillReads::Word, PairPlace::HookPair)
-            };
-            assert_eq!(gas, BigUint::from(charged(GasChain::Ethereum)));
-            assert_ne!(charged(GasChain::Ethereum), charged(GasChain::Base));
+            assert_eq!(gas, BigUint::from(named_gas().custody.sell_base.get()));
         }
 
         /// A node that ignores or refuses the next block's overrides cannot show any quote on
@@ -5118,10 +5379,32 @@ mod tests {
 
         /// The books one poll of an Ethereum node of `listings` publishes, its maps from
         /// `maps`, serving the credit listings `credit` at [`credit_gas`].
+        /// The books one poll publishes with `credit` named at [`credit_gas`] and every listing
+        /// in no credit mode at [`named_gas`]: the fake listings trade test tokens, which no
+        /// figure was measured for.
         async fn credit_books(
             listings: Vec<FakeListing>,
             maps: Vec<serde_json::Value>,
             credit: &[u32],
+        ) -> HashMap<String, Book> {
+            let named: Vec<_> = credit
+                .iter()
+                .map(|&listing| (listing, credit_gas()))
+                .chain(
+                    listings
+                        .iter()
+                        .filter(|listing| listing.credit_mode == 0 && !credit.contains(&listing.id))
+                        .map(|listing| (listing.id, named_gas())),
+                )
+                .collect();
+            books_naming(listings, maps, &named).await
+        }
+
+        /// The books one poll publishes with each of `named` configured with its gas.
+        async fn books_naming(
+            listings: Vec<FakeListing>,
+            maps: Vec<serde_json::Value>,
+            named: &[(u32, CreditGas)],
         ) -> HashMap<String, Book> {
             let node = FakeNode::ethereum(listings)
                 .spawn()
@@ -5130,11 +5413,12 @@ mod tests {
             for map in maps {
                 servers.push(spawn_state_server(map).await);
             }
-            let builder = credit.iter().fold(
+            let builder = named.iter().fold(
                 EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment()),
-                |builder, &listing| builder.credit_listing(listing, credit_gas()),
+                |builder, &(listing, gas)| builder.credit_listing(listing, gas),
             );
             let mut source = builder
+                .with_approved_desks(approved_desks())
                 .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
                 .state_urls(
                     servers
@@ -5305,6 +5589,38 @@ mod tests {
             assert_eq!(ask_gas(most), BigUint::from(187_000u64));
         }
 
+        /// A credit listing's ask is served past its custody only in a state where its route
+        /// fills there. The first pool's route on this side repays what the pool owes: while it
+        /// owes nothing the door refuses every size above the custody's most (`NotEnoughDepth`
+        /// in the fill, as measured on a fork of the deployed build), so the side is its custody
+        /// sizes alone, each charged the custody's gas, and nothing is quoted above them.
+        #[tokio::test]
+        async fn a_credit_ask_refused_past_its_custody_is_served_its_custody_alone() {
+            let custody = U256::from(2_048_000_000u64);
+            let ask = FakeSide {
+                credit_route: None,
+                custody_most: Some(custody),
+                max_in: custody,
+                ..FakeSide::weth_ask()
+            };
+            let listing = FakeListing { ask, ..FakeListing::ethereum_credit(1) };
+
+            let books =
+                credit_books(vec![listing.clone()], vec![next_map(&[(1, false)])], &[1]).await;
+
+            let state = state_for(&books, &listing);
+            let ask = samples(state, SwapDirection::QuoteToBase);
+            assert_eq!(ask, door_quotes(&listing, &ask, false, ETHEREUM_NEXT_TIME));
+            assert_eq!(ask.last().map(|&(amount, _)| amount), Some(custody));
+            for &(amount, _) in &ask[..ask.len() - 1] {
+                assert_eq!(
+                    charged(state, SwapDirection::QuoteToBase, amount).unwrap(),
+                    BigUint::from(158_340u64)
+                );
+            }
+            assert!(charged(state, SwapDirection::QuoteToBase, custody + U256::from(1u8)).is_err());
+        }
+
         /// A custody fill that pays into its pool a token the pool holds none of is charged the
         /// first write of the pool's balance on top of its figure. A routed fill is charged
         /// nothing more: its tokens pass through the pool and the write is mostly refunded.
@@ -5354,9 +5670,13 @@ mod tests {
             #[case] served: bool,
         ) {
             let listing = FakeListing { asset_module: true, ..FakeListing::ethereum(1) };
+            let named: Vec<_> = named
+                .iter()
+                .map(|&listing| (listing, credit_gas()))
+                .collect();
 
             let books =
-                credit_books(vec![listing.clone()], vec![next_map(&[(1, false)])], named).await;
+                books_naming(vec![listing.clone()], vec![next_map(&[(1, false)])], &named).await;
 
             assert_eq!(books.len(), usize::from(served));
             if served {
@@ -5422,8 +5742,8 @@ mod tests {
         }
 
         /// A credit listing is left out where it is not named, or where its credit mode is one
-        /// the front does not know; a listing without a credit mode beside it is served, named or
-        /// not, at its class's gas.
+        /// the front does not know; a listing without a credit mode beside it is served at the
+        /// gas named for it.
         #[rstest]
         #[case::not_named(2, &[])]
         #[case::another_named(2, &[3])]
@@ -5444,7 +5764,7 @@ mod tests {
             .await;
 
             assert_eq!(books.len(), 1);
-            assert_eq!(state_for(&books, &plain).credit, None);
+            assert_eq!(state_for(&books, &plain).credit, Some(named_gas()));
         }
 
         /// A credit listing sharing its pool keeps its route beside listings its route cannot
@@ -5540,7 +5860,7 @@ mod tests {
             let past =
                 charged(state, SwapDirection::BaseToQuote, most + U256::from(1u8)).unwrap_err();
             assert!(matches!(past, SimulationError::InvalidInput(_, Some(_))), "{past}");
-            assert_eq!(state_for(&books, &sibling).credit, None);
+            assert_eq!(state_for(&books, &sibling).credit, Some(named_gas()));
 
             let apart = FakeListing::ethereum(2);
             let books = credit_books(
@@ -6142,51 +6462,31 @@ mod tests {
             }
         }
 
-        /// Past the hook pair, a listing with the pool's asset (its token 0) is charged apart from
-        /// one with neither token the asset, each its own least first fill measured on Ethereum.
-        /// With the asset, the figure follows whether the input is the asset, so a listing whose
-        /// quote is the asset is charged the asset-in figure buying base.
-        #[rstest]
-        #[case::the_hook_pair(0, 1, 105_899, 106_520)]
-        #[case::with_the_pools_asset(0, 2, 126_434, 125_271)]
-        #[case::without_it(2, 1, 133_234, 133_759)]
-        #[case::with_the_pools_asset_as_quote(2, 0, 125_271, 126_434)]
+        /// A listing in no credit mode whose pair no figure was measured for (here test tokens) is
+        /// left out on Ethereum unless its gas is named, and is then charged that: no other
+        /// pair's figure, which may be over what its own tokens' transfers cost.
         #[tokio::test]
-        async fn a_print_listing_on_ethereum_is_charged_its_pairs_class(
-            #[case] base_index: u8,
-            #[case] quote_index: u8,
-            #[case] sell: u64,
-            #[case] buy: u64,
-        ) {
-            let listing = FakeListing {
-                fence: FENCE_PRINT,
-                base_index,
-                quote_index: Some(quote_index),
-                ..FakeListing::ethereum(1)
-            };
-            let map = with_account(next_map(&[(1, false)]), "desk-1", price_contract(1));
+        async fn a_listing_of_a_pair_not_measured_is_served_only_with_its_gas_named() {
+            let listings = vec![FakeListing::ethereum(1), FakeListing::ethereum(2)];
+            let map = next_map(&[(1, false), (2, false)]);
 
-            let books = ethereum_books(vec![listing.clone()], vec![map]).await;
+            let books = books_naming(listings.clone(), vec![map], &[(2, named_gas())]).await;
 
-            let state = state_for(&books, &listing);
-            let gas = |direction: SwapDirection, token_in: &Token, token_out: &Token| {
-                let (smallest, _) = state.side(direction).first().unwrap();
-                state
-                    .get_amount_out(
-                        BigUint::from_bytes_be(&smallest.to_be_bytes::<32>()),
-                        token_in,
-                        token_out,
-                    )
-                    .unwrap()
-                    .gas
-            };
-            assert_eq!(
-                (
-                    gas(SwapDirection::BaseToQuote, &weth(), &usdc()),
-                    gas(SwapDirection::QuoteToBase, &usdc(), &weth())
-                ),
-                (BigUint::from(sell), BigUint::from(buy))
-            );
+            assert_eq!(books.len(), 1);
+            let state = state_for(&books, &listings[1]);
+            let (smallest, _) = state
+                .side(SwapDirection::BaseToQuote)
+                .first()
+                .unwrap();
+            let gas = state
+                .get_amount_out(
+                    BigUint::from_bytes_be(&smallest.to_be_bytes::<32>()),
+                    &weth(),
+                    &usdc(),
+                )
+                .unwrap()
+                .gas;
+            assert_eq!(gas, BigUint::from(95_825u64));
         }
 
         /// Polls an Ethereum node and its state URLs, such as a fork with the listing doors and a
@@ -6387,6 +6687,11 @@ mod tests {
             let mut builder =
                 EfficientPropFeedBuilder::new(config.clone(), proxy.url(), deployment)
                     .approved_price_sources(price_sources.clone())
+                    .with_approved_desks(
+                        list(&env("EFFICIENT_PROP_ETH_APPROVED_DESKS").unwrap_or_default())
+                            .iter()
+                            .map(|desk| bytes(desk.parse().unwrap())),
+                    )
                     .state_urls(state_urls.clone());
             for &(listing, gas) in &credit {
                 builder = builder.credit_listing(listing, gas);
@@ -6973,6 +7278,11 @@ mod tests {
             );
             let mut source = builder
                 .approved_price_sources(poll.price_sources.iter().copied())
+                .with_approved_desks(
+                    poll.listings
+                        .iter()
+                        .map(|listing| bytes(listing.quote_contract)),
+                )
                 .state_urls(
                     servers
                         .iter()

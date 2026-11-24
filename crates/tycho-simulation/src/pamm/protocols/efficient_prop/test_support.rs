@@ -32,7 +32,7 @@ use tycho_common::{
 };
 
 use crate::{
-    book::BookFeedConfig,
+    book::{sim::SwapDirection, BookFeedConfig},
     pamm::protocols::efficient_prop::{
         ladder::Ladder,
         overrides::{BEACON_GENESIS, SLOT_SECS, STATE_METHOD},
@@ -41,7 +41,9 @@ use crate::{
             quoteFillableCall, quoteFromCall, BASECall, CELL_CODEHASHCall, DOOR_CODEHASHCall,
             DoorView, FRONTCall, LISTINGCall, Timing, IMPLEMENTATION_SLOT,
         },
-        state::{CreditGas, DirectionGas, EfficientPropState, FillReads, GasChain, PairPlace},
+        state::{
+            swap_gas, CreditGas, DirectionGas, EfficientPropState, FillReads, GasChain, PairPlace,
+        },
         EfficientPropDeployment,
     },
     snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockRequest},
@@ -250,6 +252,23 @@ pub(super) fn direction_gas(sell_base: u64, buy_base: u64) -> DirectionGas {
     DirectionGas {
         sell_base: sell_base.try_into().unwrap(),
         buy_base: buy_base.try_into().unwrap(),
+    }
+}
+
+/// The gas the tests name for a fake listing on Ethereum in no credit mode, whose pair of test
+/// tokens no figure was measured for: 95,825 selling base and 96,239 buying it.
+pub(super) fn named_gas() -> CreditGas {
+    CreditGas { custody: direction_gas(95_825, 96_239), route: direction_gas(95_825, 96_239) }
+}
+
+/// Base's figure for a swap in `direction` into a listing of the class `reads` at `pair`.
+pub(super) fn base_gas(direction: SwapDirection, reads: FillReads, pair: PairPlace) -> u64 {
+    let (sell_gas, buy_gas) =
+        swap_gas(GasChain::Base, reads, pair, &Bytes::new(), &Bytes::new()).unwrap();
+    if direction == SwapDirection::BaseToQuote {
+        sell_gas
+    } else {
+        buy_gas
     }
 }
 
@@ -1633,6 +1652,13 @@ impl FakeNode {
 /// CREATE2 child at salt `(1 << 252) | desk` under the desk contracts' creation code hash.
 pub(super) fn desk_cell(desk: u32) -> Address {
     FRONT.create2(B256::from((U256::from(1u8) << 252usize) | U256::from(desk)), CELL_CODEHASH)
+}
+
+/// The desk contracts of the fake front's first 64 desk ids, which the Ethereum tests approve.
+pub(super) fn approved_desks() -> Vec<Bytes> {
+    (1..=64)
+        .map(|desk| bytes(desk_cell(desk)))
+        .collect()
 }
 
 /// The words an Ethereum `eth_call`'s state override sets, per desk contract and slot.

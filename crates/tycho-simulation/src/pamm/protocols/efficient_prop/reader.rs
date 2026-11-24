@@ -56,6 +56,7 @@ use tycho_common::models::Chain;
 
 use crate::{
     pamm::protocols::efficient_prop::{
+        desks::ApprovedDesks,
         ladder::FillPath,
         overrides::{NextBlock, NextBlockReader, NotTaken, Wanted, SLOT_SECS},
         slots::{HeadWords, SLOT_RULE},
@@ -288,7 +289,7 @@ pub(super) struct DoorRead {
     pub credit: Option<CreditRead>,
     /// On a listing of an asset-module pair with no credit mode, the gas configured for it, whose
     /// custody pair its fills are charged; `None` on any other listing.
-    pub module_gas: Option<CreditGas>,
+    pub named_gas: Option<CreditGas>,
     /// Whether the listing's pool held none of the base and none of the quote token at the block
     /// read, where the read asks (Ethereum's): a fill that pays such a token into the pool writes
     /// the pool's balance of it from zero, which costs more (see `FIRST_BALANCE_WRITE_GAS` in
@@ -310,7 +311,7 @@ pub(super) struct DoorsRead {
     /// How far the front's clock runs ahead of the wall clock, ms: from the poll's start on the
     /// wall clock to the book's life's start on the front's, zero where the front's lags.
     pub lead_ms: u64,
-    /// The highest listing id the front has reserved, among those scanned.
+    /// The highest listing id the front has reserved, among those scanned, served or not.
     pub highest_listing: u32,
     pub doors: Vec<DoorRead>,
     /// Whether each side's life is the blocks it was sampled at, a builder chain's next block and,
@@ -374,7 +375,7 @@ struct Listing {
     credit: Option<CreditGas>,
     /// On a listing of an asset-module pair with no credit mode, the gas configured for it: its
     /// fills are charged that figure's custody pair.
-    module_gas: Option<CreditGas>,
+    named_gas: Option<CreditGas>,
     /// The pool whose custody pays its fills: `doorView`'s `pool`.
     pool: Address,
 }
@@ -458,8 +459,8 @@ struct OpenDoor {
     /// Where its credit mode is set and it is served, the gas configured for its fills: its
     /// sizes are then classified by the path the front's plan takes.
     credit: Option<CreditGas>,
-    /// On a listing of an asset-module pair with no credit mode, the gas configured for it.
-    module_gas: Option<CreditGas>,
+    /// On a listing with no credit mode, the gas configured for it, if any.
+    named_gas: Option<CreditGas>,
     /// The pool whose custody pays its fills: a credit listing sharing it with another door
     /// sampled that its route could move is served only the sizes the custody fills (see
     /// [`DoorsReader::sample_next_block`]).
@@ -882,6 +883,9 @@ pub(super) struct DoorsReader {
     /// [`EfficientPropFeedBuilder::credit_listing`]:
     /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::credit_listing
     credit: BTreeMap<u32, CreditGas>,
+    /// The desk contracts whose listings are served, on a chain whose makers have one: see
+    /// [`ApprovedDesks`].
+    desks: ApprovedDesks,
     /// Each guarded source's lane's `HOLD_MS` once it answered: an immutable of the lane's code,
     /// so it is asked once per lane.
     holds_ms: Arc<Mutex<BTreeMap<Address, u64>>>,
@@ -910,6 +914,7 @@ impl DoorsReader {
         min_tip_cap_wei: U256,
         price_sources: BTreeSet<u32>,
         credit: BTreeMap<u32, CreditGas>,
+        desks: ApprovedDesks,
         next_block: Option<NextBlockReader>,
     ) -> Self {
         let is_local = guess_local_url(rpc_url.as_str());
@@ -928,6 +933,7 @@ impl DoorsReader {
             min_tip_cap_wei,
             price_sources,
             credit,
+            desks,
             holds_ms: Arc::default(),
             next_block,
             stepping_back: Arc::new(AtomicBool::new(false)),
@@ -965,7 +971,7 @@ impl DoorsReader {
                 .read_next_block(next_block, scan_to, decimals, hold)
                 .await;
         }
-        let (clock, listings) = self.read_listings(scan_to).await?;
+        let (clock, listings, highest_listing) = self.read_listings(scan_to).await?;
         let started = hold.from_ms / 1000;
         if started >
             clock
@@ -974,11 +980,6 @@ impl DoorsReader {
         {
             return Err(lagging(started, clock.number, clock.timestamp));
         }
-        let highest_listing = listings
-            .iter()
-            .map(|listing| listing.id)
-            .max()
-            .unwrap_or(0);
         let start_ms = hold.from_ms.max(clock.ms);
         let until_ms = start_ms.saturating_add(hold.for_ms);
         let lead_ms = start_ms - hold.from_ms;
@@ -1086,7 +1087,7 @@ impl DoorsReader {
         decimals: impl Fn(&Address) -> Option<u32>,
         hold: Hold,
     ) -> Result<DoorsRead, FeedError> {
-        let ((head, listings), maps) =
+        let ((head, listings, highest_listing), maps) =
             tokio::try_join!(self.read_listings(scan_to), next_block.read())?;
         let started = hold.from_ms / 1000;
         if started >
@@ -1103,11 +1104,7 @@ impl DoorsReader {
             clock: head,
             until_ms: head.ms.saturating_add(1),
             lead_ms: 0,
-            highest_listing: listings
-                .iter()
-                .map(|listing| listing.id)
-                .max()
-                .unwrap_or(0),
+            highest_listing,
             doors: Vec::new(),
             block_lives: true,
             answered_at_block: false,
@@ -1366,7 +1363,10 @@ impl DoorsReader {
 
     /// The first request: the block, the front's implementation and clock, and every reserved
     /// listing up to `scan_to` with its door's address.
-    async fn read_listings(&self, scan_to: u32) -> Result<(FrontClock, Vec<Listing>), FeedError> {
+    async fn read_listings(
+        &self,
+        scan_to: u32,
+    ) -> Result<(FrontClock, Vec<Listing>, u32), FeedError> {
         let mut calls = vec![
             call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode()),
             call(MULTICALL3_ADDRESS, getCurrentBlockTimestampCall {}.abi_encode()),
@@ -1390,9 +1390,9 @@ impl DoorsReader {
             let listing = U24::from(id);
             calls.push(call(self.front, doorViewCall { listing }.abi_encode()));
         }
-        let answers = self
-            .aggregate(calls, BlockId::latest())
-            .await?;
+        let (answers, approved_desks) =
+            tokio::join!(self.aggregate(calls, BlockId::latest()), self.desks.current());
+        let answers = answers?;
         let (head, listings) = answers.split_at(head_calls.min(answers.len()));
         let [block_number, timestamp, chain_id, factory_front, door_codehash, clock, rest @ ..] =
             head
@@ -1459,10 +1459,24 @@ impl DoorsReader {
         let timestamp =
             to_u64(setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?, "timestamp")?;
         let mut found = Vec::new();
+        // The highest id the front has reserved, served or not: the next poll scans past it, so a
+        // listing this read leaves out never hides the ones reserved after it.
+        let mut highest = 0;
         for (id, view) in (1..=scan_to).zip(listings) {
             let view = setting::<doorViewCall>(view, "front's doorView")?;
             if view.pool == Address::ZERO {
                 continue;
+            }
+            highest = id;
+            // Anyone can reserve a listing and post quotes to it, so a listing is served only
+            // where its maker's desk contract is approved. Base's path, whose makers have no desk
+            // contract, is not served at all.
+            if let Some(cell_codehash) = self.cell_codehash {
+                let desk = SLOT_RULE.account(self.front, cell_codehash, view.desk);
+                if view.desk == 0 || !approved_desks.contains(&desk) {
+                    debug!(listing = id, %desk, "skipping listing of a desk that is not approved");
+                    continue;
+                }
             }
             // A credit listing fills an input past its pool's custody whole through the pool's own
             // preview, which may pay less than a smaller input and costs other gas: its output may
@@ -1487,24 +1501,23 @@ impl DoorsReader {
                     continue;
                 }
             };
-            // A listing of an asset-module pair (a stock token) runs its module's rules inside
-            // every fill: the token's own reads, each given up to 28,000 gas
-            // (`PropAMMStockRules.READ_GAS`), which differ by token and which no class figure
-            // holds. It is served only where the caller configured the gas measured on it, and
-            // left out otherwise rather than charged less than it spends.
+            // A listing in no credit mode the caller configured gas for is charged it. A listing
+            // of an asset-module pair (a stock token) runs its module's rules inside every fill:
+            // the token's own reads, each given up to 28,000 gas (`PropAMMStockRules.READ_GAS`),
+            // which differ by token and which no measured figure holds. It is served only with
+            // such a figure, and left out otherwise rather than charged less than it spends.
             let asset_module = view.pairWord.bit(PAIR_ASSET_BIT);
-            let module_gas = match (asset_module, credit) {
-                (false, _) | (true, Some(_)) => None,
-                (true, None) => {
-                    let Some(gas) = self.credit.get(&id) else {
-                        debug!(
-                            listing = id,
-                            "skipping listing of an asset-module pair with no gas configured"
-                        );
-                        continue;
-                    };
-                    Some(*gas)
+            let named_gas = match (credit, self.credit.get(&id)) {
+                (Some(_), _) => None,
+                (None, Some(gas)) => Some(*gas),
+                (None, None) if asset_module => {
+                    debug!(
+                        listing = id,
+                        "skipping listing of an asset-module pair with no gas configured"
+                    );
+                    continue;
                 }
+                (None, None) => None,
             };
             let tip_cap_wei = tip_cap_wei(view.tipCap);
             if tip_cap_wei.is_some_and(|cap| cap < self.min_tip_cap_wei) {
@@ -1540,7 +1553,7 @@ impl DoorsReader {
                 asset_module,
                 pair: PairPlace::of(view.baseIndex, view.quoteIndex),
                 credit,
-                module_gas,
+                named_gas,
                 pool: view.pool,
             });
         }
@@ -1549,7 +1562,7 @@ impl DoorsReader {
             .source()
             .and_then(|_| base_time.first())
             .and_then(ms_reading);
-        Ok((FrontClock::new(&timing, block_number, timestamp, source_ms), found))
+        Ok((FrontClock::new(&timing, block_number, timestamp, source_ms), found, highest))
     }
 
     /// The second request: the front's implementation and each listing's settings, controls,
@@ -1772,7 +1785,7 @@ impl DoorsReader {
                 tip_cap_wei: listing.tip_cap_wei,
                 carries: listing_carries(settings),
                 credit: listing.credit,
-                module_gas: listing.module_gas,
+                named_gas: listing.named_gas,
                 pool: listing.pool,
             });
         }
@@ -2273,7 +2286,7 @@ impl DoorsReader {
                 reads: door.fill_reads(),
                 pair: door.pair,
                 credit: None,
-                module_gas: door.module_gas,
+                named_gas: door.named_gas,
                 pool_lacks: (false, false),
             });
         }
@@ -2462,7 +2475,7 @@ impl DoorsReader {
                 credit: door
                     .credit
                     .map(|gas| CreditRead { gas, bid_route_from, ask_route_from }),
-                module_gas: door.module_gas,
+                named_gas: door.named_gas,
                 pool_lacks,
             });
         }
