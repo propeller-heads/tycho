@@ -150,8 +150,11 @@ The pool modules resolve `modules` once and then, per transaction:
 1. **A pool names a plugin** (its `Plugin` event): call `named_plugin_attributes`. `Some` holds
    the pool's `plugin_impl` and module attributes. `None` means the transaction did not create
    the plugin, so its configuration is not known: pause the pool.
-2. **A pool switches plugin**: delete every module attribute and `plugin_impl` of the old plugin
-   before applying step 1 to the new one.
+2. **A pool switches plugin**: delete the module attributes and `plugin_impl` the pool carries
+   for the old plugin, and only those, before applying step 1 to the new one. Storage rejects
+   the deletion of an attribute it has no row for, so the modules have to know what a pool
+   carries. A pool paused under step 1 is unpaused when it names a plugin created in the naming
+   transaction, or no plugin. Naming the plugin a pool already names changes nothing.
 3. **A tracked plugin writes storage**: call `updated_plugin_attributes` for the pool that runs it.
 4. **A beacon logs `Upgraded`** (`beacon_upgrades`): update `plugin_impl` on every pool whose
    plugin is bound to that beacon. Keep the beacon's pools in bounded store values.
@@ -165,6 +168,16 @@ Two stores carry the beacon links (`src/modules/5_store_plugin_beacons.rs`):
 the pools per beacon, spread over 256 keys because a store value is bounded. A pool stays listed
 after its plugin moves to another beacon, so an upgrade is applied only to pools whose plugin is
 still bound to the upgraded beacon.
+
+`store_plugin_beacons` also records what each pool carries: the plugin whose attributes it has
+(`followed:<pool>`, empty while the pool is paused or names no plugin) and whether that plugin's
+implementation is known (`impl:<plugin>`). Every deletion, update and unpause is decided from
+these two keys, read just before the event. Changes a plugin makes in a transaction that ends
+with its pool on another plugin are not emitted.
+
+A plugin re-bound to a beacon in a transaction that does not show it reading the beacon's
+implementation loses its `plugin_impl`, and it stays without one until the pool names another
+plugin: later upgrades of that beacon are applied only to pools that have a `plugin_impl`.
 
 ## What simulation does with the attributes
 

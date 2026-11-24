@@ -8,6 +8,8 @@
 - Plugin wiring: `plugin_impl` and the module attributes of each pool's plugin, followed through
   plugin switches, beacon changes and beacon upgrades; a pool whose plugin was created before it
   was named is paused.
+- A plugin switch deletes only the attributes the pool carries and unpauses only a paused pool;
+  `store_plugin_beacons` records both. A transfer from a pool to itself gives no balance delta.
 - Modules `fee_override`, `anti_sniper` and `mevx` (Nami) and `farming` (Algebra).
 - Manifests for Nami V4 on Ethereum, Base and Robinhood, with the `factory`,
   `protocol_type_name`, `modules` and `dci` params.

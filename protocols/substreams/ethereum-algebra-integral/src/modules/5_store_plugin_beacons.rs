@@ -4,13 +4,26 @@
 //! if it is ever bound to another beacon. A beacon's later `Upgraded` log changes the
 //! implementation of every pool whose plugin is bound to it, so that log has to be fanned out
 //! to those pools.
+//!
+//! The same store records which plugin attributes each pool carries, so that a later change
+//! deletes only attributes that exist: see [`followed_plugin_key`].
 
 use substreams::store::{
     Appender, StoreAppend, StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetString,
 };
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
 
-use crate::{abi::beacon::events::BeaconUpgraded, modules::store_pool_plugins::plugin_pool_key};
+use crate::{
+    abi::beacon::events::BeaconUpgraded,
+    modules::store_pool_plugins::{
+        decode_plugin, plugin_at, plugin_pool_key, StoreWrite, StringStore,
+    },
+    pb::algebra::integral::v1::{events::pool_event::Typ, Events},
+    plugin::{
+        beacon::plugin_beacon,
+        changes::{named_plugin_attributes, PLUGIN_IMPL},
+    },
+};
 
 /// Store key of the beacon (hex) a plugin is bound to.
 pub fn plugin_beacon_key(plugin: &[u8]) -> String {
@@ -21,6 +34,42 @@ pub fn plugin_beacon_key(plugin: &[u8]) -> String {
 pub fn tracked_beacon_key(beacon: &[u8]) -> String {
     format!("beacon:{}", hex::encode(beacon))
 }
+
+/// Store key of the plugin (hex) whose attributes a pool carries: the plugin the pool names,
+/// when the transaction that named it also created it. Empty when the pool names no plugin, or
+/// one created earlier, whose configuration is not known and whose pool is paused.
+pub fn followed_plugin_key(pool: &[u8]) -> String {
+    format!("followed:{}", hex::encode(pool))
+}
+
+/// Store key saying whether the pool that carries a plugin's attributes has its `plugin_impl`:
+/// `1` when the implementation the plugin runs was last seen in a trace, empty otherwise.
+pub fn known_implementation_key(plugin: &[u8]) -> String {
+    format!("impl:{}", hex::encode(plugin))
+}
+
+/// The plugin whose attributes `pool` carries after every write of the block up to `ordinal`.
+pub fn followed_plugin_at(
+    plugin_beacons: &impl StringStore,
+    ordinal: u64,
+    pool: &[u8],
+) -> Option<Vec<u8>> {
+    decode_plugin(plugin_beacons.value_at(ordinal, &followed_plugin_key(pool)))
+}
+
+/// Whether the pool carrying `plugin`'s attributes has a `plugin_impl` after every write of the
+/// block up to `ordinal`.
+pub fn implementation_known_at(
+    plugin_beacons: &impl StringStore,
+    ordinal: u64,
+    plugin: &[u8],
+) -> bool {
+    plugin_beacons
+        .value_at(ordinal, &known_implementation_key(plugin))
+        .is_some_and(|known| known == KNOWN)
+}
+
+const KNOWN: &str = "1";
 
 /// How many keys a beacon's pools are spread over. A store value is bounded, and one beacon can
 /// serve every pool of a DEX.
@@ -61,7 +110,7 @@ pub struct BeaconBinding {
 /// no pool names by the end of the block is not a plugin this package follows.
 pub fn beacon_bindings(
     block: &eth::Block,
-    pool_plugins_store: &StoreGetString,
+    pool_plugins_store: &impl StringStore,
 ) -> Vec<BeaconBinding> {
     let mut bindings = Vec::new();
     for tx in block.transactions() {
@@ -71,10 +120,11 @@ pub fn beacon_bindings(
             let Some(event) = BeaconUpgraded::match_and_decode(log) else {
                 continue;
             };
-            let Some(pool) = pool_plugins_store.get_last(plugin_pool_key(&log.address)) else {
+            let Some(pool) = pool_plugins_store.value_at(u64::MAX, &plugin_pool_key(&log.address))
+            else {
                 continue;
             };
-            if pool_plugins_store.get_last(&pool) != Some(hex::encode(&log.address)) {
+            if pool_plugins_store.value_at(u64::MAX, &pool) != Some(hex::encode(&log.address)) {
                 continue;
             }
             let Ok(pool) = hex::decode(pool) else {
@@ -92,21 +142,105 @@ pub fn beacon_bindings(
     bindings
 }
 
-/// Tracks the beacon (hex) each plugin is bound to, under [`plugin_beacon_key`], and marks every
-/// such beacon under [`tracked_beacon_key`].
+/// What the block writes to `store_plugin_beacons`, in ordinal order:
+///
+/// - the beacon (hex) each plugin is bound to, under [`plugin_beacon_key`], and a marker for every
+///   such beacon under [`tracked_beacon_key`];
+/// - on each `Plugin` event that changes a pool's plugin, the plugin whose attributes the pool then
+///   carries, under [`followed_plugin_key`];
+/// - whether that pool has a `plugin_impl`, under [`known_implementation_key`], when a plugin is
+///   named and each time it logs its beacon.
+///
+/// `map_protocol_changes` emits the attributes and reads these keys to tell which exist, so
+/// both use `named_plugin_attributes` and `plugin_beacon` on the same transactions.
+pub fn plugin_beacon_writes(
+    block: &eth::Block,
+    events: &Events,
+    pool_plugins_store: &impl StringStore,
+) -> Vec<StoreWrite> {
+    let trace_of = |index: u32| {
+        block
+            .transaction_traces
+            .iter()
+            .find(|trace| trace.index == index)
+    };
+    let known = |known: bool| if known { KNOWN.to_string() } else { String::new() };
+    let mut writes = Vec::new();
+
+    for binding in beacon_bindings(block, pool_plugins_store) {
+        let ordinal = binding.ordinal;
+        writes.push(StoreWrite {
+            ordinal,
+            key: plugin_beacon_key(&binding.plugin),
+            value: hex::encode(&binding.beacon),
+        });
+        writes.push(StoreWrite {
+            ordinal,
+            key: tracked_beacon_key(&binding.beacon),
+            value: KNOWN.to_string(),
+        });
+        let implementation =
+            trace_of(binding.tx_index).and_then(|trace| plugin_beacon(trace, &binding.plugin));
+        writes.push(StoreWrite {
+            ordinal,
+            key: known_implementation_key(&binding.plugin),
+            value: known(implementation.is_some()),
+        });
+    }
+
+    for event in &events.pool_events {
+        let Some(Typ::Plugin(named)) = &event.typ else {
+            continue;
+        };
+        let ordinal = event.log_ordinal;
+        let pool = &event.pool_address;
+        let plugin = decode_plugin(Some(hex::encode(&named.plugin)));
+        // Naming the plugin the pool already names changes nothing it carries.
+        if plugin == plugin_at(pool_plugins_store, ordinal.saturating_sub(1), pool) {
+            continue;
+        }
+        let attributes = plugin.as_ref().and_then(|plugin| {
+            let trace = trace_of(
+                event
+                    .transaction
+                    .as_ref()?
+                    .index
+                    .try_into()
+                    .ok()?,
+            )?;
+            named_plugin_attributes(trace, plugin, &[])
+        });
+        let followed = match (&plugin, attributes) {
+            (Some(plugin), Some(attributes)) => {
+                let has_implementation = attributes
+                    .iter()
+                    .any(|attribute| attribute.name == PLUGIN_IMPL);
+                writes.push(StoreWrite {
+                    ordinal,
+                    key: known_implementation_key(plugin),
+                    value: known(has_implementation),
+                });
+                hex::encode(plugin)
+            }
+            (Some(_), None) | (None, _) => String::new(),
+        };
+        writes.push(StoreWrite { ordinal, key: followed_plugin_key(pool), value: followed });
+    }
+
+    writes.sort_by_key(|write| write.ordinal);
+    writes
+}
+
+/// Tracks what [`plugin_beacon_writes`] lists.
 #[substreams::handlers::store]
 pub fn store_plugin_beacons(
     block: eth::Block,
+    events: Events,
     pool_plugins_store: StoreGetString,
     store: StoreSetString,
 ) {
-    for binding in beacon_bindings(&block, &pool_plugins_store) {
-        store.set(
-            binding.ordinal,
-            plugin_beacon_key(&binding.plugin),
-            &hex::encode(&binding.beacon),
-        );
-        store.set(binding.ordinal, tracked_beacon_key(&binding.beacon), &"1".to_string());
+    for write in plugin_beacon_writes(&block, &events, &pool_plugins_store) {
+        store.set(write.ordinal, write.key, &write.value);
     }
 }
 
@@ -154,13 +288,15 @@ mod tests {
             plugin_beacon_key(&BEACON),
             tracked_beacon_key(&BEACON),
             beacon_pools_key(&BEACON, &BEACON),
+            followed_plugin_key(&BEACON),
+            known_implementation_key(&BEACON),
         ];
 
         assert_eq!(
             keys.iter()
                 .collect::<HashSet<_>>()
                 .len(),
-            3
+            5
         );
     }
 }

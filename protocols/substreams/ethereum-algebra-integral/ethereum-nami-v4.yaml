@@ -108,13 +108,15 @@ modules:
     inputs:
       - map: map_events
 
-  # The beacon each plugin is bound to, and a marker per beacon some plugin was bound to.
+  # The beacon each plugin is bound to, a marker per beacon some plugin was bound to, and which
+  # plugin attributes each pool carries.
   - name: store_plugin_beacons
     kind: store
     updatePolicy: set
     valueType: string
     inputs:
       - source: sf.ethereum.type.v2.Block
+      - map: map_events
       - store: store_pool_plugins
 
   # The pools whose plugin was bound to each beacon, spread over 256 keys per beacon.
