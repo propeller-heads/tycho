@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap, fmt::Debug, str::FromStr, sync::Arc};
 
 use alloy::{
-    primitives::{keccak256, Address, Signed, Uint, I128, U256},
+    primitives::{keccak256, Address, Signed, Uint, B256, I128, U256},
     sol_types::SolType,
 };
 use revm::{
@@ -98,6 +98,55 @@ where
         HashMap::from([(self.pool_manager, HashMap::from([(is_unlocked_slot, U256::from(1u64))]))])
         // the slot is here https://github.com/Uniswap/v4-core/blob/main/src/libraries/Lock.sol#L8C5-L8C117
     }
+
+    /// Writes the pool state `Pool.swap` stores before the PoolManager calls `afterSwap` into the
+    /// PoolManager storage the call runs on: the price and tick, and the liquidity. A hook that
+    /// reads the pool there then sees the swap's result. Slot layout: v4-core `StateLibrary`
+    /// (`POOLS_SLOT` 6; liquidity at offset 3) and `Slot0`.
+    fn store_pool_state_after_swap(
+        &self,
+        overwrites: &mut HashMap<Address, HashMap<U256, U256>>,
+        pool_id: B256,
+        params: &AfterSwapParameters,
+    ) -> Result<(), SimulationError> {
+        let pool = &params.pool_after_swap;
+        let state_slot = mapping_slot(pool_id, U256::from(6));
+        let storage = overwrites
+            .entry(self.pool_manager)
+            .or_default();
+        // Keep the protocol and LP fees (bits 184..232); replace the tick and the price below them.
+        let fees = self.stored_word(storage, state_slot)? >> 184 << 184;
+        let tick = U256::from(pool.tick.cast_unsigned() & 0xFF_FFFF) << 160;
+        storage.insert(state_slot, fees | tick | pool.sqrt_price);
+        storage.insert(state_slot + U256::from(3), U256::from(pool.liquidity));
+        Ok(())
+    }
+
+    /// A PoolManager storage word: from `storage` when the call already overrides it, otherwise
+    /// from the engine's database.
+    fn stored_word(
+        &self,
+        storage: &HashMap<U256, U256>,
+        slot: U256,
+    ) -> Result<U256, SimulationError> {
+        if let Some(word) = storage.get(&slot) {
+            return Ok(*word);
+        }
+        self.contract
+            .engine
+            .state
+            .storage_ref(self.pool_manager, slot)
+            .map_err(|e| {
+                SimulationError::RecoverableError(format!(
+                    "Failed to read PoolManager storage slot {slot:#x}: {e:?}"
+                ))
+            })
+    }
+}
+
+/// The storage slot of `key` in a Solidity mapping at `slot`: `keccak256(abi.encode(key, slot))`.
+fn mapping_slot(key: impl alloy::sol_types::SolValue, slot: U256) -> U256 {
+    U256::from_be_bytes(keccak256(alloy::sol_types::SolValue::abi_encode(&(key, slot))).0)
 }
 
 impl<D: EngineDatabaseInterface + Clone + Debug + 'static> HookHandler for GenericVMHookHandler<D>
@@ -213,6 +262,13 @@ where
             })?,
             self.address,
         );
+        let mut overwrites =
+            over_pending_storage(pending_overrides, overwrites.unwrap_or_default());
+        self.store_pool_state_after_swap(
+            &mut overwrites,
+            keccak256(alloy::sol_types::SolValue::abi_encode(&pool_key)),
+            &params,
+        )?;
         let args = (
             params.sender,
             pool_key,
@@ -229,7 +285,7 @@ where
         let res = self.contract.call(
             selector,
             args,
-            Some(over_pending_storage(pending_overrides, overwrites.unwrap_or_default())),
+            Some(overwrites),
             Some(self.pool_manager),
             U256::from(0u64),
             Some(transient_storage_params),
