@@ -59,8 +59,8 @@ for any protocol indexed by Tycho.
     one. `quote` takes the storage overrides the pool state keeps (earlier swaps' writes,
     pending-block state, set through `set_pending_overrides`), which only a VM handler uses. The state keeps the plugin's implementation and
     module attributes and rebuilds the handler when a delta changes them: a plugin it cannot
-    reproduce fails a snapshot decode, and after a delta stops the pool's quotes without failing
-    the delta. Its serialized form holds those attributes, so deserializing needs the handlers
+    reproduce stops the pool's quotes, at a snapshot as after a delta, without failing the decode
+    or the delta. Its serialized form holds those attributes, so deserializing needs the handlers
     registered. Nami's fee sources (`modules/nami/nyse_fee_source.rs`, `gold_fee_source.rs`) are
     ports of pure contracts, checked against `testdata/` recorded from the Solidity
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool

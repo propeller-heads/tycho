@@ -73,7 +73,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AlgebraIntegralState 
             }
         }
 
-        AlgebraIntegralState::new(
+        Ok(AlgebraIntegralState::new(
             pool,
             decoder_context.chain,
             liquidity,
@@ -85,7 +85,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AlgebraIntegralState 
             // Seed value only: the stream decoder points every state at the execution block
             // before the snapshot reaches a consumer.
             BlockContext::new(block.number, block.timestamp),
-        )
+        ))
     }
 }
 
@@ -111,8 +111,8 @@ mod tests {
 
     use super::*;
     use crate::evm::protocol::algebra_integral::state::test_support::{
-        register_handlers, robinhood_module_attributes, robinhood_plugin, NAMI_PLUGIN_CONFIG,
-        PLUGIN, PLUGIN_IMPL_ROBINHOOD, SESSION,
+        register_handlers, robinhood_module_attributes, robinhood_plugin, token0, token1,
+        NAMI_PLUGIN_CONFIG, PLUGIN, PLUGIN_IMPL_ROBINHOOD, SESSION,
     };
 
     const POOL: &str = "0x1111111111111111111111111111111111111111";
@@ -197,7 +197,6 @@ mod tests {
             plugin,
             BlockContext::new(100, SESSION),
         )
-        .expect("the expected state should build")
     }
 
     #[rstest]
@@ -226,37 +225,48 @@ mod tests {
         assert_eq!(decoded.fee(), 0.0014);
     }
 
+    /// A failed snapshot decode drops every protocol's state in its message, so a plugin the
+    /// simulation cannot reproduce decodes to a pool that is not quoted.
     #[rstest]
-    #[case::no_chain(None, "needs the pool's chain")]
-    #[case::implementation_of_another_chain(Some(Chain::Base), "no native handler registered")]
+    #[case::no_chain(plugin_pool_attributes(), None, "needs the pool's chain")]
+    #[case::implementation_of_another_chain(
+        plugin_pool_attributes(),
+        Some(Chain::Base),
+        "no native handler registered"
+    )]
+    #[case::unknown_fee_source(
+        with(plugin_pool_attributes(), "fee_override/source", vec![0xf5; 20]),
+        Some(Chain::Robinhood),
+        "unsupported fee source"
+    )]
+    #[case::adaptive_fee(
+        with(plugin_pool_attributes(), "dynamic_fee/alpha1", vec![0x05, 0xdc]),
+        Some(Chain::Robinhood),
+        "adapt to volatility"
+    )]
     #[tokio::test]
-    async fn pool_whose_plugin_cannot_be_reproduced_is_rejected(
+    async fn pool_whose_plugin_cannot_be_reproduced_decodes_and_is_not_quoted(
+        #[case] attributes: HashMap<String, Bytes>,
         #[case] chain: Option<Chain>,
         #[case] reason: &str,
     ) {
-        let error = decode(plugin_pool_attributes(), chain)
+        let decoded = decode(attributes, chain)
             .await
-            .expect_err("the pool should not decode");
+            .expect("the pool should decode");
 
-        let InvalidSnapshotError::ValueError(message) = error else {
-            panic!("expected a value error, got {error:?}");
-        };
-        assert!(message.contains(reason), "{message}");
+        let error = decoded
+            .spot_price(&token0(), &token1())
+            .expect_err("the pool should not be quoted");
+        assert!(error.to_string().contains(reason), "{error}");
     }
 
-    #[tokio::test]
-    async fn unknown_fee_source_is_rejected() {
-        let mut attributes = plugin_pool_attributes();
-        attributes.insert("fee_override/source".to_string(), Bytes::from(vec![0xf5; 20]));
-
-        let error = decode(attributes, Some(Chain::Robinhood))
-            .await
-            .expect_err("an unknown fee source should not decode");
-
-        let InvalidSnapshotError::ValueError(message) = error else {
-            panic!("expected a value error, got {error:?}");
-        };
-        assert!(message.contains("unsupported fee source"), "{message}");
+    fn with(
+        mut attributes: HashMap<String, Bytes>,
+        name: &str,
+        value: Vec<u8>,
+    ) -> HashMap<String, Bytes> {
+        attributes.insert(name.to_string(), Bytes::from(value));
+        attributes
     }
 
     #[rstest]

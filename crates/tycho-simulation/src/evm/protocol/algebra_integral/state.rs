@@ -118,7 +118,7 @@ pub struct PluginSetup {
 /// hook gas of every quote come from the pool's [`PluginHandler`], built from the plugin's
 /// implementation and module attributes; otherwise the pool's stored fee applies.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(try_from = "StateData", into = "StateData")]
+#[serde(from = "StateData", into = "StateData")]
 pub struct AlgebraIntegralState {
     pool: Address,
     /// Chain the pool is on, which the plugin registry is keyed by. `None` for a state built
@@ -178,12 +178,10 @@ impl From<AlgebraIntegralState> for StateData {
     }
 }
 
-impl TryFrom<StateData> for AlgebraIntegralState {
-    type Error = InvalidSnapshotError;
-
-    /// Rebuilds the plugin handler through the registry, so it fails for a plugin that has no
-    /// handler registered in this process.
-    fn try_from(data: StateData) -> Result<Self, Self::Error> {
+impl From<StateData> for AlgebraIntegralState {
+    /// Rebuilds the plugin handler through the registry, so a plugin that has no handler
+    /// registered in this process leaves the pool unquoted.
+    fn from(data: StateData) -> Self {
         Self::new(
             data.pool,
             data.chain,
@@ -259,9 +257,11 @@ impl AlgebraIntegralState {
     /// tick with its net liquidity, including ticks whose net liquidity is zero. `block` is the
     /// block the first quote is expected to execute in.
     ///
-    /// Fails when the pool calls `beforeSwap` on a plugin the simulation cannot reproduce: no
-    /// plugin named, no chain given, no handler for the implementation, or a module
-    /// configuration its handler rejects.
+    /// A pool that calls `beforeSwap` on a plugin the simulation cannot reproduce (no plugin
+    /// named, no chain given, no handler for the implementation, or a module configuration its
+    /// handler rejects) is built all the same and is not quoted, as after a delta that brings it
+    /// there. Failing instead would fail the decode of its snapshot, and with it every protocol's
+    /// state in that message.
     #[expect(
         clippy::too_many_arguments,
         reason = "the pool's own fields in the pool's order; a wrapper type would only move the list"
@@ -276,7 +276,7 @@ impl AlgebraIntegralState {
         last_fee: u32,
         plugin: PluginSetup,
         block: BlockContext,
-    ) -> Result<Self, InvalidSnapshotError> {
+    ) -> Self {
         let mut state = AlgebraIntegralState {
             pool,
             chain,
@@ -291,8 +291,20 @@ impl AlgebraIntegralState {
             plugin_slot: PluginSlot::NotCalled,
             plugin_overrides: Arc::default(),
         };
-        state.plugin_slot = state.build_plugin_slot()?;
-        Ok(state)
+        state.rebuild_plugin_slot();
+        state
+    }
+
+    /// Builds the handler for the plugin the state now describes. A plugin the simulation cannot
+    /// reproduce stops the pool's quotes; it is not an error of the snapshot or delta, which
+    /// would end the stream for every pool.
+    fn rebuild_plugin_slot(&mut self) {
+        self.plugin_slot = self
+            .build_plugin_slot()
+            .unwrap_or_else(|error| {
+                warn!(pool = %self.pool, %error, "algebra pool's plugin is not supported");
+                PluginSlot::Unsupported(error.to_string())
+            });
     }
 
     /// The handler for the pool's plugin as the state now describes it.
@@ -847,12 +859,7 @@ impl ProtocolSim for AlgebraIntegralState {
         // The delta is the indexed state of a new block, which already holds what its swaps wrote.
         self.plugin_overrides = Arc::default();
         if plugin_changed {
-            // A plugin the simulation cannot reproduce stops the pool's quotes; it does not fail
-            // the delta, which would end the stream for every pool.
-            self.plugin_slot = self.build_plugin_slot().unwrap_or_else(|error| {
-                warn!(pool = %self.pool, %error, "algebra pool's plugin is no longer supported");
-                PluginSlot::Unsupported(error.to_string())
-            });
+            self.rebuild_plugin_slot();
         }
         Ok(())
     }
@@ -1102,11 +1109,7 @@ mod tests {
     const ROBINHOOD_HOOK_GAS: u64 = 67_000 + 6_000 + 66_000 + 60_000;
 
     /// A pool at price 1 (tick 0) with one position over [-600, 600] and a stored fee of 0.3%.
-    fn pool(
-        chain: Option<Chain>,
-        plugin: PluginSetup,
-        timestamp: u64,
-    ) -> Result<AlgebraIntegralState, InvalidSnapshotError> {
+    fn pool(chain: Option<Chain>, plugin: PluginSetup, timestamp: u64) -> AlgebraIntegralState {
         register_handlers();
         AlgebraIntegralState::new(
             Address::repeat_byte(0x11),
@@ -1122,12 +1125,11 @@ mod tests {
     }
 
     fn static_fee_pool() -> AlgebraIntegralState {
-        pool(None, PluginSetup::default(), 1_000).expect("a pool without a plugin should build")
+        pool(None, PluginSetup::default(), 1_000)
     }
 
     fn robinhood_pool(timestamp: u64) -> AlgebraIntegralState {
         pool(Some(Chain::Robinhood), robinhood_plugin(), timestamp)
-            .expect("the Robinhood plugin should build")
     }
 
     fn delta(updated: &[(&str, &[u8])], deleted: &[&str]) -> ProtocolStateDelta {
@@ -1164,8 +1166,7 @@ mod tests {
             implementation: Some(Address::repeat_byte(0xc4)),
             attributes: HashMap::new(),
         };
-        let mut state = pool(Some(Chain::Ethereum), setup, 1_000)
-            .expect("an unknown plugin on Ethereum should get the VM handler");
+        let mut state = pool(Some(Chain::Ethereum), setup, 1_000);
         state.pool = address;
         state.plugin_slot = state
             .build_plugin_slot()
@@ -1514,17 +1515,44 @@ mod tests {
     #[case::no_chain(None, robinhood_plugin(), "needs the pool's chain")]
     #[case::no_plugin(Some(Chain::Robinhood), PluginSetup { plugin: None, ..robinhood_plugin() }, "names no plugin")]
     #[case::no_implementation(Some(Chain::Robinhood), PluginSetup { implementation: None, ..robinhood_plugin() }, "an unknown implementation")]
-    fn pool_calling_a_plugin_that_cannot_be_reproduced_does_not_build(
+    fn pool_calling_a_plugin_that_cannot_be_reproduced_builds_and_is_not_quoted(
         #[case] chain: Option<Chain>,
         #[case] plugin: PluginSetup,
         #[case] reason: &str,
     ) {
-        let error = pool(chain, plugin, SESSION).expect_err("the pool should not build");
+        let pool = pool(chain, plugin, SESSION);
 
-        let InvalidSnapshotError::ValueError(message) = error else {
-            panic!("expected a value error, got {error:?}");
+        let error = pool
+            .get_amount_out(one_token(), &token0(), &token1())
+            .expect_err("the pool should not be quoted");
+        let SimulationError::RecoverableError(message) = &error else {
+            panic!("expected a recoverable error, got {error:?}");
         };
         assert!(message.contains(reason), "{message}");
+        assert!(pool
+            .get_limits(token0().address, token1().address)
+            .is_err());
+        assert!(pool
+            .spot_price(&token0(), &token1())
+            .is_err());
+    }
+
+    /// A pool whose fee is adaptive in its snapshot is in the same place as one that turns
+    /// adaptive in a delta: built, not quoted, and quoted again once the fee is made flat.
+    #[test]
+    fn pool_with_an_adaptive_fee_at_snapshot_is_quoted_once_the_fee_is_flat() {
+        let mut plugin = robinhood_plugin();
+        plugin
+            .attributes
+            .insert("dynamic_fee/alpha1".to_string(), Bytes::from(vec![0x05, 0xdc]));
+        let mut pool = pool(Some(Chain::Robinhood), plugin, SESSION);
+        assert!(pool
+            .get_amount_out(one_token(), &token0(), &token1())
+            .is_err());
+
+        apply(&mut pool, delta(&[("dynamic_fee/alpha1", &[0, 0])], &[]));
+
+        assert_eq!(pool.fee(), 0.0014);
     }
 
     #[test]
@@ -1532,7 +1560,7 @@ mod tests {
         let plugin =
             PluginSetup { config: AFTER_SWAP_ONLY, implementation: None, ..robinhood_plugin() };
 
-        let pool = pool(None, plugin, SESSION).expect("a pool that skips beforeSwap should build");
+        let pool = pool(None, plugin, SESSION);
 
         assert_eq!(pool.fee(), 0.003);
     }
@@ -1550,7 +1578,7 @@ mod tests {
             "anti_sniper/start_timestamp".to_string(),
             Bytes::from(start.to_be_bytes().to_vec()),
         );
-        pool(Some(Chain::Base), plugin, timestamp).expect("the anti-sniper plugin should build")
+        pool(Some(Chain::Base), plugin, timestamp)
     }
 
     #[test]
