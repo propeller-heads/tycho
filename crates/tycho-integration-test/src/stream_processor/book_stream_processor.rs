@@ -76,9 +76,12 @@ pub enum PammVenue {
     /// `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY`, `EFFICIENT_PROP_CELL_CODEHASH` and
     /// `EFFICIENT_PROP_IMPLEMENTATIONS` (comma-separated), the price sources a listing reading a
     /// print may be served on from `EFFICIENT_PROP_PRICE_SOURCES` (comma-separated ids, none when
-    /// unset), and on Ethereum the URLs of the next block's state map from
-    /// `EFFICIENT_PROP_STATE_URLS` (comma-separated, required there) and the credit listings
-    /// served with their gas from `EFFICIENT_PROP_CREDIT_LISTINGS` (none when unset).
+    /// unset), the makers' desk contracts whose listings are served from
+    /// `EFFICIENT_PROP_APPROVED_DESKS` (comma-separated, none when unset: nothing is served) and
+    /// `EFFICIENT_PROP_APPROVED_DESKS_URL` (a list that rules while fresh), and on Ethereum the
+    /// URLs of the next block's state map from `EFFICIENT_PROP_STATE_URLS` (comma-separated,
+    /// required there) and the listings served with gas named for them from
+    /// `EFFICIENT_PROP_CREDIT_LISTINGS` (none when unset).
     EfficientProp,
     /// Efficient pools, on Base, Ethereum and BSC. Reads its books from the chain over
     /// `--rpc-url` and needs no credentials, but serves only what the `FLAMM_*` variables name.
@@ -627,7 +630,11 @@ fn add_pamm_feeds(
                     rpc_url.to_string(),
                     deployment,
                 )
-                .approved_price_sources(sources);
+                .approved_price_sources(sources)
+                .with_approved_desks(efficient_prop_approved_desks(&secret)?);
+                if let Some(url) = secret("EFFICIENT_PROP_APPROVED_DESKS_URL") {
+                    builder = builder.with_approved_desks_url(url.trim());
+                }
                 if let Some(state_urls) = efficient_prop_state_urls(&secret) {
                     builder = builder.state_urls(state_urls);
                 }
@@ -719,10 +726,36 @@ fn efficient_prop_price_sources(
         .collect()
 }
 
-/// The credit listings served, each with the gas its fills are charged, from
+/// The desk contracts whose listings are served, from `EFFICIENT_PROP_APPROVED_DESKS`
+/// (comma-separated addresses): none when it is unset, so nothing is served but what the list at
+/// `EFFICIENT_PROP_APPROVED_DESKS_URL` names while it is fresh.
+fn efficient_prop_approved_desks(
+    secret: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<Bytes>, Unavailable> {
+    let Some(list) = secret("EFFICIENT_PROP_APPROVED_DESKS") else {
+        return Ok(Vec::new());
+    };
+    list.split(',')
+        .map(str::trim)
+        .filter(|desk| !desk.is_empty())
+        .map(|desk| {
+            Bytes::from_str(desk)
+                .ok()
+                .filter(|bytes| bytes.len() == 20)
+                .ok_or_else(|| {
+                    Unavailable::BuildFailed(format!(
+                        "EFFICIENT_PROP_APPROVED_DESKS {list} holds {desk}, not an address"
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// The listings served with gas named for them, each with the gas its fills are charged, from
 /// `EFFICIENT_PROP_CREDIT_LISTINGS` (comma-separated `listing=custody sell:custody buy:route
 /// sell:route buy`, the four figures measured on that listing's pool): none when it is unset, so
-/// no listing with a credit mode is served. The feed refuses one on Base.
+/// no listing with a credit mode, of a stock token's pair, or of a pair and place the feed holds
+/// no measured figure for is served. The feed refuses one on Base.
 fn efficient_prop_credit_listings(
     secret: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<(u32, CreditGas)>, Unavailable> {
@@ -1087,6 +1120,11 @@ mod tests {
         "EFFICIENT_PROP_FACTORY",
         Some("factory"),
         "not an address"
+    )]
+    #[case::an_approved_desk_that_is_no_address(
+        "EFFICIENT_PROP_APPROVED_DESKS",
+        Some("0x4f8dd270acE370dE2f6Ac5EBf3230cBE099a0753, desk"),
+        "holds desk, not an address"
     )]
     #[case::price_sources_that_are_not_ids(
         "EFFICIENT_PROP_PRICE_SOURCES",
