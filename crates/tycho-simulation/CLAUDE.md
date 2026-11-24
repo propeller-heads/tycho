@@ -164,244 +164,62 @@ for any protocol indexed by Tycho.
   its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
-  `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum, and holds Base's path
-  whole (`build` refuses Base, `BASE_NOT_SERVED`, until its gas figures are measured on the
-  deployment Base runs; its offline tests build past the refusal with `build_path`), one `IPropAMM`
-  door per listing and one book per door (its id the pair id followed by the door, the door in the
-  `pamm_address` attribute and the listing's tip cap in `tip_cap_wei`, so tycho-execution's generic
-  `PropAMMSwapEncoder` and `PropAMMExecutor` fill it). It does not model the front: each poll scans
-  the front's `doorView` past the highest listing seen, computes each door's CREATE2 address from
-  the factory and the door code hash the factory answers (`DOOR_CODEHASH`, read each poll: no door
-  code hash is configured), and samples each side's `quote` at the most it fills (`quoteFillable`), halvings of it, and
-  quarterings down to the listing's least fill, all at the block the first batch reads (three
-  batches a poll, a fourth where a print lapses), and
-  again under `eth_call` block overrides at the last block of the book's life (and the last before a
-  premium's window closes and the first at or after it, where a size bound by its output is
-  refused), keeping the least. Those blocks are found on the front's own clock as
-  `PropAMMClock.read` reads it (its block count, BaseTime where the count leaves the block's second,
-  else the second), every 200 ms where it counts or reads BaseTime; an override that reads BaseTime
-  also sets BaseTime's stored sub-second (slot 0) to its block's with a state override, and an
-  override's answers count only where the clock read under it is the one meant. A front whose clock
-  can step back, its count off BaseTime by less than a second (`FrontClock::may_step_back`), is not
-  served: the poll publishes none of its books and logs why. The front proxy's implementation slot
-  is checked against a caller-given allow-list at the latest block and at that block. A book's life
-  is the request timeout, the snapshot's age limit and the landing allowance from the poll's start;
-  a side is left out when its word or depth, decoded from `doorView` on the front's clock, runs out
-  within it, or when its levels age or its premium ends within it and the node hid its later
-  quotes. A listing reading a price print (fence kind PRINT or SESSION, from the settings word) is
-  not served past its print's life,
-  no later print assumed: in the same third batch, under overrides, each side is asked whether the
-  door still fills its smallest and its largest size at the last block of each second of the life;
-  a side read without overrides is left out, and a size refused at an ask within its life is not
-  quoted. A side refused both at an ask gets a life ending with its print: a fourth batch asks every
-  size at the last ask it lived through and each block up to the next; the side's life ends after
-  the last block filled without a gap, and the state refuses that side (`Deadline`, on the process's
-  monotonic clock) from that end less the landing allowance and the front clock's lead over the
-  wall clock. A side quoting for under 200 ms (`MIN_SIDE_SERVED_MS`) is left out. Listings reading
-  no print are not asked.
-  On a listing reading a print, a side whose word or depth runs out within the life is served up
-  to that block, as a side whose print lapses there.
-  A listing of an asset-module pair (a stock token: `doorView`'s pair word bit 15) runs its
-  module's rules in every quote and fill (sessions, halts, the multiplier, each token read given up
-  to 28,000 gas), so the door's `quote` refuses where the fill would and a closed market publishes no
-  book; its gas is its token's own, so it is served only where `credit_listing` names it with its
-  gas (in no credit mode it is charged that figure's custody pair), and left out otherwise.
-  Listings of every desk are found by the same scan, past the highest id holding a pool, served or
-  not; a door is the factory's CREATE2 child at the listing's id, and a desk contract the front's
-  at its desk id. Anyone can reserve a listing, so on Ethereum one is served only where its
-  maker's desk contract is approved (`desks.rs`): `with_approved_desks` (empty by default:
-  nothing is served), or the list at `with_approved_desks_url`
-  (`{"chainId", "updatedAt", "desks"}`, read every 15 s at most), which replaces that set until
-  its last read is ten minutes old; past that the set rules less the desks the list left out, and
-  a read that fails or is refused (any status but 200, another chain, over 64 KiB or 1,024 desks,
-  an older stamp) changes nothing, so a failing URL brings no desk in.
-  Listings with a credit mode (but those named on Ethereum, below), a tip cap under the caller's
-  floor, or a SESSION fence with a closed phase (a nonzero `closedAfter` in record word 13, the
-  session word, or that word unread) are not served: a closed phase's band eases as the print ages,
-  so no few samples bound it. Nor is a listing reading a print whose bound sources (record word 10,
-  primary and backup, read every poll) are not all in the builder's `approved_price_sources` (none
-  by default): anyone may register a source, and its code runs in the quote and in the fill and can
-  tell them apart (by what the call reads of its transaction and block, and by state the fill has
-  changed when it runs: the front's lock, the input already at the door), so approve a source only
-  where its code cannot change and its answer comes from its own stored prices and the clock alone;
-  the same of a listing's tokens, which are not screened. Nor is a tied listing (settings scopes 8),
-  or one reading a print whose live source's copy (record word 2) is unread. A listing reading a
-  print from a guarded source (`E_GUARD`, bit 247 of record word 2, which also holds the source's
-  lane) is served: its lane
-  prices a side at the worst print it still holds for its `HOLD_MS` (read once a lane, 2 s until
-  it answers), so the output rises when a hold ends; each size of both sides is also asked under
-  overrides at every block of the hold after the read's, kept at the least and dropped where
-  refused, and with no overrides the listing is left out. It is charged its own gas class
-  (`FillReads::GuardedSource`). Its tests run
-  on `test_support.rs` (a fake node, with the front's clock modes, and a node replaying
-  `testdata/`'s polls recorded from local forks of Ethereum, checked wei for wei: an Ethereum poll
-  recorded from a local fork with the deployed front, factory and first desk contract, the first
-  pool's launch and its four doors replayed on the fork, and an empty state map: it holds the reads
-  of the deployed contracts and that nothing is served without a maker's update, and is to be
-  re-recorded with books once a block carries one).
-  On Ethereum (`overrides.rs`, `read_next_block` in `reader.rs`) a maker's update lands only in a
-  builder's block, and a fill reads it only there or, where the listing and the word carry, in the
-  block after (`NoWord` otherwise). Each poll reads the state maps from every `state_urls` URL
-  (`titan_getPammStateOverrides`) beside the listings at the latest block (no BaseTime; a front not
-  on the block's second ends the feed) and keeps only the maps for the block after the node's latest
-  whose `slot` is the one right after the latest block's (its time 12 s later; a later slot, missed
-  or ahead of the wall clock, is dropped); with none, that poll serves nothing without failing, so
-  the feed does not back off, and the next is read as usual. A node whose latest block is more than
-  two slots and the lag allowance behind the poll's start has stalled: that poll fails as lagging,
-  map or none, so it is warned of and backed off. A listing is read by one slot rule (`slots.rs`),
-  for the quote contract layout `builder` (Ethereum and BNB Chain's): the config's `quote_layout`
-  is required on Ethereum and must name it, and is refused on Base, whose path samples the doors
-  and reads no quote contract. A maker has one desk contract, the CREATE2 child of the front at
-  salt `(1 << 252) | desk` under the configured `cell_codehash` (confirmed by the front's `deskCellOf`
-  and, each poll, by its `CELL_CODEHASH()`, whose mismatch ends the feed). A listing's pair is its
-  `doorView` word index `i`: its quote word at slot `0x100 + i` (stamp, desk epoch in bits 32-62,
-  carry 201, firm state 205) and its firm word at `0x200 + i`, counted only under bit 205. The desk
-  word (slot 1: pusher, desk epoch bits 160-190, stopped bit 224) is read from the desk contract at
-  the head, never from an answer. It is quoted from one answer, the first URL's that writes its
-  quote word with a stamp the next block fills (that block's, or the one before's where the listing
-  and the word carry), under the head's desk epoch (all 31 bits), on a desk the head has not
-  stopped, writing no slot of the desk contract but the pairs' words (a write of slots 0-3 or
-  outside `0x100`-`0x1ff` and `0x200`-`0x2ff` covers none of the desk's listings), and with no two
-  entries of one answer writing a slot the listing owns differently (that drops the listing for
-  that block, in any answer that arrived within the merge window; writes in different answers do
-  not conflict, the first covering URL's is served), and with no entry left out as unreadable (an
-  answer with any such entry covers no listing for its block, whatever the entry wrote; a later
-  clean answer still can). A word stamped with the head block is carried only where it is the head's
-  own word byte for byte (read from the desk contract in the same batch, its firm word too under
-  bit 205). Registry lanes are not modelled: a lane's write sits in the registry's account. A
-  listing whose fill reads a print needs the price contract its live source reads (PRINT and
-  SESSION fences) written by that same answer without two entries disagreeing on one of its slots,
-  and price contracts are taken whole; a listing's backup source is not read by the fill and is
-  not taken; no listing's slots are mixed across answers, a listing that
-  would take a slot another listing took from another answer is the one left out, and only the
-  listings' own slots and price contracts are overridden. A listing on a guarded source is not
-  quoted there.
-  Every later call runs at the latest block under the next block's number and time and those
-  accounts; each side is sampled at the next block and, where its listing carries, at the one
-  after; it lives through the one after, at the
-  least of the two, only where the door fills there every size it fills in the next block, and
-  otherwise through the next block alone with its samples there. It quotes until its last block's
-  time less the landing allowance (1 s there). A component carries the block its quotes fill
-  from and each side's deadline as static attributes (`valid_from_block`, `bid_valid_until_ms`,
-  `ask_valid_until_ms`). Ethereum charges no class figure (`GasChain`, `swap_gas` in `state.rs`):
-  a listing in no credit mode is charged only the figures measured on its own two tokens, same
-  base, same place in the pool (`PairPlace`), reading a source that is not guarded
-  (`ETHEREUM_MEASURED`: wstETH/WETH on the hook pair, 105,899 and 106,520, on a listing in no
-  credit mode of a two-token pool; wstETH/USDC, wstETH/USDT and USDT/USDC past it), each the least
-  first fill seen across runs on the deployed build less the refund a single fill earns (19,900 on
-  a custody fill: gas limits are sized before refunds; same-size first fills vary by up to about
-  500 gas from run to run); any other listing, one reading only its word among them, is served
-  only where `credit_listing` names its gas, and left out otherwise (`has_gas`). A carried
-  fill's extra ~2,400 is not charged. A credit listing (`creditMode` 1-3) is served on Ethereum only
-  where `EfficientPropFeedBuilder::credit_listing` names it with its `CreditGas` (custody and route,
-  each direction, measured on its pool; refused on Base): each size is also asked of the front's
-  `quoteFrom` with `PLAN_ONLY`, tagged `ROUTED` meaning it routes, untagged and equal to the door's
-  quote custody, anything else no sample (`classify` in `reader.rs`), the path agreeing across the
-  carried block; a side is custody sizes then routed ones (`stepped`), the ladder's `route_from`
-  marks the step, nothing is quoted across it (`Refusal::AcrossStep`, the largest custody size's
-  fill handed back) and each fill is charged its path's figure in place of `swap_gas`. A credit
-  listing is served its custody sizes alone (`custody_run`) where another door sampled on its pool
-  has a credit mode or trades a token its route may leave owed (`shares_what_its_route_owes`: the
-  listing's own tokens but the pool's token 0): a route borrows or repays, which moves what such a
-  listing fills in the same transaction. Beside other listings it keeps its route. A side that may
-  route is first asked how far it reaches (`reaches`, one more batch): `quoteFillable` reports
-  custody alone unless the pool's preview fills the maker's whole depth, so the door's `quote` is
-  asked across the token's scale, or above the custody's most, and the side is sampled up to the
-  largest size answered and in steps to the first refused. Each Ethereum poll also reads what each
-  listing's pool holds of its two tokens: a custody fill paying in a token the pool holds none of is
-  charged `FIRST_BALANCE_WRITE_GAS` (16,964, the least measured) more (a routed fill nothing: its refund gives the write back; a side's largest custody size is charged `LAST_CUSTODY_FILL_REFUND`, 9,600, less, since emptying the pool's balance earns that back). A listing
-  quoted in a token no listing sells for a USD quote token is valued through its own base.
-  `PLAN_ONLY` needs the deployed build's front. Signed firm quotes (`fillQuote`) are not served; an
-  update carrying the desk's firm state is accepted.
-  `EfficientPropFeedBuilder::with_fallback_router()` (off by default) stamps the components
-  `fallback:efficient_prop` (in the id too), so tycho-execution settles them through
-  `PropAMMFallbackRouter`: where a door quotes nothing (`NoWord`), the solver's fallback pool
-  fills instead of the route reverting. Which branch fills is not known at the read, so every
-  swap of such a component is charged the cheaper one, a fill on the fallback pool
-  (`FALLBACK_SWAP_GAS`, 50,445, beside tycho-execution's 40,000 for the router: the least
-  measured through the deployed router over Uniswap V2 and V3 fallbacks; a door fill spends about
-  64,000 to 121,000 more), and a listing needs no measured or named figure there. A credit listing
-  is refused with it (the router's quote runs its route once more). `flamm` has no such option: its pools answer no `quote`.
-  `ladder.rs` holds a side's samples and quotes them exactly, along floored chords between them, and
-  nothing outside them; the quote layout, front, factory, desk contract code hash (Ethereum) and
-  allow-list are builder arguments (`EfficientPropDeployment`), never constants.
+  `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum: one `IPropAMM` door
+  per listing and one book per door (the door in `pamm_address`, the listing's tip cap in
+  `tip_cap_wei`), filled by the generic `PropAMMSwapEncoder` and `PropAMMExecutor`. Nothing of the
+  venue's pricing is ported: `reader.rs` finds the doors (the front's `doorView` scan, each door
+  the factory's CREATE2 child) and samples each door's own `quote`; `overrides.rs` reads the next
+  block's state maps (`titan_getPammStateOverrides`), since a maker's update lands only in a
+  builder's block; `slots.rs` is the quote contract's slot rule; `ladder.rs` quotes the samples
+  exactly and along floored chords, nothing outside them; `state.rs` holds the gas and each
+  side's deadline; `desks.rs` the approved makers. `mod.rs` documents every rule; what a change
+  must keep:
+  - a listing is served only where its maker's desk contract is approved (`with_approved_desks`,
+    or the list at `with_approved_desks_url` while its last read is fresh; neither: nothing is
+    served, and a read that fails brings no desk in), its price sources are in
+    `approved_price_sources`, and the front runs an allow-listed implementation
+  - a swap is never charged above what its fill costs its transaction: on Ethereum only figures
+    measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas `credit_listing` names
+    for it (required for a credit listing, a stock listing and any other pair); a listing with
+    neither is left out (`has_gas`). `with_fallback_router()` charges the cheaper branch
+    (`FALLBACK_SWAP_GAS`)
+  - a size is quoted only where the door answered it at the read, in every block of the book's
+    life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
+    `ask_valid_until_ms`
+  - the quote layout, front, factory, desk contract code hash and allow-list are builder
+    arguments (`EfficientPropDeployment`), never constants; `with_door_code_hash` pins the doors'
+  - Base's path is held whole but `build` refuses Base (`BASE_NOT_SERVED`) until its gas is
+    measured on the deployment Base runs; its offline tests build past the refusal (`build_path`)
+  Its tests run on `test_support.rs` (a fake node, and a node replaying `testdata/`'s polls
+  recorded from local forks of Ethereum holding the deployed contracts, checked wei for wei).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
   - **`pamm/protocols/flamm/`**: Efficient pools, read from the chain instead of a venue API.
     `FlammFeed` polls the configured factories' pools over JSON-RPC and quotes each pool's hook
-    pair, tokens 0 and 1, as a ladder of the pool's own `previewSwap` answers at one block, asked
-    as Tycho's router (the caller the pool's hooks see when it swaps), by one `eth_call` per pool
-    of the sampler, which the node runs by state override at the router (`sample_gas`, 45M by
-    default, refused under 20,717,460). A pool's pairs share one
-    inventory, so its other pairs wait for a component that can carry every direction. It
-    publishes one `flamm_pair` book per pool, id `pool ++ lower token ++ higher token`, with the
-    pool as `pamm_address` for the generic `PropAMMSwapEncoder` and `PropAMMExecutor`. Anyone can
-    create a pool over their own hook and price feed, so a pool is served only where both are
-    listed (`hook_classes`, each class with the `HookShape` of its answers; `price_feeds` or
-    `price_feed_code_hashes`), or by name (`pools`), where a hook of no listed class is quoted by
-    steps if its `params()` show no leverage row and not at all if they show one; the lists are
-    configuration and a builder without them refuses to build. A pool a front prices (a hook its
-    factory lists as a front, or a lane-on pool) is never served, whatever the lists, the names or
-    `serve_front_priced` (which does nothing) say; that check runs first. Discovery runs beside the
-    polls: it pages each factory's `_pools` out of storage, checking every entry with `isPool`
-    (named pools too), and keeps what it cannot read from the round before, so nothing it reads ends
-    the feed. Nothing of the pools' pricing is ported, so a new hook or feed is a list entry and a
-    new venue kind or policy needs no change here. `ladder::settle` turns a direction's answers into
-    rungs by their route labels (`feeWad`), the hook's row (`params()`, a decoded one cached per
-    hook) and, where a leverage label shows, the pool's `pairRequest`, the hook's `quotePair` and on
-    a buy its `levState`, read at the poll's block as the router, plus one more `previewSwap` just
-    above the top; `testdata/settle_vectors.json` holds the rule's shared vectors, pinned by hash. A
-    rung is the pool's answer less the haircut, which the router's fee receiver takes as positive
-    slippage where the pool fills at its answer. Inside a span the state prices on the chord,
-    rounded down, where one route priced both rungs, and at the lower rung where the route changes
-    (`Segment::Flat`); nothing is quoted under the first rung, and a swap leaves its own side empty
-    until the next poll (the hook prices a whole fill at the fee before it) and the other side as
-    it was. A poll's pools share one deadline, three quarters
-    of `request_timeout` from the poll's start, and the polls' permits (`max_in_flight` less
-    discovery's quarter); each poll starts past the last one's answers, so no pool is always last,
-    and a pool given no permit by the deadline is skipped, never a miss. The sampler never
-    reverts, so `reader.rs` classes a node's error by its form, then its wording: not run (a
-    revert, which means the override was dropped; a refused method, parameter, override, gas or
-    size; an answer that is not the sampler's; no probe at the default cap), skipped (a rate limit
-    or null answer, an older block, a block the node lacks) or missed (the rest); none is the
-    pool's, and a poll fails where under half the pools were run. Each of the sampler's calls has a
-    cap, `probe_gas` (5M), doubled per pool where a probe runs short of it, up to 20M, and the
-    default again once an answer fits well under it. A read short of any pool is not cached for its
-    block. A pool that reverts a view, or whose first answer in a direction cannot be a fill, is set
-    aside, with a backoff that grows until its quotes come back. One that misses a poll drops out of
-    that snapshot, and is set aside on a second miss in a row; a poll fails only where most pools
-    miss it, and nobody is set aside where no pool answered. A view's error counts as the pool's
-    answer only where its form says the call reverted (code 3 or revert data). Gas is charged per
-    fill, never over what the fill costs inside the pool's own `swap()` net of its refund, the
-    basis Tycho's gas guide asks for: the least base of `gas_table.rs`, a table generated from
-    measured fills and never edited, over the cells the feed's reads allow (the class of what
-    prices the pair, `hook_class`, the hook's code with its immutables zeroed; the chain; the
-    live venue kinds; the side; how the payout reaches past custody, from the walk's legs; and
-    whether the input repays, from each venue's `venueActions` and, at a venue holding a minimum
-    position, its `minimumDebt`). A fill on a state a swap returned, and every fill on a pool of
-    three or more tokens, takes its key's second-fill charge instead, the least measured of the
-    second of two fills of one pool in one transaction. A pair with a live venue of a kind its
-    chain does not route or with no second-fill charge, an unread venue record or no live venue is
-    not served, nor is a pool whose tokens 0 and 1 are not the two its venues' kinds were measured
-    on (`MEASURED_POOLS`: the cells have no token dimension), and the builder's `gas` does
-    nothing.
-    `gas_limit_addition` is what a fill adds to a limit. Where a live venue whose account holds a
-    partial repay at a minimum position (`capabilities()` bit 512, Lista Moolah's) lends a
-    direction's output, `guard.rs` keeps one piece of its settled ladder before the haircut: the
-    rungs whose payouts and parts fit custody, or those paying at least what the venues free plus
-    the minimum (1 % over) less the debt; none where no walk read the legs.
-    `testdata/held_repay_guard_vectors.json` holds the rule's shared vectors, pinned by hash. A
-    pool worth less than the TVL floor is not quoted at all. `assets/FlammSampler.sol` (SPDX MIT) is the sampler a node runs by state
-    override at the taker, never deployed: one call walks each direction's `previewSwap` and
-    reads the request words the rule needs and, on every walk, the request's legs the gas charge
-    needs, and never reverts. Its raw runtime
-    (`assets/FlammSampler.evm.runtime`) and the fake pool's (`testdata/MaxOfTwoPool.sol`, its own
-    hook) come from `assets/build_sampler.py` (solc 0.8.35, via IR, paris, no metadata; `--check`
-    verifies the committed bytes). `sampler_evm.rs` runs the sampler's bytes on revm against the
-    fake pool at the feed's settings, pins both runtimes' and sources' keccaks (the sampler's are
-    the same in every client), and audits the settled ladders against the pool's own
-    `previewSwap`; the feed's node tests answer the sampler's call from `test_support.rs`'s fake
-    pools, walking their seeds and the probe above a tier-labelled top with none of its bisection.
+    pair as a ladder of the pool's own `previewSwap` answers at one block, asked as Tycho's
+    router, by one `eth_call` per pool of a sampler the node runs by state override
+    (`assets/FlammSampler.sol`, never deployed, never reverts). It publishes one `flamm_pair`
+    book per pool with the pool as `pamm_address`, for the generic `PropAMMSwapEncoder` and
+    `PropAMMExecutor`. Nothing of the pools' pricing is ported; `mod.rs` and each file's module
+    docs hold the rules. What a change must keep:
+    - a pool is served only where its hook class and price feed are listed (`hook_classes`,
+      `price_feeds`, `price_feed_code_hashes`) or it is named (`pools`); a builder without lists
+      refuses to build, and a pool a front prices is never served
+    - `ladder::settle` turns a direction's answers into rungs by their route labels; a rung is
+      the pool's answer less the haircut; a swap leaves its own side empty until the next poll.
+      `guard.rs` keeps one piece of a ladder whose output a venue holding a minimum position
+      lends. Both rules have shared vectors in `testdata/`, pinned by hash
+    - gas is never over what a fill costs inside the pool's `swap()` net of its refund: the least
+      base of `gas_table.rs` (generated from measured fills, never edited) over the cells the
+      reads allow, the legs read on every walk among them; a pool is served only on the two
+      tokens its venues' kinds were measured on (`MEASURED_POOLS`)
+    - `reader.rs` classes a node's error as not run, skipped or missed, never as the pool's; a
+      pool that reverts a view is set aside with a growing backoff; books are reused only for
+      the same block hash
+    - the sampler's runtime and the fake pool's (`testdata/MaxOfTwoPool.sol`) come from
+      `assets/build_sampler.py` (solc 0.8.33, via IR, paris, no metadata; `--check` verifies the
+      committed bytes); `sampler_run.rs` runs the sampler's bytes on revm against the fake pool
+      and pins both runtimes' and sources' keccaks
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
