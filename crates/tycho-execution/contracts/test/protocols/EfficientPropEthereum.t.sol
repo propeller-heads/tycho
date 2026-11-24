@@ -38,17 +38,16 @@ interface IEfficientPropDoor {
 /// (`CUSTODY_FILL_REFUND`, or a routed fill's own in
 /// `EFFICIENT_PROP_ETH_SELL_REFUND` and `EFFICIENT_PROP_ETH_BUY_REFUND`).
 /// `EFFICIENT_PROP_ETH_BASE_IN` and `EFFICIENT_PROP_ETH_QUOTE_IN`
-/// are the amounts sold each way, at or above the listing's least fill;
-/// `EFFICIENT_PROP_ETH_PAIR_PLACE` holds the fills to the charge of the
-/// listing's place in its pool: 0 its hook pair (the default), 1 past it with
-/// the pool's asset (its token 0) as its base, 2 past it with neither. Every
-/// listing measured reads a price print. `EFFICIENT_PROP_ETH_SELL_GAS` and
-/// `EFFICIENT_PROP_ETH_BUY_GAS`, where set, are the charges the fills are held
-/// to in place of the place's: those of a pair tycho-simulation charges
-/// apart from its class (`ETHEREUM_PRINT_PAIRS`: wstETH/USDT, 131,620 and
-/// 126,449), or of a credit listing, whose caller names its gas
-/// (`CreditGas`: the custody figure where the amount fills from the pool's
-/// custody, the route's where it borrows or repays), a custody one with
+/// are the amounts sold each way, at or above the listing's least fill.
+/// `EFFICIENT_PROP_ETH_SELL_GAS` and `EFFICIENT_PROP_ETH_BUY_GAS` are the
+/// charges the fills are held to: those tycho-simulation measured on the
+/// listing's own pair (`ETHEREUM_MEASURED`: by default wstETH/WETH on its
+/// pool's hook pair, 105,899 and 106,520; wstETH/USDC past it, 126,434 and
+/// 125,271; wstETH/USDT, 131,620 and 126,449; USDT/USDC, 134,412 and
+/// 138,945), or those its caller names for a listing of another pair or for
+/// a credit listing (`CreditGas`: the custody figure where the amount fills
+/// from the pool's custody, the route's where it borrows or repays), a
+/// custody one with
 /// `FIRST_BALANCE_WRITE_GAS` (16,964) added where the pool holds none of the
 /// token the fill pays into it, as the simulation adds it. A credit
 /// listing's route figure is the least over its pool's states, so the state
@@ -65,24 +64,10 @@ contract EfficientPropDoorEthereumForkTest is TestUtils, Constants {
     /// `ETHEREUM_SELL_BASE_PRINT_SWAP_GAS` and
     /// `ETHEREUM_BUY_BASE_PRINT_SWAP_GAS` in tycho-simulation's
     /// `efficient_prop/state.rs`: the gas charged on Ethereum for a fill
-    /// selling the door's base, and for one buying it, on a listing of its
-    /// pool's hook pair reading a print.
+    /// selling the door's base, and for one buying it, on a wstETH/WETH
+    /// listing of its pool's hook pair reading a print.
     uint256 constant SELL_BASE_PRINT_SWAP_GAS = 105_899;
     uint256 constant BUY_BASE_PRINT_SWAP_GAS = 106_520;
-    /// `ETHEREUM_SELL_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS` and
-    /// `ETHEREUM_BUY_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS` there: the same, on
-    /// a listing past its pool's hook pair with the pool's asset as its base.
-    /// Measured on a wstETH/USDC listing of the deployed build: run this place
-    /// against such a listing's door. A wstETH/USDT listing of the same pool
-    /// costs up to about 5,200 more selling base, over the band below.
-    uint256 constant SELL_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS = 126_434;
-    uint256 constant BUY_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS = 125_271;
-    /// `ETHEREUM_SELL_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS` and
-    /// `ETHEREUM_BUY_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS` there: the same,
-    /// on a listing past its pool's hook pair with neither token the pool's
-    /// asset.
-    uint256 constant SELL_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS = 133_234;
-    uint256 constant BUY_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS = 133_759;
     /// How far a fill's gas may fall under the charge and its refund. Each
     /// charge is the
     /// least first fill seen across runs in real transactions, where
@@ -115,13 +100,9 @@ contract EfficientPropDoorEthereumForkTest is TestUtils, Constants {
     /// The amounts sold each way.
     uint256 baseIn;
     uint256 quoteIn;
-    /// The door's listing's place in its pool: 0 its hook pair, 1 past it
-    /// with the pool's asset, 2 past it without.
-    uint256 pairPlace;
     /// Whether the latest block carries no update of the door's quote.
     bool noUpdate;
-    /// The charges the fills are held to in place of the place's; zero for
-    /// the place's.
+    /// The charges the fills are held to.
     uint256 sellGas;
     uint256 buyGas;
     /// The refund each fill earns, which its charge is net of.
@@ -140,11 +121,10 @@ contract EfficientPropDoorEthereumForkTest is TestUtils, Constants {
         }
         baseIn = vm.envUint("EFFICIENT_PROP_ETH_BASE_IN");
         quoteIn = vm.envUint("EFFICIENT_PROP_ETH_QUOTE_IN");
-        pairPlace = vm.envOr("EFFICIENT_PROP_ETH_PAIR_PLACE", uint256(0));
-        require(pairPlace <= 2, "EFFICIENT_PROP_ETH_PAIR_PLACE is 0, 1 or 2");
         noUpdate = vm.envOr("EFFICIENT_PROP_ETH_NO_UPDATE", false);
-        sellGas = vm.envOr("EFFICIENT_PROP_ETH_SELL_GAS", uint256(0));
-        buyGas = vm.envOr("EFFICIENT_PROP_ETH_BUY_GAS", uint256(0));
+        sellGas =
+            vm.envOr("EFFICIENT_PROP_ETH_SELL_GAS", SELL_BASE_PRINT_SWAP_GAS);
+        buyGas = vm.envOr("EFFICIENT_PROP_ETH_BUY_GAS", BUY_BASE_PRINT_SWAP_GAS);
         sellRefund =
             vm.envOr("EFFICIENT_PROP_ETH_SELL_REFUND", CUSTODY_FILL_REFUND);
         buyRefund =
@@ -179,37 +159,11 @@ contract EfficientPropDoorEthereumForkTest is TestUtils, Constants {
     }
 
     function testSellBaseMatchesQuote() public {
-        _assertSwap(
-            base,
-            quoteToken,
-            baseIn,
-            sellGas != 0
-                ? sellGas
-                : [
-                    SELL_BASE_PRINT_SWAP_GAS,
-                    SELL_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS,
-                    SELL_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS
-                ][pairPlace],
-            sellRefund,
-            sellOver
-        );
+        _assertSwap(base, quoteToken, baseIn, sellGas, sellRefund, sellOver);
     }
 
     function testBuyBaseMatchesQuote() public {
-        _assertSwap(
-            quoteToken,
-            base,
-            quoteIn,
-            buyGas != 0
-                ? buyGas
-                : [
-                    BUY_BASE_PRINT_SWAP_GAS,
-                    BUY_BASE_PAST_WITH_ASSET_PRINT_SWAP_GAS,
-                    BUY_BASE_PAST_WITHOUT_ASSET_PRINT_SWAP_GAS
-                ][pairPlace],
-            buyRefund,
-            buyOver
-        );
+        _assertSwap(quoteToken, base, quoteIn, buyGas, buyRefund, buyOver);
     }
 
     function _transferData(bytes memory data)

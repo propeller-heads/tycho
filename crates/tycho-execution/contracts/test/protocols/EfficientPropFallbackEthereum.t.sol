@@ -26,7 +26,12 @@ import {IEfficientPropDoor} from "./EfficientPropEthereum.t.sol";
 /// `EfficientPropEthereum.t.sol` does, with `EFFICIENT_PROP_ETH_FALLBACK_POOL`
 /// a Uniswap V3 pool of the door's pair that quotes the amounts
 /// (`EFFICIENT_PROP_ETH_BASE_IN`, `EFFICIENT_PROP_ETH_QUOTE_IN`) below the
-/// door, and is skipped without any of the three. In a block carrying the
+/// door, or a Uniswap V2 pair where `EFFICIENT_PROP_ETH_FALLBACK_V2_FEE_BPS`
+/// gives its fee, and is skipped without any of the three. Either branch
+/// costs its transaction at least what a `fallback:efficient_prop` swap is
+/// charged: tycho-simulation's `FALLBACK_SWAP_GAS` and the gas estimator's
+/// `FALLBACK_ROUTER_OVERHEAD_GAS`, held against this frame's gas less the
+/// refund the branch earns. In a block carrying the
 /// maker's update the door fills, at exactly its quote, and the pool is left
 /// untouched. With `EFFICIENT_PROP_ETH_NO_UPDATE` true the latest block
 /// carries none: the door quotes nothing, the direct path would revert
@@ -37,9 +42,25 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
 
     /// The `fallback` row `executor_addresses.json` lists for Ethereum.
     address constant EXECUTOR = 0x355d1D7bd40330c235e1132de8D2314b956584c9;
-    /// `FallbackProtocol.UniswapV3`, the byte before the pool in the swap
-    /// data.
+    /// `FallbackProtocol.UniswapV2` and `UniswapV3`, the byte before the
+    /// pool in the swap data.
+    uint8 constant UNISWAP_V2 = 0;
     uint8 constant UNISWAP_V3 = 1;
+    /// `FALLBACK_SWAP_GAS` in tycho-simulation's `efficient_prop/state.rs`,
+    /// what the book charges every swap on this path, and
+    /// `FALLBACK_ROUTER_OVERHEAD_GAS` in tycho-execution's gas estimator,
+    /// which is added to it.
+    uint256 constant FALLBACK_SWAP_GAS = 50_445;
+    uint256 constant FALLBACK_ROUTER_OVERHEAD_GAS = 40_000;
+    /// The most each branch earned back at its transaction's end in real
+    /// transactions on the fork: a swap on the pool (the router's balance of
+    /// the input written and cleared, and the guard), and a fill at the door
+    /// (the door's balance too).
+    uint256 constant POOL_BRANCH_REFUND = 22_235;
+    uint256 constant DOOR_BRANCH_REFUND = 39_335;
+    /// How far this frame's metering has come in under a real transaction's,
+    /// as in `EfficientPropEthereum.t.sol`.
+    uint256 constant BAND_UNDER = 600;
 
     /// A taker no earlier call in a test touched.
     address constant RECEIVER =
@@ -49,6 +70,9 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
     address base;
     address quoteToken;
     address pool;
+    /// The fee of a Uniswap V2 pair named as the fallback, in bps; zero for a
+    /// Uniswap V3 pool.
+    uint256 v2FeeBps;
     bool noUpdate;
 
     function setUp() public {
@@ -61,6 +85,8 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
             return;
         }
         noUpdate = vm.envOr("EFFICIENT_PROP_ETH_NO_UPDATE", false);
+        v2FeeBps =
+            vm.envOr("EFFICIENT_PROP_ETH_FALLBACK_V2_FEE_BPS", uint256(0));
         vm.createSelectFork(rpc);
         base = IEfficientPropDoor(door).BASE();
         IPropAMM.TokenPair memory pair = IPropAMM(door).getPairs()[0];
@@ -80,8 +106,11 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
     {
         // The fallback encoder's layout: the two tokens, the pAMM, then the
         // fallback protocol and its pool.
-        bytes memory data =
-            abi.encodePacked(tokenIn, tokenOut, door, UNISWAP_V3, pool);
+        bytes memory data = v2FeeBps == 0
+            ? abi.encodePacked(tokenIn, tokenOut, door, UNISWAP_V3, pool)
+            : abi.encodePacked(
+                tokenIn, tokenOut, door, UNISWAP_V2, pool, uint8(v2FeeBps)
+            );
         deal(tokenIn, address(this), amountIn);
         deal(tokenOut, RECEIVER, 10 ** IERC20Metadata(tokenOut).decimals());
         uint256 poolHeld = IERC20(tokenIn).balanceOf(pool);
@@ -93,14 +122,17 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
 
         emit log_named_uint("executor swap gas", swapGas);
         assertGt(amountOut, 0);
+        uint256 charged = FALLBACK_SWAP_GAS + FALLBACK_ROUTER_OVERHEAD_GAS;
         if (noUpdate) {
             vm.expectRevert();
             IPropAMM(door).quote(tokenIn, tokenOut, amountIn);
             assertEq(poolTook, amountIn);
+            assertGe(swapGas + BAND_UNDER, charged + POOL_BRANCH_REFUND);
             return;
         }
         assertEq(amountOut, IPropAMM(door).quote(tokenIn, tokenOut, amountIn));
         assertEq(poolTook, 0);
+        assertGe(swapGas + BAND_UNDER, charged + DOOR_BRANCH_REFUND);
     }
 
     /// The router's hop around the executor, as `Dispatcher` makes it and as
