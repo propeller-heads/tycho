@@ -109,10 +109,12 @@ pub async fn run_http_poll_feed<S: HttpSource>(
         request_timeout,
         max_consecutive_failures,
         max_backoff_exp,
-        source,
+        &source,
     );
     publisher
-        .publishing(max_snapshot_age, snapshots)
+        .publishing_with_deadline(max_snapshot_age, snapshots, |snapshot| {
+            source.snapshot_deadline(snapshot)
+        })
         .await
 }
 
@@ -132,6 +134,12 @@ pub trait HttpSource: Send + Sync {
     /// failed poll toward `max_consecutive_failures` (unset by default, which polls forever) and
     /// backs off before the next poll. Only `Ok` clears the failure count.
     fn fetch(&self) -> impl Future<Output = Result<Self::Snapshot, FeedError>> + Send;
+
+    /// An earlier withdrawal deadline for a snapshot anchored to external state.
+    /// `None` uses the feed's configured maximum age from publication.
+    fn snapshot_deadline(&self, _snapshot: &Self::Snapshot) -> Option<tokio::time::Instant> {
+        None
+    }
 }
 
 /// Every snapshot the provider answers with, and as a last item the error the feed gives up on.
@@ -148,8 +156,8 @@ fn polled_snapshots<S: HttpSource>(
     request_timeout: Duration,
     max_consecutive_failures: Option<u32>,
     max_backoff_exp: u32,
-    source: S,
-) -> impl Stream<Item = Result<S::Snapshot, FeedError>> {
+    source: &S,
+) -> impl Stream<Item = Result<S::Snapshot, FeedError>> + '_ {
     // A poller backs off by stretching the cadence it already has, so one poll interval is the
     // unit its failures double — which is what lets a backoff stand in for a tick below.
     let mut failures =

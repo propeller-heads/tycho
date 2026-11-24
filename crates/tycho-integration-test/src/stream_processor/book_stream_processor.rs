@@ -18,6 +18,7 @@ use tycho_simulation::{
     },
     pamm::protocols::{
         baibai::{self, BaibaiFeedBuilder},
+        elfomofi::{self, feed::ElfomofiFeedBuilder},
         metric::{self, feed::MetricFeedBuilder},
     },
     rfq::protocols::{
@@ -66,6 +67,8 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
+    /// Base, BSC and Robinhood. Reads helper books over `--rpc-url`.
+    Elfomofi,
 }
 
 impl PammVenue {
@@ -88,6 +91,7 @@ impl Display for PammVenue {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
             PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
+            PammVenue::Elfomofi => write!(f, "{}", elfomofi::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -291,8 +295,7 @@ impl BookStreamProcessor {
             min_tvl_usd: self.tvl_threshold,
         };
 
-        // The RFQ feeds price their books' TVL in these; Metric reports USD TVL itself, so it is
-        // the one venue a chain without a curated set can still serve.
+        // RFQ feeds price TVL through these stablecoins; pAMMs handle their own TVL.
         let usd_quote_tokens = usd_stablecoins_for_chain(self.chain).map(Arc::new);
 
         let mut feeds = BookFeedStreams::new();
@@ -300,7 +303,6 @@ impl BookStreamProcessor {
         add_pamm_feeds(&self.pamm, &book_config, &self.rpc_url, &mut feeds, |name| {
             env::var(name).ok()
         })?;
-
         for (protocol, user, key) in self.rfq.venues() {
             let Some(usd_quote_tokens) = &usd_quote_tokens else {
                 warn!(
@@ -510,15 +512,7 @@ impl BookStreamProcessor {
                 }
                 *next_stream_time = now + skip_messages_duration;
 
-                // Sample random books from the venue's complete snapshot
-                let books = Arc::new(
-                    books
-                        .iter()
-                        .choose_multiple(&mut rand::rng(), sample_size)
-                        .into_iter()
-                        .map(|(id, book)| (id.clone(), book.clone()))
-                        .collect(),
-                );
+                let books = Arc::new(sample_books(&books, sample_size));
 
                 let received_at =
                     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
@@ -601,6 +595,16 @@ fn add_pamm_feeds(
                         .add(venue.to_string(), feed)
                         .is_ok()
                 }),
+            PammVenue::Elfomofi => {
+                ElfomofiFeedBuilder::new(book_config.clone(), rpc_url.to_string())
+                    .build()
+                    .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                    .map(|feed| {
+                        feeds
+                            .add(venue.to_string(), feed)
+                            .is_ok()
+                    })
+            }
         };
         match added {
             Ok(true) => info!("Added {venue} feed"),
@@ -651,6 +655,25 @@ impl Unavailable {
     }
 }
 
+fn sample_books(
+    books: &HashMap<String, tycho_simulation::book::Book>,
+    sample_size: usize,
+) -> HashMap<String, tycho_simulation::book::Book> {
+    books
+        .iter()
+        // A book explicitly advertising no swap direction cannot produce a simulation.
+        .filter(|(_, book)| {
+            book.component
+                .static_attributes
+                .get(tycho_simulation::book::SWAP_DIRECTIONS_ATTRIBUTE)
+                .is_none_or(|directions| !directions.is_empty())
+        })
+        .choose_multiple(&mut rand::rng(), sample_size)
+        .into_iter()
+        .map(|(id, book)| (id.clone(), book.clone()))
+        .collect()
+}
+
 /// Hands one update to the harness. `false` once nobody is receiving, which is the processor's
 /// signal to stop.
 async fn forward(
@@ -666,6 +689,13 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
+    use tycho_simulation::{
+        book::{Book, SWAP_DIRECTIONS_ATTRIBUTE},
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        protocol::models::ProtocolComponent,
+    };
+
     use super::*;
 
     /// The labels of the feeds `selection` adds on Base when `METRIC_API_KEY` holds `key`.
@@ -708,6 +738,8 @@ mod tests {
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
         assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
         assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Elfomofi.cli_name(), "elfomofi");
+        assert_eq!(PammVenue::Elfomofi.to_string(), elfomofi::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -889,5 +921,77 @@ mod tests {
         handle
             .expect("the Bebop feed runs")
             .abort();
+    }
+
+    #[tokio::test]
+    async fn explicitly_selected_elfomofi_uses_the_configured_rpc_without_credentials() {
+        let selection = PammSelection::Listed(vec![PammVenue::Elfomofi]);
+        for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
+            assert_eq!(added_on(chain, &selection, None).unwrap(), [elfomofi::PROTOCOL_SYSTEM]);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicitly_selected_elfomofi_rejects_an_unsupported_chain() {
+        let selection = PammSelection::Listed(vec![PammVenue::Elfomofi]);
+        let message = added_on(Chain::Ethereum, &selection, None)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains("not configured"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn explicitly_selected_elfomofi_rejects_an_invalid_rpc_endpoint() {
+        let config = BookFeedConfig {
+            chain: Chain::Base,
+            tokens: Arc::new(HashMap::new()),
+            min_tvl_usd: 0.0,
+        };
+        let mut feeds = BookFeedStreams::new();
+        let message = add_pamm_feeds(
+            &PammSelection::Listed(vec![PammVenue::Elfomofi]),
+            &config,
+            "invalid://endpoint",
+            &mut feeds,
+            |_name| None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("--pamm"), "{message}");
+        assert!(message.contains("RPC"), "{message}");
+    }
+
+    #[test]
+    fn empty_books_do_not_spend_the_simulation_sample() {
+        let token =
+            |byte| Token::new(&Bytes::from(vec![byte; 20]), "T", 18, 0, &[], Chain::Base, 100);
+        let active = Book {
+            component: ProtocolComponent::new(
+                Bytes::from(vec![1; 20]),
+                "test:book".into(),
+                "book_pool".into(),
+                Chain::Base,
+                vec![token(1), token(2)],
+                vec![],
+                HashMap::new(),
+                Bytes::default(),
+                Default::default(),
+            ),
+            state: Arc::new(UniswapV2State::new(U256::from(1000), U256::from(1000))),
+            updated_at: None,
+        };
+        let mut books = HashMap::from([("active".to_string(), active.clone())]);
+        for n in 0..20 {
+            let mut empty = active.clone();
+            empty
+                .component
+                .static_attributes
+                .insert(SWAP_DIRECTIONS_ATTRIBUTE.to_string(), Bytes::default());
+            books.insert(format!("empty{n}"), empty);
+        }
+        let sample = sample_books(&books, 1);
+        assert_eq!(sample.len(), 1);
+        assert!(sample.contains_key("active"));
     }
 }

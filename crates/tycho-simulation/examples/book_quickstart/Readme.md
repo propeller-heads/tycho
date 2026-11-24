@@ -40,8 +40,8 @@ Then, you can run the example with:
 cargo run --release --example book_quickstart
 ```
 
-The pAMM feeds (Metric) run alongside the RFQ venues by default, and need only `METRIC_API_KEY` —
-so the example works with no RFQ credentials at all. Pass `--disable-pamm` to leave them out:
+The pAMM feeds run alongside the RFQ venues when configured, so RFQ credentials are optional.
+Pass `--disable-pamm` to leave them out:
 
 ```bash
 cargo run --release --example book_quickstart -- --disable-pamm
@@ -78,7 +78,7 @@ export RPC_URL=<your-rpc-url>
 
 - **Credentials**: Contact each venue directly to obtain API credentials for accessing its live
   book. Euclid's is public: `EUCLID_ENABLED=true` turns it on, and `EUCLID_API_URL` points it
-  at another gateway. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
+  at another gateway. pAMM feeds use their configured credentials or RPC endpoints; `--disable-pamm` leaves them out.
 
 ## What you'll see
 
@@ -92,3 +92,29 @@ The example will:
 
 See [here](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) a complete guide to the
 book feeds.
+
+## ElFomoFi
+
+Enable ElFomoFi with `--enable-elfomofi` and set `RPC_URL` for Base, BSC or Robinhood.
+`propamm:elfomofi` polls complete helper books and interpolates quotes locally. Pair changes
+update automatically within the configured token universe. Settlement uses
+`swapWithContractBalance`, partner **299**, and no venue approval. Each transaction permits
+one ElFomoFi swap across all pairs.
+
+Set a per-leg execution floor through `ElfomofiSwapPolicy` in the swap's `user_data`.
+The default tolerance is 50 bps. `MinAmountOut` supplies an absolute floor and supports
+serialized solutions without attaching local protocol state.
+
+```bash
+cargo run --release --example book_quickstart -- --chain base --enable-elfomofi
+```
+
+The quickstart needs a configured executor address for simulation or execution. To test with
+the local executor fixture through read-only RPC state overrides:
+
+```bash
+cargo run -p tycho-integration-test -- --chain base --pamm elfomofi \
+  --disable-onchain --disable-rfq --disable-price-level-stream \
+  --max-blocks 1 --skip-messages-duration 0 \
+  --executor-fixture propamm:elfomofi=protocols/testing/fixtures/Elfomofi.runtime.json
+```

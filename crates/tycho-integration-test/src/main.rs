@@ -1,3 +1,4 @@
+mod executor_fixtures;
 mod fee_fetcher;
 mod limit_probes;
 mod metrics;
@@ -26,7 +27,10 @@ use miette::{miette, IntoDiagnostic, NarratableReportHandler, WrapErr};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use rand::{prelude::IndexedRandom, seq::SliceRandom};
-use tokio::{signal, sync::Semaphore};
+use tokio::{
+    signal,
+    sync::{Notify, Semaphore},
+};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tycho_client::feed::SynchronizerState;
@@ -77,6 +81,13 @@ use crate::{
     reason = "independent command-line switches, not mutually exclusive states"
 )]
 struct Cli {
+    /// Override an executor in read-only simulations with a runtime fixture: PROTOCOL=PATH.
+    #[arg(long = "executor-fixture")]
+    executor_fixtures: Vec<executor_fixtures::ExecutorFixture>,
+
+    #[arg(skip)]
+    executors_json: Option<String>,
+
     /// The TVL threshold in native token units to filter the graph by.
     /// Defaults to a chain-appropriate value targeting ~$200K USD equivalent (Medium tier).
     #[arg(long)]
@@ -421,7 +432,7 @@ async fn main() -> miette::Result<()> {
     }
 }
 
-async fn run(cli: Cli) -> miette::Result<()> {
+async fn run(mut cli: Cli) -> miette::Result<()> {
     info!("Starting integration test");
 
     if cli.bypass_executor_timelock {
@@ -435,17 +446,22 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let tvl_threshold = cli
         .tvl_threshold
         .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Medium));
+    let (executors_json, fixture_overwrites) =
+        executor_fixtures::load(chain, &cli.executor_fixtures)?;
+    cli.executors_json = executors_json;
     let cli = Arc::new(cli);
 
     let rpc_tools = tycho_test::RPCTools::new(&cli.rpc_url, &chain).await?;
 
-    // Everything is simulated against the deployed contracts; the executors are only activated
-    // when asked for, so that a missing activation still surfaces as a revert.
-    let router_overwrites_data = if cli.bypass_executor_timelock {
+    // Deployed code is the default; opt-in fixtures replace executors in RPC state overrides.
+    let mut router_overwrites_data = if cli.bypass_executor_timelock {
         create_router_overwrites_data(chain)?
     } else {
         RouterOverwritesData::default()
     };
+    router_overwrites_data
+        .executors
+        .extend(fixture_overwrites.executors);
 
     // Read the router fee on output from the on-chain FeeCalculator once at start-up. Slippage is
     // computed after backing this fee out of the simulated amount out, so a stale or wrong fee
@@ -578,7 +594,8 @@ async fn run(cli: Cli) -> miette::Result<()> {
     let protocol_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let book_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
     let price_level_semaphore = Arc::new(Semaphore::new(cli.parallel_updates as usize));
-    let mut protocol_stream_open = true;
+    let update_finished = Arc::new(Notify::new());
+    let mut protocol_stream_open = !cli.disable_onchain;
     let mut book_stream_open = book_handle.is_some();
     let mut price_level_stream_open = price_level_handle.is_some();
 
@@ -598,6 +615,11 @@ async fn run(cli: Cli) -> miette::Result<()> {
         }
 
         tokio::select! {
+            _ = await_block_limit(cli.max_blocks, statistics.as_ref(), &update_finished) => {
+                info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                break;
+            }
+
             // Monitor protocol stream termination. The handles are awaited by reference: the
             // select futures are recreated (and the losers dropped) every iteration, so taking
             // the handle out would detach the task and disable this arm after one poll.
@@ -714,6 +736,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let strict = strict.clone();
+                        let update_finished = Arc::clone(&update_finished);
                         let permit = protocol_semaphore
                             .clone()
                             .acquire_owned()
@@ -725,6 +748,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
+                            update_finished.notify_one();
                         });
                     }
                     None => {
@@ -746,6 +770,11 @@ async fn run(cli: Cli) -> miette::Result<()> {
                             }
                         };
 
+                        if reached_max_blocks(cli.max_blocks, statistics.as_ref()) {
+                            info!("Reached max blocks ({}), stopping...", cli.max_blocks);
+                            break;
+                        }
+
                         let cli = cli.clone();
                         let rpc_tools = rpc_tools.clone();
                         let tycho_state = tycho_state.clone();
@@ -753,6 +782,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let strict = strict.clone();
+                        let update_finished = Arc::clone(&update_finished);
                         let permit = book_semaphore
                             .clone()
                             .acquire_owned()
@@ -764,6 +794,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
+                            update_finished.notify_one();
                         });
                     }
                     None => {
@@ -797,6 +828,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                         let token_prices = token_prices.clone();
                         let router_overwrites_data = router_overwrites_data.clone();
                         let strict = strict.clone();
+                        let update_finished = Arc::clone(&update_finished);
                         let permit = price_level_semaphore
                             .clone()
                             .acquire_owned()
@@ -808,6 +840,7 @@ async fn run(cli: Cli) -> miette::Result<()> {
                                 warn!("{}", format_error_chain(&e));
                             }
                             drop(permit);
+                            update_finished.notify_one();
                         });
                     }
                     None => {
@@ -817,6 +850,14 @@ async fn run(cli: Cli) -> miette::Result<()> {
                 }
             }
         }
+    }
+
+    // Updates run in separate tasks; finish their simulations before reporting a bounded run.
+    for semaphore in [&protocol_semaphore, &book_semaphore, &price_level_semaphore] {
+        let _finished = semaphore
+            .acquire_many(u32::from(cli.parallel_updates))
+            .await
+            .into_diagnostic()?;
     }
 
     // Print summary before exiting (only when stats were collected)
@@ -1257,7 +1298,10 @@ async fn process_update(
                 .ok()
                 .flatten()
             {
-                Some(b) => Arc::new(b),
+                Some(b) => {
+                    record_book_block(statistics.as_ref(), b.header.number, cli.disable_onchain);
+                    Arc::new(b)
+                }
                 None => {
                     warn!("Failed to retrieve latest block, continuing to next message...");
                     return Ok(());
@@ -1420,6 +1464,7 @@ async fn process_update(
         let statistics = statistics.clone();
         let token_prices = token_prices.clone();
         let strict = strict.clone();
+        let executors_json = cli.executors_json.clone();
         let permit = semaphore
             .clone()
             .acquire_owned()
@@ -1440,6 +1485,7 @@ async fn process_update(
                 token_prices,
                 max_swap_directions,
                 &strict,
+                executors_json,
             )
             .await;
             drop(permit);
@@ -1802,6 +1848,7 @@ async fn process_state(
     token_prices: Arc<HashMap<Bytes, f64>>,
     max_swap_directions: usize,
     strict: &StrictChecks,
+    executors_json: Option<String>,
 ) -> (HashMap<String, TychoExecutionInput>, HashMap<String, Probe>) {
     let tokens_len = component.tokens.len();
     if tokens_len < 2 {
@@ -2011,7 +2058,7 @@ async fn process_state(
             token_out,
             amount_in,
             chain,
-            None,
+            executors_json.clone(),
             amount_out_result.gas,
             expected_amount_out.clone(),
         ) {
@@ -2275,8 +2322,37 @@ fn process_execution_result(
     }
 }
 
-/// Whether the run has processed `--max-blocks` blocks. Always false when no cap is set or
-/// statistics are disabled.
+/// Stop at the block limit without waiting for another feed message.
+async fn await_block_limit(
+    max_blocks: u64,
+    statistics: Option<&Arc<RwLock<TestStatistics>>>,
+    update_finished: &Notify,
+) {
+    if max_blocks == 0 {
+        std::future::pending::<()>().await;
+    }
+    while !reached_max_blocks(max_blocks, statistics) {
+        update_finished.notified().await;
+    }
+}
+
+fn record_book_block(
+    statistics: Option<&Arc<RwLock<TestStatistics>>>,
+    block_number: u64,
+    disable_onchain: bool,
+) {
+    if !disable_onchain {
+        return;
+    }
+    if let Some(stats) = statistics {
+        stats
+            .write()
+            .expect("Failed to get write lock for statistics (record block)")
+            .record_block_processed(block_number);
+    }
+}
+
+/// Whether the run has processed `--max-blocks` blocks. False without a cap or statistics.
 fn reached_max_blocks(max_blocks: u64, statistics: Option<&Arc<RwLock<TestStatistics>>>) -> bool {
     if max_blocks == 0 {
         return false;
@@ -2482,18 +2558,137 @@ fn format_error_chain(e: &miette::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{
+        collections::HashSet,
+        str::FromStr,
+        sync::{Arc, RwLock},
+        time::Duration,
+    };
 
     use clap::Parser;
     use rstest::rstest;
+    use tokio::{sync::Notify, time::timeout};
     use tycho_common::{models::token::Token, Bytes};
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::{
-        book_swap_directions, categorize_error, executes_in_next_block, is_oracle_stale_revert,
-        is_stale_quote, pamm_venue, sample_swap_directions, should_fetch_block_by_number, Cli,
-        ErrorCategory, PammVenue, TychoState,
+        await_block_limit, book_swap_directions, categorize_error, executes_in_next_block,
+        is_oracle_stale_revert, is_stale_quote, pamm_venue, reached_max_blocks, record_book_block,
+        sample_swap_directions, should_fetch_block_by_number, Cli, ErrorCategory, PammVenue,
+        TestStatistics, TychoExecutionResult, TychoState,
     };
+
+    #[test]
+    fn book_updates_do_not_shorten_a_mixed_stream_block_limit() {
+        let statistics = Arc::new(RwLock::new(TestStatistics::default()));
+        record_book_block(Some(&statistics), 101, false);
+        assert!(!reached_max_blocks(1, Some(&statistics)));
+
+        statistics
+            .write()
+            .unwrap()
+            .record_block_processed(100);
+        record_book_block(Some(&statistics), 102, false);
+        assert!(!reached_max_blocks(2, Some(&statistics)));
+
+        statistics
+            .write()
+            .unwrap()
+            .record_block_processed(101);
+        assert!(reached_max_blocks(2, Some(&statistics)));
+        assert_eq!(statistics.read().unwrap().blocks_seen, HashSet::from([100, 101]));
+    }
+
+    #[test]
+    fn book_only_runs_count_unique_blocks_across_venues() {
+        let statistics = Arc::new(RwLock::new(TestStatistics::default()));
+        record_book_block(Some(&statistics), 100, true);
+        record_book_block(Some(&statistics), 100, true);
+        assert!(!reached_max_blocks(2, Some(&statistics)));
+
+        record_book_block(Some(&statistics), 101, true);
+        assert!(reached_max_blocks(2, Some(&statistics)));
+        assert_eq!(
+            statistics
+                .read()
+                .unwrap()
+                .blocks_processed,
+            2
+        );
+    }
+
+    #[rstest]
+    #[case("base")]
+    #[case("bsc")]
+    #[case("robinhood")]
+    fn existing_rpc_arguments_do_not_enable_elfomofi(#[case] chain: &str) {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--chain",
+            chain,
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--partial-blocks",
+            "--test-every-n-blocks",
+            "10",
+        ])
+        .unwrap();
+
+        assert!(cli.pamm.is_none());
+        assert!(!cli.disable_onchain);
+        assert!(!cli.disable_rfq);
+        assert!(!cli.disable_pamm);
+        assert!(cli.partial_blocks);
+        assert_eq!(cli.test_every_n_updates, 10);
+        assert!(cli.executor_fixtures.is_empty());
+    }
+
+    #[test]
+    fn elfomofi_can_be_explicitly_enabled_without_disabling_other_venues() {
+        let cli = Cli::try_parse_from([
+            "tycho-integration-test",
+            "--tycho-url",
+            "localhost:4242",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--pamm",
+            "elfomofi",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.pamm, Some(vec![PammVenue::Elfomofi]));
+        assert!(!cli.disable_onchain);
+        assert!(!cli.disable_rfq);
+        assert!(!cli.disable_pamm);
+    }
+
+    #[tokio::test]
+    async fn block_limit_finishes_after_failed_execution_without_another_feed_update() {
+        let statistics = Arc::new(RwLock::new(TestStatistics::default()));
+        let finished = Arc::new(Notify::new());
+        let waiting = {
+            let statistics = Arc::clone(&statistics);
+            let finished = Arc::clone(&finished);
+            tokio::spawn(async move { await_block_limit(1, Some(&statistics), &finished).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        {
+            let mut stats = statistics.write().unwrap();
+            stats.record_block_processed(100);
+            stats.record_execution_simulation_result(
+                "test:book",
+                &TychoExecutionResult::Failed { error_msg: "debug_traceCall unavailable".into() },
+            );
+        }
+        finished.notify_one();
+        timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the completed block must stop the run even when its feed publishes no more")
+            .unwrap();
+    }
 
     #[test]
     fn a_node_error_on_one_call_is_its_own_category() {

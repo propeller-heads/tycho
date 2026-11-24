@@ -17,6 +17,16 @@ use crate::{
     Bytes,
 };
 
+/// The identity of a venue's book across all pairs on one chain.
+pub fn all_pairs_component_id(protocol_system: &str) -> Bytes {
+    Bytes::from(protocol_system.as_bytes())
+}
+
+/// A pair book's identity; the address orientation is part of the identity.
+pub fn pair_component_id(protocol_system: &str, base: &Bytes, quote: &Bytes) -> Bytes {
+    Bytes::from([protocol_system.as_bytes(), base, quote].concat())
+}
+
 /// `ProtocolComponent` provides detailed descriptions of a component of a protocol,
 /// for example, swap pools that enables the exchange of two tokens.
 ///

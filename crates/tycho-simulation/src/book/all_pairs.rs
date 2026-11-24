@@ -25,7 +25,7 @@ use num_bigint::BigUint;
 use num_traits::{CheckedSub, Zero};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tycho_common::{
-    models::{token::Token, Chain},
+    models::{protocol::all_pairs_component_id, token::Token, Chain},
     simulation::{
         errors::SimulationError,
         protocol_sim::{GetAmountOutResult, ProtocolSim},
@@ -829,14 +829,6 @@ macro_rules! all_pairs_state {
 }
 
 pub(crate) use all_pairs_state;
-
-/// The id of a venue's component covering every pair it prices: its protocol system, which
-/// names both the venue and the path its swaps settle through. A feed serves one chain and a
-/// consumer keys its components within one, so the venue is the whole of this component's
-/// identity, where a pair's id needs its two tokens as well.
-pub(crate) fn all_pairs_component_id(protocol_system: &str) -> Bytes {
-    Bytes::from(protocol_system.as_bytes())
-}
 
 /// The venue's one book, priced by `books` under `rule`: every token they name, the directions
 /// they price and the rule they are quoted under.
