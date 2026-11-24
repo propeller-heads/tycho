@@ -310,6 +310,14 @@ These values were measured on Base at block 53,545,000. The venue owner can chan
 {% endhint %}
 
 {% hint style="warning" %}
+**Efficient PropAMM: approved makers and gas**
+
+Anyone can reserve a listing and post quotes to it, so a feed serves a listing only where its maker's desk contract is approved: `EfficientPropFeedBuilder::with_approved_desks`, or the list at `with_approved_desks_url` (`{"chainId": 1, "updatedAt": <Unix seconds>, "desks": ["0x…"]}`), which replaces that set while its last read is under ten minutes old. A feed built with neither serves nothing, and a list that cannot be read brings no desk in.
+
+On Ethereum a swap is charged only gas measured on its listing's own pair, never above what the fill costs its transaction: the feed holds figures for wstETH/WETH, wstETH/USDC, wstETH/USDT and USDT/USDC, and serves any other listing only where `credit_listing` names it with gas measured on it.
+{% endhint %}
+
+{% hint style="warning" %}
 **Efficient PropAMM: taker tip cap**
 
 Each Efficient PropAMM listing door refuses a swap whose transaction pays a priority fee (gas price minus basefee) above its listing's taker tip cap, and the whole route reverts. The listing's operator sets the cap and can change it, and you choose the priority fee after the route is priced, so the books cannot hold a route to it.
@@ -325,6 +333,8 @@ A listing with a credit mode fills its larger sizes through its pool's credit ro
 The figures are what a fill costs its transaction after refunds, not a gas limit. The call uses more before the transaction ends: the figure plus its refund, 19,900 on a fill the pool's custody pays and 84,400 to 99,500 on the first pool's route. A fill also forwards its gas through three contracts, each keeping a 64th back, so the least limit that lets a fill through is above what it uses: 11% to 20% above the gas before refunds, measured through the `PropAMMExecutor`. Give a route through a listing door at least 25% over its estimate plus those refunds, or it can run out of gas and revert.
 
 On a listing that has a route, size the limit from the route's gas before refunds whatever the size: each figure is the least a first fill in a fresh block pays, and a size quoted inside custody fills through the route when another fill of the same block takes the pool's balance first.
+
+A side is quoted past its pool's custody only as far as the door answers at the read. On that listing a purchase of wstETH past custody fills by repaying what the pool owes in WETH, so those sizes are quoted while the pool owes and refused, in the book as at the door (`NotEnoughDepth`), while it owes nothing.
 {% endhint %}
 
 {% hint style="warning" %}
@@ -332,7 +342,9 @@ On a listing that has a route, size the limit from the route's gas before refund
 
 On Ethereum a maker's update reaches the chain only inside a builder's block, and a listing door fills only in the block that carries its maker's update, or, where the listing and the update carry, in the block after. In any other block the door reverts `NoWord`, the whole route reverts, and the taker pays the gas. The books are read from the `/state` answers for the next block (`EfficientPropFeedBuilder::state_urls`) and only quote a listing whose update an answer holds, but a book cannot know which builder wins the block: a route sent to a builder that does not carry the update, or one that lands a block late, reverts.
 
-Send routes through Ethereum listing doors only to the builders that carry the makers' updates, and only for the block the books were read for. Each side quotes until its last block's time less a 1 s landing allowance; a route sent after that is refused by the book, not by the chain. Keep listing doors out of a route you cannot afford to revert, or send them as a route of their own.
+Send routes through Ethereum listing doors only to the builders that carry the makers' updates, and only for the block the books were read for, which each component names in its `valid_from_block` static attribute. Each side quotes until its last block's time less a 1 s landing allowance, the Unix millisecond in `bid_valid_until_ms` and `ask_valid_until_ms`; a route sent after that is refused by the book, not by the chain. Keep listing doors out of a route you cannot afford to revert, or send them as a route of their own.
+
+`EfficientPropFeedBuilder::with_fallback_router()` publishes the same books as `fallback:efficient_prop`, settled through the `PropAMMFallbackRouter`: where the door quotes nothing, or less than the fallback pool you name in the swap's `user_data`, that pool fills and the route does not revert. Every swap on this path is charged what the cheaper branch, a fill on the fallback pool, cost on fork fills through the deployed router (90,445 with the router's 40,000; a fill at the door spent about 64,000 to 121,000 more). Listings with a credit mode are not served this way.
 {% endhint %}
 
 ## pAMM Price Level Stream

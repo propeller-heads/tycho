@@ -206,8 +206,15 @@ for any protocol indexed by Tycho.
   to 28,000 gas), so the door's `quote` refuses where the fill would and a closed market publishes no
   book; its gas is its token's own, so it is served only where `credit_listing` names it with its
   gas (in no credit mode it is charged that figure's custody pair), and left out otherwise.
-  Listings of every desk are found by the same scan: nothing names a maker, a door is the factory's
-  CREATE2 child at the listing's id, and a desk contract the front's at its desk id.
+  Listings of every desk are found by the same scan, past the highest id holding a pool, served or
+  not; a door is the factory's CREATE2 child at the listing's id, and a desk contract the front's
+  at its desk id. Anyone can reserve a listing, so on Ethereum one is served only where its
+  maker's desk contract is approved (`desks.rs`): `with_approved_desks` (empty by default:
+  nothing is served), or the list at `with_approved_desks_url`
+  (`{"chainId", "updatedAt", "desks"}`, read every 15 s at most), which replaces that set until
+  its last read is ten minutes old; past that the set rules less the desks the list left out, and
+  a read that fails or is refused (any status but 200, another chain, over 64 KiB or 1,024 desks,
+  an older stamp) changes nothing, so a failing URL brings no desk in.
   Listings with a credit mode (but those named on Ethereum, below), a tip cap under the caller's
   floor, or a SESSION fence with a closed phase (a nonzero `closedAfter` in record word 13, the
   session word, or that word unread) are not served: a closed phase's band eases as the print ages,
@@ -274,14 +281,18 @@ for any protocol indexed by Tycho.
   after; it lives through the one after, at the
   least of the two, only where the door fills there every size it fills in the next block, and
   otherwise through the next block alone with its samples there. It quotes until its last block's
-  time less the landing allowance (1 s there). Gas per class on Ethereum is its own (`GasChain`,
-  `swap_gas` in `state.rs`), by where the pair sits in the pool (`PairPlace`: the hook pair, a pair
-  with the pool's asset as its base or its quote, charged by whether the input is the asset, a pair
-  without it): the print class measured on the deployed build at each place (the hook pair's on a listing in
-  no credit mode of a two-token pool, 105,899 and 106,520: the figure follows the listing's credit
-  mode, not whether its pool has a lender), the word class past the hook pair on an earlier build
-  and on the hook pair a sum, each figure the least first fill seen across runs less the refund a single fill earns (19,900 on a custody fill: gas limits are sized before refunds) (same-size first fills vary by up to about 500 gas from run to run), and a carried
-  fill's extra ~2,400 not charged. A credit listing (`creditMode` 1-3) is served on Ethereum only
+  time less the landing allowance (1 s there). A component carries the block its quotes fill
+  from and each side's deadline as static attributes (`valid_from_block`, `bid_valid_until_ms`,
+  `ask_valid_until_ms`). Ethereum charges no class figure (`GasChain`, `swap_gas` in `state.rs`):
+  a listing in no credit mode is charged only the figures measured on its own two tokens, same
+  base, same place in the pool (`PairPlace`), reading a source that is not guarded
+  (`ETHEREUM_MEASURED`: wstETH/WETH on the hook pair, 105,899 and 106,520, on a listing in no
+  credit mode of a two-token pool; wstETH/USDC, wstETH/USDT and USDT/USDC past it), each the least
+  first fill seen across runs on the deployed build less the refund a single fill earns (19,900 on
+  a custody fill: gas limits are sized before refunds; same-size first fills vary by up to about
+  500 gas from run to run); any other listing, one reading only its word among them, is served
+  only where `credit_listing` names its gas, and left out otherwise (`has_gas`). A carried
+  fill's extra ~2,400 is not charged. A credit listing (`creditMode` 1-3) is served on Ethereum only
   where `EfficientPropFeedBuilder::credit_listing` names it with its `CreditGas` (custody and route,
   each direction, measured on its pool; refused on Base): each size is also asked of the front's
   `quoteFrom` with `PLAN_ONLY`, tagged `ROUTED` meaning it routes, untagged and equal to the door's
@@ -298,16 +309,19 @@ for any protocol indexed by Tycho.
   asked across the token's scale, or above the custody's most, and the side is sampled up to the
   largest size answered and in steps to the first refused. Each Ethereum poll also reads what each
   listing's pool holds of its two tokens: a custody fill paying in a token the pool holds none of is
-  charged `FIRST_BALANCE_WRITE_GAS` (16,964, the least measured) more (a routed fill nothing: its refund gives the write back; a side's largest custody size is charged `LAST_CUSTODY_FILL_REFUND`, 9,600, less, since emptying the pool's balance earns that back), and where two pairs of one class were measured
-  apart by more than the swing the dearer has its own figures (`ETHEREUM_PRINT_PAIRS`). A listing
+  charged `FIRST_BALANCE_WRITE_GAS` (16,964, the least measured) more (a routed fill nothing: its refund gives the write back; a side's largest custody size is charged `LAST_CUSTODY_FILL_REFUND`, 9,600, less, since emptying the pool's balance earns that back). A listing
   quoted in a token no listing sells for a USD quote token is valued through its own base.
   `PLAN_ONLY` needs the deployed build's front. Signed firm quotes (`fillQuote`) are not served; an
   update carrying the desk's firm state is accepted.
   `EfficientPropFeedBuilder::with_fallback_router()` (off by default) stamps the components
   `fallback:efficient_prop` (in the id too), so tycho-execution settles them through
   `PropAMMFallbackRouter`: where a door quotes nothing (`NoWord`), the solver's fallback pool
-  fills instead of the route reverting. A credit listing is refused with it (the router's quote
-  runs its route once more). `flamm` has no such option: its pools answer no `quote`.
+  fills instead of the route reverting. Which branch fills is not known at the read, so every
+  swap of such a component is charged the cheaper one, a fill on the fallback pool
+  (`FALLBACK_SWAP_GAS`, 50,445, beside tycho-execution's 40,000 for the router: the least
+  measured through the deployed router over Uniswap V2 and V3 fallbacks; a door fill spends about
+  64,000 to 121,000 more), and a listing needs no measured or named figure there. A credit listing
+  is refused with it (the router's quote runs its route once more). `flamm` has no such option: its pools answer no `quote`.
   `ladder.rs` holds a side's samples and quotes them exactly, along floored chords between them, and
   nothing outside them; the quote layout, front, factory, desk contract code hash (Ethereum) and
   allow-list are builder arguments (`EfficientPropDeployment`), never constants.
@@ -340,8 +354,9 @@ for any protocol indexed by Tycho.
     rung is the pool's answer less the haircut, which the router's fee receiver takes as positive
     slippage where the pool fills at its answer. Inside a span the state prices on the chord,
     rounded down, where one route priced both rungs, and at the lower rung where the route changes
-    (`Segment::Flat`); nothing is quoted under the first rung, a swap moves only its own side, and a
-    ladder with a flat span has no second fill. A poll's pools share one deadline, three quarters
+    (`Segment::Flat`); nothing is quoted under the first rung, and a swap leaves its own side empty
+    until the next poll (the hook prices a whole fill at the fee before it) and the other side as
+    it was. A poll's pools share one deadline, three quarters
     of `request_timeout` from the poll's start, and the polls' permits (`max_in_flight` less
     discovery's quarter); each poll starts past the last one's answers, so no pool is always last,
     and a pool given no permit by the deadline is skipped, never a miss. The sampler never
@@ -367,7 +382,9 @@ for any protocol indexed by Tycho.
     three or more tokens, takes its key's second-fill charge instead, the least measured of the
     second of two fills of one pool in one transaction. A pair with a live venue of a kind its
     chain does not route or with no second-fill charge, an unread venue record or no live venue is
-    not served, and the builder's `gas` does nothing.
+    not served, nor is a pool whose tokens 0 and 1 are not the two its venues' kinds were measured
+    on (`MEASURED_POOLS`: the cells have no token dimension), and the builder's `gas` does
+    nothing.
     `gas_limit_addition` is what a fill adds to a limit. Where a live venue whose account holds a
     partial repay at a minimum position (`capabilities()` bit 512, Lista Moolah's) lends a
     direction's output, `guard.rs` keeps one piece of its settled ladder before the haircut: the
@@ -376,7 +393,8 @@ for any protocol indexed by Tycho.
     `testdata/held_repay_guard_vectors.json` holds the rule's shared vectors, pinned by hash. A
     pool worth less than the TVL floor is not quoted at all. `assets/FlammSampler.sol` (SPDX MIT) is the sampler a node runs by state
     override at the taker, never deployed: one call walks each direction's `previewSwap` and
-    reads the request words the rule needs, and never reverts. Its raw runtime
+    reads the request words the rule needs and, on every walk, the request's legs the gas charge
+    needs, and never reverts. Its raw runtime
     (`assets/FlammSampler.evm.runtime`) and the fake pool's (`testdata/MaxOfTwoPool.sol`, its own
     hook) come from `assets/build_sampler.py` (solc 0.8.35, via IR, paris, no metadata; `--check`
     verifies the committed bytes). `sampler_evm.rs` runs the sampler's bytes on revm against the
