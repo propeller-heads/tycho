@@ -456,8 +456,7 @@ pub trait ProtocolGateway {
     ///
     /// # Parameters
     /// - `chain` The chain of the components.
-    /// - `system` Only components of this protocol system. Required, because the answer is keyed by
-    ///   pool id and a pool id can repeat across protocol systems.
+    /// - `system` Only components of this protocol system.
     /// - `ids` Only components with these ids.
     /// - `version` The version of the balances. The latest version if `None`.
     async fn get_component_balances(
@@ -497,6 +496,7 @@ pub trait ProtocolGateway {
     /// # Parameters
     /// - `chain` The chain for which to retrieve the total value locked
     /// - `system` The protocol system for which to retrieve the total value locked
+    /// - `allowed` Without `system`, only the TVL of these protocol systems. `None` means all.
     /// - `ids` The ids of the components to retrieve the total value locked for
     /// - `pagination_params` Optional pagination parameters to control the number of results.
     ///
@@ -506,6 +506,7 @@ pub trait ProtocolGateway {
         &self,
         chain: &Chain,
         system: Option<String>,
+        allowed: Option<&HashSet<String>>,
         ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError>;

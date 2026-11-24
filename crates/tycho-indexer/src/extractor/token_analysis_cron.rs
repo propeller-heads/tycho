@@ -214,7 +214,8 @@ async fn holder_candidates(
     gw: &(dyn ProtocolGateway + Send + Sync),
     owners: HashMap<Bytes, TokenOwner>,
 ) -> anyhow::Result<HashMap<Bytes, Vec<Bytes>>> {
-    // A pool id can repeat across protocols, so each protocol's pools are read on their own.
+    // A read by component id needs a protocol system, so each protocol's pools are read on their
+    // own.
     let mut owners_by_protocol: HashMap<String, Vec<(Bytes, ComponentId)>> = HashMap::new();
     for (token, owner) in owners {
         owners_by_protocol

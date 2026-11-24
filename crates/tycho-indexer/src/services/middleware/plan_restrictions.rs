@@ -266,7 +266,8 @@ impl ValidateRestrictions for dto::StateRequestBody {
 
 impl ValidateRestrictions for dto::ComponentTvlRequestBody {
     fn validate_restrictions(&self, restrictions: &PlanRestrictions) -> Result<(), RpcError> {
-        // protocol_system is optional on this endpoint; skip check when absent
+        // protocol_system is optional here; without it, the handler limits the answer to the
+        // plan's protocol systems
         if let Some(protocol_system) = &self.protocol_system {
             restrictions.check_protocol_system(protocol_system)?;
         }

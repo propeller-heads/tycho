@@ -6,6 +6,7 @@
 //!
 //! - one protocol: [`active_instance`], then `instance_id.eq(id)`.
 //! - all protocols: [`active_instance_ids`], then `instance_id.eq_any(&ids)`.
+//! - some protocols: [`active_instance_ids_of`], then `instance_id.eq_any(&ids)`.
 //!
 //! Postgres prunes a subselect only during execution, so with one it would plan and lock every
 //! leaf of each table. Each statement also takes a new snapshot, so a subselect in each query of a
@@ -13,6 +14,8 @@
 //!
 //! A protocol with no active instance yields no rows, and so does an unknown protocol name:
 //! check the name first where it must exist.
+
+use std::collections::HashSet;
 
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -83,6 +86,23 @@ pub async fn active_instance_ids(
 ) -> Result<Vec<InstanceId>, StorageError> {
     Ok(protocol_system::table
         .filter(protocol_system::active_instance_id.is_not_null())
+        .select(protocol_system::active_instance_id.assume_not_null())
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// The active instance of every protocol system whose name is in `names`.
+///
+/// An unknown name, or a protocol system without an active instance, adds nothing. Empty if no
+/// named protocol system has an active instance.
+pub async fn active_instance_ids_of(
+    names: &HashSet<String>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<InstanceId>, StorageError> {
+    Ok(protocol_system::table
+        .filter(protocol_system::active_instance_id.is_not_null())
+        .filter(protocol_system::name.eq_any(names))
         .select(protocol_system::active_instance_id.assume_not_null())
         .load(conn)
         .await
@@ -189,6 +209,67 @@ mod tests {
 
         assert_eq!(
             active_instance_ids(&mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
+    fn names(names: &[&str]) -> HashSet<String> {
+        names
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_both_protocols() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        let mut ids = active_instance_ids_of(&names(&["vm:curve", "uniswap_v4"]), &mut conn)
+            .await
+            .unwrap();
+        ids.sort();
+
+        let mut expected = vec![setup.uniswap_v4, setup.curve];
+        expected.sort();
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_one_protocol() {
+        let mut conn = instance_test_connection().await;
+        let setup = setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["vm:curve"]), &mut conn)
+                .await
+                .unwrap(),
+            vec![setup.curve]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_an_unknown_name_is_empty() {
+        let mut conn = instance_test_connection().await;
+        setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["unknown"]), &mut conn)
+                .await
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_instance_ids_of_a_protocol_without_pointer_is_empty() {
+        let mut conn = instance_test_connection().await;
+        setup_protocols(&mut conn).await;
+
+        assert_eq!(
+            active_instance_ids_of(&names(&["vm:old"]), &mut conn)
                 .await
                 .unwrap(),
             Vec::new()

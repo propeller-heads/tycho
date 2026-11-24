@@ -798,10 +798,11 @@ where
         ))
     }
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request, allowed))]
     async fn get_component_tvls(
         &self,
         request: &dto::ComponentTvlRequestBody,
+        allowed: Option<&HashSet<String>>,
     ) -> Result<dto::ComponentTvlRequestResponse, RpcError> {
         if let Some(ref component_ids) = request.component_ids {
             info!(
@@ -827,6 +828,7 @@ where
             .get_component_tvls(
                 &chain,
                 request.protocol_system.clone(),
+                allowed,
                 ids_slice,
                 Some(&pagination_params),
             )
@@ -1559,7 +1561,8 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
 
 /// Retrieve protocol component tvl
 ///
-/// This endpoint retrieves component tvl
+/// This endpoint retrieves component tvl. Without `protocol_system`, it returns the TVL of all
+/// active protocol systems; on a plan restricted to some protocol systems, of those only.
 #[utoipa::path(
     post,
     path = "/v1/component_tvl",
@@ -1571,25 +1574,36 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
          ("apiKey" = [])
     ),
 )]
-#[instrument(skip_all, fields(page, page_size))]
+#[instrument(skip_all, fields(page, page_size, protocol_system))]
 pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ComponentTvlRequestBody>,
     handler: web::Data<RpcHandler<G, T>>,
 ) -> Result<HttpResponse, RpcError> {
+    let mut body = body.into_inner();
+    body.protocol_system = body
+        .protocol_system
+        .take()
+        .filter(|system| !system.trim().is_empty());
+
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
     tracing::Span::current().record("page_size", body.pagination.page_size);
+    tracing::Span::current().record("protocol_system", body.protocol_system.as_deref());
 
     body.validate_pagination(&req)?;
     if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
         body.validate_restrictions(restrictions)?;
     }
 
+    let allowed = handler
+        .resolve_plan_restrictions(&req)
+        .and_then(|r| r.allowed_protocol_systems.clone());
+
     // Call the handler to get component tvl
     let response = handler
         .into_inner()
-        .get_component_tvls(&body)
+        .get_component_tvls(&body, allowed.as_ref())
         .await;
 
     match response {
@@ -4503,6 +4517,107 @@ plans:
         let body: dto::ProtocolSystemsRequestResponse = test::read_body_json(resp).await;
         assert_eq!(body.protocol_systems, vec!["ambient", "sushiswap", "uniswap_v3"]);
         assert_eq!(body.pagination.total, 3);
+    }
+
+    #[rstest]
+    #[case::restricted_plan_passes_its_protocols(
+        None,
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
+    #[case::no_plan_passes_no_allowlist(None, None, None)]
+    #[case::empty_counts_as_no_protocol(
+        Some(""),
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
+    #[case::blank_counts_as_no_protocol(
+        Some("  "),
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
+    #[actix_web::test]
+    async fn test_component_tvl_without_protocol_passes_the_plan_allowlist(
+        #[case] protocol_system: Option<&str>,
+        #[case] plan_header: Option<&str>,
+        #[case] expected_allowed: Option<HashSet<String>>,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_component_tvls()
+            .withf(move |_, system, allowed, _, _| {
+                system.is_none() && allowed.cloned() == expected_allowed
+            })
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: HashMap::new(), total: Some(0) }) })
+            });
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            plans_config_with_restrictions(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let request_body = dto::ComponentTvlRequestBody {
+            protocol_system: protocol_system.map(str::to_string),
+            ..Default::default()
+        };
+        let mut req_builder = test::TestRequest::post()
+            .uri("/v1/component_tvl")
+            .set_json(&request_body);
+        if let Some(plan) = plan_header {
+            req_builder = req_builder.insert_header(("X-User-Plan", plan));
+        }
+        let resp = test::call_service(&app, req_builder.to_request()).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_component_tvl_rejects_a_protocol_outside_the_plan() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_component_tvls().never();
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            plans_config_with_restrictions(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let request_body =
+            dto::ComponentTvlRequestBody::system_filtered("sushiswap", dto::Chain::Ethereum);
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/component_tvl")
+                .insert_header(("X-User-Plan", "restricted"))
+                .set_json(&request_body)
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
     }
 
     fn plans_config_restricted_history() -> PlansConfig {

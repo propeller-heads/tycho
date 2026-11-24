@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -10,7 +10,7 @@ use tycho_common::{
 
 use crate::postgres::{
     instance::{
-        active::{active_instance, active_instance_ids},
+        active::{active_instance, active_instance_ids, active_instance_ids_of},
         gateway::PostgresGatewayNew,
         orm as iorm,
         schema::tycho::{
@@ -29,8 +29,8 @@ impl PostgresGatewayNew {
     ///
     /// - `system`: only components of this protocol system. `NotFound` for an unknown name. A
     ///   protocol system without an active instance has no components.
-    /// - `ids`: only components with these external ids. Needs `system`, because an external id can
-    ///   repeat across protocol systems: `ids` without `system` is `Unsupported`.
+    /// - `ids`: only components with these external ids. Needs `system`: `ids` without `system` is
+    ///   `Unsupported`.
     /// - `min_tvl`: only components with a TVL greater than this value. A component without a TVL
     ///   row never matches.
     /// - `pagination_params`: the page to return, ordered by instance and component id. Without it,
@@ -54,8 +54,7 @@ impl PostgresGatewayNew {
             }
             (None, Some(_)) => {
                 return Err(StorageError::Unsupported(
-                    "component ids need a protocol system: a pool id can repeat across protocols"
-                        .to_string(),
+                    "component ids need a protocol system".to_string(),
                 ));
             }
             (None, None) => load_active_components(min_tvl, pagination_params, conn).await?,
@@ -66,20 +65,24 @@ impl PostgresGatewayNew {
         Ok(WithTotal { entity, total: Some(total) })
     }
 
-    /// Returns the TVL of the components of `system`'s active instance, by external id, and the
-    /// number of matching components on all pages.
+    /// Returns the TVL of the components of the active instances, by external id, and the number of
+    /// matching components on all pages.
     ///
-    /// - `system`: the protocol system. Required, because the answer is keyed by external id and an
-    ///   external id can repeat across protocol systems: `None` is `Unsupported`. `NotFound` for an
-    ///   unknown name. A protocol system without an active instance has no TVL.
+    /// - `system`: only the active instance of this protocol system. `NotFound` for an unknown
+    ///   name. A protocol system without an active instance has no TVL. `None` reads the TVL of
+    ///   every active instance. Pool IDs are unique across active instances, so the answer has one
+    ///   value per pool ID.
+    /// - `allowed`: without `system`, only the TVL of these protocol systems; `None` means all.
+    ///   Ignored with `system`.
     /// - `component_ids`: only components with these external ids.
-    /// - `pagination_params`: the page to return, in component id order.
+    /// - `pagination_params`: the page to return, ordered by instance and component id.
     ///
     /// Components without a TVL row are absent. `NotFound` for an unknown chain.
     pub async fn get_component_tvls(
         &self,
         chain: &Chain,
         system: Option<String>,
+        allowed: Option<&HashSet<String>>,
         component_ids: Option<&[&str]>,
         pagination_params: Option<&PaginationParams>,
         conn: &mut AsyncPgConnection,
@@ -87,16 +90,22 @@ impl PostgresGatewayNew {
         if !self.chain_id_cache.value_exists(chain) {
             return Err(StorageError::NotFound("Chain".to_string(), chain.to_string()));
         }
-        let Some(system) = system else {
-            return Err(StorageError::Unsupported(
-                "component TVL needs a protocol system: the response is keyed by pool id"
-                    .to_string(),
-            ));
+        let instances = match system {
+            Some(system) => {
+                self.get_protocol_system_id(&system)?;
+                active_instance(&system, conn)
+                    .await?
+                    .into_iter()
+                    .collect()
+            }
+            None => match allowed {
+                Some(allowed) => active_instance_ids_of(allowed, conn).await?,
+                None => active_instance_ids(conn).await?,
+            },
         };
-        self.get_protocol_system_id(&system)?;
-        let Some(instance) = active_instance(&system, conn).await? else {
+        if instances.is_empty() {
             return Ok(WithTotal { entity: HashMap::new(), total: Some(0) });
-        };
+        }
 
         let filtered = || {
             let mut query = component_tvl::table
@@ -105,7 +114,7 @@ impl PostgresGatewayNew {
                         .eq(component_tvl::instance_id)
                         .and(protocol_component::id.eq(component_tvl::protocol_component_id))),
                 )
-                .filter(component_tvl::instance_id.eq(instance))
+                .filter(component_tvl::instance_id.eq_any(&instances))
                 .into_boxed::<Pg>();
             if let Some(ids) = component_ids {
                 query = query.filter(protocol_component::external_id.eq_any(ids));
@@ -122,7 +131,7 @@ impl PostgresGatewayNew {
         let mut query = filtered().select((protocol_component::external_id, component_tvl::tvl));
         if let Some(pagination) = pagination_params {
             query = query
-                .order_by(component_tvl::protocol_component_id)
+                .order_by((component_tvl::instance_id, component_tvl::protocol_component_id))
                 .limit(pagination.page_size)
                 .offset(pagination.offset());
         }
@@ -369,7 +378,7 @@ fn group_by_component(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use chrono::NaiveDate;
     use diesel::{
@@ -445,10 +454,18 @@ mod tests {
         gateway: &PostgresGatewayNew,
         conn: &mut AsyncPgConnection,
         system: Option<&str>,
+        allowed: Option<&HashSet<String>>,
         ids: Option<&[&str]>,
     ) -> Result<(HashMap<String, f64>, Option<i64>), StorageError> {
         let page = gateway
-            .get_component_tvls(&Chain::Ethereum, system.map(str::to_string), ids, None, conn)
+            .get_component_tvls(
+                &Chain::Ethereum,
+                system.map(str::to_string),
+                allowed,
+                ids,
+                None,
+                conn,
+            )
             .await?;
         Ok((page.entity, page.total))
     }
@@ -821,7 +838,7 @@ mod tests {
             db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
         }
 
-        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None, None)
             .await
             .expect("reading the TVLs failed");
 
@@ -842,7 +859,7 @@ mod tests {
 
         for (system, tvl) in [("vm:curve", 1.0), ("uniswap_v4", 2.0)] {
             for ids in [None, Some(&["0xpool"][..])] {
-                let (found, total) = tvls(&s.gateway, &mut conn, Some(system), ids)
+                let (found, total) = tvls(&s.gateway, &mut conn, Some(system), None, ids)
                     .await
                     .expect("reading the TVLs failed");
                 assert_eq!(found, HashMap::from([("0xpool".to_string(), tvl)]), "{system}");
@@ -852,13 +869,177 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tvls_need_a_protocol() {
+    async fn test_tvls_without_a_protocol_read_all_active_instances() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in [(s.curve, "a", 1.0), (s.uniswap_v4, "u", 3.0)] {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
 
-        let result = tvls(&s.gateway, &mut conn, None, None).await;
+        let (found, total) = tvls(&s.gateway, &mut conn, None, None, None)
+            .await
+            .expect("reading the TVLs failed");
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "got {result:?}");
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0), ("u".to_string(), 3.0)]));
+        assert_eq!(total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_without_a_protocol_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
+        let ready = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, ready, "old", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, ready, id, 5.0).await;
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, None, None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0)]));
+        assert_eq!(total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_without_a_protocol_page_by_instance_then_component() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        assert!(s.curve < s.uniswap_v4);
+        // Component ids follow the insert order, so (instance_id, id) order gives z, y | a, while
+        // external id order would give a, y, z.
+        for (instance, external_id, tvl) in
+            [(s.curve, "z", 1.0), (s.curve, "y", 2.0), (s.uniswap_v4, "a", 3.0)]
+        {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        for (page, external_id, tvl) in [(0, "z", 1.0), (1, "y", 2.0), (2, "a", 3.0)] {
+            let pagination = PaginationParams::new(page, 1);
+            let found = s
+                .gateway
+                .get_component_tvls(
+                    &Chain::Ethereum,
+                    None,
+                    None,
+                    None,
+                    Some(&pagination),
+                    &mut conn,
+                )
+                .await
+                .expect("reading the TVLs failed");
+
+            assert_eq!(found.entity, HashMap::from([(external_id.to_string(), tvl)]), "{page}");
+            assert_eq!(found.total, Some(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tvls_with_ids_without_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in
+            [(s.curve, "a", 1.0), (s.curve, "b", 2.0), (s.uniswap_v4, "u", 3.0)]
+        {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, None, Some(&["a", "u"]))
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0), ("u".to_string(), 3.0)]));
+        assert_eq!(total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_without_a_protocol_keep_to_the_allowed_protocols() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in [(s.curve, "a", 1.0), (s.uniswap_v4, "u", 3.0)] {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+        let allowed = HashSet::from(["uniswap_v4".to_string()]);
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, Some(&allowed), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("u".to_string(), 3.0)]));
+        assert_eq!(total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_of_allowed_protocols_without_active_instance_are_empty() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
+        db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
+        let allowed = HashSet::from(["vm:curve".to_string()]);
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, Some(&allowed), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert!(found.is_empty());
+        assert_eq!(total, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_of_a_protocol_ignore_the_allowed_set() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in [(s.curve, "a", 1.0), (s.uniswap_v4, "u", 3.0)] {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+        let allowed = HashSet::from(["uniswap_v4".to_string()]);
+
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), Some(&allowed), None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0)]));
+        assert_eq!(total, Some(1));
     }
 
     #[tokio::test]
@@ -873,7 +1054,7 @@ mod tests {
             db_fixtures::insert_instance_component(&mut conn, ready, "old", &[b("0x01")]).await;
         db_fixtures::insert_instance_tvl(&mut conn, ready, id, 5.0).await;
 
-        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None, None)
             .await
             .expect("reading the TVLs failed");
 
@@ -890,7 +1071,7 @@ mod tests {
         db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
         db_fixtures::set_active_instance(&mut conn, s.curve_system_id, None).await;
 
-        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None)
+        let (found, total) = tvls(&s.gateway, &mut conn, Some("vm:curve"), None, None)
             .await
             .expect("reading the TVLs failed");
 
