@@ -18,7 +18,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_qs = "0.13.0"
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
-substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.5.0" }
+substreams-helper = { path = "../crates/substreams-helper" }
 tycho-substreams = "0.8.1"
 
 [dev-dependencies]

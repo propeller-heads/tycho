@@ -8,11 +8,6 @@ pub fn plugin_pool_key(plugin: &[u8]) -> String {
     format!("plugin:{}", hex::encode(plugin))
 }
 
-/// Store key of a pool's current plugin config (decimal), keyed by pool address (hex).
-pub fn pool_config_key(pool: &[u8]) -> String {
-    format!("config:{}", hex::encode(pool))
-}
-
 /// A string store as the pool modules read it. Unit tests implement it over a map.
 pub trait StringStore {
     /// The value of `key` after every write of the block up to `ordinal`.
@@ -46,44 +41,17 @@ pub fn plugin_at(pool_plugins: &impl StringStore, ordinal: u64, pool: &[u8]) -> 
 }
 
 /// What the block's events write: each pool's current plugin address (hex), keyed by pool
-/// address (hex), the reverse, keyed by `plugin_pool_key`, and each pool's current plugin
-/// config, keyed by `pool_config_key`.
+/// address (hex), and the reverse, keyed by `plugin_pool_key`.
 pub fn pool_plugin_writes(events: &Events) -> Vec<StoreWrite> {
     let mut writes = Vec::new();
     for event in &events.pool_events {
+        let Some(Typ::Plugin(plugin)) = &event.typ else {
+            continue;
+        };
         let ordinal = event.log_ordinal;
-        match &event.typ {
-            Some(Typ::Plugin(plugin)) => {
-                let pool = hex::encode(&event.pool_address);
-                writes.push(StoreWrite {
-                    ordinal,
-                    key: pool.clone(),
-                    value: hex::encode(&plugin.plugin),
-                });
-                writes.push(StoreWrite {
-                    ordinal,
-                    key: plugin_pool_key(&plugin.plugin),
-                    value: pool,
-                });
-            }
-            Some(Typ::PluginConfig(config)) => writes.push(StoreWrite {
-                ordinal,
-                key: pool_config_key(&event.pool_address),
-                value: config.plugin_config.to_string(),
-            }),
-            // Spelled out so a new event type must be classified here.
-            Some(
-                Typ::Initialize(_) |
-                Typ::Mint(_) |
-                Typ::Collect(_) |
-                Typ::Burn(_) |
-                Typ::Swap(_) |
-                Typ::Flash(_) |
-                Typ::Skim(_) |
-                Typ::Fee(_),
-            ) |
-            None => {}
-        }
+        let pool = hex::encode(&event.pool_address);
+        writes.push(StoreWrite { ordinal, key: pool.clone(), value: hex::encode(&plugin.plugin) });
+        writes.push(StoreWrite { ordinal, key: plugin_pool_key(&plugin.plugin), value: pool });
     }
     writes
 }

@@ -28,9 +28,7 @@ use crate::{
             beacon_bindings, beacon_pools_keys, followed_plugin_at, implementation_known_at,
             plugin_beacon_key, tracked_beacon_key,
         },
-        store_pool_plugins::{
-            decode_plugin, plugin_at, plugin_pool_key, pool_config_key, StringStore,
-        },
+        store_pool_plugins::{decode_plugin, plugin_at, plugin_pool_key, StringStore},
     },
     pb::algebra::integral::v1::{events::pool_event::Typ, Events, LiquidityChanges, TickDeltas},
     plugin::{
@@ -58,8 +56,8 @@ struct Params {
     /// so a plugin with no native handler can be simulated in the VM.
     dci: bool,
     /// The plugin modules the deployment's plugins are built from, separated by commas: see
-    /// [`modules_named`].
-    #[serde(default)]
+    /// [`modules_named`]. Required: without it no module attribute is indexed and simulation
+    /// rejects every pool that has a plugin.
     modules: String,
 }
 
@@ -190,11 +188,10 @@ pub fn map_protocol_changes(
     // Pool events. With DCI, the plugin's `beforeSwap` is also registered as an entrypoint
     // whenever a pool enables it, so the plugin's code and storage (and the pool's) are indexed
     // for VM simulation. It is registered on `PluginConfig` rather than on `Plugin` because the
-    // plugin's oracle is only initialized once the pool is, and a trace before that reverts. It
-    // is registered again on every swap, on purpose: a plugin that refuses swaps until a start
-    // time fails its trace, and the indexer retraces a failed entrypoint each time it is emitted
-    // again, outside its retry cap, so the pool is picked up once trading opens. An entrypoint
-    // already traced costs the indexer a few database statements per swap.
+    // plugin's oracle is only initialized once the pool is, and a trace before that reverts.
+    // `setPlugin` resets the config to zero, so a new plugin always gets a `PluginConfig` of its
+    // own. A trace that fails, as for a plugin that refuses swaps until a start time, is retried
+    // by the indexer on the pool's later changes, up to its retry cap.
     let mut registered_entrypoints = HashSet::new();
     // The transactions in which a pool names a plugin they created, whose writes are emitted
     // as creations.
@@ -215,22 +212,11 @@ pub fn map_protocol_changes(
         let pool = hex::encode(&event.pool_address);
 
         if params.dci {
-            let plugin_config = match &typ {
-                Typ::PluginConfig(config) => Some(config.plugin_config),
-                Typ::Swap(_) => pool_plugins_store
-                    .get_at(event.log_ordinal, pool_config_key(&event.pool_address))
-                    .and_then(|config| config.parse().ok()),
-                // Spelled out so a new event type must be classified here.
-                Typ::Initialize(_) |
-                Typ::Mint(_) |
-                Typ::Collect(_) |
-                Typ::Burn(_) |
-                Typ::Flash(_) |
-                Typ::Skim(_) |
-                Typ::Fee(_) |
-                Typ::Plugin(_) => None,
-            };
-            if plugin_config.is_some_and(|config| config & BEFORE_SWAP_FLAG != 0) {
+            let calls_before_swap = matches!(
+                &typ,
+                Typ::PluginConfig(config) if config.plugin_config & BEFORE_SWAP_FLAG != 0
+            );
+            if calls_before_swap {
                 let plugin = decode_plugin(pool_plugins_store.get_at(event.log_ordinal, &pool));
                 if let Some(plugin) = plugin {
                     if registered_entrypoints.insert((event.pool_address.clone(), plugin.clone())) {
@@ -671,6 +657,10 @@ mod tests {
 
         assert_eq!(params, Params { dci: true, modules: "dynamic_fee,fee_override".to_string() });
         assert!(serde_qs::from_str::<Params>("dci=true&factory=0x00").is_err());
+        assert!(
+            serde_qs::from_str::<Params>("dci=true").is_err(),
+            "a manifest that leaves out `modules` must not run"
+        );
     }
 
     #[test]
