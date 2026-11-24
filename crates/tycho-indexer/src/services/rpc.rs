@@ -1574,7 +1574,7 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
          ("apiKey" = [])
     ),
 )]
-#[instrument(skip_all, fields(page, page_size))]
+#[instrument(skip_all, fields(page, page_size, protocol_system))]
 pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ComponentTvlRequestBody>,
@@ -1589,6 +1589,7 @@ pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
     tracing::Span::current().record("page_size", body.pagination.page_size);
+    tracing::Span::current().record("protocol_system", body.protocol_system.as_deref());
 
     body.validate_pagination(&req)?;
     if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
