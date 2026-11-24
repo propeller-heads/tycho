@@ -537,7 +537,7 @@ struct FlammBookSource {
 }
 
 /// A block and the books read at it.
-type BlockBooks = (u64, Arc<std::collections::HashMap<String, Book>>);
+type BlockBooks = (B256, Arc<std::collections::HashMap<String, Book>>);
 
 impl HttpSource for FlammBookSource {
     type Snapshot = BookSnapshot<ReceivedAt>;
@@ -564,7 +564,7 @@ impl HttpSource for FlammBookSource {
             self.chain_checked
                 .store(true, Ordering::Relaxed);
         }
-        let (block, timestamp) = self.reader.head().await?;
+        let (block, timestamp, hash) = self.reader.head().await?;
         if let Some(lag) = self.max_block_lag {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -590,7 +590,8 @@ impl HttpSource for FlammBookSource {
             .expect("books lock")
             .as_ref()
         {
-            if *read_at == block {
+            // By hash, not number: another block at the same height is another state.
+            if *read_at == hash {
                 return Ok(BookSnapshot {
                     anchor: ReceivedAt(Utc::now()),
                     books: Arc::clone(books),
@@ -606,7 +607,7 @@ impl HttpSource for FlammBookSource {
             *self
                 .last_books
                 .lock()
-                .expect("books lock") = Some((block, Arc::clone(&snapshot.books)));
+                .expect("books lock") = Some((hash, Arc::clone(&snapshot.books)));
         }
         Ok(snapshot)
     }
@@ -1054,6 +1055,21 @@ mod node_tests {
         assert!(Arc::ptr_eq(&first.books, &second.books));
         // the head of the chain, and nothing else
         assert_eq!(node.server.request_count(), asked + 1);
+    }
+
+    /// Another block at the same height (a reorg) is another state: its books are read anew.
+    #[tokio::test]
+    async fn another_block_at_the_same_height_is_quoted_anew() {
+        let node = FakeNode::spawn(CHAIN_ID, 0, vec![fake::pool(0x01)]).await;
+        let feed = builder(&node, config(0.0))
+            .build()
+            .unwrap();
+        let first = first_poll(&feed).await.unwrap();
+        let asked = node.server.request_count();
+        node.chain.lock().unwrap().fork = 1;
+        let second = feed.source.fetch().await.unwrap();
+        assert!(!Arc::ptr_eq(&first.books, &second.books));
+        assert!(node.server.request_count() > asked + 1);
     }
 
     #[tokio::test]

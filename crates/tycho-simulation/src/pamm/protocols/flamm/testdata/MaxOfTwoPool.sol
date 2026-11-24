@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity 0.8.35;
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
+pragma solidity 0.8.33;
 
 /// @title MaxOfTwoPool
 /// @notice A test pool for FlammSampler and the ladder rule. One runtime, with no constructor and no immutables, serves

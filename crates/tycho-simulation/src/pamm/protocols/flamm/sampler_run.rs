@@ -57,11 +57,11 @@ const POOL_SOURCE: &[u8] = include_bytes!("testdata/MaxOfTwoPool.sol");
 const SAMPLER_RUNTIME_KECCAK: B256 =
     b256!("bbdf94edbd91824346d073adae889ff0e173649ad0a6235549b77c788b70c918");
 const SAMPLER_SOURCE_KECCAK: B256 =
-    b256!("28a7ecd1865a0aaf95cdd0e37e8c5d6a89ee3dba7c8012f4c1b0aeb3741b1162");
+    b256!("e5438b963ed76f155814ee0edd142b91170a517163e24c7dcdfa44ab56192401");
 const POOL_RUNTIME_KECCAK: B256 =
     b256!("e9b47028abbbbde6b37871b0bc7383dcd45447c40f072dbd271019abbb678941");
 const POOL_SOURCE_KECCAK: B256 =
-    b256!("ed86138a409c1fa6cd6ddadc3f6e526b3709b563ffb8fdcffcd99c1657175d3c");
+    b256!("199410cb34bd66718bd4b1b8de963edd53f09ad21b208ac0807912875ecd8a80");
 /// Opcodes a build for paris never holds.
 const PUSH0: u8 = 0x5f;
 const MCOPY: u8 = 0x5e;

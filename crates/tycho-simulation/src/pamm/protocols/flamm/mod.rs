@@ -66,7 +66,7 @@ mod guard;
 mod ladder;
 mod reader;
 #[cfg(test)]
-mod sampler_evm;
+mod sampler_run;
 pub mod state;
 #[cfg(test)]
 mod test_support;

@@ -761,15 +761,15 @@ impl FlammReader {
             .map_err(|e| FeedError::Connection(format!("eth_chainId: {e}")))
     }
 
-    /// The number and timestamp of the node's latest block.
-    pub(super) async fn head(&self) -> Result<(u64, u64), FeedError> {
+    /// The number, timestamp and hash of the node's latest block.
+    pub(super) async fn head(&self) -> Result<(u64, u64, B256), FeedError> {
         let block = self
             .provider
             .get_block_by_number(BlockNumberOrTag::Latest)
             .await
             .map_err(|e| FeedError::Connection(format!("latest block: {e}")))?
             .ok_or_else(|| FeedError::Connection("the node has no latest block".into()))?;
-        Ok((block.header.number, block.header.timestamp))
+        Ok((block.header.number, block.header.timestamp, block.header.hash))
     }
 
     /// The node's answer to `request`, asked again if it comes back unanswered, and unanswered

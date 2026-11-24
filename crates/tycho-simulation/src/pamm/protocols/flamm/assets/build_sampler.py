@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Rebuild FlammSampler (assets/) and the test pool MaxOfTwoPool (testdata/) with solc 0.8.35; --check verifies the
-committed runtimes. Both are written as raw runtime bytes, never hex: a node runs the sampler by a state override, and
-the tests set the pool's code at an address."""
+"""Rebuild FlammSampler (assets/) and the test pool MaxOfTwoPool (testdata/) with solc 0.8.33, the version
+crates/tycho-execution/contracts/foundry.toml pins; --check verifies the committed runtimes. Both are written as raw
+runtime bytes, never hex: a node runs the sampler by a state override, and the tests set the pool's code at an
+address."""
 import argparse
 import json
 import pathlib
@@ -12,7 +13,7 @@ parser.add_argument('--solc', default='solc')
 parser.add_argument('--check', action='store_true')
 args = parser.parse_args()
 version = subprocess.check_output([args.solc, '--version'], text=True)
-assert 'Version: 0.8.35+commit.47b9dedd' in version, version
+assert 'Version: 0.8.33+commit.64118f21' in version, version
 module = pathlib.Path(__file__).resolve().parent.parent
 settings = {'viaIR': True, 'optimizer': {'enabled': True, 'runs': 1}, 'evmVersion': 'paris',
             'metadata': {'bytecodeHash': 'none', 'appendCBOR': False},

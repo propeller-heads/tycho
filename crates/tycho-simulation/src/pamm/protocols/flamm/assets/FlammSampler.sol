@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity 0.8.35;
+// SPDX-License-Identifier: LicenseRef-Fynd-License-1.1
+pragma solidity 0.8.33;
 
 /// @title FlammSampler
 /// @notice Never deployed. A node runs this by eth_call state override at the address whose calls a pool should see.

@@ -1,7 +1,7 @@
 //! A JSON-RPC node for the feed's tests, serving one factory, its pools, their hooks, their price
 //! feed and their lending router from Rust instead of a chain. It answers the sampler's call with
 //! walks computed from its pools as the sampler would walk them, its seeds and then the probe
-//! above a tier-labelled top, with none of its bisection: `sampler_evm` runs the sampler's own
+//! above a tier-labelled top, with none of its bisection: `sampler_run` runs the sampler's own
 //! bytes.
 use std::{
     collections::{HashMap, HashSet},
@@ -392,6 +392,8 @@ pub(super) struct FakeChain {
     pub not_pools: HashSet<Address>,
     /// How far past [`BLOCK`] the head is.
     pub blocks_ahead: u64,
+    /// Which block the head is at its height: its hash's last byte.
+    pub fork: u8,
     /// The node answers every read of the factory with an error of its own.
     pub factory_down: bool,
     /// How long the node takes to answer a storage read.
@@ -528,7 +530,7 @@ impl FakeNode {
             .unwrap_or_default()
         {
             "eth_chainId" => Ok(json!(format!("{chain_id:#x}"))),
-            "eth_getBlockByNumber" => Ok(block(timestamp, BLOCK + chain.blocks_ahead)),
+            "eth_getBlockByNumber" => Ok(block(timestamp, BLOCK + chain.blocks_ahead, chain.fork)),
             "eth_getCode" => {
                 let address = word(params[0].as_str().unwrap_or_default());
                 *seen
@@ -1282,10 +1284,10 @@ impl<'a> Walking<'a> {
 }
 
 /// A block as `eth_getBlockByNumber` returns it, every field alloy requires present.
-fn block(timestamp: u64, number: u64) -> Value {
+fn block(timestamp: u64, number: u64, fork: u8) -> Value {
     let zero32 = format!("0x{}", "00".repeat(32));
     json!({
-        "hash": zero32,
+        "hash": format!("0x{number:062x}{fork:02x}"),
         "parentHash": zero32,
         "sha3Uncles": zero32,
         "miner": format!("0x{}", "00".repeat(20)),
