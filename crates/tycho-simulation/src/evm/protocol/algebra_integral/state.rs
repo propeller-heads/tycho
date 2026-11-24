@@ -1009,7 +1009,7 @@ impl ProtocolSim for AlgebraIntegralState {
 }
 
 #[cfg(test)]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use std::{collections::HashMap, str::FromStr};
 
     use alloy::primitives::{address, Address};
