@@ -223,3 +223,25 @@ sol! {
         uint256 amount_out_upper_limit;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// The delta holds, on each currency, the input the pool took as a negative amount and the
+    /// output it pays as a positive one.
+    #[rstest]
+    #[case::zero_for_one(true, (-100, 90))]
+    #[case::one_for_zero(false, (90, -100))]
+    fn test_from_swap_result(#[case] zero_for_one: bool, #[case] expected: (i64, i64)) {
+        let input_taken = I256::try_from(-100i64).unwrap();
+        let output_calculated = I256::try_from(-90i64).unwrap();
+
+        let delta = BalanceDelta::from_swap_result(input_taken, output_calculated, zero_for_one);
+
+        let expected = (I128::try_from(expected.0).unwrap(), I128::try_from(expected.1).unwrap());
+        assert_eq!((delta.amount0(), delta.amount1()), expected);
+    }
+}
