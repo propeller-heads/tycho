@@ -856,13 +856,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tvls_need_a_protocol() {
+    async fn test_tvls_without_a_protocol_read_all_active_instances() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in [(s.curve, "a", 1.0), (s.uniswap_v4, "u", 3.0)] {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
 
-        let result = tvls(&s.gateway, &mut conn, None, None).await;
+        let (found, total) = tvls(&s.gateway, &mut conn, None, None)
+            .await
+            .expect("reading the TVLs failed");
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "got {result:?}");
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0), ("u".to_string(), 3.0)]));
+        assert_eq!(total, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_without_a_protocol_skip_instances_that_are_not_active() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, s.curve, id, 1.0).await;
+        let ready = db_fixtures::insert_instance(&mut conn, s.curve_system_id, "0.0.2").await;
+        let id =
+            db_fixtures::insert_instance_component(&mut conn, ready, "old", &[b("0x01")]).await;
+        db_fixtures::insert_instance_tvl(&mut conn, ready, id, 5.0).await;
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, None)
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0)]));
+        assert_eq!(total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_tvls_without_a_protocol_page_by_instance_then_component() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        assert!(s.curve < s.uniswap_v4);
+        // Component ids follow the insert order, so (instance_id, id) order gives z, y | a, while
+        // external id order would give a, y, z.
+        for (instance, external_id, tvl) in
+            [(s.curve, "z", 1.0), (s.curve, "y", 2.0), (s.uniswap_v4, "a", 3.0)]
+        {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        for (page, external_id, tvl) in [(0, "z", 1.0), (1, "y", 2.0), (2, "a", 3.0)] {
+            let pagination = PaginationParams::new(page, 1);
+            let found = s
+                .gateway
+                .get_component_tvls(&Chain::Ethereum, None, None, Some(&pagination), &mut conn)
+                .await
+                .expect("reading the TVLs failed");
+
+            assert_eq!(found.entity, HashMap::from([(external_id.to_string(), tvl)]), "{page}");
+            assert_eq!(found.total, Some(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tvls_with_ids_without_a_protocol() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        for (instance, external_id, tvl) in
+            [(s.curve, "a", 1.0), (s.curve, "b", 2.0), (s.uniswap_v4, "u", 3.0)]
+        {
+            let id = db_fixtures::insert_instance_component(
+                &mut conn,
+                instance,
+                external_id,
+                &[b("0x01")],
+            )
+            .await;
+            db_fixtures::insert_instance_tvl(&mut conn, instance, id, tvl).await;
+        }
+
+        let (found, total) = tvls(&s.gateway, &mut conn, None, Some(&["a", "u"]))
+            .await
+            .expect("reading the TVLs failed");
+
+        assert_eq!(found, HashMap::from([("a".to_string(), 1.0), ("u".to_string(), 3.0)]));
+        assert_eq!(total, Some(2));
     }
 
     #[tokio::test]
