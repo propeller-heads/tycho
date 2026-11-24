@@ -970,12 +970,17 @@ impl ProtocolSim for UniswapV4State {
                     },
                 };
 
+                // As for beforeSwap: a hook that refuses this swap, such as one that runs out of
+                // gas on a large amount, reports `InvalidInput`; only a failure to simulate the
+                // hook is fatal.
                 let after_swap_result = hook
                     .after_swap(after_swap_params, storage_overwrites, None)
-                    .map_err(|e| {
-                        SimulationError::FatalError(format!(
-                            "AfterSwap hook simulation failed: {e:?}"
-                        ))
+                    .map_err(|e| match e {
+                        SimulationError::InvalidInput(..) => e,
+                        e @ (SimulationError::FatalError(_) |
+                        SimulationError::RecoverableError(_)) => SimulationError::FatalError(
+                            format!("AfterSwap hook simulation failed: {e:?}"),
+                        ),
                     })?;
                 after_swap_gas = after_swap_result.gas_estimate;
                 // Hooks.sol calls afterSwap whenever AFTER_SWAP_FLAG is set, but only parses the
