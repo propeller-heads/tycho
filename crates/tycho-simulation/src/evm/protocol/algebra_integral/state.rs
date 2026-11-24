@@ -61,8 +61,9 @@ use crate::{
 // Gas model of an Algebra Integral swap: what the pool's `swap` frame spends outside its plugin.
 // The figures come from cold swaps on Nami's Base WETH/USDC pool `0x0E8AF367…`, traced on a Base
 // fork at block 52562900 (no MEVX router) and block 52924436 (router set), in both directions, and
-// from Base swap traces for what those swaps did not exercise. The executor's and callback's own
-// gas, the input transfer included, is the execution gas estimator's business.
+// from Base swap traces for what those swaps did not exercise. The input transfer made in the
+// swap callback is part of the figure: the execution gas estimator leaves it to the quote for a
+// protocol that pays in a callback. The executor's own gas is the estimator's business.
 
 /// `swap` outside its external calls: state reads and writes, fee accounting and the swap loop.
 /// Measured at 54.0k to 54.3k.
@@ -77,6 +78,10 @@ const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 22_000;
 /// than WETH. Set near the recurring case, so the fork test's cold first swap comes out slightly
 /// under and the warm ones slightly over.
 const SWAP_SETTLEMENT_GAS: u64 = 30_000;
+/// The swap callback paying the input token to the pool. 8.9k in Base transaction
+/// `0x4cd89607…f82c` (block 61.6M), a USDC transfer to a pool that already holds USDC; a token
+/// whose transfer does more costs more.
+const SWAP_CALLBACK_GAS: u64 = 9_000;
 /// Gas budget of a single swap: the Ethereum transaction gas cap, as in the Uniswap V3 model.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 /// Plugin costs a swap can carry, `beforeSwap` and `afterSwap` together. Set aside before
@@ -84,7 +89,7 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 const MAX_PLUGIN_GAS: u64 = 250_000;
 /// Initialized ticks one swap can cross within `MAX_SWAP_GAS`.
 const MAX_TICKS_CROSSED: u64 =
-    (MAX_SWAP_GAS - SWAP_BASE_GAS - SWAP_SETTLEMENT_GAS - MAX_PLUGIN_GAS) /
+    (MAX_SWAP_GAS - SWAP_BASE_GAS - SWAP_SETTLEMENT_GAS - SWAP_CALLBACK_GAS - MAX_PLUGIN_GAS) /
         (GAS_PER_INITIALIZED_TICK_CROSS + GAS_PER_SWAP_MATH_STEP);
 
 /// Attribute holding the implementation a pool's plugin runs.
@@ -575,7 +580,7 @@ impl AlgebraIntegralState {
             sqrt_price: current_price,
             liquidity: current_liquidity,
             tick: current_tick.into(),
-            gas_used: U256::from(gas_used + SWAP_SETTLEMENT_GAS),
+            gas_used: U256::from(gas_used + SWAP_SETTLEMENT_GAS + SWAP_CALLBACK_GAS),
         })
     }
 
@@ -1261,7 +1266,7 @@ mod tests {
         assert!(result.amount < fee_free);
         assert!(result.amount > &fee_free - &fee_free / 1000u32);
         // No plugin: the swap frame, one step and the settlement.
-        assert_eq!(result.gas, BigUint::from(54_000u64 + 5_400 + 30_000));
+        assert_eq!(result.gas, BigUint::from(54_000u64 + 5_400 + 30_000 + 9_000));
         let new_state = result
             .new_state
             .as_any()
@@ -1632,7 +1637,7 @@ mod tests {
         assert_eq!(pool.fee(), 0.001);
         assert_eq!(
             quote.gas,
-            BigUint::from(54_000u64 + 5_400 + 30_000 + 67_000 + 9_000 + 44_000 + 3_000)
+            BigUint::from(54_000u64 + 5_400 + 30_000 + 9_000 + 67_000 + 9_000 + 44_000 + 3_000)
         );
     }
 

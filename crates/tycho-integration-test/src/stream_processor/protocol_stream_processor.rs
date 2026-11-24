@@ -311,6 +311,7 @@ impl ProtocolStreamProcessor {
                 "aero_basic".to_string(),
                 "biconomy".to_string(),
                 "pancakeswap_infinity_bin".to_string(),
+                "nami_v4".to_string(),
             ],
             Chain::Bsc => vec![
                 "uniswap_v2".to_string(),
