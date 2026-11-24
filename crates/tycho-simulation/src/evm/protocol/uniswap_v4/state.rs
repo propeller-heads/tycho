@@ -850,6 +850,7 @@ impl ProtocolSim for UniswapV4State {
         let mut after_swap_gas = 0u64;
         let mut before_swap_delta = BeforeSwapDelta(I256::ZERO);
         let mut storage_overwrites = None;
+        let mut transient_storage = None;
 
         let token_in_address = Address::from_slice(&token_in.address);
         let token_out_address = Address::from_slice(&token_out.address);
@@ -897,6 +898,13 @@ impl ProtocolSim for UniswapV4State {
                 before_swap_gas = before_swap_result.gas_estimate;
                 before_swap_delta = before_swap_result.result.amount_delta;
                 storage_overwrites = Some(before_swap_result.result.overwrites);
+                // On chain, beforeSwap and afterSwap run in one transaction, so afterSwap can read
+                // what beforeSwap stored with TSTORE.
+                transient_storage = Some(
+                    before_swap_result
+                        .result
+                        .transient_storage,
+                );
 
                 // Convert amountDelta to amountToSwap as per Uniswap V4 spec
                 // See: https://github.com/Uniswap/v4-core/blob/main/src/libraries/Hooks.sol#L270
@@ -977,7 +985,7 @@ impl ProtocolSim for UniswapV4State {
                 // gas on a large amount, reports `InvalidInput`; only a failure to simulate the
                 // hook is fatal.
                 let after_swap_result = hook
-                    .after_swap(after_swap_params, storage_overwrites, None)
+                    .after_swap(after_swap_params, storage_overwrites, transient_storage)
                     .map_err(|e| match e {
                         SimulationError::InvalidInput(..) => e,
                         e @ (SimulationError::FatalError(_) |

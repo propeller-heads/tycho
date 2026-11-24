@@ -326,6 +326,8 @@ where
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
         let pending_overrides = self.pending_overrides.as_deref();
         let mut transient_storage_params = self.unlock_pool_manager();
+        // What beforeSwap left holds the unlock flag too, so replacing the PoolManager map keeps
+        // it.
         if let Some(input_params) = transient_storage {
             transient_storage_params.extend(input_params);
         }
