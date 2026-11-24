@@ -35,6 +35,7 @@ use crate::{
             },
             utils::{
                 add_fee_markup,
+                solidity_math::mul_div,
                 uniswap::{
                     i24_be_bytes_to_i32, liquidity_math,
                     lp_fee::{self, is_dynamic},
@@ -49,7 +50,7 @@ use crate::{
                         get_sqrt_ratio_at_tick_cached, MAX_SQRT_RATIO, MAX_TICK, MIN_SQRT_RATIO,
                         MIN_TICK,
                     },
-                    StepComputation, SwapResults, SwapState,
+                    StepComputation, SwapResults, SwapState, FEE_PIPS_DENOMINATOR,
                 },
             },
             vm::constants::EXTERNAL_ACCOUNT,
@@ -318,13 +319,15 @@ impl UniswapV4State {
         state
     }
 
+    /// Swaps natively. With `fee_accrual`, also records the fees the swap accrues the way
+    /// `Pool.swap` accounts them, which needs every step, so the step cache is not used.
     fn swap(
         &self,
         zero_for_one: bool,
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
-        fee_accrual: Option<&mut SwapFeeAccrual>,
+        mut fee_accrual: Option<&mut SwapFeeAccrual>,
     ) -> Result<SwapResults, SimulationError> {
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
@@ -374,7 +377,11 @@ impl UniswapV4State {
         // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
         // its input, which an exact-output swap does not know. A cached step can also lie past a
         // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
+        let cache_key = if exact_input &&
+            sqrt_price_limit.is_none() &&
+            lp_fee_override.is_none() &&
+            fee_accrual.is_none()
+        {
             let fee_pips = self
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, None)?;
@@ -441,14 +448,12 @@ impl UniswapV4State {
                 .calculate_swap_fees_pips(zero_for_one, lp_fee_override)?;
 
             let sqrt_price_start = state.sqrt_price;
+            let sqrt_price_target =
+                UniswapV4State::get_sqrt_ratio_target(sqrt_price_next, price_limit, zero_for_one);
             let SwapStepResult { sqrt_price, amount_in_with_fee, amount_out } =
                 swap_math::compute_swap_step(
                     state.sqrt_price,
-                    UniswapV4State::get_sqrt_ratio_target(
-                        sqrt_price_next,
-                        price_limit,
-                        zero_for_one,
-                    ),
+                    sqrt_price_target,
                     state.liquidity,
                     // The core univ4 swap logic assumes that if the amount is > 0 it's exact in,
                     // and if it's < 0 it's exact out. The compute_swap_step
@@ -477,6 +482,19 @@ impl UniswapV4State {
                 state.amount_calculated +=
                     I256::checked_from_sign_and_abs(Sign::Positive, step.amount_in_with_fee)
                         .unwrap();
+            }
+            if let Some(accrual) = fee_accrual.as_deref_mut() {
+                let stopped_short = exact_input && state.sqrt_price != sqrt_price_target;
+                let fee =
+                    step_fee(&step, state.sqrt_price, state.liquidity, stopped_short, fee_pips)?;
+                let protocol_fee =
+                    if zero_for_one { self.fees.zero_for_one } else { self.fees.one_for_zero };
+                accrue_step_fee(accrual, &step, fee, (fee_pips, protocol_fee), state.liquidity);
+                if state.sqrt_price == step.sqrt_price_next && next_tick_info.is_some() {
+                    accrual
+                        .crossed_ticks
+                        .push((step.tick_next, accrual.fee_growth));
+                }
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
@@ -644,6 +662,63 @@ impl UniswapV4State {
         }
 
         Ok(Some(rate))
+    }
+}
+
+/// The fee of a swap step as v4-core's `SwapMath.computeSwapStep` splits it from the step's input:
+/// what remains above the input less fee when an exact-input step stops short of its target,
+/// otherwise the input with fee less the input the price move needs. v3 splits a short step
+/// differently, so this is not in the shared swap math.
+fn step_fee(
+    step: &StepComputation,
+    sqrt_price_end: U256,
+    liquidity: u128,
+    stopped_short: bool,
+    fee_pips: u32,
+) -> Result<U256, SimulationError> {
+    if stopped_short {
+        let less_fee = mul_div(
+            step.amount_in_with_fee,
+            U256::from(FEE_PIPS_DENOMINATOR - fee_pips),
+            U256::from(FEE_PIPS_DENOMINATOR),
+        )?;
+        return safe_sub_u256(step.amount_in_with_fee, less_fee);
+    }
+    let amount_in = if sqrt_price_end <= step.sqrt_price_start {
+        get_amount0_delta(sqrt_price_end, step.sqrt_price_start, liquidity, true)?
+    } else {
+        get_amount1_delta(step.sqrt_price_start, sqrt_price_end, liquidity, true)?
+    };
+    safe_sub_u256(step.amount_in_with_fee, amount_in)
+}
+
+/// Adds a step's fee to `accrual` as `Pool.swap` does: the protocol takes its share of the step's
+/// input first, and the rest grows the fee per unit of liquidity. `fee_pips` is (swap fee,
+/// protocol fee). The arithmetic wraps where `Pool.swap`'s is unchecked.
+fn accrue_step_fee(
+    accrual: &mut SwapFeeAccrual,
+    step: &StepComputation,
+    fee: U256,
+    (swap_fee, protocol_fee): (u32, u32),
+    liquidity: u128,
+) {
+    let mut lp_fee = fee;
+    if protocol_fee > 0 {
+        let to_protocol = if swap_fee == protocol_fee {
+            fee
+        } else {
+            step.amount_in_with_fee
+                .wrapping_mul(U256::from(protocol_fee)) /
+                U256::from(FEE_PIPS_DENOMINATOR)
+        };
+        lp_fee = lp_fee.wrapping_sub(to_protocol);
+        accrual.protocol_fee = accrual
+            .protocol_fee
+            .wrapping_add(to_protocol);
+    }
+    if liquidity > 0 {
+        let growth = lp_fee.wrapping_mul(U256::from(1) << 128) / U256::from(liquidity);
+        accrual.fee_growth = accrual.fee_growth.wrapping_add(growth);
     }
 }
 
