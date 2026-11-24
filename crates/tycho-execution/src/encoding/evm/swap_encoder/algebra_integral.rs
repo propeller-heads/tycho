@@ -11,7 +11,8 @@ use crate::encoding::{
     swap_encoder::SwapEncoder,
 };
 
-/// Encodes a swap on a Nami V4 (Algebra Integral) pool for `UniswapV3Executor`.
+/// Encodes a swap on an Algebra Integral pool for `UniswapV3Executor`. It serves every protocol
+/// system in [`ALGEBRA_INTEGRAL_FORKS`](crate::encoding::evm::constants::ALGEBRA_INTEGRAL_FORKS).
 ///
 /// An Algebra pool's `swap(recipient, zeroToOne, amountRequired, limitSqrtPrice, data)` has the
 /// same selector as Uniswap V3's, and TychoRouterV3 answers its `algebraSwapCallback` through its
@@ -22,11 +23,11 @@ use crate::encoding::{
 /// # Fields
 /// * `executor_address` - The address of the executor contract that will perform the swap.
 #[derive(Clone)]
-pub struct NamiV4SwapEncoder {
+pub struct AlgebraIntegralSwapEncoder {
     executor_address: Bytes,
 }
 
-impl SwapEncoder for NamiV4SwapEncoder {
+impl SwapEncoder for AlgebraIntegralSwapEncoder {
     fn new(
         executor_address: Bytes,
         _chain: Chain,
@@ -45,7 +46,7 @@ impl SwapEncoder for NamiV4SwapEncoder {
         let zero_to_one = token_in < token_out;
         let pool = Address::from_str(&swap.component().id).map_err(|err| {
             EncodingError::FatalError(format!(
-                "Invalid Nami V4 component id {}: expected the pool address: {err}",
+                "Invalid Algebra Integral component id {}: expected the pool address: {err}",
                 swap.component().id
             ))
         })?;
@@ -96,7 +97,7 @@ mod tests {
             group_token_out: token_out,
             origin: None,
         };
-        let encoder = NamiV4SwapEncoder::new(
+        let encoder = AlgebraIntegralSwapEncoder::new(
             Bytes::from("0x543778987b293C7E8Cf0722BB2e935ba6f4068D4"),
             Chain::Base,
             None,
