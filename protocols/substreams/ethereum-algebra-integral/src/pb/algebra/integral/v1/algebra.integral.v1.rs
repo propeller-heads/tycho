@@ -70,7 +70,7 @@ pub struct Events {
 }
 /// Nested message and enum types in `Events`.
 pub mod events {
-    #[derive(Clone, PartialEq, ::prost::Message)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
     pub struct PoolEvent {
         #[prost(uint64, tag="11")]
         pub log_ordinal: u64,
@@ -118,7 +118,7 @@ pub mod events {
             pub tick: i32,
         }
         /// The pool's stored fee, used when the plugin does not override it.
-        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct Fee {
             #[prost(uint32, tag="1")]
             pub fee: u32,
@@ -128,7 +128,7 @@ pub mod events {
             #[prost(bytes="vec", tag="1")]
             pub plugin: ::prost::alloc::vec::Vec<u8>,
         }
-        #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
         pub struct PluginConfig {
             #[prost(uint32, tag="1")]
             pub plugin_config: u32,
@@ -162,12 +162,11 @@ impl LiquidityChangeType {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition changes) but this is still the name used by
-    /// the ProtoBuf definition.
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            LiquidityChangeType::Delta => "DELTA",
-            LiquidityChangeType::Absolute => "ABSOLUTE",
+            Self::Delta => "DELTA",
+            Self::Absolute => "ABSOLUTE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
