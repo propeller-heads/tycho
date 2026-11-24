@@ -961,4 +961,75 @@ mod tests {
             overwrites
         );
     }
+
+    /// PoolManager storage of mainnet ETH/USDC pool
+    /// 0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27 (protocol fee 512125,
+    /// LP fee 500) at blocks 26400000 and 26400200: writing the later price, tick and liquidity
+    /// over the earlier slot0 gives the later slot0 word.
+    #[test]
+    fn test_pool_state_after_swap_matches_the_pool_managers_storage() {
+        let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap();
+        let pool_id =
+            B256::from_str("0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27")
+                .unwrap();
+        let slot0 =
+            U256::from_str("0xda8cac368d67cd2f2d8aaa5cc531768e0fa3b1d205c5c5de60da078e1f59bdfc")
+                .unwrap();
+        let db = SimulationDB::new(get_client(None).unwrap(), get_runtime().unwrap(), None);
+        let hook_handler = GenericVMHookHandler {
+            contract: TychoSimulationContract::new(Address::ZERO, create_engine(db, true).unwrap())
+                .unwrap(),
+            address: Address::ZERO,
+            pool_manager,
+            limits_entrypoint: None,
+            is_euler: false,
+            pending_overrides: None,
+        };
+        let mut overwrites = HashMap::from([(
+            pool_manager,
+            HashMap::from([(
+                slot0,
+                U256::from_str(
+                    "0x0000000001f407d07dfcf1bf00000000000000000002f05eabb55f9c49d605f0",
+                )
+                .unwrap(),
+            )]),
+        )]);
+        let params = AfterSwapParameters {
+            context: StateContext {
+                currency_0: Address::ZERO,
+                currency_1: Address::ZERO,
+                fees: UniswapV4Fees::new(0, 0, 0),
+                tick_spacing: 10,
+            },
+            sender: Address::ZERO,
+            swap_params: SwapParams {
+                zero_for_one: true,
+                amount_specified: I256::ZERO,
+                sqrt_price_limit: U256::ZERO,
+            },
+            delta: BalanceDelta(I256::ZERO),
+            hook_data: Bytes::new(),
+            pool_after_swap: PoolAfterSwap {
+                sqrt_price: U256::from_str("3549800748464954447918354").unwrap(),
+                tick: -200274,
+                liquidity: 128237474780958120,
+                fees: None,
+            },
+        };
+
+        hook_handler
+            .store_pool_state_after_swap(&mut overwrites, pool_id, &params)
+            .unwrap();
+
+        assert_eq!(
+            overwrites[&pool_manager][&slot0],
+            U256::from_str("0x0000000001f407d07dfcf1ae00000000000000000002efb3158c167381527512")
+                .unwrap()
+        );
+        assert_eq!(
+            overwrites[&pool_manager][&(slot0 + U256::from(3))],
+            U256::from(128237474780958120u64)
+        );
+    }
 }
