@@ -1,3 +1,10 @@
+## [0.539.0](https://github.com/propeller-heads/tycho/compare/0.538.0...0.539.0) (2026-11-24)
+
+
+### Features
+
+* **curve:** expose the pool policy and its grant terms ([2f32d6a](https://github.com/propeller-heads/tycho/commit/2f32d6a9cf2140f95be7aca5c186c622197752d2))
+
 ## [0.538.0](https://github.com/propeller-heads/tycho/compare/0.537.3...0.538.0) (2026-11-23)
 
 
