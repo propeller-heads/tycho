@@ -2257,6 +2257,161 @@ mod tests {
         assert_eq!(out.amount, BigUint::from_str("2681115183499232721").unwrap())
     }
 
+    /// A mainnet swap that crossed one initialized tick, with the pool before it and the
+    /// PoolManager storage it changed.
+    struct RecordedSwap {
+        pool: UniswapV4State,
+        zero_for_one: bool,
+        amount_in: u128,
+        lp_fee_override: Option<u32>,
+        amount_out: u128,
+        sqrt_price_after: &'static str,
+        /// Fee growth of the input token, then of the other token, before the swap.
+        fee_growth_before: [&'static str; 2],
+        input_fee_growth_after: &'static str,
+        crossed_tick: i32,
+        /// The crossed tick's fee growth outside of token 0 and token 1, before and after.
+        outside_before: [&'static str; 2],
+        outside_after: [&'static str; 2],
+    }
+
+    fn word(hex: &str) -> U256 {
+        U256::from_str(hex).unwrap()
+    }
+
+    /// A 0.265 ETH sell on ETH/cbBTC pool
+    /// 0x8514479827d1884c2957e8015b2aed79c4422e89e44476a170a70101b5422203 in block 26399072 (tx
+    /// 0x45787888fc2dd109dd2ef1fe5df796d713b2b16a54f7e9db9ac5ab6c0e6bbf63; LP fee 750 from its
+    /// hook, no protocol fee).
+    fn eth_cbbtc_sell() -> RecordedSwap {
+        RecordedSwap {
+            pool: UniswapV4State::new(
+                287751570427245,
+                U256::from_str("131899408666490343900873").unwrap(),
+                UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0x800000 },
+                -266130,
+                10,
+                vec![
+                    TickInfo::new(-266720, 3357011528574).unwrap(),
+                    TickInfo::new(-266570, 228824122692015).unwrap(),
+                    TickInfo::new(-266140, 55570436206656).unwrap(),
+                    TickInfo::new(-266000, -55570436206656).unwrap(),
+                    TickInfo::new(-265500, 545141848435037).unwrap(),
+                    TickInfo::new(-265310, -545141848435037).unwrap(),
+                    TickInfo::new(-264580, -228824122692015).unwrap(),
+                    TickInfo::new(-262670, -3357011528574).unwrap(),
+                ],
+            )
+            .unwrap(),
+            zero_for_one: true,
+            amount_in: 264876065113123394,
+            lp_fee_override: Some(750),
+            amount_out: 732337,
+            sqrt_price_after: "131666296751652001327224",
+            fee_growth_before: [
+                "0x19629d1724f23b6d2c61c11e60a272b85e5",
+                "0x3a52f6d24ef7e520358c6c315",
+            ],
+            input_fee_growth_after: "0x196f62884d7dd5cf55b66cc34f053fd5a90",
+            crossed_tick: -266140,
+            outside_before: [
+                "0x18efb0a967816426f502e0fcb9d9a5fb752",
+                "0x39290b807e5895d1952750e10",
+            ],
+            outside_after: ["0x76c2e71c314d924abdaf230d852dc02f6", "0x129eb51d09f4f4ea0651b505"],
+        }
+    }
+
+    /// A 2764 USDC buy of ETH on hookless ETH/USDC pool
+    /// 0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27 in block 26437415 (tx
+    /// 0x60c621c2fb33d1ba68c4c97c5d220429d145476480a778c03d74e4e92822b961; LP fee 500, protocol
+    /// fee 125 in each direction).
+    fn eth_usdc_buy() -> RecordedSwap {
+        RecordedSwap {
+            pool: UniswapV4State::new(
+                66420678841621718,
+                U256::from_str("3361698241084044207915833").unwrap(),
+                UniswapV4Fees { zero_for_one: 125, one_for_zero: 125, lp_fee: 500 },
+                -201363,
+                10,
+                vec![
+                    TickInfo::new(-201420, -97835694571045).unwrap(),
+                    TickInfo::new(-201390, 176714900096).unwrap(),
+                    TickInfo::new(-201380, 8353592860).unwrap(),
+                    TickInfo::new(-201370, 73942609341).unwrap(),
+                    TickInfo::new(-201360, 2730418515073443).unwrap(),
+                    TickInfo::new(-201320, 435352623583966).unwrap(),
+                    TickInfo::new(-201300, 504009147482).unwrap(),
+                    TickInfo::new(-201290, 10155954859657).unwrap(),
+                ],
+            )
+            .unwrap(),
+            zero_for_one: false,
+            amount_in: 2764077465,
+            lp_fee_override: None,
+            amount_out: 1532876437017993081,
+            sqrt_price_after: "3364882276308783914745758",
+            fee_growth_before: [
+                "0x37b83f84f010344b3399123c0005",
+                "0x553c6fce0c9399e3b3c305c0eaa1663b7dd",
+            ],
+            input_fee_growth_after: "0x37b855a07685a0ac94de1612b93f",
+            crossed_tick: -201360,
+            outside_before: [
+                "0x40128e35ef9624ac229cc071fb0efc170fb",
+                "0x2eae27c67e5dda447d95075b4582",
+            ],
+            outside_after: [
+                "0x1529e1981cfd75379126454eef926a246e2",
+                "0x90a1b1c1bad77adc18738181234",
+            ],
+        }
+    }
+
+    /// The fee accrual a swap records reproduces the PoolManager storage the same swap changed on
+    /// chain: the input token's fee growth and the crossed tick's flipped fee growth outside.
+    #[rstest]
+    #[case::sell_without_protocol_fee(eth_cbbtc_sell())]
+    #[case::buy_with_protocol_fee(eth_usdc_buy())]
+    fn test_swap_fee_accrual_matches_the_pool_managers_storage(#[case] swap: RecordedSwap) {
+        let mut accrual = SwapFeeAccrual::default();
+        let amount_specified = -I256::try_from(swap.amount_in).unwrap();
+
+        let result = swap
+            .pool
+            .swap(
+                swap.zero_for_one,
+                amount_specified,
+                None,
+                swap.lp_fee_override,
+                Some(&mut accrual),
+            )
+            .unwrap();
+
+        assert_eq!(result.amount_calculated.unsigned_abs(), U256::from(swap.amount_out));
+        assert_eq!(result.sqrt_price, word(swap.sqrt_price_after));
+        let [input_growth, other_growth] = swap.fee_growth_before.map(word);
+        assert_eq!(
+            input_growth.wrapping_add(accrual.fee_growth),
+            word(swap.input_fee_growth_after)
+        );
+        let [(tick, growth_at_cross)] = accrual.crossed_ticks[..] else {
+            panic!("the swap crosses one tick: {:?}", accrual.crossed_ticks);
+        };
+        assert_eq!(tick, swap.crossed_tick);
+        let input_global = input_growth.wrapping_add(growth_at_cross);
+        let globals = if swap.zero_for_one {
+            [input_global, other_growth]
+        } else {
+            [other_growth, input_global]
+        };
+        let [outside0, outside1] = swap.outside_before.map(word);
+        assert_eq!(
+            [globals[0].wrapping_sub(outside0), globals[1].wrapping_sub(outside1)],
+            swap.outside_after.map(word)
+        );
+    }
+
     #[test]
     fn test_get_amount_out_angstrom_hook() {
         // Test using transaction 0x671b8e1d0966cee520dc2bb9628de8e22a17b036e70077504796d0a476932d21
