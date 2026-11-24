@@ -54,7 +54,7 @@ services/
                             state answers serialize from them without copying the entries
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
-  access_control.rs         API-key authentication middleware
+  access_control.rs         API-key middleware for the heap profile route (`jemalloc`)
   client_metadata.rs        Parses the X-Tycho-Client-Metadata header into allowlisted Prometheus labels
   debug.rs                  heap_profile handler behind the `jemalloc` feature
   middleware/
@@ -262,7 +262,6 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/tokens` | Token metadata (quality, decimals, symbol) |
 | `/protocol_components` | Components by system / TVL / IDs |
 | `/traced_entry_points` | Traced entry point results |
-| `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — health check |

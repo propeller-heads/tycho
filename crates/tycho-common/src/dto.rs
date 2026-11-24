@@ -2134,27 +2134,6 @@ pub struct TracedEntryPointRequestResponse {
     pub pagination: PaginationResponse,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq, ToSchema, Eq, Clone)]
-pub struct AddEntryPointRequestBody {
-    #[serde(default)]
-    pub chain: Chain,
-    #[schema(value_type=String)]
-    #[serde(default)]
-    pub block_hash: Bytes,
-    /// The map of component ids to their tracing params to insert
-    #[schema(value_type = Vec<(String, Vec<EntryPointWithTracingParams>)>)]
-    pub entry_points_with_tracing_data: Vec<(ComponentId, Vec<EntryPointWithTracingParams>)>,
-}
-
-#[derive(Serialize, PartialEq, ToSchema, Eq, Clone, Debug, Deserialize)]
-pub struct AddEntryPointRequestResponse {
-    /// Map of protocol component id to a list of a tuple containing each entry point with its
-    /// tracing parameters and its corresponding tracing results.
-    #[schema(value_type = HashMap<String, Vec<(EntryPointWithTracingParams, TracingResult)>>)]
-    pub traced_entry_points:
-        HashMap<ComponentId, Vec<(EntryPointWithTracingParams, TracingResult)>>,
-}
-
 #[cfg(test)]
 mod test {
     use std::str::FromStr;

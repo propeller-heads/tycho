@@ -12,9 +12,6 @@ use futures03::future::try_join_all;
 use tokio::task::JoinHandle;
 use tracing::info;
 use tycho_common::storage::Gateway;
-use tycho_ethereum::{
-    rpc::EthereumRpcClient, services::entrypoint_tracer::tracer::EVMEntrypointService,
-};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -32,6 +29,7 @@ use crate::{
     },
 };
 
+#[cfg(feature = "jemalloc")]
 mod access_control;
 mod api_docs;
 mod cache;
@@ -56,7 +54,10 @@ pub struct ServicesBuilder<G> {
     prefix: String,
     port: u16,
     bind: String,
-    rpc: EthereumRpcClient,
+    #[cfg_attr(
+        not(feature = "jemalloc"),
+        expect(dead_code, reason = "only the heap profile route checks the API key")
+    )]
     api_key: String,
     extractor_handles: ws::MessageSenderMap,
     db_gateway: G,
@@ -95,12 +96,11 @@ impl<G> ServicesBuilder<G>
 where
     G: Gateway + Send + Sync + 'static,
 {
-    pub fn new(db_gateway: G, rpc: EthereumRpcClient, api_key: String) -> Self {
+    pub fn new(db_gateway: G, api_key: String) -> Self {
         Self {
             prefix: "v1".to_owned(),
             port: 4242,
             bind: "0.0.0.0".to_owned(),
-            rpc,
             api_key,
             extractor_handles: HashMap::new(),
             db_gateway,
@@ -299,8 +299,6 @@ where
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
         state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     ) -> Result<(ServerHandle, JoinHandle<Result<(), ExtractionError>>), ExtractionError> {
-        let tracer = EVMEntrypointService::new(&self.rpc);
-
         if !self.disabled_rpc_caches.is_empty() {
             info!(disabled = ?self.disabled_rpc_caches, "RPC response caches turned off");
         }
@@ -308,7 +306,6 @@ where
             rpc::RpcHandler::new(
                 self.db_gateway,
                 pending_deltas,
-                tracer,
                 self.plans_config,
                 self.dci_protocols,
                 self.protocol_systems,
@@ -343,29 +340,23 @@ where
                 .app_data(rpc_data.clone())
                 .service(
                     web::resource(format!("/{}/contract_state", self.prefix))
-                        .route(web::post().to(rpc::contract_state::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::contract_state::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/protocol_state", self.prefix))
-                        .route(web::post().to(rpc::protocol_state::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::protocol_state::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/tokens", self.prefix))
-                        .route(web::post().to(rpc::tokens::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::tokens::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/protocol_components", self.prefix))
-                        .route(web::post().to(rpc::protocol_components::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::protocol_components::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/traced_entry_points", self.prefix))
-                        .route(web::post().to(rpc::traced_entry_points::<G, EVMEntrypointService>)),
-                )
-                .service(
-                    web::resource(format!("/{}/add_entry_points", self.prefix))
-                        // TODO: add swagger service for internal endpoints
-                        .wrap(access_control::AccessControl::new(&self.api_key))
-                        .route(web::post().to(rpc::add_entry_points::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::traced_entry_points::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/health", self.prefix))
@@ -373,11 +364,11 @@ where
                 )
                 .service(
                     web::resource(format!("/{}/protocol_systems", self.prefix))
-                        .route(web::post().to(rpc::protocol_systems::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::protocol_systems::<G>)),
                 )
                 .service(
                     web::resource(format!("/{}/component_tvl", self.prefix))
-                        .route(web::post().to(rpc::component_tvl::<G, EVMEntrypointService>)),
+                        .route(web::post().to(rpc::component_tvl::<G>)),
                 )
                 .service(
                     SwaggerUi::new("/docs/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),

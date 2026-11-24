@@ -1,8 +1,5 @@
 //! This module contains Tycho RPC implementation
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
 use anyhow::Error;
@@ -13,15 +10,13 @@ use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{
-        blockchain::{BlockAggregatedChanges, EntryPoint, TracedEntryPoint, TracingParams},
-        protocol::QualityRange,
-        Address, Chain, ComponentId, EntryPointId, PaginationParams,
+        blockchain::BlockAggregatedChanges, protocol::QualityRange, Address, Chain,
+        PaginationParams,
     },
     storage::{
         BlockIdentifier, BlockOrTimestamp, EntryPointFilter, Gateway, StorageError, Version,
         VersionKind,
     },
-    traits::EntryPointTracer,
     Bytes,
 };
 use tycho_storage::postgres::{count_to_i64, page_window};
@@ -115,7 +110,7 @@ enum StateAnswer<D> {
     Db(Arc<D>),
 }
 
-pub struct RpcHandler<G, T> {
+pub struct RpcHandler<G> {
     db_gateway: G,
     // TODO: remove use of Arc. It was introduced for ease of testing this deltas buffer, however
     // it potentially could make this slow. We should consider refactoring this and maybe use
@@ -128,7 +123,6 @@ pub struct RpcHandler<G, T> {
         RpcCache<dto::ProtocolComponentsRequestBody, dto::ProtocolComponentRequestResponse>,
     traced_entry_point_cache:
         RpcCache<dto::TracedEntryPointRequestBody, dto::TracedEntryPointRequestResponse>,
-    tracer: T,
     plans_config: PlansConfig,
     /// Protocol systems that use Dynamic Contract Indexing (DCI). Included in the
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
@@ -140,15 +134,13 @@ pub struct RpcHandler<G, T> {
     off_worker: OffWorker,
 }
 
-impl<G, T> RpcHandler<G, T>
+impl<G> RpcHandler<G>
 where
     G: Gateway,
-    T: EntryPointTracer + Sync,
 {
     pub fn new(
         db_gateway: G,
         pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
-        tracer: T,
         plans_config: PlansConfig,
         dci_protocols: Vec<String>,
         protocol_systems: Vec<String>,
@@ -187,7 +179,6 @@ where
             protocol_state_cache,
             component_cache,
             traced_entry_point_cache,
-            tracer,
             plans_config,
             dci_protocols,
             protocol_systems,
@@ -1170,93 +1161,6 @@ where
             ),
         })
     }
-
-    async fn add_entry_points(
-        &self,
-        request: &dto::AddEntryPointRequestBody,
-    ) -> Result<dto::AddEntryPointRequestResponse, RpcError> {
-        let tracing_result = self.trace_entry_points(request).await?;
-        let mut entry_points: HashMap<ComponentId, HashSet<EntryPoint>> = HashMap::new();
-        let mut entry_points_params: HashMap<EntryPointId, HashSet<(TracingParams, ComponentId)>> =
-            HashMap::new();
-        for (component_id, components_and_params) in &request.entry_points_with_tracing_data {
-            for params in components_and_params {
-                entry_points
-                    .entry(component_id.into())
-                    .or_default()
-                    .insert(params.entry_point.clone().into());
-                entry_points_params
-                    .entry(params.entry_point.external_id.clone())
-                    .or_default()
-                    .insert((params.params.clone().into(), component_id.into()));
-            }
-        }
-        self.db_gateway
-            .insert_entry_points(&entry_points)
-            .await?;
-        self.db_gateway
-            .insert_entry_point_tracing_params(&entry_points_params)
-            .await?;
-        self.db_gateway
-            .upsert_traced_entry_points(&tracing_result)
-            .await?;
-
-        let mut traced_entry_points: HashMap<
-            String,
-            Vec<(dto::EntryPointWithTracingParams, dto::TracingResult)>,
-        > = HashMap::new();
-        let mut entry_point_to_component: HashMap<EntryPoint, ComponentId> = HashMap::new();
-        for (component_id, entry_point_set) in &entry_points {
-            for entry_point in entry_point_set {
-                entry_point_to_component.insert(entry_point.clone(), component_id.clone());
-            }
-        }
-        for traced_entry_point in tracing_result {
-            let entry_point_with_tracing_params: dto::EntryPointWithTracingParams =
-                traced_entry_point
-                    .entry_point_with_params
-                    .clone()
-                    .into();
-            let tracing_result: dto::TracingResult = traced_entry_point
-                .tracing_result
-                .clone()
-                .into();
-            let component_id = entry_point_to_component
-                .get(
-                    &entry_point_with_tracing_params
-                        .entry_point
-                        .clone()
-                        .into(),
-                )
-                .cloned()
-                .unwrap_or_default();
-            traced_entry_points.insert(
-                component_id.to_string(),
-                vec![(entry_point_with_tracing_params, tracing_result)],
-            );
-        }
-        Ok(dto::AddEntryPointRequestResponse { traced_entry_points })
-    }
-
-    async fn trace_entry_points(
-        &self,
-        request: &dto::AddEntryPointRequestBody,
-    ) -> Result<Vec<TracedEntryPoint>, RpcError> {
-        let entry_points_with_params: Vec<_> = request
-            .entry_points_with_tracing_data
-            .iter()
-            .flat_map(|(_, params)| params.iter().cloned().map(Into::into))
-            .collect();
-        let trace_results = self
-            .tracer
-            .trace(request.block_hash.clone(), entry_points_with_params)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>() //TODO: Ideally we would want to return each error separately and not just a single
-            // error for the whole batch
-            .map_err(|e| RpcError::Unknown(format!("Error while tracing entry points: {e:?}")))?;
-        Ok(trace_results)
-    }
 }
 
 /// The response to a state service failure: the body the database path returns for the same
@@ -1328,10 +1232,10 @@ fn require_protocol_system(system: &str) -> Result<(), RpcError> {
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
+pub async fn contract_state<G: Gateway>(
     req: actix_web::HttpRequest,
     mut body: web::Json<dto::StateRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Note - filtering by protocol system is not supported on this endpoint. This is due to the
     // complexity of paginating this endpoint with the current design.
@@ -1386,10 +1290,10 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn tokens<G: Gateway, T: EntryPointTracer>(
+pub async fn tokens<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::TokensRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1431,10 +1335,10 @@ pub async fn tokens<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn protocol_components<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_components<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ProtocolComponentsRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1477,10 +1381,10 @@ pub async fn protocol_components<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_state<G: Gateway>(
     req: actix_web::HttpRequest,
     mut body: web::Json<dto::ProtocolStateRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1531,10 +1435,10 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
+pub async fn protocol_systems<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ProtocolSystemsRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1575,10 +1479,10 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size, protocol_system))]
-pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
+pub async fn component_tvl<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::ComponentTvlRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     let mut body = body.into_inner();
     body.protocol_system = body
@@ -1630,10 +1534,10 @@ pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
     ),
 )]
 #[instrument(skip_all, fields(page, page_size))]
-pub async fn traced_entry_points<G: Gateway, T: EntryPointTracer>(
+pub async fn traced_entry_points<G: Gateway>(
     req: actix_web::HttpRequest,
     body: web::Json<dto::TracedEntryPointRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
+    handler: web::Data<RpcHandler<G>>,
 ) -> Result<HttpResponse, RpcError> {
     // Tracing and metrics
     tracing::Span::current().record("page", body.pagination.page);
@@ -1654,40 +1558,6 @@ pub async fn traced_entry_points<G: Gateway, T: EntryPointTracer>(
         Ok(state) => Ok(HttpResponse::Ok().json(state)),
         Err(err) => {
             error!(error = %err, ?body, "Error while getting traced entry points.");
-            Err(err)
-        }
-    }
-}
-
-/// Add Entry Point
-///
-/// Trace the given entry points and add the entry point, tracing params and results to DB.
-#[utoipa::path(
-    post,
-    path = "/v1/add_entry_points",
-    responses(
-    (status = 200, description = "OK", body = AddEntryPointRequestResponse),
-    ),
-    request_body = AddEntryPointRequestBody,
-    security(
-    ("apiKey" = [])
-    ),
-)]
-#[instrument(skip_all)]
-pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
-    body: web::Json<dto::AddEntryPointRequestBody>,
-    handler: web::Data<RpcHandler<G, T>>,
-) -> Result<HttpResponse, RpcError> {
-    // Call the handler to add entry points
-    let response = handler
-        .into_inner()
-        .add_entry_points(&body)
-        .await;
-
-    match response {
-        Ok(state) => Ok(HttpResponse::Ok().json(state)),
-        Err(err) => {
-            error!(error = %err, ?body, "Error while adding entry points.");
             Err(err)
         }
     }
@@ -1716,12 +1586,12 @@ pub async fn health() -> Result<HttpResponse, RpcError> {
 // The allow is on the module because Clippy does not apply this lint allow
 // reliably when it is placed on the macro invocation itself.
 mod tests {
-    use std::{collections::HashMap, env, str::FromStr, sync::Mutex};
+    use std::{collections::HashMap, str::FromStr, sync::Mutex};
 
     use actix_web::{test, App};
     use chrono::{NaiveDateTime, TimeDelta};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
-    use mockall::{mock, predicate::eq};
+    use mockall::mock;
     use rstest::rstest;
     use tycho_common::{
         dto, keccak256,
@@ -1739,10 +1609,6 @@ mod tests {
             AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
             WriteTimestamp,
         },
-        traits::MockEntryPointTracer,
-    };
-    use tycho_ethereum::{
-        rpc::EthereumRpcClient, services::entrypoint_tracer::tracer::EVMEntrypointService,
     };
 
     use super::*;
@@ -1977,7 +1843,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -2029,15 +1894,8 @@ mod tests {
             new_windows(["uniswap_v2"], WindowConfig::default()),
             Arc::new(EntityCache::new()),
         );
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
 
         let request = dto::StateRequestBody {
             contract_ids: None,
@@ -2068,10 +1926,7 @@ mod tests {
     /// A handler whose state service holds one `ex` window with blocks 5 and 6: account
     /// `0x..01` and component `c1` are created in block 5. The cache starts empty. Without
     /// expectations, `gw` panics on any database call.
-    fn state_routing_handler(
-        gw: MockGateway,
-        mode: CacheMode,
-    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    fn state_routing_handler(gw: MockGateway, mode: CacheMode) -> RpcHandler<MockGateway> {
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);
         for n in 5..=6 {
@@ -2100,15 +1955,7 @@ mod tests {
             CacheMode::Serve => EntityCacheSetup::Serve(service),
             CacheMode::Shadow => EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(0.0))),
         };
-        RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(setup)
+        RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]).with_state_service(setup)
     }
 
     /// A request without ids lists the component ids first; a failure there keeps its status.
@@ -2121,14 +1968,7 @@ mod tests {
                     Err(StorageError::NotFound("ProtocolComponent".to_string(), "ex".to_string()))
                 })
             });
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         let result = handler
             .get_protocol_state_inner(dto::ProtocolStateRequestBody {
@@ -2165,17 +2005,10 @@ mod tests {
         windows: HashMap<String, Arc<Mutex<DeltaWindow>>>,
         cache: Arc<EntityCache>,
         rate: f64,
-    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    ) -> RpcHandler<MockGateway> {
         let service = Arc::new(StateService::new(windows, cache));
-        RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
+        RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
     }
 
     fn uniswap_v2_windows() -> HashMap<String, Arc<Mutex<DeltaWindow>>> {
@@ -2220,15 +2053,9 @@ mod tests {
             }
             EntityCacheSetup::Serve(()) => EntityCacheSetup::Serve(service),
         };
-        let handler = RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(state_service);
+        let handler =
+            RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![])
+                .with_state_service(state_service);
 
         let request = shadow_request("uniswap_v2", Some(vec![Bytes::from(1u64).lpad(20, 0)]));
 
@@ -2807,7 +2634,7 @@ mod tests {
     /// A `serve` handler whose cache holds [`loaded_account`] and [`loaded_component`] from block
     /// 4. The `ex` window then sets slot 1, the native balance and attribute `x` to `n` in blocks 5
     /// and 6. The gateway panics on any database call, so only a cache answer passes.
-    fn loaded_cache_handler() -> RpcHandler<MockGateway, MockEntryPointTracer> {
+    fn loaded_cache_handler() -> RpcHandler<MockGateway> {
         let account = loaded_account();
         let at = WriteTimestamp::from(&testing::block(4));
         let cache = EntityCache::from_snapshot(StateSnapshot {
@@ -2844,41 +2671,19 @@ mod tests {
                 .unwrap();
         }
         let service = StateService::new(windows, Arc::new(cache));
-        RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
+        RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![])
+            .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
     }
 
     async fn post_to_bare_handler(route: &str, body: serde_json::Value) -> (StatusCode, String) {
-        let handler = RpcHandler::new(
-            MockGateway::new(),
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let handler =
+            RpcHandler::new(MockGateway::new(), None, PlansConfig::default(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                )
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                )
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>))
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>))
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -2944,10 +2749,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(loaded_cache_handler()))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>)),
         )
         .await;
         let mut account = loaded_account();
@@ -2978,10 +2780,7 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(loaded_cache_handler()))
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>)),
         )
         .await;
         let mut state = loaded_component();
@@ -3043,14 +2842,7 @@ mod tests {
                 Box::pin(async move { Ok(WithTotal { entity: vec![response], total: Some(1) }) })
             });
 
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         let request = dto::StateRequestBody {
             contract_ids: Some(vec![first_page_addr, second_page_addr.clone()]),
@@ -3087,14 +2879,7 @@ mod tests {
             .returning(|_, _, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
         let request = dto::StateRequestBody {
             contract_ids: None,
             protocol_system: "uniswap_v2".to_string(),
@@ -3107,398 +2892,6 @@ mod tests {
             .get_contract_state_inner(request)
             .await
             .unwrap();
-    }
-
-    /// Helper used to make tracing results comparisons deterministic.
-    #[expect(
-        clippy::type_complexity,
-        reason = "test helper returning several parallel collections"
-    )]
-    fn normalize_tracing_result(
-        result: &dto::TracingResult,
-    ) -> (Vec<(Bytes, dto::AddressStorageLocation)>, Vec<(Bytes, Vec<Bytes>)>) {
-        let mut retriggers: Vec<_> = result
-            .retriggers
-            .iter()
-            .cloned()
-            .collect();
-        retriggers.sort();
-        let mut accessed_slots: Vec<_> = result
-            .accessed_slots
-            .iter()
-            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-            .collect();
-        accessed_slots.sort_by(|(a, _), (b, _)| a.cmp(b));
-        (retriggers, accessed_slots)
-    }
-
-    fn sort_tracing_results(
-        params_to_result: &mut [(dto::EntryPointWithTracingParams, dto::TracingResult)],
-    ) {
-        params_to_result.sort_by(|(a, _), (b, _)| {
-            a.entry_point
-                .external_id
-                .cmp(&b.entry_point.external_id)
-                .then_with(|| match (a.params.clone(), b.params.clone()) {
-                    (dto::TracingParams::RPCTracer(a), dto::TracingParams::RPCTracer(b)) => {
-                        a.caller.cmp(&b.caller)
-                    }
-                })
-        });
-    }
-
-    #[expect(
-        clippy::type_complexity,
-        reason = "test helper returning several parallel collections"
-    )]
-    fn get_add_entry_point_test_data(
-        block_hash: Bytes,
-        component_id: ComponentId,
-        entry_point_ids: &[String],
-    ) -> (
-        Vec<dto::EntryPointWithTracingParams>,
-        Vec<TracedEntryPoint>,
-        HashMap<ComponentId, HashSet<EntryPoint>>,
-        HashMap<EntryPointId, HashSet<(TracingParams, ComponentId)>>,
-        Vec<(dto::EntryPointWithTracingParams, dto::TracingResult)>,
-    ) {
-        let entry_points = [
-            dto::EntryPoint {
-                external_id: entry_point_ids[0].clone(),
-                target: Bytes::from_str("0xEdf63cce4bA70cbE74064b7687882E71ebB0e988").unwrap(),
-                signature: "getRate()".to_string(),
-            },
-            dto::EntryPoint {
-                external_id: entry_point_ids[1].clone(),
-                target: Bytes::from_str("0x8f4E8439b970363648421C692dd897Fb9c0Bd1D9").unwrap(),
-                signature: "getRate()".to_string(),
-            },
-        ];
-        let tracing_params = [
-            dto::TracingParams::RPCTracer(dto::RPCTracerParams {
-                caller: None,
-                calldata: Bytes::from(&keccak256("getRate()").to_vec()[0..4]),
-                state_overrides: None,
-                prune_addresses: None,
-            }),
-            dto::TracingParams::RPCTracer(dto::RPCTracerParams {
-                caller: None,
-                calldata: Bytes::from(&keccak256("getRate()").to_vec()[0..4]),
-                state_overrides: None,
-                prune_addresses: None,
-            }),
-        ];
-        let entry_points_with_tracing_params = vec![
-            dto::EntryPointWithTracingParams {
-                entry_point: entry_points[0].clone(),
-                params: tracing_params[0].clone(),
-            },
-            dto::EntryPointWithTracingParams {
-                entry_point: entry_points[1].clone(),
-                params: tracing_params[1].clone(),
-            },
-        ];
-        let tracing_results = vec![
-            TracedEntryPoint {
-                entry_point_with_params: entry_points_with_tracing_params[0].clone().into(),
-                detection_block_hash: block_hash.clone(),
-                tracing_result: TracingResult::new(
-                    HashSet::from([
-                    (
-                        Bytes::from_str("0x7bc3485026ac48b6cf9baf0a377477fff5703af8").unwrap(),
-                        AddressStorageLocation::new(Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(), 12),
-                    ),
-                    (
-                        Bytes::from_str("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2").unwrap(),
-                        AddressStorageLocation::new(Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(), 12),
-                    ),
-                ]),
-                HashMap::from([
-                        (Bytes::from_str("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2").unwrap(), HashSet::from([
-                            Bytes::from_str("0xca6decca4edae0c692b2b0c41376a54b812edb060282d36e07a7060ccb58244d").unwrap(),
-                            Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(),
-                            Bytes::from_str("0xca6decca4edae0c692b2b0c41376a54b812edb060282d36e07a7060ccb58244f").unwrap(),
-                        ])),
-                        (Bytes::from_str("0x487c2c53c0866f0a73ae317bd1a28f63adcd9ad1").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0x9aeb8aaa1ca38634aa8c0c8933e7fb4d61091327").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0xedf63cce4ba70cbe74064b7687882e71ebb0e988").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0x7bc3485026ac48b6cf9baf0a377477fff5703af8").unwrap(), HashSet::from([
-                            Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(),
-                            Bytes::from_str("0x0773e532dfede91f04b12a73d3d2acd361424f41f76b4fb79f090161e36b4e00").unwrap(),
-                        ])),
-                    ]),
-                ),
-            },
-            TracedEntryPoint {
-                entry_point_with_params: entry_points_with_tracing_params[1].clone().into(),
-                detection_block_hash: block_hash,
-                tracing_result: TracingResult::new(
-                    HashSet::from([
-                        (
-                        Bytes::from_str("0xd4fa2d31b7968e448877f69a96de69f5de8cd23e").unwrap(),
-                        AddressStorageLocation::new(Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(), 12),
-                    ),
-                    (
-                        Bytes::from_str("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2").unwrap(),
-                        AddressStorageLocation::new(Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(), 12),
-                    ),
-                    ]),
-                    HashMap::from([
-                        (Bytes::from_str("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2").unwrap(), HashSet::from([
-                            Bytes::from_str("0xed960c71bd5fa1333658850f076b35ec5565086b606556c3dd36a916b43ddf23").unwrap(),
-                            Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(),
-                            Bytes::from_str("0xed960c71bd5fa1333658850f076b35ec5565086b606556c3dd36a916b43ddf21").unwrap(),
-                        ])),
-                        (Bytes::from_str("0x487c2c53c0866f0a73ae317bd1a28f63adcd9ad1").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0x9aeb8aaa1ca38634aa8c0c8933e7fb4d61091327").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0x8f4e8439b970363648421c692dd897fb9c0bd1d9").unwrap(), HashSet::new()),
-                        (Bytes::from_str("0xd4fa2d31b7968e448877f69a96de69f5de8cd23e").unwrap(), HashSet::from([
-                            Bytes::from_str("0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc").unwrap(),
-                            Bytes::from_str("0x0773e532dfede91f04b12a73d3d2acd361424f41f76b4fb79f090161e36b4e00").unwrap(),
-                        ])),
-                    ]),
-                ),
-            }];
-
-        let expected_inserted_entry_points: HashMap<ComponentId, HashSet<EntryPoint>> =
-            HashMap::from([(
-                component_id.clone(),
-                HashSet::from([entry_points[0].clone().into(), entry_points[1].clone().into()]),
-            )]);
-
-        let expected_inserted_tracing_params: HashMap<
-            EntryPointId,
-            HashSet<(TracingParams, ComponentId)>,
-        > = HashMap::from([
-            (
-                entry_point_ids[0].clone(),
-                HashSet::from([(tracing_params[0].clone().into(), component_id.clone())]),
-            ),
-            (
-                entry_point_ids[1].clone(),
-                HashSet::from([(tracing_params[1].clone().into(), component_id)]),
-            ),
-        ]);
-
-        let mut expected_traces_for_component: Vec<(
-            dto::EntryPointWithTracingParams,
-            dto::TracingResult,
-        )> = tracing_results
-            .iter()
-            .map(|tep| {
-                (
-                    tep.entry_point_with_params
-                        .clone()
-                        .into(),
-                    tep.tracing_result.clone().into(),
-                )
-            })
-            .collect();
-
-        sort_tracing_results(&mut expected_traces_for_component);
-        (
-            entry_points_with_tracing_params,
-            tracing_results,
-            expected_inserted_entry_points,
-            expected_inserted_tracing_params,
-            expected_traces_for_component,
-        )
-    }
-
-    fn mock_gateway_add_entry_points(
-        expected_inserted_entry_points: HashMap<ComponentId, HashSet<EntryPoint>>,
-        expected_inserted_tracing_params: HashMap<
-            EntryPointId,
-            HashSet<(TracingParams, ComponentId)>,
-        >,
-        expected_upserted_tracing_results: Vec<TracedEntryPoint>,
-    ) -> MockGateway {
-        let mut gw = MockGateway::new();
-        gw.expect_insert_entry_points()
-            .return_once(move |inserted_entry_points| {
-                assert_eq!(*inserted_entry_points, expected_inserted_entry_points);
-                Box::pin(async move { Ok(()) })
-            });
-        gw.expect_insert_entry_point_tracing_params()
-            .return_once(move |inserted_tracing_params| {
-                assert_eq!(*inserted_tracing_params, expected_inserted_tracing_params);
-                Box::pin(async move { Ok(()) })
-            });
-        gw.expect_upsert_traced_entry_points()
-            .return_once(move |upserted_tracing_results| {
-                assert_eq!(upserted_tracing_results, expected_upserted_tracing_results);
-                Box::pin(async move { Ok(()) })
-            });
-        gw
-    }
-
-    #[test]
-    async fn test_add_entry_points() {
-        // Mocks tracer and DB.
-
-        let mut mock_entrypoint_tracer = MockEntryPointTracer::new();
-
-        let block_hash =
-            Bytes::from_str("0x354c90a0a98912aff15b044bdff6ce3d4ace63a6fc5ac006ce53c8737d425ab2")
-                .unwrap();
-
-        // Balancer v3 stable pool
-        let component_id = "0x0000000000000000000000000000000000000001".to_string();
-
-        let entry_point_ids = [
-            "0xEdf63cce4bA70cbE74064b7687882E71ebB0e988:getRate()".to_string(),
-            "0x8f4E8439b970363648421C692dd897Fb9c0Bd1D9:getRate()".to_string(),
-        ];
-
-        let (
-            entry_points_with_tracing_params,
-            tracing_results,
-            expected_inserted_entry_points,
-            expected_inserted_tracing_params,
-            expected_traces_for_component,
-        ) = get_add_entry_point_test_data(
-            block_hash.clone(),
-            component_id.clone(),
-            &entry_point_ids,
-        );
-        let entry_points_by_component =
-            vec![(component_id.clone(), entry_points_with_tracing_params.clone())];
-
-        let req_body = dto::AddEntryPointRequestBody {
-            chain: Chain::Ethereum.into(),
-            block_hash: block_hash.clone(),
-            entry_points_with_tracing_data: entry_points_by_component.clone(),
-        };
-
-        let expected_upserted_tracing_results = tracing_results.clone();
-        mock_entrypoint_tracer
-            .expect_trace()
-            .with(
-                eq(block_hash.clone()),
-                eq(entry_points_with_tracing_params
-                    .iter()
-                    .cloned()
-                    .map(EntryPointWithTracingParams::from)
-                    .collect::<Vec<_>>()),
-            )
-            .return_once(move |_, _| {
-                tracing_results
-                    .into_iter()
-                    .map(Ok)
-                    .collect()
-            });
-
-        let gw = mock_gateway_add_entry_points(
-            expected_inserted_entry_points,
-            expected_inserted_tracing_params,
-            expected_upserted_tracing_results,
-        );
-
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            mock_entrypoint_tracer,
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
-        let response = req_handler
-            .add_entry_points(&req_body)
-            .await
-            .unwrap();
-
-        // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points;
-        let traced_entry_points_for_component = traced_entry_points_response
-            .get_mut(&component_id)
-            .unwrap();
-        sort_tracing_results(traced_entry_points_for_component);
-
-        for ((actual_entry, actual_result), (expected_entry, expected_result)) in
-            traced_entry_points_for_component
-                .iter()
-                .zip(expected_traces_for_component.iter())
-        {
-            assert_eq!(actual_entry, expected_entry);
-            assert_eq!(
-                normalize_tracing_result(actual_result),
-                normalize_tracing_result(expected_result)
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "requires a RPC connection"]
-    async fn test_add_entry_points_integration() {
-        // Tests the RPC integration with the tracer. The DB writing is still mocked, however.
-        let url = env::var("RPC_URL").expect("RPC_URL is not set");
-        let rpc = EthereumRpcClient::new(&url).expect("RPC client is not configured");
-        let tracer = EVMEntrypointService::new(&rpc);
-
-        let block_hash =
-            Bytes::from_str("0x354c90a0a98912aff15b044bdff6ce3d4ace63a6fc5ac006ce53c8737d425ab2")
-                .unwrap();
-
-        // Balancer v3 stable pool
-        let component_id = "0x0000000000000000000000000000000000000001".to_string();
-
-        let entry_point_ids = [
-            "0xEdf63cce4bA70cbE74064b7687882E71ebB0e988:getRate()".to_string(),
-            "0x8f4E8439b970363648421C692dd897Fb9c0Bd1D9:getRate()".to_string(),
-        ];
-        let (
-            entry_points_with_tracing_params,
-            expected_upserted_tracing_results,
-            expected_inserted_entry_points,
-            expected_inserted_tracing_params,
-            expected_traces_for_component,
-        ) = get_add_entry_point_test_data(
-            block_hash.clone(),
-            component_id.clone(),
-            &entry_point_ids,
-        );
-        let entry_points_by_component =
-            vec![(component_id.clone(), entry_points_with_tracing_params.clone())];
-
-        let req_body = dto::AddEntryPointRequestBody {
-            chain: Chain::Ethereum.into(),
-            block_hash: Bytes::from_str(
-                "0x354c90a0a98912aff15b044bdff6ce3d4ace63a6fc5ac006ce53c8737d425ab2",
-            )
-            .unwrap(),
-            entry_points_with_tracing_data: entry_points_by_component.clone(),
-        };
-
-        let gw = mock_gateway_add_entry_points(
-            expected_inserted_entry_points,
-            expected_inserted_tracing_params,
-            expected_upserted_tracing_results,
-        );
-
-        let req_handler = RpcHandler::new(gw, None, tracer, PlansConfig::default(), vec![], vec![]);
-        let response = req_handler
-            .add_entry_points(&req_body)
-            .await
-            .unwrap();
-
-        // Sort to make test deterministic
-        let mut traced_entry_points_response = response.traced_entry_points;
-        let traced_entry_points_for_component = traced_entry_points_response
-            .get_mut(&component_id)
-            .unwrap();
-        sort_tracing_results(traced_entry_points_for_component);
-
-        for ((actual_entry, actual_result), (expected_entry, expected_result)) in
-            traced_entry_points_for_component
-                .iter()
-                .zip(expected_traces_for_component.iter())
-        {
-            assert_eq!(actual_entry, expected_entry);
-            assert_eq!(
-                normalize_tracing_result(actual_result),
-                normalize_tracing_result(expected_result)
-            );
-        }
     }
 
     #[test]
@@ -3586,14 +2979,7 @@ mod tests {
         gw.expect_get_traced_entry_points_by_component()
             .return_once(|_, _| Box::pin(async move { mock_traced_entry_points_response }));
 
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         // Request for two protocol components
         let request = dto::TracedEntryPointRequestBody {
@@ -3759,14 +3145,7 @@ mod tests {
                 let response = Ok(WithTotal { entity: mock_entity.clone(), total: Some(3) });
                 Box::pin(async move { response })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        );
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![]);
 
         // request for 2 tokens that are in the DB (WETH and USDC)
         let request = dto::TokensRequestBody {
@@ -3814,15 +3193,8 @@ mod tests {
             .returning(|_, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
             });
-        let req_handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            vec![],
-        )
-        .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
+        let req_handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], vec![])
+            .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
 
         let request = dto::ProtocolComponentsRequestBody {
             protocol_system: "uniswap_v2".to_string(),
@@ -3877,7 +3249,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -3965,7 +3336,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -4065,7 +3435,6 @@ mod tests {
         let req_handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             vec![],
             vec![],
@@ -4148,21 +3517,14 @@ mod tests {
             gw.expect_get_protocol_components()
                 .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
         }
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
                 .route(
                     "/v1/protocol_components",
-                    web::post().to(protocol_components::<MockGateway, MockEntryPointTracer>),
+                    web::post().to(protocol_components::<MockGateway>),
                 ),
         )
         .await;
@@ -4214,19 +3576,12 @@ mod tests {
             gw.expect_get_tokens()
                 .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
         }
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route("/v1/tokens", web::post().to(tokens::<MockGateway, MockEntryPointTracer>)),
+                .route("/v1/tokens", web::post().to(tokens::<MockGateway>)),
         )
         .await;
 
@@ -4272,8 +3627,7 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free =
-            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
+        let handler_free = RpcHandler::new(gw_free, None, config, vec![], vec![]);
 
         let restrictions = handler_free
             .resolve_plan_restrictions(
@@ -4323,7 +3677,6 @@ plans:
         let req_handler = RpcHandler::new(
             gw,
             None,
-            MockEntryPointTracer::new(),
             PlansConfig::default(),
             dci_protocols.clone(),
             protocol_systems,
@@ -4352,14 +3705,7 @@ plans:
             "uniswap_v3".to_string(),
         ];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let allowed: HashSet<String> =
             HashSet::from(["uniswap_v2".to_string(), "uniswap_v3".to_string()]);
@@ -4387,14 +3733,7 @@ plans:
             "uniswap_v4".to_string(),
         ];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let allowed: HashSet<String> = HashSet::from([
             "uniswap_v2".to_string(),
@@ -4435,14 +3774,7 @@ plans:
         let protocol_systems =
             vec!["ambient".to_string(), "uniswap_v2".to_string(), "uniswap_v3".to_string()];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            PlansConfig::default(),
-            vec![],
-            protocol_systems,
-        );
+        let handler = RpcHandler::new(gw, None, PlansConfig::default(), vec![], protocol_systems);
 
         let request = dto::ProtocolSystemsRequestBody {
             chain: dto::Chain::Ethereum,
@@ -4463,21 +3795,15 @@ plans:
         let active_systems =
             vec!["ambient".to_string(), "sushiswap".to_string(), "uniswap_v3".to_string()];
 
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            active_systems,
-        );
+        let handler =
+            RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], active_systems);
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
                 .route(
                     "/v1/protocol_systems",
-                    web::post().to(super::protocol_systems::<MockGateway, MockEntryPointTracer>),
+                    web::post().to(super::protocol_systems::<MockGateway>),
                 ),
         )
         .await;
@@ -4550,21 +3876,11 @@ plans:
             .return_once(|_, _, _, _, _| {
                 Box::pin(async { Ok(WithTotal { entity: HashMap::new(), total: Some(0) }) })
             });
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -4587,21 +3903,11 @@ plans:
     async fn test_component_tvl_rejects_a_protocol_outside_the_plan() {
         let mut gw = MockGateway::new();
         gw.expect_get_component_tvls().never();
-        let handler = RpcHandler::new(
-            gw,
-            None,
-            MockEntryPointTracer::new(),
-            plans_config_with_restrictions(),
-            vec![],
-            vec![],
-        );
+        let handler = RpcHandler::new(gw, None, plans_config_with_restrictions(), vec![], vec![]);
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/component_tvl",
-                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/component_tvl", web::post().to(component_tvl::<MockGateway>)),
         )
         .await;
 
@@ -4657,7 +3963,6 @@ plans:
         let handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             plans_config_restricted_history(),
             vec![],
             vec![],
@@ -4666,10 +3971,7 @@ plans:
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/contract_state",
-                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/contract_state", web::post().to(contract_state::<MockGateway>)),
         )
         .await;
 
@@ -4727,7 +4029,6 @@ plans:
         let handler = RpcHandler::new(
             gw,
             Some(Arc::new(mock_buffer)),
-            MockEntryPointTracer::new(),
             plans_config_restricted_history(),
             vec![],
             vec![],
@@ -4736,10 +4037,7 @@ plans:
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(handler))
-                .route(
-                    "/v1/protocol_state",
-                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
-                ),
+                .route("/v1/protocol_state", web::post().to(protocol_state::<MockGateway>)),
         )
         .await;
 

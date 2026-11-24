@@ -59,7 +59,7 @@ Configure the stack through `docker/.env`. The compose file reads it for both th
 <tr><td><code>SUBSTREAMS_API_TOKEN</code></td><td>indexer</td><td>No</td><td><code>readme</code></td><td>Auth token for a hosted Substreams endpoint; unused self-hosted.</td></tr>
 <tr><td><code>TRACE_RPC_URL</code></td><td>indexer</td><td>For DCI</td><td><code>readme</code> (placeholder)</td><td>Trace-capable RPC for dynamic contract indexing.</td></tr>
 <tr><td><code>OTLP_EXPORTER_ENDPOINT</code></td><td>indexer</td><td>No</td><td>empty (disabled)</td><td>OpenTelemetry collector. Set <code>http://lgtm:4317</code> with the <code>observability</code> profile.</td></tr>
-<tr><td><code>AUTH_API_KEY</code></td><td>indexer</td><td>No</td><td><code>local-dev-key</code></td><td>Tycho RPC API key.</td></tr>
+<tr><td><code>AUTH_API_KEY</code></td><td>indexer</td><td>No</td><td><code>local-dev-key</code></td><td>API key for the heap profile route, <code>/debug/pprof/heap</code>. Only builds with the <code>jemalloc</code> feature check it.</td></tr>
 <tr><td><code>RUST_LOG</code></td><td>indexer</td><td>No</td><td><code>info</code></td><td>Log level.</td></tr>
 </tbody></table>
 
