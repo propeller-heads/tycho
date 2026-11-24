@@ -1,7 +1,7 @@
 use std::{any::Any, collections::HashMap, fmt::Debug, str::FromStr, sync::Arc};
 
 use alloy::{
-    primitives::{keccak256, Address, Signed, Uint, B256, I128, U256},
+    primitives::{keccak256, Address, Signed, Uint, B256, I128, I256, U256},
     sol_types::SolType,
 };
 use revm::{
@@ -27,7 +27,7 @@ use crate::evm::{
                 models::{
                     AfterSwapDelta, AfterSwapParameters, AfterSwapSolReturn, AmountRanges,
                     BeforeSwapOutput, BeforeSwapParameters, BeforeSwapSolOutput,
-                    GetLimitsSolReturn, SwapParams, WithGasEstimate,
+                    GetLimitsSolReturn, SwapFeeAccrual, SwapParams, WithGasEstimate,
                 },
             },
             state::UniswapV4State,
@@ -100,9 +100,11 @@ where
     }
 
     /// Writes the pool state `Pool.swap` stores before the PoolManager calls `afterSwap` into the
-    /// PoolManager storage the call runs on: the price and tick, and the liquidity. A hook that
-    /// reads the pool there then sees the swap's result. Slot layout: v4-core `StateLibrary`
-    /// (`POOLS_SLOT` 6; liquidity at offset 3) and `Slot0`.
+    /// PoolManager storage the call runs on: the price and tick, the liquidity and, with
+    /// [`PoolAfterSwap::fees`](super::models::PoolAfterSwap::fees), the fee accounting. A hook that
+    /// reads the pool there then sees the swap's result, and the pool stays consistent for a
+    /// hook that modifies a position in `afterSwap`. Slot layout: v4-core `StateLibrary`
+    /// (`POOLS_SLOT` 6; fee growth at offsets 1 and 2, liquidity at 3, ticks at 4) and `Slot0`.
     fn store_pool_state_after_swap(
         &self,
         overwrites: &mut HashMap<Address, HashMap<U256, U256>>,
@@ -119,6 +121,56 @@ where
         let tick = U256::from(pool.tick.cast_unsigned() & 0xFF_FFFF) << 160;
         storage.insert(state_slot, fees | tick | pool.sqrt_price);
         storage.insert(state_slot + U256::from(3), U256::from(pool.liquidity));
+        if let Some(accrual) = &pool.fees {
+            let zero_for_one = params.swap_params.zero_for_one;
+            let input =
+                if zero_for_one { params.context.currency_0 } else { params.context.currency_1 };
+            self.store_swap_fees(storage, state_slot, zero_for_one, input, accrual)?;
+        }
+        Ok(())
+    }
+
+    /// Writes a swap's fee accrual as `Pool.swap` and `PoolManager._swap` do: the input token's
+    /// fee growth, every crossed tick's fee growth outside flipped against the growth at its
+    /// crossing, and the protocol's fees on the input token (`protocolFeesAccrued`, slot 1).
+    fn store_swap_fees(
+        &self,
+        storage: &mut HashMap<U256, U256>,
+        state_slot: U256,
+        zero_for_one: bool,
+        input: Address,
+        accrual: &SwapFeeAccrual,
+    ) -> Result<(), SimulationError> {
+        let (input_growth_slot, other_growth_slot) = if zero_for_one {
+            (state_slot + U256::from(1), state_slot + U256::from(2))
+        } else {
+            (state_slot + U256::from(2), state_slot + U256::from(1))
+        };
+        let input_growth = self.stored_word(storage, input_growth_slot)?;
+        let other_growth = self.stored_word(storage, other_growth_slot)?;
+        for (tick, growth_at_cross) in &accrual.crossed_ticks {
+            let input_global = input_growth.wrapping_add(*growth_at_cross);
+            let globals = if zero_for_one {
+                [input_global, other_growth]
+            } else {
+                [other_growth, input_global]
+            };
+            let tick = I256::try_from(*tick).map_err(|e| {
+                SimulationError::FatalError(format!("Failed to convert tick {tick}: {e:?}"))
+            })?;
+            let tick_slot = mapping_slot(tick, state_slot + U256::from(4));
+            for (offset, global) in [(1u8, globals[0]), (2u8, globals[1])] {
+                let slot = tick_slot + U256::from(offset);
+                let outside = self.stored_word(storage, slot)?;
+                storage.insert(slot, global.wrapping_sub(outside));
+            }
+        }
+        storage.insert(input_growth_slot, input_growth.wrapping_add(accrual.fee_growth));
+        if !accrual.protocol_fee.is_zero() {
+            let slot = mapping_slot(input, U256::from(1));
+            let accrued = self.stored_word(storage, slot)?;
+            storage.insert(slot, accrued.wrapping_add(accrual.protocol_fee));
+        }
         Ok(())
     }
 
@@ -156,6 +208,10 @@ where
 {
     fn address(&self) -> Address {
         self.address
+    }
+
+    fn needs_swap_fee_accrual(&self) -> bool {
+        true
     }
 
     fn before_swap(
