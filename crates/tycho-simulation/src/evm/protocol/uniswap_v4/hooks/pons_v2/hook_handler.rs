@@ -258,7 +258,7 @@ mod tests {
     use crate::evm::protocol::uniswap_v4::{
         hooks::{
             hook_handler::HookHandler,
-            models::{AfterSwapParameters, BalanceDelta, StateContext, SwapParams},
+            models::{AfterSwapParameters, BalanceDelta, PoolAfterSwap, StateContext, SwapParams},
         },
         state::UniswapV4Fees,
     };
@@ -294,6 +294,7 @@ mod tests {
                 I128::try_from(amount1).expect("i128 fits I128"),
             ),
             hook_data: Bytes::new(),
+            pool_after_swap: PoolAfterSwap::default(),
         }
     }
 

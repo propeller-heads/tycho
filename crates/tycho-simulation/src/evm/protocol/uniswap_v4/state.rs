@@ -30,7 +30,7 @@ use crate::{
                 hook_handler::HookHandler,
                 models::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                    StateContext, SwapFeeAccrual, SwapParams,
+                    PoolAfterSwap, StateContext, SwapFeeAccrual, SwapParams,
                 },
             },
             utils::{
@@ -954,6 +954,7 @@ impl ProtocolSim for UniswapV4State {
                     swap_params,
                     delta: swap_delta,
                     hook_data: Bytes::new(),
+                    pool_after_swap: PoolAfterSwap::default(),
                 };
 
                 let after_swap_result = hook

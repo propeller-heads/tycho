@@ -437,7 +437,7 @@ mod tests {
         },
         protocol::{
             uniswap_v4::{
-                hooks::models::{BalanceDelta, BeforeSwapDelta, StateContext},
+                hooks::models::{BalanceDelta, BeforeSwapDelta, PoolAfterSwap, StateContext},
                 state::UniswapV4Fees,
             },
             vm::constants::MAX_BALANCE,
@@ -639,6 +639,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_after_swap: PoolAfterSwap::default(),
         };
 
         let result = hook_handler.after_swap(after_swap_params, None, None);
@@ -729,6 +730,7 @@ mod tests {
                     .unwrap(),
             ),
             hook_data: Bytes::new(),
+            pool_after_swap: PoolAfterSwap::default(),
         };
 
         transient_storage.extend(result.result.transient_storage);
