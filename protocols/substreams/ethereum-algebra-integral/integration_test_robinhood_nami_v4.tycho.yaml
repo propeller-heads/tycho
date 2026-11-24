@@ -8,10 +8,11 @@ initialized_accounts:
 tests:
   # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
   # 0x8788deCB…ba97. Both still hold at the stop block: simulation does not quote an adaptive
-  # fee, so the component is indexed and checked but not simulated.
+  # fee, so the component is indexed and checked but not simulated. The pool gets its first
+  # liquidity 1.5M blocks after it is created, so the range covers its creation only.
   - name: test_weth_usdg_pool_with_adaptive_fee
     start_block: 86166359
-    stop_block: 87922688
+    stop_block: 86176359
     expected_components:
       - id: "0xa730c5d09dd9926f798530d52e572d7594b952f3"
         tokens:
@@ -22,7 +23,9 @@ tests:
         skip_simulation: true
         skip_execution: true
   # The last pool created before the beacon is upgraded to implementation 0x1a2898f7…6874 at
-  # block 100790474. Its fee is made flat before that, so it is quoted at the stop block.
+  # block 100790474. Its fee is made flat before that, so it is quoted at the stop block. Every
+  # other pool is 11.7M blocks older, so no range that ends on the registered implementation is
+  # shorter.
   - name: test_usdg_crcl_pool_after_flat_fee_and_beacon_upgrade
     start_block: 97919351
     stop_block: 100790600

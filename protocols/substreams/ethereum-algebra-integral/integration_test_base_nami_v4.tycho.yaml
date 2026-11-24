@@ -7,22 +7,10 @@ skip_balance_check: false
 initialized_accounts:
 tests:
   # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
-  # 0x0c534dD0…05D1. Both still hold at the stop block: simulation does not quote an adaptive
-  # fee, so the component is indexed and checked but not simulated.
-  - name: test_weth_usdc_pool_with_adaptive_fee
-    start_block: 52483471
-    stop_block: 52573274
-    expected_components:
-      - id: "0x0e8af367dba0c9cb4674d38539ef3465a25a7237"
-        tokens:
-          - "0x4200000000000000000000000000000000000006" # WETH
-          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
-        static_attributes: {}
-        creation_tx: "0xea2187c16033f3119597c4d3c9b7e26220013b2884b62b9d1f2504c33f234d9d"
-        skip_simulation: true
-        skip_execution: true
-  # The same pool past two changes: its fee is made flat at block 52987571 and its beacon is
-  # upgraded to implementation 0xd1dfA0…a642 at block 53237911, after which it is quoted.
+  # 0x0c534dD0…05D1. Its fee is made flat at block 52987571 and its beacon is upgraded to
+  # implementation 0xd1dfA0…a642 at block 53237911, after which it is quoted. Every Nami pool but
+  # three was created in the 100 blocks around the start block, so no range that crosses the
+  # upgrade is shorter.
   - name: test_weth_usdc_pool_after_flat_fee_and_beacon_upgrade
     start_block: 52483471
     stop_block: 53238000
@@ -34,3 +22,34 @@ tests:
         static_attributes: {}
         creation_tx: "0xea2187c16033f3119597c4d3c9b7e26220013b2884b62b9d1f2504c33f234d9d"
         skip_simulation: false
+  # A pool created under the current implementation with no fee override. At block 60044639 its
+  # plugin is given the NYSE fee source 0x146669E5…E5d2, a fee per market segment, a floor and a
+  # cap, so the fee quoted at the stop block comes from the fee source.
+  - name: test_usdc_antc_pool_after_fee_source_is_set
+    start_block: 59604941
+    stop_block: 60044700
+    expected_components:
+      - id: "0x46a365ffdbd4247d12f77b0b6b8f354131f91055"
+        tokens:
+          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+          - "0xb20000000000000000000016e38FD364d271Ba28" # ANTc
+        static_attributes: {}
+        creation_tx: "0xfec248615afc815f28ee273c38744bb0b616f9aca3dfb700d336d47646d00df0"
+        skip_simulation: false
+  # The creation transaction names two plugins to the pool, one after the other: the one the
+  # factory creates with every pool, then an AntiSniper plugin bound to another beacon
+  # (0xabb28b3e…359e), both created in that transaction. The pool has no liquidity and its
+  # plugin refuses swaps until trading opens 802k blocks later, so it is indexed and checked but
+  # not simulated.
+  - name: test_weth_nami_pool_switched_to_an_anti_sniper_plugin
+    start_block: 54878072
+    stop_block: 54878172
+    expected_components:
+      - id: "0x22c96e2873ac34462addf0160e1b69d3373c64ae"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0x8888CDad9Ef66382f89E68f95Ec384d89ec28888" # NAMI
+        static_attributes: {}
+        creation_tx: "0x5874af1646b7ead553ffe7206649d1f1e92fd726149bc2312ce53388590ea23b"
+        skip_simulation: true
+        skip_execution: true
