@@ -7,22 +7,22 @@ use thiserror::Error;
 use tycho_common::Bytes;
 
 /// Name of the state attribute that holds the pool's policy contract.
-pub(super) const POLICY_ATTRIBUTE: &str = "policy";
+pub const POLICY_ATTRIBUTE: &str = "policy";
 /// Name of the state attribute that holds the version of the policy's grant rules.
-pub(super) const POLICY_VERSION_ATTRIBUTE: &str = "policy_version";
+pub const POLICY_VERSION_ATTRIBUTE: &str = "policy_version";
 /// Name of the state attribute that holds the key that signs the policy's grants.
-pub(super) const POLICY_CONTROLLER_ATTRIBUTE: &str = "policy_controller";
+pub const POLICY_CONTROLLER_ATTRIBUTE: &str = "policy_controller";
 /// Name of the state attribute that holds the only caller that can submit a grant.
-pub(super) const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
+pub const POLICY_ROUTER_ATTRIBUTE: &str = "policy_router";
 /// Name of the state attribute that is `1` while the policy refuses grants.
-pub(super) const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
+pub const POLICY_KILLED_ATTRIBUTE: &str = "policy_killed";
 /// Name of the state attribute that holds the lowest fee of a granted swap, in units of 1e-10.
-pub(super) const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
+pub const POLICY_MIN_FEE_ATTRIBUTE: &str = "policy_min_fee";
 
 /// A policy attribute whose value is malformed.
 #[derive(Debug, Error)]
 #[error("curve `{name}` attribute is {value}, expected {expected}")]
-pub(super) struct PolicyDecodeError {
+pub struct PolicyDecodeError {
     name: String,
     value: Bytes,
     expected: &'static str,
@@ -37,7 +37,7 @@ impl PolicyDecodeError {
 /// The policy contract of a pool and the terms of its grants. A zero attribute value means unset:
 /// a pool without a grant policy has version 0.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct CurvePolicy {
+pub struct CurvePolicy {
     address: Option<Bytes>,
     version: U256,
     controller: Option<Bytes>,
@@ -83,9 +83,24 @@ impl CurvePolicy {
         }
     }
 
+    /// The policy contract. `None` if the pool has no policy.
+    pub fn address(&self) -> Option<&Bytes> {
+        self.address.as_ref()
+    }
+
     /// The version of the grant rules. 0 if the policy has no grants.
     pub fn version(&self) -> U256 {
         self.version
+    }
+
+    /// The key that signs the policy's grants. `None` if unset.
+    pub fn controller(&self) -> Option<&Bytes> {
+        self.controller.as_ref()
+    }
+
+    /// The only caller that can submit a grant. `None` if unset.
+    pub fn router(&self) -> Option<&Bytes> {
+        self.router.as_ref()
     }
 
     /// Whether the policy refuses grants.

@@ -114,9 +114,14 @@ impl CurveState {
     }
 
     /// Sets the pool's policy contract.
-    pub(super) fn with_policy(mut self, policy: CurvePolicy) -> Self {
+    pub fn with_policy(mut self, policy: CurvePolicy) -> Self {
         self.policy = policy;
         self
+    }
+
+    /// The pool's policy contract and the terms of its grants.
+    pub fn policy(&self) -> &CurvePolicy {
+        &self.policy
     }
 
     /// Returns a copy that quotes swaps with a grant from the pool's policy: at the policy's
