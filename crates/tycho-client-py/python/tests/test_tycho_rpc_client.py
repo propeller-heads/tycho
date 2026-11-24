@@ -48,13 +48,13 @@ def test_get_protocol_state_returns_expected_result(mock_post, asset_dir):
     mock_post.return_value = mock_response
 
     client = TychoRPCClient()
-    params = ProtocolStateParams()
+    params = ProtocolStateParams(protocol_system="uniswap_v2")
     result = client.get_protocol_state(params)
 
     mock_post.assert_called_once_with(
         "http://0.0.0.0:4242/v1/protocol_state",
         headers={"accept": "application/json", "Content-Type": "application/json"},
-        data='{"include_balances": true, "chain": "ethereum"}',
+        data='{"include_balances": true, "protocol_system": "uniswap_v2", "chain": "ethereum"}',
         params={},
     )
     assert isinstance(result.states, list)

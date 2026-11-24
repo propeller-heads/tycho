@@ -138,6 +138,7 @@ mod tests {
 
     #[rstest]
     #[case::contract_state("StateRequestBody")]
+    #[case::protocol_state("ProtocolStateRequestBody")]
     fn test_openapi_requires_protocol_system(#[case] schema: &str) {
         let doc = ApiDoc::openapi();
         let json =

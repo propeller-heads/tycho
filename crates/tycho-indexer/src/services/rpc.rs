@@ -1462,6 +1462,7 @@ pub async fn protocol_components<G: Gateway, T: EntryPointTracer>(
 /// Retrieve protocol states
 ///
 /// This endpoint retrieves the state of protocols within a specific execution environment.
+/// `protocol_system` is required; a missing, empty or blank value is a 400.
 #[utoipa::path(
     post,
     path = "/v1/protocol_state",
@@ -1484,6 +1485,7 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     tracing::Span::current().record("page_size", body.pagination.page_size);
     tracing::Span::current().record("protocol_system", &body.protocol_system);
 
+    require_protocol_system(&body.protocol_system)?;
     body.validate_pagination(&req)?;
     if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
         body.version = handler
@@ -2893,6 +2895,21 @@ mod tests {
     )]
     #[case::contract_state_blank(
         "/v1/contract_state",
+        serde_json::json!({"protocol_system": "  "}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[case::protocol_state_missing(
+        "/v1/protocol_state",
+        serde_json::json!({"protocol_ids": []}),
+        "missing field `protocol_system`"
+    )]
+    #[case::protocol_state_empty(
+        "/v1/protocol_state",
+        serde_json::json!({"protocol_system": ""}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[case::protocol_state_blank(
+        "/v1/protocol_state",
         serde_json::json!({"protocol_system": "  "}),
         PROTOCOL_SYSTEM_REQUIRED
     )]

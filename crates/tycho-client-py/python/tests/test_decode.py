@@ -8,6 +8,7 @@ from tycho_indexer_client.dto import (
     Chain,
     ContractId,
     ContractStateParams,
+    ProtocolStateParams,
     CustomChain,
     ExtractorIdentity,
     FeedMessage,
@@ -141,3 +142,8 @@ def test_decode_contract_state_params_backward_compatibility():
 def test_contract_state_params_require_protocol_system():
     with pytest.raises(ValidationError):
         ContractStateParams(contract_ids=["0xba12222222228d8ba445958a75a0704d566bf2c8"])
+
+
+def test_protocol_state_params_require_protocol_system():
+    with pytest.raises(ValidationError):
+        ProtocolStateParams()

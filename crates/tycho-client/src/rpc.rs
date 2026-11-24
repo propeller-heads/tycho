@@ -2487,6 +2487,9 @@ mod tests {
 
         let mocked_server = server
             .mock("POST", "/v1/protocol_state")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"protocol_system": "uniswap_v2"}),
+            ))
             .expect(1)
             .with_body(server_resp)
             .create_async()
@@ -2496,7 +2499,8 @@ mod tests {
 
         let states = client
             .get_protocol_states(
-                ProtocolStatesParams::new(Chain::Ethereum, "").with_include_balances(true),
+                ProtocolStatesParams::new(Chain::Ethereum, "uniswap_v2")
+                    .with_include_balances(true),
             )
             .await
             .expect("get state");
