@@ -2053,6 +2053,39 @@ mod tests {
         );
     }
 
+    /// The runner returns `Ok` when a config file is missing, so a manifest whose file has
+    /// another name passes without running.
+    #[test]
+    fn nami_v4_manifests_resolve_to_config_files_that_exist() {
+        for (chain, protocol) in [
+            (Chain::Ethereum, "ethereum-nami-v4"),
+            (Chain::Base, "base-nami-v4"),
+            (Chain::Robinhood, "robinhood-nami-v4"),
+        ] {
+            let runner =
+                get_mocked_runner_for(chain, protocol, "http://localhost:8545".to_string());
+
+            assert!(
+                runner
+                    .substreams_path
+                    .ends_with("substreams/ethereum-algebra-integral"),
+                "unexpected substreams_path: {}",
+                runner.substreams_path.display()
+            );
+            let file_name = runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("the config path has a file name");
+            assert_eq!(
+                file_name,
+                format!("integration_test_{}.tycho.yaml", protocol.replace('-', "_"))
+            );
+            let config = protocols_path("substreams/ethereum-algebra-integral").join(file_name);
+            assert!(config.exists(), "{} is missing", config.display());
+        }
+    }
+
     #[test]
     fn test_token_balance_validation() {
         let runner = get_mocked_runner();
