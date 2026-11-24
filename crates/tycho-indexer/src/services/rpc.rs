@@ -798,10 +798,11 @@ where
         ))
     }
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request, allowed))]
     async fn get_component_tvls(
         &self,
         request: &dto::ComponentTvlRequestBody,
+        allowed: Option<&HashSet<String>>,
     ) -> Result<dto::ComponentTvlRequestResponse, RpcError> {
         if let Some(ref component_ids) = request.component_ids {
             info!(
@@ -827,7 +828,7 @@ where
             .get_component_tvls(
                 &chain,
                 request.protocol_system.clone(),
-                None,
+                allowed,
                 ids_slice,
                 Some(&pagination_params),
             )
@@ -1560,7 +1561,8 @@ pub async fn protocol_systems<G: Gateway, T: EntryPointTracer>(
 
 /// Retrieve protocol component tvl
 ///
-/// This endpoint retrieves component tvl
+/// This endpoint retrieves component tvl. Without `protocol_system`, it returns the TVL of all
+/// active protocol systems; on a plan restricted to some protocol systems, of those only.
 #[utoipa::path(
     post,
     path = "/v1/component_tvl",
@@ -1587,10 +1589,14 @@ pub async fn component_tvl<G: Gateway, T: EntryPointTracer>(
         body.validate_restrictions(restrictions)?;
     }
 
+    let allowed = handler
+        .resolve_plan_restrictions(&req)
+        .and_then(|r| r.allowed_protocol_systems.clone());
+
     // Call the handler to get component tvl
     let response = handler
         .into_inner()
-        .get_component_tvls(&body)
+        .get_component_tvls(&body, allowed.as_ref())
         .await;
 
     match response {
