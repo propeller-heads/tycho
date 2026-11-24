@@ -80,10 +80,10 @@ attributes are emitted:
 modules=dynamic_fee,farming,fee_override,mevx
 ```
 
-`modules_named` resolves the names against `MODULES` and fails on a name the package does not
-index or one listed twice; the pool modules stop on that error, so a manifest with a wrong name
-does not run. The list is per manifest: a chain where a DEX deploys a plugin variant with one more
-module lists that module there only. A plugin without a listed module never writes its slots and
+`modules_named` resolves the names against `MODULES` and fails on an empty or missing param, on a
+name the package does not index and on one listed twice; the pool modules stop on that error, so
+a manifest with a wrong or missing list does not run. The list is per manifest: a chain where a
+DEX deploys a plugin variant with one more module lists that module there only. A plugin without a listed module never writes its slots and
 carries its fields as zero, which no handler of that plugin's implementation reads.
 
 ## Discovery without RPC

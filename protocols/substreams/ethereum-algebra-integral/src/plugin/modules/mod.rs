@@ -31,6 +31,8 @@ pub const MODULES: &[&PluginModule] = &[&algebra::dynamic_fee::MODULE];
 /// A manifest's `modules` param that cannot be resolved.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModuleListError {
+    /// The param names no module, as when a manifest leaves it out.
+    Empty,
     /// The package has no module of this name.
     Unknown(String),
     /// The name is listed twice, which would emit the module's attributes twice.
@@ -40,18 +42,18 @@ pub enum ModuleListError {
 impl fmt::Display for ModuleListError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown(name) => {
-                let known: Vec<&str> = MODULES
-                    .iter()
-                    .map(|module| module.name)
-                    .collect();
-                write!(
-                    f,
-                    "the modules param names plugin module `{name}`, which this package does not \
-                     index; it indexes {}",
-                    known.join(", ")
-                )
-            }
+            Self::Empty => write!(
+                f,
+                "the modules param names no plugin module; list the modules of this \
+                 deployment's plugins, from: {}",
+                indexed_module_names()
+            ),
+            Self::Unknown(name) => write!(
+                f,
+                "the modules param names plugin module `{name}`, which this package does not \
+                 index; it indexes {}",
+                indexed_module_names()
+            ),
             Self::Duplicate(name) => {
                 write!(f, "the modules param names plugin module `{name}` twice")
             }
@@ -61,16 +63,24 @@ impl fmt::Display for ModuleListError {
 
 impl std::error::Error for ModuleListError {}
 
+fn indexed_module_names() -> String {
+    let names: Vec<&str> = MODULES
+        .iter()
+        .map(|module| module.name)
+        .collect();
+    names.join(", ")
+}
+
 /// The modules a manifest's `modules` param names: module names separated by commas, in the
-/// order their attributes are emitted. An empty param names none.
+/// order their attributes are emitted.
 ///
-/// A manifest that names a module the package lacks must not run: every pool would be created
-/// without that module's attributes.
+/// A manifest that names no module, or one the package lacks, must not run: every pool would be
+/// created without those modules' attributes, and simulation would refuse each of them.
 pub fn modules_named(names: &str) -> Result<Vec<&'static PluginModule>, ModuleListError> {
-    let mut modules: Vec<&'static PluginModule> = Vec::new();
     if names.is_empty() {
-        return Ok(modules);
+        return Err(ModuleListError::Empty);
     }
+    let mut modules: Vec<&'static PluginModule> = Vec::new();
     for name in names.split(',') {
         let Some(module) = MODULES
             .iter()
@@ -105,14 +115,8 @@ mod tests {
         assert_eq!(modules[0].name, "dynamic_fee");
     }
 
-    #[test]
-    fn modules_named_takes_an_empty_param_as_no_modules() {
-        assert!(modules_named("")
-            .expect("an empty param is valid")
-            .is_empty());
-    }
-
     #[rstest]
+    #[case::empty("", ModuleListError::Empty)]
     #[case::unknown("dynamic_fee,nope", ModuleListError::Unknown("nope".to_string()))]
     #[case::padded("dynamic_fee, dynamic_fee", ModuleListError::Unknown(" dynamic_fee".to_string()))]
     #[case::trailing_comma("dynamic_fee,", ModuleListError::Unknown(String::new()))]
@@ -128,6 +132,13 @@ mod tests {
         let message = ModuleListError::Unknown("nope".to_string()).to_string();
 
         assert!(message.contains("`nope`"), "{message}");
+        assert!(message.contains("dynamic_fee"), "{message}");
+    }
+
+    #[test]
+    fn empty_error_lists_what_is_indexed() {
+        let message = ModuleListError::Empty.to_string();
+
         assert!(message.contains("dynamic_fee"), "{message}");
     }
 
