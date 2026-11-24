@@ -167,9 +167,9 @@ impl SplitSwapValidator {
 /// recipient, so a sequential route through the same venue twice in a row always reverts.
 const SELF_RECIPIENT_REJECTING_PROTOCOLS: &[&str] = &["biconomy", "flamm"];
 
-/// Whether two components trade on one venue. Components of one venue differ by pair (a `flamm`
-/// pool has one id per pair), so their `pamm_address` decides; a component without that attribute
-/// is its own venue.
+/// Whether two components trade on one venue: by their `pamm_address` where both carry one, else
+/// by id. A `flamm` component's id is its pool followed by its two tokens, so the address the
+/// swap goes to is the attribute, not the id.
 fn same_venue(first: &ProtocolComponent, second: &ProtocolComponent) -> bool {
     match (
         first
