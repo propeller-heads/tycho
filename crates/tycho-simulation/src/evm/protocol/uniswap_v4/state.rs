@@ -30,7 +30,7 @@ use crate::{
                 hook_handler::HookHandler,
                 models::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                    StateContext, SwapParams,
+                    StateContext, SwapFeeAccrual, SwapParams,
                 },
             },
             utils::{
@@ -324,6 +324,7 @@ impl UniswapV4State {
         amount_specified: I256,
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
+        fee_accrual: Option<&mut SwapFeeAccrual>,
     ) -> Result<SwapResults, SimulationError> {
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
@@ -860,7 +861,7 @@ impl ProtocolSim for UniswapV4State {
         }
 
         // Perform the swap with potential hook modifications
-        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override)?;
+        let result = self.swap(zero_for_one, amount_to_swap, None, lp_fee_override, None)?;
 
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
@@ -1222,7 +1223,13 @@ impl ProtocolSim for UniswapV4State {
                     fee_pips,
                     Sign::Negative, // V4 uses negative for exact input
                     |zero_for_one, amount_specified, sqrt_price_limit| {
-                        self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
+                        self.swap(
+                            zero_for_one,
+                            amount_specified,
+                            Some(sqrt_price_limit),
+                            None,
+                            None,
+                        )
                     },
                 )?;
 
@@ -3244,7 +3251,7 @@ mod tests {
 
     fn two_range_swap_gas(pool: &UniswapV4State) -> u64 {
         let amount = -I256::from_raw(U256::from(TWO_RANGE_SWAP_AMOUNT));
-        pool.swap(true, amount, None, None)
+        pool.swap(true, amount, None, None, None)
             .expect("the swap ends inside the outer range")
             .gas_used
             .to::<u64>()
@@ -3313,7 +3320,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(100_000_000_000_000_000u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, None)
             .expect("swap should stay within the current liquidity range");
         let expected_tick =
             get_tick_at_sqrt_ratio(result.sqrt_price).expect("new sqrt price should map to a tick");
@@ -3331,7 +3338,7 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1u64));
 
         let result = pool
-            .swap(true, amount, None, None)
+            .swap(true, amount, None, None, None)
             .expect("swap should consume the input as fee without moving price");
 
         assert_eq!(result.sqrt_price, pool.sqrt_price);
@@ -3721,19 +3728,19 @@ mod tests {
         let amount = -I256::from_raw(U256::from(1000u64)); // V4 uses negative for exact input
 
         // zero_for_one: price_limit equal to sqrt_price is invalid (must be strictly less)
-        let result = pool.swap(true, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(true, amount, Some(pool.sqrt_price), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // zero_for_one: price_limit at MIN_SQRT_RATIO is invalid (must be strictly greater)
-        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None);
+        let result = pool.swap(true, amount, Some(MIN_SQRT_RATIO), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit equal to sqrt_price is invalid (must be strictly greater)
-        let result = pool.swap(false, amount, Some(pool.sqrt_price), None);
+        let result = pool.swap(false, amount, Some(pool.sqrt_price), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
 
         // one_for_zero: price_limit at MAX_SQRT_RATIO is invalid (must be strictly less)
-        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None);
+        let result = pool.swap(false, amount, Some(MAX_SQRT_RATIO), None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
@@ -3761,7 +3768,7 @@ mod tests {
 
         let amount = -I256::from_raw(U256::from(1000u64));
         // Default price limit for zero_for_one is MIN_SQRT_RATIO + 1 == sqrt_price, so invalid
-        let result = pool.swap(true, amount, None, None);
+        let result = pool.swap(true, amount, None, None, None);
         assert!(matches!(result, Err(SimulationError::InvalidInput(_, None))));
     }
 
