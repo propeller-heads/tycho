@@ -4512,6 +4512,92 @@ plans:
         assert_eq!(body.pagination.total, 3);
     }
 
+    #[rstest]
+    #[case::restricted_plan_passes_its_protocols(
+        Some("restricted"),
+        Some(HashSet::from(["ambient".to_string(), "uniswap_v3".to_string()]))
+    )]
+    #[case::no_plan_passes_no_allowlist(None, None)]
+    #[actix_web::test]
+    async fn test_component_tvl_without_protocol_passes_the_plan_allowlist(
+        #[case] plan_header: Option<&str>,
+        #[case] expected_allowed: Option<HashSet<String>>,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_component_tvls()
+            .withf(move |_, system, allowed, _, _| {
+                system.is_none() && allowed.cloned() == expected_allowed
+            })
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: HashMap::new(), total: Some(0) }) })
+            });
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            plans_config_with_restrictions(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let request_body = dto::ComponentTvlRequestBody::default();
+        let mut req_builder = test::TestRequest::post()
+            .uri("/v1/component_tvl")
+            .set_json(&request_body);
+        if let Some(plan) = plan_header {
+            req_builder = req_builder.insert_header(("X-User-Plan", plan));
+        }
+        let resp = test::call_service(&app, req_builder.to_request()).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_component_tvl_rejects_a_protocol_outside_the_plan() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_component_tvls().never();
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            plans_config_with_restrictions(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let request_body =
+            dto::ComponentTvlRequestBody::system_filtered("sushiswap", dto::Chain::Ethereum);
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/component_tvl")
+                .insert_header(("X-User-Plan", "restricted"))
+                .set_json(&request_body)
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
+    }
+
     fn plans_config_restricted_history() -> PlansConfig {
         let yaml = r#"
 plans:
