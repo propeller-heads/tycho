@@ -1568,6 +1568,89 @@ mod tests {
         assert_eq!(pool.fee(), 0.0014);
     }
 
+    /// Quotes against the contract: real swaps of Nami's Base WETH/USDC pool, in both directions,
+    /// one of them across an initialized tick. Each is quoted from the pool's state at the block
+    /// before with the fee the plugin set, and has to give the amount the pool paid and the price,
+    /// tick and liquidity it ended at.
+    #[test]
+    fn quotes_equal_the_pools_swaps_on_chain() {
+        let field = |fields: &[&str], index: usize| -> String {
+            fields
+                .get(index)
+                .expect("a fixture line has thirteen fields")
+                .to_string()
+        };
+        let mut directions = HashSet::new();
+        let mut crossed_a_tick = false;
+        for line in include_str!("testdata/base_weth_usdc_swaps.csv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let fields: Vec<&str> = line.split(',').collect();
+            let number = |index: usize| field(&fields, index);
+            let tx = number(0);
+            let zero_for_one = number(2) == "true";
+            let liquidity: u128 = number(8).parse().expect("liquidity");
+            let liquidity_after: u128 = number(11)
+                .parse()
+                .expect("liquidity after");
+            let ticks = number(12)
+                .split(';')
+                .map(|tick| {
+                    let (index, net) = tick.split_once(':').expect("index:net");
+                    (index.parse().expect("a tick index"), net.parse().expect("net liquidity"))
+                })
+                .collect();
+            let pool = AlgebraIntegralState::new(
+                Address::repeat_byte(0x11),
+                None,
+                liquidity,
+                U256::from_str_radix(&number(6), 10).expect("price"),
+                number(7).parse().expect("tick"),
+                ticks,
+                number(5).parse().expect("fee"),
+                PluginSetup::default(),
+                BlockContext::new(number(1).parse().expect("block"), SESSION),
+            );
+            let (token_in, token_out) =
+                if zero_for_one { (token0(), token1()) } else { (token1(), token0()) };
+
+            let quote = pool
+                .get_amount_out(number(3).parse().expect("amount in"), &token_in, &token_out)
+                .unwrap_or_else(|error| panic!("{tx}: {error}"));
+
+            assert_eq!(
+                quote.amount,
+                number(4)
+                    .parse::<BigUint>()
+                    .expect("amount out"),
+                "{tx}"
+            );
+            let after = quote
+                .new_state
+                .as_any()
+                .downcast_ref::<AlgebraIntegralState>()
+                .expect("an Algebra Integral state");
+            assert_eq!(
+                after.sqrt_price,
+                U256::from_str_radix(&number(9), 10).expect("price after"),
+                "{tx}"
+            );
+            assert_eq!(
+                after.tick,
+                number(10)
+                    .parse::<i32>()
+                    .expect("tick after"),
+                "{tx}"
+            );
+            assert_eq!(after.liquidity, liquidity_after, "{tx}");
+            directions.insert(zero_for_one);
+            crossed_a_tick |= liquidity_after != liquidity;
+        }
+        assert_eq!(directions.len(), 2, "the fixtures cover both directions");
+        assert!(crossed_a_tick, "the fixtures cover a tick crossing");
+    }
+
     #[test]
     fn plugin_the_pool_does_not_call_is_not_needed() {
         let plugin =
