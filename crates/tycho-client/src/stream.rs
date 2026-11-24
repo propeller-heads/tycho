@@ -26,7 +26,7 @@ use crate::{
     feed::{
         component_tracker::ComponentFilter,
         synchronizer::{ProtocolStateSynchronizer, StateSynchronizer, DEFAULT_SNAPSHOT_JITTER},
-        BlockHeader, BlockSynchronizer, BlockSynchronizerError, FeedMessage,
+        BlockHeader, BlockSynchronizer, BlockSynchronizerError, FeedMessage, DEFAULT_STARTUP_GRACE,
     },
     rpc::{HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     HttpRPCClient, WsDeltasClient,
@@ -108,6 +108,7 @@ pub struct TychoStreamBuilder {
     block_time: u64,
     timeout: u64,
     startup_timeout: Duration,
+    startup_grace: Duration,
     max_missed_blocks: u64,
     state_sync_retry_config: RetryConfiguration,
     websockets_retry_config: RetryConfiguration,
@@ -137,6 +138,7 @@ impl TychoStreamBuilder {
             block_time,
             timeout,
             startup_timeout: Duration::from_secs(startup_timeout),
+            startup_grace: DEFAULT_STARTUP_GRACE,
             max_missed_blocks,
             state_sync_retry_config: RetryConfiguration::constant(
                 32,
@@ -162,11 +164,11 @@ impl TychoStreamBuilder {
     /// Returns the default `(block_time, timeout, max_missed_blocks, startup_timeout)` for the
     /// given blockchain network. Times are in seconds.
     ///
-    /// A silent synchronizer holds every round while it is Delayed, and stays Delayed for
-    /// `block_time * max_missed_blocks`. The consumer falls about that far behind the chain head
-    /// before the synchronizer goes stale and stops holding rounds. Chains whose blocks come
-    /// faster than their one-second `block_time` therefore use 20 missed blocks, keeping that
-    /// lag near 20 s. The startup timeout is set apart, so large first snapshots keep their time.
+    /// A round closes half a `block_time` (at least 500 ms) after the first new block, so a silent
+    /// synchronizer does not hold the others. It is Delayed until it makes no progress for
+    /// `block_time * max_missed_blocks`, then Stale. Chains whose blocks come faster than their
+    /// one-second `block_time` use 20 missed blocks, so a silent protocol is reported stale within
+    /// about 20 s. The startup timeout is set apart, so large first snapshots keep their time.
     fn default_timing(chain: &Chain) -> (u64, u64, u64, u64) {
         match chain {
             Chain::Ethereum => (12, 36, 50, 600),
@@ -208,6 +210,15 @@ impl TychoStreamBuilder {
 
     pub fn startup_timeout(mut self, timeout: Duration) -> Self {
         self.startup_timeout = timeout;
+        self
+    }
+
+    /// Sets how long startup waits for the other protocols once one delivered its first message.
+    ///
+    /// Protocols that miss it start the stream as `Started` and join with their snapshot once
+    /// they deliver. Defaults to 60 seconds.
+    pub fn startup_grace(mut self, grace: Duration) -> Self {
+        self.startup_grace = grace;
         self
     }
 
@@ -445,6 +456,7 @@ impl TychoStreamBuilder {
             self.max_missed_blocks,
         );
         block_sync.startup_timeout(self.startup_timeout);
+        block_sync.startup_grace(self.startup_grace);
         if let Some(n) = self.max_messages {
             block_sync.max_messages(n);
         }
