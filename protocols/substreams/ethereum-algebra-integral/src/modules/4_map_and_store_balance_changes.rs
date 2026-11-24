@@ -30,20 +30,40 @@ pub fn store_pools_balances(balances_deltas: BlockBalanceDeltas, store: StoreAdd
 
 /// Balance deltas of the known pools in the block. `pool_by_address` returns an address's pool
 /// when it is one.
+///
+/// A transfer from a pool to itself is left out. The helper turns it into a debit and a credit
+/// at the log's ordinal, and `store_balance_changes` panics on two deltas of one pool and token
+/// at one ordinal. Anyone can cause such a log: most tokens accept `transferFrom(pool, pool, 0)`
+/// without an allowance. It changes no balance.
 fn block_balance_deltas(
     block: &eth::Block,
     pool_by_address: impl Fn(&[u8]) -> Option<Pool>,
 ) -> Vec<BalanceDelta> {
-    block
-        .transactions()
-        .flat_map(|tx| {
-            extract_balance_deltas_from_tx(tx, |token, transactor| {
-                pool_by_address(transactor).is_some_and(|pool| {
-                    token == pool.token0.as_slice() || token == pool.token1.as_slice()
-                })
+    let mut deltas: Vec<BalanceDelta> = Vec::new();
+    for tx in block.transactions() {
+        let tx_deltas = extract_balance_deltas_from_tx(tx, |token, transactor| {
+            pool_by_address(transactor).is_some_and(|pool| {
+                token == pool.token0.as_slice() || token == pool.token1.as_slice()
             })
-        })
-        // The helper writes the pool's hex address without the `0x` the component ids carry.
+        });
+        for delta in tx_deltas {
+            // One log gives two deltas for the same pool only when it is both sender and
+            // recipient, and they follow each other.
+            let self_transfer = deltas.last().is_some_and(|last| {
+                last.ord == delta.ord &&
+                    last.token == delta.token &&
+                    last.component_id == delta.component_id
+            });
+            if self_transfer {
+                deltas.pop();
+            } else {
+                deltas.push(delta);
+            }
+        }
+    }
+    // The helper writes the pool's hex address without the `0x` the component ids carry.
+    deltas
+        .into_iter()
         .map(|delta| BalanceDelta {
             component_id: [b"0x", delta.component_id.as_slice()].concat(),
             ..delta
@@ -136,6 +156,47 @@ mod tests {
         assert!(deltas
             .iter()
             .all(|delta| delta.component_id == pool_id));
+    }
+
+    #[test]
+    fn test_ignores_a_transfer_from_a_pool_to_itself() {
+        let block = block(vec![
+            transfer(1, TOKEN0, USER, POOL, 1_000),
+            // `transferFrom(pool, pool, 0)` needs no allowance on most tokens.
+            transfer(2, TOKEN0, POOL, POOL, 0),
+            transfer(3, TOKEN1, POOL, POOL, 7),
+            transfer(4, TOKEN1, POOL, USER, 900),
+        ]);
+
+        let deltas = block_balance_deltas(&block, pool_by_address);
+
+        assert_eq!(
+            summary(&deltas),
+            vec![
+                (1, TOKEN0.to_vec(), "1000".to_string()),
+                (4, TOKEN1.to_vec(), "-900".to_string())
+            ]
+        );
+    }
+
+    /// What `store_balance_changes` rejects: two deltas of one pool and token at one ordinal.
+    #[test]
+    fn test_no_two_deltas_share_pool_token_and_ordinal() {
+        let block = block(vec![
+            transfer(1, TOKEN0, POOL, POOL, 0),
+            transfer(2, TOKEN0, POOL, POOL, 5),
+            transfer(3, TOKEN0, USER, POOL, 5),
+        ]);
+
+        let deltas = block_balance_deltas(&block, pool_by_address);
+
+        let mut keys: Vec<_> = deltas
+            .iter()
+            .map(|delta| (delta.ord, delta.token.clone(), delta.component_id.clone()))
+            .collect();
+        keys.dedup();
+        assert_eq!(keys.len(), deltas.len());
+        assert_eq!(summary(&deltas), vec![(3, TOKEN0.to_vec(), "5".to_string())]);
     }
 
     #[test]
