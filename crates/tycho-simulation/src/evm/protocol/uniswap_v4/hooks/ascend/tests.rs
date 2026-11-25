@@ -22,7 +22,10 @@ use tycho_common::{
 use super::{
     hook_handler::{fee_ceil, fee_floor, max_gross_buy, AscendHookHandler, ASCEND_HOOK_ELYSIUM},
     hook_handler_creator::AscendHookCreator,
-    math::{amount0_delta_down, observe, size_fill, tokens_for_capped_quote, Curve, FillRequest},
+    math::{
+        amount0_delta_down, observe, size_fill, tokens_for_capped_quote, Curve, FillRequest,
+        PoolPrice,
+    },
     *,
 };
 use crate::{
@@ -112,7 +115,17 @@ fn pool_scaled(
     timestamp: u64,
     scale: u128,
 ) -> UniswapV4State {
-    let liquidity = state.curve.liquidity * scale;
+    pool_with_liquidity(state, spot, tick, timestamp, state.curve.liquidity * scale)
+}
+
+/// [`pool`] with the position holding `liquidity`.
+fn pool_with_liquidity(
+    state: AscendPoolState,
+    spot: U256,
+    tick: i32,
+    timestamp: u64,
+    liquidity: u128,
+) -> UniswapV4State {
     let net = i128::try_from(liquidity).expect("fits");
     let (lower, upper) = if state.token_is_currency0() {
         (state.curve.start_tick, state.curve.start_tick + 200_000)
@@ -206,7 +219,11 @@ fn amm_only(pool: &UniswapV4State) -> UniswapV4State {
 fn buy_through_the_amm_on_the_net(pool: &UniswapV4State, gross: u128) -> BigUint {
     let state = hook_of(pool).state;
     let fee = (gross * u128::from(state.fee_pips)).div_ceil(1_000_000);
-    buy(&amm_only(pool), state.token_is_currency0(), &(gross - fee).to_string()).unwrap()
+    let (launched, quote) = tokens(state.token_is_currency0());
+    amm_only(pool)
+        .get_amount_out(BigUint::from(gross - fee), &quote, &launched)
+        .unwrap()
+        .amount
 }
 
 /// What a sell of `amount` on `pool` gives with no fill: the AMM's output less the hook's
@@ -220,9 +237,8 @@ fn sell_through_the_amm_less_the_fee(pool: &UniswapV4State, amount: &str) -> Big
 }
 
 fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
-    let u64_attr = |v: u64| Bytes::from(v.to_be_bytes().to_vec());
     [
-        ("ascend_fee_pips", u64_attr(state.fee_pips.into())),
+        ("ascend_fee_pips", Bytes::from(u64::from(state.fee_pips))),
         ("ascend_token_is_currency0", Bytes::from(vec![u8::from(state.token_is_currency0())])),
         (
             "ascend_start_tick",
@@ -244,7 +260,7 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        ("ascend_ema_updated_at", u64_attr(state.observation.updated_at)),
+        ("ascend_ema_updated_at", Bytes::from(state.observation.updated_at)),
         (
             "ascend_observed_tick",
             Bytes::from(
@@ -255,7 +271,7 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        ("ascend_discount", u64_attr(state.observation.discount.into())),
+        ("ascend_discount", Bytes::from(u64::from(state.observation.discount))),
         (
             "ascend_bid_inventory",
             Bytes::from(
@@ -276,17 +292,8 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
                     .to_vec(),
             ),
         ),
-        ("ascend_bid_window_start", u64_attr(state.bid.window_start)),
-        (
-            "ascend_bid_max_clip",
-            Bytes::from(
-                state
-                    .bid
-                    .max_clip
-                    .to_be_bytes()
-                    .to_vec(),
-            ),
-        ),
+        ("ascend_bid_window_start", Bytes::from(state.bid.window_start)),
+        ("ascend_bid_max_clip", Bytes::from(state.bid.max_clip)),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_string(), value))
@@ -375,7 +382,13 @@ fn test_observation_reproduces_the_traced_ema_and_discount() {
     );
     let spot = U256::from_str_radix("d9173164a0a4ad89a19b10", 16).unwrap();
 
-    let after = observe(&curve, &before, spot, -99_000, 1_795_112_640 + 969).unwrap();
+    let after = observe(
+        &curve,
+        &before,
+        PoolPrice { sqrt_price: spot, tick: -99_000 },
+        1_795_112_640 + 969,
+    )
+    .unwrap();
 
     assert_eq!(after.ema, U256::from_str_radix("d9160c7dbd65710dd08a3d", 16).unwrap());
     assert_eq!(after.discount, 0x2af920e);
@@ -388,7 +401,13 @@ fn test_observation_changes_nothing_in_the_same_second() {
     let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS, -100_000, 1_000);
 
-    let after = observe(&curve, &before, u("90000000000000000000000000"), -50, TS).unwrap();
+    let after = observe(
+        &curve,
+        &before,
+        PoolPrice { sqrt_price: u("90000000000000000000000000"), tick: -50 },
+        TS,
+    )
+    .unwrap();
 
     assert_eq!(after, before);
 }
@@ -398,7 +417,12 @@ fn test_observation_before_the_last_one_is_refused() {
     let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS, 0, 0);
 
-    let result = observe(&curve, &before, u("100000000000000000000000000"), 0, TS - 1);
+    let result = observe(
+        &curve,
+        &before,
+        PoolPrice { sqrt_price: u("100000000000000000000000000"), tick: 0 },
+        TS - 1,
+    );
 
     assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
 }
@@ -454,7 +478,7 @@ fn test_observation_floors_the_discount_at_zero(
     let curve = Curve::try_new(token_is_currency0, -168_600).unwrap();
     let before = observation(u(ema), TS - 100, 0, discount);
 
-    let after = observe(&curve, &before, u(spot), 5, TS).unwrap();
+    let after = observe(&curve, &before, PoolPrice { sqrt_price: u(spot), tick: 5 }, TS).unwrap();
 
     assert_eq!(after.ema, u(expected_ema));
     assert_eq!(after.discount, expected_discount);
@@ -467,7 +491,13 @@ fn test_observation_takes_at_most_eight_steps() {
     let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS - 1_000_000, 0, 1_000_000);
 
-    let after = observe(&curve, &before, u("200000000000000000000000000"), 0, TS).unwrap();
+    let after = observe(
+        &curve,
+        &before,
+        PoolPrice { sqrt_price: u("200000000000000000000000000"), tick: 0 },
+        TS,
+    )
+    .unwrap();
 
     assert_eq!(after.ema, u("199609375000000000000000000"));
     assert_eq!(after.discount, 2_143_301_883);
@@ -480,7 +510,13 @@ fn test_observation_decays_the_discount_with_the_elapsed_time() {
     let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(u("100000000000000000000000000"), TS - 2_000, 0, 1_000_000);
 
-    let after = observe(&curve, &before, u("100000000000000000000000000"), 0, TS).unwrap();
+    let after = observe(
+        &curve,
+        &before,
+        PoolPrice { sqrt_price: u("100000000000000000000000000"), tick: 0 },
+        TS,
+    )
+    .unwrap();
 
     assert_eq!(after.ema, before.ema);
     assert_eq!(after.discount, 955_753);
@@ -719,9 +755,11 @@ fn test_token0_sizing_the_library_declines_is_no_fill(
     assert_eq!(size(&token0_fixture(), amount, inventory, max_clip, filled), None);
 }
 
-#[test]
-fn test_token0_fill_price_at_the_curve_end_is_no_fill() {
-    let mut fixture = token0_fixture();
+/// A fill price at the curve end leaves nothing to fill, in either orientation.
+#[rstest]
+#[case::token0(token0_fixture())]
+#[case::mirrored(mirrored_fixture())]
+fn test_fill_price_at_the_curve_end_is_no_fill(#[case] mut fixture: SizingFixture) {
     fixture.fill_price = fixture.curve.curve_end;
 
     assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
@@ -736,15 +774,35 @@ fn test_token0_spot_outside_the_band_is_no_fill() {
     assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
 }
 
-/// A spot below the curve end with the fill price above it: the library returns no fill.
-#[test]
-fn test_token0_spot_beyond_the_curve_end_is_no_fill() {
-    let mut fixture = token0_fixture();
-    fixture.spot = u("17279279613376353790481728");
+/// A spot beyond the curve end, the EMA there too: the library returns no fill. On the token0
+/// pool the spot is below the end with the fill price above it; on the mirrored pool the spot is
+/// above the end with the fixture's fill price.
+#[rstest]
+#[case::token0(
+    token0_fixture(),
+    "17279279613376353790481728",
+    Some("17313872765755485629902110"),
+    "1000000000000000000000000"
+)]
+#[case::mirrored(
+    mirrored_fixture(),
+    "363272983523322200713924948012421",
+    None,
+    "1000000000000000000000000000000"
+)]
+fn test_spot_beyond_the_curve_end_is_no_fill(
+    #[case] mut fixture: SizingFixture,
+    #[case] spot: &str,
+    #[case] fill_price: Option<&str>,
+    #[case] amount: &str,
+) {
+    fixture.spot = u(spot);
     fixture.ema = fixture.spot;
-    fixture.fill_price = u("17313872765755485629902110");
+    if let Some(fill_price) = fill_price {
+        fixture.fill_price = u(fill_price);
+    }
 
-    assert_eq!(size(&fixture, "1000000000000000000000000", HUGE, HUGE, "0"), None);
+    assert_eq!(size(&fixture, amount, HUGE, HUGE, "0"), None);
 }
 
 /// A spot exactly at the curve end, with the fill price on the near side of it: nothing is left
@@ -761,24 +819,6 @@ fn test_spot_at_the_curve_end_is_no_fill(
     fixture.fill_price = u(fill_price);
 
     assert_eq!(size(&fixture, "1000000000000000000000000", HUGE, HUGE, "0"), None);
-}
-
-#[test]
-fn test_mirrored_fill_price_at_the_curve_end_is_no_fill() {
-    let mut fixture = mirrored_fixture();
-    fixture.fill_price = fixture.curve.curve_end;
-
-    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
-}
-
-/// The mirrored spot above the curve end, the EMA there too: the library returns no fill.
-#[test]
-fn test_mirrored_spot_beyond_the_curve_end_is_no_fill() {
-    let mut fixture = mirrored_fixture();
-    fixture.spot = u("363272983523322200713924948012421");
-    fixture.ema = fixture.spot;
-
-    assert_eq!(size(&fixture, "1000000000000000000000000000000", HUGE, HUGE, "0"), None);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -834,38 +874,29 @@ fn test_max_gross_buy_is_the_largest_fitting_input(
 // Quotes through the state
 // ---------------------------------------------------------------------------------------------
 
-/// V4Quoter at block 8660000 (time 1795168252) on pool
-/// 0xc0be17156606216257c638d839c1dd6d43955a565e0b3d6c568d79ebe82cf84c (token0, fee 1%) with the
-/// price at tick -168500 and a discount so deep that X is clamped (no fill) quotes a sell of 1e21
-/// as the AMM alone does: 47658306588964.
-#[test]
-fn test_a_sell_with_a_clamped_fill_price_quotes_the_amm_alone_on_a_token0_pool() {
-    let ema = u(SQRT_M168500);
+/// V4Quoter at block 8660000 (time 1795168252), with the price 100 ticks from the curve end and a
+/// discount so deep that X is clamped (no fill), quotes a sell of 1e21 as the AMM alone does:
+/// pool 0xc0be17156606216257c638d839c1dd6d43955a565e0b3d6c568d79ebe82cf84c (token0, fee 1%) and
+/// pool 0x37a99c5c3fb3f8431e718494fed8746c856de1c6a61f8cd96aa145cf3f1bc9a5 (mirrored, fee 2%).
+#[rstest]
+#[case::token0(true, 10_000, SQRT_M168500, -168_500, "47658306588964")]
+#[case::mirrored(false, 20_000, SQRT_168500, 168_500, "47176909552712")]
+fn test_a_sell_with_a_clamped_fill_price_quotes_the_amm_alone(
+    #[case] token_is_currency0: bool,
+    #[case] fee_pips: u32,
+    #[case] sqrt_price: &str,
+    #[case] tick: i32,
+    #[case] expected: &str,
+) {
     let state = pool_state(
-        true,
-        10_000,
-        observation(ema, TS, -168_500, 0xf000_0000),
+        token_is_currency0,
+        fee_pips,
+        observation(u(sqrt_price), TS, tick, 0xf000_0000),
         bid(U256::from(10u64).pow(U256::from(30))),
     );
-    let pool = pool(state, u(SQRT_M168500), -168_500, TS);
+    let pool = pool(state, u(sqrt_price), tick, TS);
 
-    assert_eq!(sell(&pool, true, "1000000000000000000000").unwrap(), big("47658306588964"));
-}
-
-/// The same on pool 0x37a99c5c3fb3f8431e718494fed8746c856de1c6a61f8cd96aa145cf3f1bc9a5 (mirrored,
-/// fee 2%), the price at tick 168500: 47176909552712.
-#[test]
-fn test_a_sell_with_a_clamped_fill_price_quotes_the_amm_alone_on_a_mirrored_pool() {
-    let ema = u(SQRT_168500);
-    let state = pool_state(
-        false,
-        20_000,
-        observation(ema, TS, 168_500, 0xf000_0000),
-        bid(U256::from(10u64).pow(U256::from(30))),
-    );
-    let pool = pool(state, u(SQRT_168500), 168_500, TS);
-
-    assert_eq!(sell(&pool, false, "1000000000000000000000").unwrap(), big("47176909552712"));
+    assert_eq!(sell(&pool, token_is_currency0, "1000000000000000000000").unwrap(), big(expected));
 }
 
 const PLENTY: &str = "1000000000000000000000000000000";
@@ -875,7 +906,7 @@ const PLENTY: &str = "1000000000000000000000000000000";
 /// 0.2% above its price and `d = 2147483`: the fill price is above the spot, so `T = 0` and a
 /// small sell fills entirely at the spot (the library at block 8660000: 1e18 tokens -> quote
 /// 48139751956, newD 8572794, in either orientation).
-fn funded_pool(token_is_currency0: bool, fee_pips: u32, inventory: &str) -> UniswapV4State {
+fn pool_with_inventory(token_is_currency0: bool, fee_pips: u32, inventory: &str) -> UniswapV4State {
     if token_is_currency0 {
         let state = pool_state(
             true,
@@ -901,7 +932,7 @@ fn funded_pool(token_is_currency0: bool, fee_pips: u32, inventory: &str) -> Unis
 /// `test_the_fee_moves_the_quote_against_the_trader`.
 #[test]
 fn test_a_sell_fills_to_the_curve_end_and_the_amm_takes_the_rest_on_a_token0_pool() {
-    let pool = funded_pool(true, 10_000, PLENTY);
+    let pool = pool_with_inventory(true, 10_000, PLENTY);
 
     assert_eq!(sell(&pool, true, "4988498616072757541375877").unwrap(), big("236558180832118545"));
 }
@@ -911,7 +942,7 @@ fn test_a_sell_fills_to_the_curve_end_and_the_amm_takes_the_rest_on_a_token0_poo
 /// at the spot.
 #[test]
 fn test_a_sell_without_inventory_is_the_amms() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     assert_eq!(sell(&pool, true, "1000000000000000000000").unwrap(), big("47658306588964"));
 }
@@ -984,7 +1015,7 @@ fn before_swap_delta(
 ///   for a fill.
 #[test]
 fn test_a_capped_fill_delta_is_the_tokens_for_the_quote_net_of_its_fee() {
-    let pool = funded_pool(true, 10_000, "1000000000");
+    let pool = pool_with_inventory(true, 10_000, "1000000000");
 
     let (specified, unspecified, gas) =
         before_swap_delta(&pool, true, -1_000_000_000_000_000_000, u(SQRT_M168500), -168_500);
@@ -997,7 +1028,7 @@ fn test_a_capped_fill_delta_is_the_tokens_for_the_quote_net_of_its_fee() {
 /// A buy's beforeSwap takes `ceil(A * f / 1e6)` of the input as a positive specified delta.
 #[test]
 fn test_a_buy_takes_its_fee_in_before_swap() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     let (specified, unspecified, _) =
         before_swap_delta(&pool, false, -67_545_513_342_823_285, u(SQRT_M168500), -168_500);
@@ -1009,7 +1040,7 @@ fn test_a_buy_takes_its_fee_in_before_swap() {
 /// A buy pays the fee out of its input and the AMM swaps the rest; the output is the AMM's.
 #[test]
 fn test_a_buy_quotes_the_amm_on_the_net_input() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     let with_fee = buy(&pool, true, "1010101010101010102").unwrap();
     let without_fee = buy(&amm_only(&pool), true, "1000000000000000000").unwrap();
@@ -1023,7 +1054,7 @@ fn test_a_buy_quotes_the_amm_on_the_net_input() {
 // Refusals
 // ---------------------------------------------------------------------------------------------
 
-fn assert_refused(result: &Result<BigUint, SimulationError>, label: &str) {
+fn assert_refused<T: std::fmt::Debug>(result: &Result<T, SimulationError>, label: &str) {
     assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{label}: {result:?}");
 }
 
@@ -1114,7 +1145,7 @@ fn test_a_pool_at_its_start_price_quotes_buys(#[case] token_is_currency0: bool) 
 #[case::exact_output(I256::ONE)]
 #[case::above_int128(-I256::from_raw(U256::from(u128::MAX >> 1) + U256::from(1)))]
 fn test_before_swap_refuses_what_the_pool_reverts(#[case] amount: I256) {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
     let params = BeforeSwapParameters {
         context: state_context(u(SQRT_M168500), -168_500),
         sender: Address::ZERO,
@@ -1133,7 +1164,7 @@ fn outcome(unfilled: u64) -> SwapOutcome {
 
 #[test]
 fn test_an_unfilled_swap_is_refused() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     assert!(matches!(
         hook_of(&pool).check_swap_outcome(true, &outcome(1)),
@@ -1143,7 +1174,7 @@ fn test_an_unfilled_swap_is_refused() {
 
 #[test]
 fn test_a_swap_filled_in_full_is_accepted() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     assert!(hook_of(&pool)
         .check_swap_outcome(true, &outcome(0))
@@ -1283,8 +1314,9 @@ fn test_limits_of_random_states_settle_and_one_more_unit_is_refused() {
         }
     }
 
-    // Most states have a limit to test: a pool inside the empty range sells nothing.
-    assert!(checked > 600, "only {checked} limits were above 0");
+    // The seed is fixed, so the number of limits above 0 is too: most states have one, while a
+    // pool inside the empty range sells nothing. A change of it means the sampled states changed.
+    assert_eq!(checked, 933);
 }
 
 /// A pool 100 ticks from its curve end, in either orientation.
@@ -1301,7 +1333,7 @@ fn test_limits_settle_and_one_more_unit_is_refused(
     #[case] inventory: &str,
     #[case] is_sell: bool,
 ) {
-    let pool = funded_pool(token_is_currency0, 20_000, inventory);
+    let pool = pool_with_inventory(token_is_currency0, 20_000, inventory);
 
     assert_limit_is_exact(&pool, token_is_currency0, !is_sell);
 }
@@ -1318,7 +1350,7 @@ fn test_limits_settle_and_one_more_unit_is_refused(
 fn test_a_sell_limit_clamped_at_int128_max_settles_and_one_more_unit_is_refused(
     #[case] token_is_currency0: bool,
 ) {
-    let funded = funded_pool(token_is_currency0, 20_000, PLENTY);
+    let funded = pool_with_inventory(token_is_currency0, 20_000, PLENTY);
     let hook = hook_of(&funded);
     let (spot, tick) = funded.price_and_tick();
     let pool = pool_scaled(hook.state, spot, tick, TS, 100_000_000_000_000);
@@ -1356,7 +1388,7 @@ fn test_the_buy_limit_of_a_pool_at_its_start_price_settles(#[case] token_is_curr
 /// discount to the library's `newD`; the pool's price is the AMM's alone.
 #[test]
 fn test_a_fill_updates_the_hook_in_the_returned_state() {
-    let pool = funded_pool(true, 10_000, PLENTY);
+    let pool = pool_with_inventory(true, 10_000, PLENTY);
     let (launched, quote) = tokens(true);
 
     let result = pool
@@ -1465,8 +1497,8 @@ fn test_a_funded_pool_quotes_differently_one_second_later() {
 
 #[test]
 fn test_apply_block_reports_a_change_only_for_a_pool_with_inventory() {
-    let mut funded = funded_pool(true, 10_000, PLENTY);
-    let mut empty = funded_pool(true, 10_000, "0");
+    let mut funded = pool_with_inventory(true, 10_000, PLENTY);
+    let mut empty = pool_with_inventory(true, 10_000, "0");
 
     assert!(!ProtocolSim::apply_block(&mut funded, &BlockContext::new(1, TS)));
     assert!(ProtocolSim::apply_block(&mut funded, &BlockContext::new(2, TS + 1)));
@@ -1491,18 +1523,18 @@ fn test_apply_block_reports_the_start_and_the_end_of_a_refusal_of_every_swap() {
     let one = "1000000000000000000";
     assert_refused(&sell(&pool, true, one), "a sell before the observation");
     assert_refused(&buy(&pool, true, one), "a buy before the observation");
-    // The limits refuse as the quotes do, in both directions.
+    // The limits and the spot price refuse as the quotes do, in both directions.
     let (launched, quote) = tokens(true);
-    assert!(
-        pool.get_limits(quote.address.clone(), launched.address.clone())
-            .is_err(),
-        "a buy limit before the observation"
+    assert_refused(
+        &pool.get_limits(quote.address.clone(), launched.address.clone()),
+        "a buy limit before the observation",
     );
-    assert!(
-        pool.get_limits(launched.address, quote.address)
-            .is_err(),
-        "a sell limit before the observation"
+    assert_refused(
+        &pool.get_limits(launched.address.clone(), quote.address.clone()),
+        "a sell limit before the observation",
     );
+    assert_refused(&pool.spot_price(&launched, &quote), "a spot price before the observation");
+    assert_refused(&pool.spot_price(&quote, &launched), "a spot price before the observation");
 
     assert!(!ProtocolSim::apply_block(&mut pool, &BlockContext::new(1, TS + 5)));
     assert_refused(&sell(&pool, true, one), "a sell at TS + 5");
@@ -1533,8 +1565,8 @@ fn test_the_fee_moves_the_quote_against_the_trader(
     #[case] filled_sell: &str,
 ) {
     let one = "1000000000000000000";
-    let no_inventory = funded_pool(token_is_currency0, fee_pips, "0");
-    let funded = funded_pool(token_is_currency0, fee_pips, PLENTY);
+    let no_inventory = pool_with_inventory(token_is_currency0, fee_pips, "0");
+    let funded = pool_with_inventory(token_is_currency0, fee_pips, PLENTY);
 
     assert_eq!(
         buy(&no_inventory, token_is_currency0, one).unwrap(),
@@ -1563,7 +1595,7 @@ fn test_a_buy_and_a_sell_without_a_fill_quote_the_pinned_amounts(
     #[case] buy_quote: &str,
     #[case] sell_quote: &str,
 ) {
-    let pool = funded_pool(token_is_currency0, 10_000, "0");
+    let pool = pool_with_inventory(token_is_currency0, 10_000, "0");
     let one = "1000000000000000000";
 
     assert_eq!(buy(&pool, token_is_currency0, one).unwrap(), big(buy_quote));
@@ -1613,7 +1645,7 @@ fn test_a_reanchored_discount_beyond_uint32_is_refused() {
     let curve = Curve::try_new(true, -168_600).unwrap();
     let before = observation(U256::from(1), TS - 1, 0, 1_000_000);
 
-    let result = observe(&curve, &before, curve.far_end, 5, TS);
+    let result = observe(&curve, &before, PoolPrice { sqrt_price: curve.far_end, tick: 5 }, TS);
 
     assert!(
         matches!(&result, Err(SimulationError::InvalidInput(message, _))
@@ -1659,7 +1691,7 @@ fn test_a_fills_new_discount_beyond_uint32_is_refused() {
 /// chain.
 #[test]
 fn test_a_whole_input_fill_costs_the_route_the_noop_swap_and_the_hook_frames() {
-    let pool = funded_pool(true, 10_000, PLENTY);
+    let pool = pool_with_inventory(true, 10_000, PLENTY);
     let (launched, quote) = tokens(true);
 
     let result = pool
@@ -1701,7 +1733,7 @@ fn test_attributes_decode_in_the_indexers_formats() {
 #[test]
 fn test_attribute_bytes_of_a_chain_pool_decode() {
     let mut attrs = attributes(&sample_state());
-    attrs.insert(FEE_PIPS_ATTRIBUTE.into(), Bytes::from(10_000u64.to_be_bytes().to_vec()));
+    attrs.insert(FEE_PIPS_ATTRIBUTE.into(), Bytes::from(10_000u64));
     attrs.insert(TOKEN_IS_CURRENCY0_ATTRIBUTE.into(), Bytes::from(vec![0]));
     attrs.insert(START_TICK_ATTRIBUTE.into(), Bytes::from(vec![0xff, 0xfd, 0x6d, 0x68]));
     attrs.insert(
@@ -1733,28 +1765,72 @@ fn test_every_ascend_attribute_is_required() {
 }
 
 #[rstest]
-#[case::fee_of_100_percent(FEE_PIPS_ATTRIBUTE, 1_000_000u64.to_be_bytes().to_vec())]
-#[case::orientation_2(TOKEN_IS_CURRENCY0_ATTRIBUTE, vec![2])]
-#[case::short_tick(START_TICK_ATTRIBUTE, vec![0xff, 0xfd, 0x6d])]
-#[case::tick_beyond_int24(OBSERVED_TICK_ATTRIBUTE, 0x0080_0000i32.to_be_bytes().to_vec())]
-#[case::discount_beyond_uint32(DISCOUNT_ATTRIBUTE, (1u64 << 32).to_be_bytes().to_vec())]
-#[case::short_ema(EMA_SQRT_PRICE_ATTRIBUTE, vec![1; 19])]
-#[case::short_inventory(BID_INVENTORY_ATTRIBUTE, vec![1; 31])]
-#[case::short_clip(BID_MAX_CLIP_ATTRIBUTE, vec![1; 15])]
-#[case::ema_of_0(EMA_SQRT_PRICE_ATTRIBUTE, vec![0; 20])]
-#[case::start_tick_without_a_curve(START_TICK_ATTRIBUTE, 0x007f_ffffi32.to_be_bytes().to_vec())]
-#[case::start_tick_below_int24(START_TICK_ATTRIBUTE, 0xff7f_ffffu32.to_be_bytes().to_vec())]
-#[case::observed_tick_below_int24(OBSERVED_TICK_ATTRIBUTE, 0xff7f_ffffu32.to_be_bytes().to_vec())]
+#[case::fee_of_100_percent(
+    FEE_PIPS_ATTRIBUTE,
+    1_000_000u64.to_be_bytes().to_vec(),
+    "ascend_fee_pips = 1000000 is not a fee below 1e6 pips"
+)]
+#[case::orientation_2(
+    TOKEN_IS_CURRENCY0_ATTRIBUTE,
+    vec![2],
+    "ascend_token_is_currency0 is 0x02, not a one-byte 0 or 1"
+)]
+#[case::short_tick(
+    START_TICK_ATTRIBUTE,
+    vec![0xff, 0xfd, 0x6d],
+    "ascend_start_tick is 3 bytes (0xfffd6d), not the 4-byte big-endian i32"
+)]
+#[case::tick_beyond_int24(
+    OBSERVED_TICK_ATTRIBUTE,
+    0x0080_0000i32.to_be_bytes().to_vec(),
+    "ascend_observed_tick = 8388608 does not fit an int24"
+)]
+#[case::discount_beyond_uint32(
+    DISCOUNT_ATTRIBUTE,
+    (1u64 << 32).to_be_bytes().to_vec(),
+    "ascend_discount = 4294967296 does not fit a uint32"
+)]
+#[case::short_ema(
+    EMA_SQRT_PRICE_ATTRIBUTE,
+    vec![1; 19],
+    "ascend_ema_sqrt_price_x96 is 19 bytes"
+)]
+#[case::short_inventory(BID_INVENTORY_ATTRIBUTE, vec![1; 31], "ascend_bid_inventory is 31 bytes")]
+#[case::short_clip(BID_MAX_CLIP_ATTRIBUTE, vec![1; 15], "ascend_bid_max_clip is 15 bytes")]
+#[case::ema_of_0(
+    EMA_SQRT_PRICE_ATTRIBUTE,
+    vec![0; 20],
+    "ascend_ema_sqrt_price_x96 is 0, which no observation leaves"
+)]
+#[case::start_tick_without_a_curve(
+    START_TICK_ATTRIBUTE,
+    0x007f_ffffi32.to_be_bytes().to_vec(),
+    "ascend_start_tick = 8388607 has no launch curve"
+)]
+#[case::start_tick_below_int24(
+    START_TICK_ATTRIBUTE,
+    0xff7f_ffffu32.to_be_bytes().to_vec(),
+    "ascend_start_tick = -8388609 does not fit an int24"
+)]
+#[case::observed_tick_below_int24(
+    OBSERVED_TICK_ATTRIBUTE,
+    0xff7f_ffffu32.to_be_bytes().to_vec(),
+    "ascend_observed_tick = -8388609 does not fit an int24"
+)]
 fn test_values_the_hook_could_not_have_stored_are_rejected_at_decode(
     #[case] name: &str,
     #[case] value: Vec<u8>,
+    #[case] expected: &str,
 ) {
     let mut attrs = attributes(&sample_state());
     attrs.insert(name.to_string(), Bytes::from(value));
 
     let result = AscendPoolState::from_attributes(&attrs);
 
-    assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))), "{name}: {result:?}");
+    assert!(
+        matches!(&result, Err(InvalidSnapshotError::ValueError(message)) if message.starts_with(expected)),
+        "{name}: {result:?}"
+    );
 }
 
 fn transition(
@@ -1785,7 +1861,7 @@ fn test_a_delta_updates_only_the_attributes_it_carries() {
                     .to_vec(),
             ),
         ),
-        (DISCOUNT_ATTRIBUTE.to_string(), Bytes::from(5u64.to_be_bytes().to_vec())),
+        (DISCOUNT_ATTRIBUTE.to_string(), Bytes::from(5u64)),
         ("liquidity".to_string(), Bytes::from(vec![1])),
     ]
     .into();
@@ -1861,8 +1937,19 @@ fn test_a_bad_delta_leaves_the_handler_unchanged() {
     ]
     .into();
 
-    assert!(transition(&mut handler, updated, &[]).is_err());
-    assert!(transition(&mut handler, HashMap::new(), &[FEE_PIPS_ATTRIBUTE]).is_err());
+    let undecodable = transition(&mut handler, updated, &[]);
+    let deleted = transition(&mut handler, HashMap::new(), &[FEE_PIPS_ATTRIBUTE]);
+
+    assert!(
+        matches!(&undecodable, Err(TransitionError::DecodeError(message))
+            if message.contains("ascend_start_tick is 1 bytes")),
+        "{undecodable:?}"
+    );
+    assert!(
+        matches!(&deleted, Err(TransitionError::DecodeError(message))
+            if message.contains("ascend_fee_pips was deleted")),
+        "{deleted:?}"
+    );
 
     assert_eq!(handler.state, sample_state());
 }
@@ -1893,7 +1980,12 @@ fn test_the_creator_needs_the_blocks_timestamp() {
 
     let no_time = AscendHookCreator.instantiate_hook_handler(snapshot.params(ASCEND_HOOK_ELYSIUM));
 
-    assert!(matches!(no_time, Err(InvalidSnapshotError::ValueError(_))));
+    assert!(
+        matches!(&no_time, Err(InvalidSnapshotError::ValueError(message))
+            if message.contains("need the decoded block's timestamp")),
+        "{:?}",
+        no_time.err()
+    );
 }
 
 #[test]
@@ -1931,31 +2023,26 @@ fn test_the_hook_address_grants_the_swap_callbacks() {
     }
 }
 
+/// The names the decoder requires are exactly the `ascend_*` names the with-hooks indexer writes
+/// (`protocols/substreams/ethereum-uniswap-v4/with-hooks/src/ascend/mod.rs`), and every one of
+/// them is what [`attributes`] encodes a state into.
 #[test]
 fn test_the_attribute_names_are_the_ones_the_indexer_writes() {
-    assert_eq!(
-        POOL_ATTRIBUTES,
-        [
-            "ascend_fee_pips",
-            "ascend_token_is_currency0",
-            "ascend_start_tick",
-            "ascend_ema_sqrt_price_x96",
-            "ascend_ema_updated_at",
-            "ascend_observed_tick",
-            "ascend_discount",
-            "ascend_bid_inventory",
-            "ascend_bid_filled_in_window",
-            "ascend_bid_window_start",
-            "ascend_bid_max_clip",
-        ]
+    let indexer = include_str!(
+        "../../../../../../../../protocols/substreams/ethereum-uniswap-v4/with-hooks/src/ascend/mod.rs"
     );
-    let names: Vec<String> = attributes(&sample_state())
-        .into_keys()
+    let written: std::collections::BTreeSet<&str> = indexer
+        .split('"')
+        .filter(|token| token.starts_with("ascend_") && !token.contains(' '))
         .collect();
-    assert_eq!(names.len(), POOL_ATTRIBUTES.len());
+    let required: std::collections::BTreeSet<&str> = POOL_ATTRIBUTES.into_iter().collect();
+    assert_eq!(required, written);
+
+    let encoded = attributes(&sample_state());
+    assert_eq!(encoded.len(), POOL_ATTRIBUTES.len());
     assert!(POOL_ATTRIBUTES
         .iter()
-        .all(|name| names.contains(&name.to_string())));
+        .all(|name| encoded.contains_key(*name)));
 }
 
 /// An `int24` takes its extremes, which a `uint32` or a wider integer would not tell apart.
@@ -1979,7 +2066,7 @@ fn test_an_observed_tick_at_the_int24_extremes_decodes(#[case] observed: i32) {
 /// swapper's output is 0 and the swap is refused.
 #[test]
 fn test_a_buy_that_leaves_the_swapper_nothing_is_refused() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     assert_refused(&buy(&pool, true, "1"), "buy of 1");
 }
@@ -2039,7 +2126,7 @@ fn test_a_fill_on_a_window_that_ran_out_opens_a_new_one() {
 
 #[rstest]
 fn test_the_hook_states_its_spot_fee_in_both_directions(#[values(true, false)] zero_for_one: bool) {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
 
     let fees = hook_of(&pool)
         .spot_fees(zero_for_one)
@@ -2052,7 +2139,7 @@ fn test_the_hook_states_its_spot_fee_in_both_directions(#[values(true, false)] z
 
 #[test]
 fn test_the_hook_states_its_fee_as_a_fraction() {
-    let pool = funded_pool(true, 10_000, "0");
+    let pool = pool_with_inventory(true, 10_000, "0");
     let hook = hook_of(&pool);
     let params = SwapParams {
         zero_for_one: true,
@@ -2097,7 +2184,7 @@ fn test_each_path_costs_the_gas_measured_on_chain(
     #[case] before: u64,
     #[case] after: u64,
 ) {
-    let pool = funded_pool(true, 10_000, inventory);
+    let pool = pool_with_inventory(true, 10_000, inventory);
     let amount = 1_000_000_000_000_000_000i128;
 
     let (_, _, before_gas) =
@@ -2107,6 +2194,38 @@ fn test_each_path_costs_the_gas_measured_on_chain(
     assert_eq!((before_gas, after_gas), (before, after));
     // 1,689 is the lower median of the four transactions' own PoolManager overhead.
     assert_eq!(hook_of(&pool).pool_manager_call_overhead(), 1_689);
+}
+
+/// A pool whose position holds a tenth of the launch liquidity, which the hook's curve does not
+/// follow, with a discount (29,000,000 of 2^32, about 0.68%) that puts the fill price below the
+/// spot and just above the curve end: the tokens the curve needs to bring the spot to the fill
+/// price are more than the pool takes down to its curve end, so no fill settles within the walk.
+/// The sell limit is then the walk alone, and a sell of it gets no fill.
+#[test]
+fn test_a_sell_limit_with_no_fill_within_the_walk_is_the_walk_alone() {
+    let state = pool_state(
+        true,
+        10_000,
+        observation(u("17418037835569639047771018"), TS, -168_500, 29_000_000),
+        bid(u(PLENTY)),
+    );
+    let pool =
+        pool_with_liquidity(state, u(SQRT_M168500), -168_500, TS, state.curve.liquidity / 10);
+    let walk = pool
+        .amount_in_to_price(true, state.curve.curve_end, None)
+        .unwrap();
+
+    let limit = hook_of(&pool)
+        .max_amount_in(&pool, true)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(limit, walk.amount_in);
+    let at_limit = limit.to_string();
+    assert_eq!(
+        sell(&pool, true, &at_limit).unwrap(),
+        sell_through_the_amm_less_the_fee(&pool, &at_limit)
+    );
 }
 
 /// A token of the real swaps below, at its real Elysium address.
@@ -2170,68 +2289,69 @@ fn quote_chain_swap(
 
 const QUOTE_TOKEN: &str = "0xba876237b0f021a6c6d852d6c26e107997cc5e81";
 
+/// A swap the chain settled: the state just before it, what went in and what the trader was paid.
+struct RealSwap {
+    chain: ChainState,
+    token_in: &'static str,
+    token_out: &'static str,
+    amount_in: &'static str,
+    paid: &'static str,
+}
+
 /// The buy of transaction 0xe607911e... (block 8365605): 67545513342823285 raw units of quote
 /// into pool 0xa138... (the launched token is currency1, fee 1%) paid 3095426913806548396391
 /// raw units of the token. The state is the one at block 8365604.
-#[test]
-fn test_the_real_buy_of_block_8365605_quotes_what_the_chain_paid() {
-    let chain = ChainState {
-        token_is_currency0: false,
-        fee_pips: 10_000,
-        sqrt_price: "17046621566962139112998883225325",
-        tick: 107_432,
-        ema: "17085784019734129912562702400420",
-        ema_updated_at: 1_795_115_699,
-        observed_tick: 107_439,
-        discount: 24_914_504,
-        inventory: "1",
-        filled: "100855758202931709",
-        window_start: 1_795_102_826,
-        max_clip: 11_862_044_423_356_365_469,
-        swap_block_timestamp: 1_795_115_724,
-    };
-
-    let out = quote_chain_swap(
-        &chain,
-        QUOTE_TOKEN,
-        "0xc75f783646739542c1e3680fd64424a0c4088d69",
-        "67545513342823285",
-    );
-
-    assert_eq!(out, big("3095426913806548396391"));
+fn buy_of_block_8365605() -> RealSwap {
+    RealSwap {
+        chain: ChainState {
+            token_is_currency0: false,
+            fee_pips: 10_000,
+            sqrt_price: "17046621566962139112998883225325",
+            tick: 107_432,
+            ema: "17085784019734129912562702400420",
+            ema_updated_at: 1_795_115_699,
+            observed_tick: 107_439,
+            discount: 24_914_504,
+            inventory: "1",
+            filled: "100855758202931709",
+            window_start: 1_795_102_826,
+            max_clip: 11_862_044_423_356_365_469,
+            swap_block_timestamp: 1_795_115_724,
+        },
+        token_in: QUOTE_TOKEN,
+        token_out: "0xc75f783646739542c1e3680fd64424a0c4088d69",
+        amount_in: "67545513342823285",
+        paid: "3095426913806548396391",
+    }
 }
 
 /// The sell of transaction 0xfc0a9737... (block 8365306) on the same pool: 54254357347547482959
-/// raw units of the token paid 1157967377186068 raw units of quote. The bid holds 1 unit of
-/// quote and the stored observed tick (107451) is one below the pool's (107452), so the hook
-/// fills nothing and the AMM's output less the 1% fee is paid. The state is the one at block
-/// 8365305.
-#[test]
-fn test_the_real_sell_without_a_fill_of_block_8365306_quotes_what_the_chain_paid() {
-    let chain = ChainState {
-        token_is_currency0: false,
-        fee_pips: 10_000,
-        sqrt_price: "17063419976435549609351934167077",
-        tick: 107_452,
-        ema: "17087038351741979698894234667038",
-        ema_updated_at: 1_795_115_666,
-        observed_tick: 107_451,
-        discount: 24_619_835,
-        inventory: "1",
-        filled: "100855758202931709",
-        window_start: 1_795_102_826,
-        max_clip: 11_862_044_423_356_365_469,
-        swap_block_timestamp: 1_795_115_667,
-    };
-
-    let out = quote_chain_swap(
-        &chain,
-        "0xc75f783646739542c1e3680fd64424a0c4088d69",
-        QUOTE_TOKEN,
-        "54254357347547482959",
-    );
-
-    assert_eq!(out, big("1157967377186068"));
+/// raw units of the token paid 1157967377186068 raw units of quote. The observation is one second
+/// old, so it re-observes the pool's tick (107452) and the hook considers a fill; the input does
+/// not reach the fill price, so the library returns none (the bid of 1 would decline it too) and
+/// the AMM's output less the 1% fee is paid. The state is the one at block 8365305.
+fn sell_without_a_fill_of_block_8365306() -> RealSwap {
+    RealSwap {
+        chain: ChainState {
+            token_is_currency0: false,
+            fee_pips: 10_000,
+            sqrt_price: "17063419976435549609351934167077",
+            tick: 107_452,
+            ema: "17087038351741979698894234667038",
+            ema_updated_at: 1_795_115_666,
+            observed_tick: 107_451,
+            discount: 24_619_835,
+            inventory: "1",
+            filled: "100855758202931709",
+            window_start: 1_795_102_826,
+            max_clip: 11_862_044_423_356_365_469,
+            swap_block_timestamp: 1_795_115_667,
+        },
+        token_in: "0xc75f783646739542c1e3680fd64424a0c4088d69",
+        token_out: QUOTE_TOKEN,
+        amount_in: "54254357347547482959",
+        paid: "1157967377186068",
+    }
 }
 
 /// The sell of transaction 0xd2cce086... (block 8351072) on pool 0xc0be... (the launched token is
@@ -2239,61 +2359,65 @@ fn test_the_real_sell_without_a_fill_of_block_8365306_quotes_what_the_chain_paid
 /// raw units of quote, 0xd1067f45eda23a of it from a bid fill that left 1 unit of the
 /// inventory. The state is the one at block 8351071, last observed 969 s before the swap's
 /// block, so the fill depends on that block's timestamp.
-#[test]
-fn test_the_real_fill_of_block_8351072_quotes_what_the_chain_paid() {
-    let chain = ChainState {
-        token_is_currency0: true,
-        fee_pips: 10_000,
-        sqrt_price: "262446428426916609831050000",
-        tick: -114_207,
-        ema: "262428976457584592784190568",
-        ema_updated_at: 1_795_112_640,
-        observed_tick: -114_208,
-        discount: 45_871_853,
-        inventory: "58835413836341819",
-        filled: "45903045785268993",
-        window_start: 1_795_057_476,
-        max_clip: 11_862_044_423_356_365_469,
-        swap_block_timestamp: 1_795_113_609,
-    };
-
-    let out = quote_chain_swap(
-        &chain,
-        "0x8df4f39d592de2aaee15838b265c2392d19a4128",
-        QUOTE_TOKEN,
-        "5488508576537824572920531",
-    );
-
-    assert_eq!(out, big("55046848802575745640"));
+fn fill_of_block_8351072() -> RealSwap {
+    RealSwap {
+        chain: ChainState {
+            token_is_currency0: true,
+            fee_pips: 10_000,
+            sqrt_price: "262446428426916609831050000",
+            tick: -114_207,
+            ema: "262428976457584592784190568",
+            ema_updated_at: 1_795_112_640,
+            observed_tick: -114_208,
+            discount: 45_871_853,
+            inventory: "58835413836341819",
+            filled: "45903045785268993",
+            window_start: 1_795_057_476,
+            max_clip: 11_862_044_423_356_365_469,
+            swap_block_timestamp: 1_795_113_609,
+        },
+        token_in: "0x8df4f39d592de2aaee15838b265c2392d19a4128",
+        token_out: QUOTE_TOKEN,
+        amount_in: "5488508576537824572920531",
+        paid: "55046848802575745640",
+    }
 }
 
 /// The fill of transaction 0x22de467d... (block 8350326) on the mirrored pool 0x37a9... (the
 /// launched token is currency1, fee 2%): 10407358261468789814437414 raw units of the token paid
 /// 226771144826141240567 raw units of quote. The state is the one at block 8350325.
-#[test]
-fn test_the_real_mirrored_fill_of_block_8350326_quotes_what_the_chain_paid() {
-    let chain = ChainState {
-        token_is_currency0: false,
-        fee_pips: 20_000,
-        sqrt_price: "15022007281697289604796549426400",
-        tick: 104_904,
-        ema: "15004746514433361125146405163812",
-        ema_updated_at: 1_795_112_527,
-        observed_tick: 104_884,
-        discount: 91_427_704,
-        inventory: "189785977084469053",
-        filled: "936239546818708979",
-        window_start: 1_795_058_182,
-        max_clip: 11_862_044_423_356_365_469,
-        swap_block_timestamp: 1_795_113_532,
-    };
+fn mirrored_fill_of_block_8350326() -> RealSwap {
+    RealSwap {
+        chain: ChainState {
+            token_is_currency0: false,
+            fee_pips: 20_000,
+            sqrt_price: "15022007281697289604796549426400",
+            tick: 104_904,
+            ema: "15004746514433361125146405163812",
+            ema_updated_at: 1_795_112_527,
+            observed_tick: 104_884,
+            discount: 91_427_704,
+            inventory: "189785977084469053",
+            filled: "936239546818708979",
+            window_start: 1_795_058_182,
+            max_clip: 11_862_044_423_356_365_469,
+            swap_block_timestamp: 1_795_113_532,
+        },
+        token_in: "0xf0394d1e25be152c9746791f5da3b287743f0e52",
+        token_out: QUOTE_TOKEN,
+        amount_in: "10407358261468789814437414",
+        paid: "226771144826141240567",
+    }
+}
 
-    let out = quote_chain_swap(
-        &chain,
-        "0xf0394d1e25be152c9746791f5da3b287743f0e52",
-        QUOTE_TOKEN,
-        "10407358261468789814437414",
-    );
+/// Each real swap quotes, on the state the chain held just before it, what the chain paid.
+#[rstest]
+#[case::buy_of_block_8365605(buy_of_block_8365605())]
+#[case::sell_without_a_fill_of_block_8365306(sell_without_a_fill_of_block_8365306())]
+#[case::fill_of_block_8351072(fill_of_block_8351072())]
+#[case::mirrored_fill_of_block_8350326(mirrored_fill_of_block_8350326())]
+fn test_a_real_swap_quotes_what_the_chain_paid(#[case] swap: RealSwap) {
+    let out = quote_chain_swap(&swap.chain, swap.token_in, swap.token_out, swap.amount_in);
 
-    assert_eq!(out, big("226771144826141240567"));
+    assert_eq!(out, big(swap.paid));
 }

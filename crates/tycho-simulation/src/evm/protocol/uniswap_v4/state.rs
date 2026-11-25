@@ -318,8 +318,7 @@ impl UniswapV4State {
         })
     }
 
-    /// The pool's square-root price and current tick, which a hook that bounds limits reads in
-    /// [`HookHandler::max_amount_in`].
+    /// The pool's square-root price and current tick.
     pub(crate) fn price_and_tick(&self) -> (U256, i32) {
         (self.sqrt_price, self.tick.value())
     }

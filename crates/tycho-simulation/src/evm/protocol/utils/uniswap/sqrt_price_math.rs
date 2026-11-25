@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// One in a square-root price's fixed point (2^96).
-pub(crate) const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
+pub const Q96: U256 = U256::from_limbs([0, 4294967296, 0, 0]);
 const Q192: U256 = U256::from_limbs([0, 0, 0, 1]); // 2^192
 const RESOLUTION: U256 = U256::from_limbs([96, 0, 0, 0]);
 const U160_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX, 4294967295, 0]);

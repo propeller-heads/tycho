@@ -201,18 +201,25 @@ fn band(x: U256) -> Result<U256, SimulationError> {
     mul_div_floor(x, U256::from(BAND_NUMERATOR), U256::from(BAND_DENOMINATOR))
 }
 
+/// A pool's square-root price and the tick it is in, which the hook reads together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PoolPrice {
+    pub(super) sqrt_price: U256,
+    pub(super) tick: i32,
+}
+
 /// The observation `beforeSwap` runs on every swap that reaches the hook, at the pool's current
-/// `spot` and `tick`, at the block timestamp `now`.
+/// `price`, at the block timestamp `now`.
 ///
 /// Nothing changes when `dt == 0`. A `now` before the last observation refuses: the hook's
 /// subtraction would revert.
 pub(super) fn observe(
     curve: &Curve,
     observation: &Observation,
-    spot: U256,
-    tick: i32,
+    price: PoolPrice,
     now: u64,
 ) -> Result<Observation, SimulationError> {
+    let PoolPrice { sqrt_price: spot, tick } = price;
     if observation.is_ahead_of(now) {
         return Err(refuse(format!(
             "the block timestamp {now} is before the last observation {}",

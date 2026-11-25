@@ -7,7 +7,7 @@
 //! Substreams package (`elysium-uniswap-v4-with-hooks.yaml`) decodes the hook's `PoolData` and
 //! `Bid` storage writes into the `ascend_*` state attributes [`AscendPoolState`] reads. The hook
 //! has no verified source: the model follows its bytecode and traces recorded on Elysium, and
-//! `math.rs` ports the hook's arithmetic and its math library's.
+//! ports the hook's arithmetic and its math library's.
 pub mod hook_handler;
 pub mod hook_handler_creator;
 mod math;

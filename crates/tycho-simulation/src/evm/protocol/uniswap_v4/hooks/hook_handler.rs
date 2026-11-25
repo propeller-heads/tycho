@@ -227,7 +227,12 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// accepted the result, before `after_swap`; a swap refused later returns its error and drops
     /// the handler. `None` keeps the hook as it is, which is the default.
     ///
-    /// A handler that keeps the default writes no storage of its own on a swap.
+    /// Errors are classified as for [`HookHandler::before_swap`]: an `InvalidInput` refuses this
+    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`.
+    ///
+    /// The generic VM handler keeps the default although the hook bytecode it runs may write the
+    /// hook's storage on a swap: those writes reach `after_swap` of the same swap only, so the next
+    /// swap of a route through the same pool reads the hook's storage from before the route.
     fn handler_after_swap(
         &self,
         _context: &StateContext,
