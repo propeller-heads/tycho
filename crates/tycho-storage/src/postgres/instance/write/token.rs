@@ -116,7 +116,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(stored(&mut conn).await.len(), 1);
+        let stored = stored(&mut conn).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].symbol, "A");
     }
 
     #[tokio::test]
