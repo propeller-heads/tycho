@@ -687,7 +687,7 @@ mod tests {
     use super::*;
     use crate::{
         modules::{
-            store_plugin_beacons::plugin_beacon_writes,
+            store_plugin_beacons::{beacon_pool_writes, plugin_beacon_writes},
             store_pool_plugins::{pool_plugin_writes, StoreWrite},
         },
         pb::algebra::integral::v1::events::{pool_event, PoolEvent},
@@ -795,12 +795,53 @@ mod tests {
         }
     }
 
+    /// A list store over a map, as [`MapStore`] is a string store.
+    #[derive(Default)]
+    struct ListMapStore {
+        committed: HashMap<String, Vec<String>>,
+        block: Vec<StoreWrite>,
+    }
+
+    impl ListStore for ListMapStore {
+        fn list_at(&self, ordinal: u64, key: &str) -> Vec<String> {
+            let mut list = self
+                .committed
+                .get(key)
+                .cloned()
+                .unwrap_or_default();
+            list.extend(
+                self.block
+                    .iter()
+                    .filter(|write| write.ordinal <= ordinal && write.key == key)
+                    .map(|write| write.value.clone()),
+            );
+            list
+        }
+    }
+
+    impl ListMapStore {
+        fn commit(&mut self) {
+            for write in self.block.drain(..) {
+                self.committed
+                    .entry(write.key)
+                    .or_default()
+                    .push(write.value);
+            }
+        }
+    }
+
     const POOL: [u8; 20] = [0x11; 20];
     const PLUGIN_X: [u8; 20] = [0xa1; 20];
     const PLUGIN_Y: [u8; 20] = [0xa2; 20];
     const NO_PLUGIN: [u8; 20] = [0; 20];
     const BEACON: [u8; 20] = [0x44; 20];
     const IMPLEMENTATION: [u8; 20] = [0x65; 20];
+    const OTHER_BEACON: [u8; 20] = [0x45; 20];
+    const NEW_IMPLEMENTATION: [u8; 20] = [0x66; 20];
+    const BEACON_UPGRADED_TOPIC: [u8; 32] =
+        hex_literal::hex!("1cf3b03a6cf19fa2baba4df148e9dcabedea7f8a5c07840e207e5c089be95d3e");
+    const UPGRADED_TOPIC: [u8; 32] =
+        hex_literal::hex!("bc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b");
     const BASE_FEE_500: [u8; 32] =
         hex_literal::hex!("000000000000000000000000000001f400010001000000000000000000000000");
     const BASE_FEE_800: [u8; 32] =
@@ -829,13 +870,7 @@ mod tests {
         }
         create.logs = vec![eth::Log {
             address: plugin.to_vec(),
-            topics: vec![
-                hex_literal::hex!(
-                    "1cf3b03a6cf19fa2baba4df148e9dcabedea7f8a5c07840e207e5c089be95d3e"
-                )
-                .to_vec(),
-                address_word(&BEACON),
-            ],
+            topics: vec![BEACON_UPGRADED_TOPIC.to_vec(), address_word(&BEACON)],
             ordinal: 1,
             ..Default::default()
         }];
@@ -847,6 +882,57 @@ mod tests {
             ..Default::default()
         };
         vec![create, read_beacon]
+    }
+
+    /// A transaction in which `plugin`, named earlier, writes its fee configuration.
+    fn reconfigures(plugin: [u8; 20], fee_word: [u8; 32]) -> Tx {
+        let fee_slot = modules_named("dynamic_fee").expect("dynamic_fee is indexed")[0].fields[0]
+            .slot()
+            .to_vec();
+        let mut set_fee = call(CallType::Call, plugin, false);
+        set_fee.storage_changes = vec![eth::StorageChange {
+            address: plugin.to_vec(),
+            key: fee_slot,
+            new_value: fee_word.to_vec(),
+            ordinal: 2,
+            ..Default::default()
+        }];
+        Tx { calls: vec![set_fee], names: Vec::new() }
+    }
+
+    /// A transaction in which `plugin`, named earlier, is bound to [`OTHER_BEACON`]. With
+    /// `implementation`, the trace shows the plugin reading it from that beacon.
+    fn rebinds(plugin: [u8; 20], implementation: Option<[u8; 20]>) -> Tx {
+        let mut rebind = call(CallType::Call, plugin, false);
+        rebind.logs = vec![eth::Log {
+            address: plugin.to_vec(),
+            topics: vec![BEACON_UPGRADED_TOPIC.to_vec(), address_word(&OTHER_BEACON)],
+            ordinal: 1,
+            ..Default::default()
+        }];
+        let mut calls = vec![rebind];
+        if let Some(implementation) = implementation {
+            calls.push(eth::Call {
+                caller: plugin.to_vec(),
+                address: OTHER_BEACON.to_vec(),
+                input: hex_literal::hex!("5c60da1b").to_vec(),
+                return_data: address_word(&implementation),
+                ..Default::default()
+            });
+        }
+        Tx { calls, names: Vec::new() }
+    }
+
+    /// A transaction in which `beacon` is upgraded to `implementation`.
+    fn upgrades(beacon: [u8; 20], implementation: [u8; 20]) -> Tx {
+        let mut upgrade = call(CallType::Call, beacon, false);
+        upgrade.logs = vec![eth::Log {
+            address: beacon.to_vec(),
+            topics: vec![UPGRADED_TOPIC.to_vec(), address_word(&implementation)],
+            ordinal: 1,
+            ..Default::default()
+        }];
+        Tx { calls: vec![upgrade], names: Vec::new() }
     }
 
     /// One transaction: its calls and the plugins [`POOL`] names in it, in order.
@@ -868,6 +954,7 @@ mod tests {
     struct Indexed {
         pool_plugins: MapStore,
         plugin_beacons: MapStore,
+        beacon_pools: ListMapStore,
         rows: HashMap<String, Vec<u8>>,
     }
 
@@ -895,6 +982,7 @@ mod tests {
                 let trace = eth::TransactionTrace {
                     index,
                     hash: vec![u8::try_from(index).expect("few transactions")],
+                    status: eth::TransactionTraceStatus::Succeeded.into(),
                     calls,
                     begin_ordinal: begin,
                     end_ordinal: begin + ORDINALS_PER_TX - 1,
@@ -914,35 +1002,58 @@ mod tests {
             let events = Events { pool_events };
             self.pool_plugins.block = pool_plugin_writes(&events);
             self.plugin_beacons.block = plugin_beacon_writes(&block, &events, &self.pool_plugins);
+            self.beacon_pools.block = beacon_pool_writes(&block, &self.pool_plugins);
 
-            let component_id = POOL.to_vec().to_hex();
-            for trace in &block.transaction_traces {
-                let transaction: Transaction = trace.into();
-                let mut builder = TransactionChangesBuilder::new(&transaction);
-                for event in &events.pool_events {
-                    let Some(Typ::Plugin(named)) = &event.typ else { continue };
-                    if event.transaction.as_ref() != Some(&transaction) {
-                        continue;
-                    }
-                    let change = naming_change(
-                        trace,
-                        &event.pool_address,
-                        &named.plugin,
-                        event.log_ordinal,
-                        &modules,
-                        &self.pool_plugins,
-                        &self.plugin_beacons,
-                    );
-                    if let Some(change) = change {
-                        assert_eq!(
-                            change.followed,
-                            followed_plugin_at(&self.plugin_beacons, event.log_ordinal, &POOL)
-                                .is_some(),
-                            "the store and the map disagree on whether the pool follows its plugin"
-                        );
-                        apply_naming_change(&mut builder, &component_id, change);
-                    }
-                }
+            let mut builders: HashMap<u32, TransactionChangesBuilder> = HashMap::new();
+            let mut namings = HashSet::new();
+            for event in &events.pool_events {
+                let Some(Typ::Plugin(named)) = &event.typ else { continue };
+                let transaction = event
+                    .transaction
+                    .as_ref()
+                    .expect("the event has a transaction");
+                let index = u32::try_from(transaction.index).expect("few transactions");
+                name_plugin(
+                    builders
+                        .entry(index)
+                        .or_insert_with(|| TransactionChangesBuilder::new(transaction)),
+                    block
+                        .transaction_traces
+                        .iter()
+                        .find(|trace| trace.index == index),
+                    &event.pool_address,
+                    &named.plugin,
+                    event.log_ordinal,
+                    &modules,
+                    &self.pool_plugins,
+                    &self.plugin_beacons,
+                    &mut namings,
+                );
+            }
+            let later_changes = followed_plugin_changes(
+                &block,
+                &modules,
+                &namings,
+                &self.pool_plugins,
+                &self.plugin_beacons,
+                &self.beacon_pools,
+            );
+            for change in later_changes {
+                assert_eq!(change.pool, POOL);
+                let transaction: Transaction = change.trace.into();
+                builders
+                    .entry(change.trace.index)
+                    .or_insert_with(|| TransactionChangesBuilder::new(&transaction))
+                    .add_entity_change(&EntityChanges {
+                        component_id: change.pool.to_hex(),
+                        attributes: change.attributes,
+                    });
+            }
+
+            for (_, builder) in builders
+                .into_iter()
+                .sorted_by_key(|(index, _)| *index)
+            {
                 let attributes = builder
                     .build()
                     .into_iter()
@@ -973,6 +1084,7 @@ mod tests {
             }
             self.pool_plugins.commit();
             self.plugin_beacons.commit();
+            self.beacon_pools.commit();
             self
         }
 
@@ -1144,6 +1256,121 @@ mod tests {
 
         assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
         assert_eq!(indexed.base_fee(), [0x03, 0x20]);
+    }
+
+    #[test]
+    fn followed_plugin_that_writes_its_configuration_updates_the_pool() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![reconfigures(PLUGIN_X, BASE_FEE_800)]);
+
+        assert_eq!(indexed.row_names(), FOLLOWED_PROXY);
+        assert_eq!(indexed.base_fee(), [0x03, 0x20]);
+    }
+
+    #[test]
+    fn plugin_that_is_not_followed_writes_nothing_to_the_pool() {
+        let mut indexed = Indexed::default();
+
+        // Named but created earlier, so the pool is paused and carries none of its fields.
+        indexed
+            .block(vec![names(PLUGIN_X)])
+            .block(vec![
+                reconfigures(PLUGIN_X, BASE_FEE_800),
+                rebinds(PLUGIN_X, Some(NEW_IMPLEMENTATION)),
+            ]);
+        assert_eq!(indexed.row_names(), ["paused"]);
+
+        // A plugin the pool no longer names.
+        indexed
+            .block(vec![creates_and_names(PLUGIN_Y, true, BASE_FEE_500)])
+            .block(vec![reconfigures(PLUGIN_X, BASE_FEE_800)]);
+        assert_eq!(indexed.base_fee(), [0x01, 0xf4]);
+    }
+
+    #[test]
+    fn beacon_upgrade_updates_the_implementation_of_the_pool_bound_to_it() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![upgrades(BEACON, NEW_IMPLEMENTATION)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PROXY);
+        assert_eq!(indexed.rows["plugin_impl"], NEW_IMPLEMENTATION);
+
+        // A beacon no plugin is bound to changes nothing.
+        indexed.block(vec![upgrades(OTHER_BEACON, IMPLEMENTATION)]);
+        assert_eq!(indexed.rows["plugin_impl"], NEW_IMPLEMENTATION);
+    }
+
+    #[test]
+    fn plugin_bound_to_another_beacon_takes_that_beacons_implementation() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![rebinds(PLUGIN_X, Some(NEW_IMPLEMENTATION))]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PROXY);
+        assert_eq!(indexed.rows["plugin_impl"], NEW_IMPLEMENTATION);
+
+        // The beacon it left no longer reaches the pool; the one it moved to does.
+        indexed.block(vec![upgrades(BEACON, [0x67; 20])]);
+        assert_eq!(indexed.rows["plugin_impl"], NEW_IMPLEMENTATION);
+        indexed.block(vec![upgrades(OTHER_BEACON, [0x68; 20])]);
+        assert_eq!(indexed.rows["plugin_impl"], [0x68; 20]);
+    }
+
+    #[test]
+    fn rebind_whose_implementation_is_not_in_the_trace_deletes_it_until_another_plugin() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![rebinds(PLUGIN_X, None)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
+
+        // Nothing brings it back or deletes it twice: not an upgrade of the new beacon, not a
+        // second rebind without the read.
+        indexed
+            .block(vec![upgrades(OTHER_BEACON, NEW_IMPLEMENTATION)])
+            .block(vec![rebinds(PLUGIN_X, None)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
+
+        // A switch away deletes only what is left, and a new plugin has its own.
+        indexed.block(vec![creates_and_names(PLUGIN_Y, true, BASE_FEE_800)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PROXY);
+        assert_eq!(indexed.rows["plugin_impl"], IMPLEMENTATION);
+    }
+
+    #[test]
+    fn rebind_that_shows_the_implementation_again_creates_it() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![rebinds(PLUGIN_X, None)])
+            .block(vec![rebinds(PLUGIN_X, Some(NEW_IMPLEMENTATION))]);
+
+        assert_eq!(indexed.row_names(), FOLLOWED_PROXY);
+        assert_eq!(indexed.rows["plugin_impl"], NEW_IMPLEMENTATION);
+    }
+
+    #[test]
+    fn upgrade_and_reconfiguration_in_the_block_of_a_switch_reach_only_the_plugin_followed() {
+        let mut indexed = Indexed::default();
+
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500)])
+            .block(vec![
+                reconfigures(PLUGIN_X, BASE_FEE_800),
+                creates_and_names(PLUGIN_Y, false, BASE_FEE_500),
+                upgrades(BEACON, NEW_IMPLEMENTATION),
+            ]);
+
+        assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
+        assert_eq!(indexed.base_fee(), [0x01, 0xf4]);
     }
 
     #[test]
