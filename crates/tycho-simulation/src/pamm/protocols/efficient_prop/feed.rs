@@ -30,9 +30,9 @@ use crate::{
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
         telemetry::{self, PollOutcome},
         EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BID_VALID_UNTIL_MS_ATTRIBUTE,
-        EXPECTED_GAS_ATTRIBUTE, FALLBACK_PROTOCOL_SYSTEM, GAS_LIMIT_ATTRIBUTE,
-        PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER,
-        TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
+        ETHEREUM_PRICE_SOURCES, EXPECTED_GAS_ATTRIBUTE, FALLBACK_PROTOCOL_SYSTEM,
+        GAS_LIMIT_ATTRIBUTE, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
+        QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -113,6 +113,23 @@ pub struct EfficientPropFeedBuilder {
 }
 
 impl EfficientPropFeedBuilder {
+    /// A feed of the front deployed on Ethereum ([`EfficientPropDeployment::ethereum`]), with
+    /// the price sources of its deployment approved ([`ETHEREUM_PRICE_SOURCES`]): `book_config`
+    /// is Ethereum's and `rpc_url` an Ethereum node. What is left to set is where the next
+    /// block's state comes from ([`Self::state_urls`], one URL at least) and whose listings to
+    /// serve ([`Self::with_approved_desks`]): without the first the feed does not build, and
+    /// without the second it serves nothing.
+    ///
+    /// Approving a price source is a judgement of its code ([`Self::approved_price_sources`]):
+    /// these four were read for it at the deployment. A caller that judges otherwise replaces the
+    /// set, or starts from [`Self::new`]. A credit listing, the first pool's wstETH/WETH among
+    /// them, is served only where [`Self::credit_listing`] names its gas, which is its pool's
+    /// settings' and no constant.
+    pub fn ethereum(book_config: BookFeedConfig, rpc_url: String) -> Self {
+        Self::new(book_config, rpc_url, EfficientPropDeployment::ethereum())
+            .approved_price_sources(ETHEREUM_PRICE_SOURCES)
+    }
+
     pub fn new(
         book_config: BookFeedConfig,
         rpc_url: String,
@@ -228,6 +245,9 @@ impl EfficientPropFeedBuilder {
     /// brings no desk in. An answer is refused whole where its status is not 200, it is for
     /// another chain, over 64 KiB or 1,024 desks, names the zero address, or is stamped zero,
     /// before the one held or ahead of the clock.
+    ///
+    /// No such list is served at any URL yet. Until one is, give the desks to
+    /// [`Self::with_approved_desks`]: they are the whole set, and they rule.
     pub fn with_approved_desks_url(mut self, url: impl Into<String>) -> Self {
         self.approved_desks_url = Some(url.into());
         self
@@ -7970,6 +7990,76 @@ mod tests {
             assert_eq!(unrecorded.load(Ordering::SeqCst), 0, "calls the recording does not answer");
             assert_eq!(first.len(), poll.books);
             assert_eq!(second, first);
+        }
+
+        /// The Ethereum preset is the deployment the recorded polls were made against, value for
+        /// value, and the price sources it approves are theirs: nothing in it is written down
+        /// anywhere but there.
+        #[rstest]
+        #[case::no_update(include_str!("testdata/ethereum_fork_26482068.json"))]
+        #[case::served(include_str!("testdata/ethereum_fork_26479480_served.json"))]
+        #[case::served_with_the_credit_listing(include_str!(
+            "testdata/ethereum_fork_26479480_credit.json"
+        ))]
+        fn the_ethereum_preset_is_the_recorded_deployment(#[case] recording: &str) {
+            let poll: RecordedEthereumPoll = serde_json::from_str(recording).unwrap();
+
+            assert_eq!(EfficientPropDeployment::ethereum(), poll.deployment());
+            assert_eq!(poll.price_sources, ETHEREUM_PRICE_SOURCES);
+        }
+
+        /// A feed built from the preset needs a node, one state URL and its approved desks, and
+        /// no more: it replays the recorded poll that serves four listings, every call answered
+        /// from the recording, and publishes its four books.
+        #[tokio::test]
+        async fn a_feed_from_the_ethereum_preset_needs_a_node_a_state_url_and_its_desks() {
+            let poll: RecordedEthereumPoll =
+                serde_json::from_str(include_str!("testdata/ethereum_fork_26479480_served.json"))
+                    .unwrap();
+            let node = RecordedNode::new(&poll.rpc);
+            let unrecorded = node.unrecorded();
+            let node = node.spawn().await;
+            let state = spawn_state_server(poll.maps[0].clone()).await;
+            assert_eq!(poll.maps.len(), 1);
+            let tokens: HashMap<Bytes, Token> = poll
+                .tokens
+                .iter()
+                .map(|&(address, decimals)| {
+                    let address = bytes(address);
+                    let token = Token::new(
+                        &address,
+                        "TKN",
+                        decimals,
+                        0,
+                        &[Some(10_000)],
+                        Chain::Ethereum,
+                        100,
+                    );
+                    (address, token)
+                })
+                .collect();
+            let config = BookFeedConfig {
+                chain: Chain::Ethereum,
+                tokens: Arc::new(tokens),
+                min_tvl_usd: 0.0,
+            };
+
+            let mut source = EfficientPropFeedBuilder::ethereum(config, node.url())
+                .state_urls([state.url()])
+                .with_approved_desks(
+                    poll.listings
+                        .iter()
+                        .map(|listing| bytes(listing.quote_contract)),
+                )
+                .build()
+                .unwrap()
+                .source;
+            let now_ms = poll.now_ms;
+            source.clock = Arc::new(move || now_ms);
+            let books = source.fetch().await.unwrap().books;
+
+            assert_eq!(unrecorded.load(Ordering::SeqCst), 0, "calls the recording does not answer");
+            assert_eq!((books.len(), poll.books), (4, 4));
         }
 
         /// The source a recorded Ethereum read was made by, polling `node_url` and the state

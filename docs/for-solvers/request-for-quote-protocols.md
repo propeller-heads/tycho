@@ -312,7 +312,9 @@ These values were measured on Base at block 53,545,000. The venue owner can chan
 {% hint style="warning" %}
 **Efficient PropAMM: approved makers and gas**
 
-Anyone can reserve a listing and post quotes to it, so a feed serves a listing only where its maker's desk contract is approved: `EfficientPropFeedBuilder::with_approved_desks`, or the list at `with_approved_desks_url` (`{"chainId": 1, "updatedAt": <Unix seconds>, "desks": ["0x…"]}`), which replaces that set while its last read is under ten minutes old. A feed built with neither serves nothing, and a list that cannot be read brings no desk in.
+Anyone can reserve a listing and post quotes to it, so a feed serves a listing only where its maker's desk contract is approved: `EfficientPropFeedBuilder::with_approved_desks`, or the list at `with_approved_desks_url` (`{"chainId": 1, "updatedAt": <Unix seconds>, "desks": ["0x…"]}`), which replaces that set while its last read is under ten minutes old. A feed built with neither serves nothing, and a list that cannot be read brings no desk in. No such list is served at any URL yet: until one is, the desks you give `with_approved_desks` are the whole set, and they rule.
+
+`EfficientPropFeedBuilder::ethereum` holds the front deployed on Ethereum, its listing-door factory, its quote layout, its desk contracts' code hash, the implementation the feed was checked against and the deployment's four price sources, so you set a node, one state URL (`state_urls`) and your approved desks.
 
 On Ethereum a swap is charged only gas measured on its listing's own pair, never above what the fill costs its transaction: the feed holds figures for wstETH/WETH, wstETH/USDC, wstETH/USDT and USDT/USDC, and serves any other listing only where `credit_listing` names it with gas measured on it.
 {% endhint %}

@@ -194,7 +194,11 @@ for any protocol indexed by Tycho.
     bytes and its record's and desk's words, the implementation. Whatever a door's calls are
     newly derived from joins that key; a node that names no block hash is asked every door
   - the quote layout, front, factory, desk contract code hash and allow-list are builder
-    arguments (`EfficientPropDeployment`), never constants; `with_door_code_hash` pins the doors'
+    arguments (`EfficientPropDeployment`); the one place that writes them down is
+    `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings hold it
+    (a test holds the two equal), which `EfficientPropFeedBuilder::ethereum` builds on with the
+    deployment's price sources. No other code reads them as constants; `with_door_code_hash`
+    pins the doors'
   - Base's path is held whole but `build` refuses Base (`BASE_NOT_SERVED`) until its gas is
     measured on the deployment Base runs; its offline tests build past the refusal (`build_path`)
   Its tests run on `test_support.rs` (a fake node, and a node replaying `testdata/`'s polls

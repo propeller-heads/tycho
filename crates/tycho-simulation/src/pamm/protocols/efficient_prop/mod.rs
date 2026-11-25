@@ -527,7 +527,9 @@
 //! maker's desk contract is approved: one of [`EfficientPropFeedBuilder::with_approved_desks`]'s,
 //! or of the list read from [`EfficientPropFeedBuilder::with_approved_desks_url`] while that
 //! read is fresh (ten minutes; past it the builder's desks rule less those the list left out, so
-//! a URL that fails brings no desk in). With neither, nothing is served. Listing ids are the
+//! a URL that fails brings no desk in). With neither, nothing is served. No such list is served
+//! at any URL yet: until one is, the desks given to the builder are the whole set, and they rule.
+//! Listing ids are the
 //! front's own, handed out in order to every pool and desk, and each poll scans `doorView` past
 //! the highest id holding a pool, served or not, so an approved maker's new listing is found at
 //! the next poll, whatever listings were reserved before it. Its door is the factory's CREATE2
@@ -598,10 +600,13 @@
 //! door's quote means. The listing records' settings, controls, session and source words are read
 //! from the front's storage at their layout in those implementations. The factory and the front are
 //! configured by the caller ([`EfficientPropDeployment`]), with the desk contract creation code
-//! hash on Ethereum; the feed checks that the factory serves that front and, on Ethereum, that the
-//! front's `CELL_CODEHASH` is the configured one: a mismatch ends the feed, so nothing is listed
-//! that cannot be simulated.
+//! hash on Ethereum ([`EfficientPropDeployment::ethereum`] holds the deployed front's, and
+//! [`EfficientPropFeedBuilder::ethereum`] builds on it, so a caller there sets a node, a state URL
+//! and its approved desks); the feed checks that the factory serves that front and, on Ethereum,
+//! that the front's `CELL_CODEHASH` is the configured one: a mismatch ends the feed, so nothing is
+//! listed that cannot be simulated.
 
+use alloy::primitives::{address, b256};
 use tycho_common::Bytes;
 
 mod desks;
@@ -690,6 +695,50 @@ pub struct EfficientPropDeployment {
     /// The front implementations this integration was checked against. A poll that finds the
     /// proxy on any other ends the feed.
     pub implementations: Vec<Bytes>,
+}
+
+/// The ids of the front's price sources at its deployment on Ethereum: the price contracts of the
+/// four pairs listed there, which [`EfficientPropFeedBuilder::ethereum`] approves.
+pub const ETHEREUM_PRICE_SOURCES: [u32; 4] = [1, 2, 3, 4];
+
+impl EfficientPropDeployment {
+    /// The front deployed on Ethereum, as this integration was checked against it and as its
+    /// recorded polls hold it (`testdata/`): the front proxy
+    /// `0x0000000000403aeB66691063CC2fD42E71d6AcD6`, its listing-door factory
+    /// `0x39eD9993449C96503f6a629cCD2BB5F132D7cc93`, the quote layout
+    /// [`QUOTE_LAYOUT_BUILDER`], the desk contracts' creation code hash and the one
+    /// implementation checked, `0x48C6efab497EeC8501483Ceb23B6623f626d8371`.
+    ///
+    /// The feed still checks each of them against the chain: the factory's `FRONT`, the front's
+    /// `CELL_CODEHASH`, and at every poll the implementation the proxy runs, so after an upgrade
+    /// of the front a feed built from this ends rather than quote an implementation it was not
+    /// checked against, until a release names the new one. A caller that has checked another
+    /// implementation itself builds its own [`EfficientPropDeployment`].
+    pub fn ethereum() -> Self {
+        Self {
+            quote_layout: Some(QUOTE_LAYOUT_BUILDER.to_string()),
+            front: Bytes::from(
+                address!("0000000000403aeB66691063CC2fD42E71d6AcD6")
+                    .0
+                    .to_vec(),
+            ),
+            factory: Bytes::from(
+                address!("39eD9993449C96503f6a629cCD2BB5F132D7cc93")
+                    .0
+                    .to_vec(),
+            ),
+            cell_codehash: Some(Bytes::from(
+                b256!("b4f7512e65eee793ac5939d62b8383d8544eb1ca850c276fd706e97a0b7938de")
+                    .0
+                    .to_vec(),
+            )),
+            implementations: vec![Bytes::from(
+                address!("48C6efab497EeC8501483Ceb23B6623f626d8371")
+                    .0
+                    .to_vec(),
+            )],
+        }
+    }
 }
 
 #[cfg(test)]
