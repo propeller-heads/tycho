@@ -294,7 +294,7 @@ async fn round_trip_catalog_and_components(
     assert_eq!(balance.new_balance, bytes(5));
 
     diesel::insert_into(tycho::component_balance_history::table)
-        .values(ComponentBalanceHistory {
+        .values(NewComponentBalanceHistory {
             instance_id,
             protocol_component_id: component_id,
             token: bytes(0xee),
@@ -304,7 +304,6 @@ async fn round_trip_catalog_and_components(
             valid_from: ts - Duration::seconds(12),
             valid_to: ts,
             tx_index: 1,
-            inserted_ts: ts,
         })
         .execute(conn)
         .await
