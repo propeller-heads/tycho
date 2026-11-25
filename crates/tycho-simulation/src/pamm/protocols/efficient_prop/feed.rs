@@ -434,9 +434,10 @@ impl EfficientPropFeedBuilder {
     ///
     /// A poll is three HTTP requests (four where a print lapses within the book's life), but a node
     /// meters each JSON-RPC call inside them. For `n` listings, each side sampled at about 16 sizes
-    /// (32 door quotes a listing), a poll makes:
-    /// - `2 + 5n` `eth_getStorageAt` calls: the front's implementation slot twice, and each
-    ///   listing's settings, controls, session, source and live-source words;
+    /// (32 door quotes a listing; a side on a depth post adds one for each rung boundary its walk
+    /// crosses, at most ten, twenty where a standing word may refill it), a poll makes:
+    /// - `2 + 7n` `eth_getStorageAt` calls: the front's implementation slot twice, and each
+    ///   listing's settings, controls, session, source, live-source and two board words;
     /// - `eth_call`s of `Multicall3.aggregate3`: `ceil((n + 24) / 48)` reading the listings,
     ///   `ceil(5n / 48)` asking each door's front, listing, base and fills, and for the quotes
     ///   `ceil(32n / 48)` at the read's block and `ceil(32n / 45)` under each block override: the
@@ -5041,6 +5042,154 @@ mod tests {
 
         fn samples(state: &EfficientPropState, direction: SwapDirection) -> Vec<(U256, U256)> {
             state.side(direction).points().to_vec()
+        }
+
+        /// A WETH/USDC listing on Ethereum whose sides walk depth posts of six and five rungs,
+        /// each rung's price worse than the one before: the bid's 0.07, 0.12, 0.14, 0.19 and
+        /// 0.19 WETH, then the rest of 1 WETH, from 0 to 400 ppm off its price, the ask's 250,
+        /// 400, 600 and 800 USDC, then the rest of 3,010 USDC, from 0 to 260 ppm. Where `post`,
+        /// the depth words hold each as a post (board units of 1e12 wei and of 1 atom of USDC,
+        /// size units of 1e4 and 1e6 board units), each side's fill memory `filled` hundredths
+        /// of it, tagged with another post's nonce where `other_post`; else they hold no post
+        /// the reader reads. The bid's pool holds `custody` WETH's worth where given.
+        fn on_depth_posts(
+            post: bool,
+            filled: u64,
+            other_post: bool,
+            custody: Option<U256>,
+        ) -> FakeListing {
+            use crate::pamm::protocols::efficient_prop::test_support::FakePost;
+            let counted = if other_post { 0 } else { filled };
+            let side =
+                |side: FakeSide, rungs: &[(u64, u64)], top: u64, exps: (u8, u8), unit: u64| {
+                    FakeSide {
+                        rungs: rungs
+                            .iter()
+                            .map(|&(size, offset)| (U256::from(size), offset))
+                            .collect(),
+                        max_in: U256::from(top - top / 100 * counted),
+                        post: post.then_some(FakePost {
+                            board_exp: exps.0,
+                            size_exp: exps.1,
+                            filled: top / 100 * filled / unit,
+                            other_post,
+                        }),
+                        ..side
+                    }
+                };
+            let mut bid = side(
+                FakeSide::weth_bid(),
+                &[
+                    (70_000_000_000_000_000, 0),
+                    (120_000_000_000_000_000, 40),
+                    (140_000_000_000_000_000, 90),
+                    (190_000_000_000_000_000, 160),
+                    (190_000_000_000_000_000, 250),
+                    (0, 400),
+                ],
+                1_000_000_000_000_000_000,
+                (12, 4),
+                1_000_000_000_000,
+            );
+            bid.custody_most = custody;
+            let ask = side(
+                FakeSide::weth_ask(),
+                &[
+                    (250_000_000, 0),
+                    (400_000_000, 30),
+                    (600_000_000, 80),
+                    (800_000_000, 150),
+                    (0, 260),
+                ],
+                3_010_000_000,
+                (0, 6),
+                1,
+            );
+            FakeListing { bid, ask, ..FakeListing::ethereum(1) }
+        }
+
+        /// The most the book quotes under the door of `listing` on one side, the bid's where
+        /// `bid`, at every size from its least sample to its largest: 2,001 sizes evenly apart
+        /// and each sample and the atoms beside it. It panics where the book quotes over the
+        /// door, or refuses a size the door fills.
+        fn most_under(state: &EfficientPropState, listing: &FakeListing, bid: bool) -> BigUint {
+            use crate::evm::protocol::u256_num::u256_to_biguint;
+            let direction =
+                if bid { SwapDirection::BaseToQuote } else { SwapDirection::QuoteToBase };
+            let (token_in, token_out) = if bid {
+                (&state.base_token, &state.quote_token)
+            } else {
+                (&state.quote_token, &state.base_token)
+            };
+            let (address_in, address_out) =
+                if bid { (listing.base, listing.quote) } else { (listing.quote, listing.base) };
+            let points = samples(state, direction);
+            let (least, most) = (points[0].0, points[points.len() - 1].0);
+            let steps = U256::from(2_000u64);
+            let mut sizes: Vec<U256> = (0..=2_000u64)
+                .map(|step| least + (most - least) * U256::from(step) / steps)
+                .collect();
+            for &(size, _) in &points {
+                sizes.extend([size - U256::from(1u8), size, size + U256::from(1u8)]);
+            }
+            let mut worst = BigUint::ZERO;
+            for size in sizes
+                .into_iter()
+                .filter(|size| (least..=most).contains(size))
+            {
+                let book = state
+                    .get_amount_out(u256_to_biguint(size), token_in, token_out)
+                    .unwrap_or_else(|error| panic!("the book refuses {size}: {error}"))
+                    .amount;
+                let door = u256_to_biguint(
+                    listing
+                        .quote_at(address_in, address_out, size, ETHEREUM_NEXT_TIME * 1000)
+                        .unwrap(),
+                );
+                assert!(book <= door, "at {size} the book quotes {book} over the door's {door}");
+                worst = worst.max(door - book);
+            }
+            worst
+        }
+
+        /// A side on a depth post is asked at every rung boundary its walk crosses below the most
+        /// it fills, so the book quotes within a unit of the door at every size from its least
+        /// sample to the most the pool's own balance fills: on posts walked from their start,
+        /// from inside a rung their fill memory left them in, from a memory tagged with another
+        /// post (which the front counts as none), and on a pool whose custody fills the bid only
+        /// to 0.6 WETH, past which nothing is quoted. Read as no post, the same rungs are sampled
+        /// on the grid alone, and the book quotes tens of thousands of units under the door.
+        #[rstest]
+        #[case::from_the_posts_start(0, false, None)]
+        #[case::from_inside_a_rung(25, false, None)]
+        #[case::from_another_posts_memory(25, true, None)]
+        #[case::on_custody_under_the_post(0, false, Some(600_000_000_000_000_000))]
+        #[tokio::test]
+        async fn a_side_on_a_depth_post_is_quoted_within_a_unit_of_its_door(
+            #[case] filled: u64,
+            #[case] other_post: bool,
+            #[case] custody: Option<u64>,
+        ) {
+            let custody = custody.map(U256::from);
+            let listing = on_depth_posts(true, filled, other_post, custody);
+
+            let books = ethereum_books(vec![listing.clone()], vec![next_map(&[(1, false)])]).await;
+
+            let state = state_for(&books, &listing);
+            let top = samples(state, SwapDirection::BaseToQuote)
+                .last()
+                .unwrap()
+                .0;
+            assert_eq!(top, custody.unwrap_or(listing.bid.max_in));
+            for bid in [true, false] {
+                let worst = most_under(state, &listing, bid);
+                assert!(worst <= BigUint::from(1u8), "bid {bid}: {worst} units under the door");
+            }
+
+            let grid = on_depth_posts(false, filled, other_post, custody);
+            let books = ethereum_books(vec![grid.clone()], vec![next_map(&[(1, false)])]).await;
+            let worst = most_under(state_for(&books, &grid), &grid, true);
+            assert!(worst > BigUint::from(10_000u32), "the grid alone is {worst} units under");
         }
 
         /// A maker's update for the next block makes its listing quotable: the book quotes the

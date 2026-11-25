@@ -41,13 +41,21 @@
 //! ([`EfficientPropFeedBuilder::rungs`] sizes in all), and below those at quarterings down to the
 //! listing's least fill, read from its settings in the front's storage (of the quote token: the
 //! ask's input, and for the bid the input that pays it at the full fill's average price), and at
-//! that least fill itself. A size the door refuses (a revert: under the listing's minimum, past its
-//! depth, a stale word) is no sample, never a zero price. The state quotes exactly at a sampled
-//! size, along the chord between two neighbouring samples rounded down, and refuses sizes below the
-//! smallest sample or above the largest. The chord is a lower bound on the fill wherever the output
-//! is concave in the input, as the front's rung ladder and its per-fill fee make it; where the
-//! samples show otherwise by more than the door's rounding down of each output explains, the state
-//! quotes the smaller sample's output for that stretch instead.
+//! that least fill itself. A side whose depth words hold a post the front walks (rungs from the
+//! side's fill memory, each at one price, the output floored once) is also asked at every rung
+//! boundary the walk crosses below the most it fills, from the fill memory its board word holds,
+//! and from the post's start too where its controls let a standing word refill it: between two
+//! boundaries the door's output is one line floored once, so where the rungs' prices worsen along
+//! the walk the book quotes within a unit of the door at every size from its least sample to the
+//! most it fills. The boundaries are sizes, never prices: a post read wrong moves a sample, never
+//! a quote above the door's. A credit listing is sampled on the grid alone. A size the door refuses
+//! (a revert: under the listing's minimum, past its depth, a stale word) is no sample, never a zero
+//! price. The state quotes exactly at a sampled size, along the chord between two neighbouring
+//! samples rounded down, and refuses sizes below the smallest sample or above the largest. The
+//! chord is a lower bound on the fill wherever the output is concave in the input, as the front's
+//! rung ladder and its per-fill fee make it; where the samples show otherwise by more than the
+//! door's rounding down of each output explains, the state quotes the smaller sample's output for
+//! that stretch instead.
 //!
 //! A listing's levels may age within a book's life: the front cuts them for the word's age past the
 //! listing's grace (each side's drift, and a widening with the root of the age), and by a premium

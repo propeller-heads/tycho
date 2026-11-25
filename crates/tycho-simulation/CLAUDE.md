@@ -192,7 +192,9 @@ for any protocol indexed by Tycho.
     (`CreditGas::most_before_refunds`), not from a charge
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
-    `ask_valid_until_ms`
+    `ask_valid_until_ms`. A side on a depth post is also asked at each rung boundary its walk
+    crosses (`RungPost`, record words 8 and 9 for the fill memory): sizes only, never prices; a
+    credit listing keeps the grid
   - a poll asks no door only where everything the doors' answers are read from equals the last
     sampled poll's (`SampledOn` in `reader.rs`): the head's hash and number, the next block's
     number and second, the whole state override sent, each listing taken with its `doorView`

@@ -338,6 +338,41 @@ pub(super) struct FakeSide {
     /// pool's preview does not fill the maker's whole depth. A probe it fills whole is answered
     /// whole.
     pub custody_most: Option<U256>,
+    /// Where set, the side's rungs as a depth post of `doorView`'s layout, with its fill memory:
+    /// the walk then starts where that memory left it. `None` is a depth word of no post the
+    /// reader reads.
+    pub post: Option<FakePost>,
+}
+
+/// A side's rungs as the front stores a depth post (see `RungPost` in `reader.rs`), and the
+/// side's board word.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FakePost {
+    /// The board exponent of the side's input token: input atoms per board unit, as a power of
+    /// ten.
+    pub board_exp: u8,
+    /// The post's size exponent: board units per size unit, as a power of ten.
+    pub size_exp: u8,
+    /// Board units the side has filled from the post.
+    pub filled: u64,
+    /// Whether the board word's tag is another post's: the front then counts none of it filled.
+    pub other_post: bool,
+}
+
+impl FakePost {
+    /// Input atoms a size unit counts.
+    pub(super) fn scale(&self) -> U256 {
+        u(10).pow(U256::from(self.board_exp + self.size_exp))
+    }
+
+    /// Where the walk starts, in input atoms from the post's start.
+    pub(super) fn cursor(&self) -> U256 {
+        if self.other_post {
+            U256::ZERO
+        } else {
+            U256::from(self.filled) * u(10).pow(U256::from(self.board_exp))
+        }
+    }
 }
 
 impl FakeSide {
@@ -351,6 +386,7 @@ impl FakeSide {
             rungs: Vec::new(),
             credit_route: None,
             custody_most: None,
+            post: None,
         }
     }
 
@@ -364,6 +400,7 @@ impl FakeSide {
             rungs: Vec::new(),
             credit_route: None,
             custody_most: None,
+            post: None,
         }
     }
 
@@ -376,6 +413,7 @@ impl FakeSide {
             rungs: Vec::new(),
             credit_route: None,
             custody_most: None,
+            post: None,
         }
     }
 
@@ -422,13 +460,61 @@ impl FakeSide {
         if self.rungs.is_empty() {
             return Some(amount_in * self.price * kept / (self.per * ppm));
         }
+        // From where the side's fill memory left the walk, each rung at its one price, the last
+        // to the side's end.
         let (mut left, mut out) = (amount_in, U256::ZERO);
+        let mut at = self
+            .post
+            .map_or(U256::ZERO, |post| post.cursor());
+        let mut start = U256::ZERO;
         for (i, &(size, offset)) in self.rungs.iter().enumerate() {
-            let take = if i + 1 == self.rungs.len() { left } else { left.min(size) };
-            out += take * self.price * (ppm - U256::from(offset)) * kept / (ppm * ppm);
-            left -= take;
+            let end = if i + 1 == self.rungs.len() { U256::MAX } else { start + size };
+            if end > at {
+                let take = left.min(end - at);
+                out += take * self.price * (ppm - U256::from(offset)) * kept / (ppm * ppm);
+                left -= take;
+                at += take;
+            }
+            start = end;
         }
         Some(out / self.per)
+    }
+
+    /// The side's depth words, `[first, second]`, holding its post where it has one: version 1,
+    /// its size exponent, and each rung's cumulative size from the post's start in size units,
+    /// the last rung's reaching the side's end. Bits a post sets are only those.
+    fn post_words(&self) -> [U256; 2] {
+        let Some(post) = self.post else { return [U256::ZERO; 2] };
+        let scale = post.scale();
+        let mut words = [U256::from(1u8) | (U256::from(post.size_exp) << 112), U256::ZERO];
+        let mut cumulative = U256::ZERO;
+        for (j, &(size, offset)) in self.rungs.iter().enumerate() {
+            let end = if j + 1 == self.rungs.len() {
+                (post.cursor() + self.max_in).div_ceil(scale)
+            } else {
+                cumulative += size;
+                assert!((cumulative % scale).is_zero(), "a rung of whole size units");
+                cumulative / scale
+            };
+            assert!(end <= U256::from(u16::MAX), "a rung size of 16 bits");
+            let rung = end | (U256::from(offset) << 16);
+            if j < 3 {
+                words[0] |= rung << (120 + 36 * j);
+            } else {
+                words[0] |= U256::from(1u8) << 118;
+                words[1] |= rung << (36 * (j - 3));
+            }
+        }
+        words
+    }
+
+    /// The side's board word, its depth's nonce `nonce_ms`: the post's fill memory, tagged with
+    /// that nonce unless it is another post's; zero for a side with no post.
+    fn board(&self, nonce_ms: u64) -> U256 {
+        self.post.map_or(U256::ZERO, |post| {
+            let tag = if post.other_post { nonce_ms + 1 } else { nonce_ms };
+            (U256::from(tag) << 4) | (U256::from(post.filled) << 52)
+        })
     }
 
     /// The output the front's plan gives `amount_in` on the credit route, which reads no
@@ -740,10 +826,17 @@ impl FakeListing {
             (U256::from(expires) << 60) | (U256::from(nonce) << 12) | (U256::from(drift) << 92)
         };
         let aging = &self.aging;
+        let ([bid0, bid1], [ask0, ask1]) = (self.bid.post_words(), self.ask.post_words());
         // The pair word's bit 8 is set where the base is the pair's lower address, its token 0,
-        // and its bit 15 on an asset-module pair.
+        // and its bit 15 on an asset-module pair; its board exponents are the posts'.
+        let board_exp = |side: &FakeSide| {
+            side.post
+                .map_or(0u8, |post| post.board_exp)
+        };
         let pair_word = if self.base == token0 { U256::from(1u16 << 8) } else { U256::ZERO } |
-            if self.asset_module { U256::from(1u16 << 15) } else { U256::ZERO };
+            if self.asset_module { U256::from(1u16 << 15) } else { U256::ZERO } |
+            (U256::from(board_exp(&self.bid)) << 112) |
+            (U256::from(board_exp(&self.ask)) << 120);
         DoorView {
             pairWord: pair_word,
             token0,
@@ -755,10 +848,10 @@ impl FakeListing {
                 .unwrap_or(if self.base_index == 0 { 1 } else { 0 }),
             word,
             depth: [
-                depth(self.bid_depth_expires, aging.bid_nonce_ms, aging.bid_drift),
-                U256::ZERO,
-                depth(self.ask_depth_expires, aging.ask_nonce_ms, aging.ask_drift),
-                U256::ZERO,
+                depth(self.bid_depth_expires, aging.bid_nonce_ms, aging.bid_drift) | bid0,
+                bid1,
+                depth(self.ask_depth_expires, aging.ask_nonce_ms, aging.ask_drift) | ask0,
+                ask1,
             ],
             creditMode: self.credit_mode,
             tipCap: self.tip_cap,
@@ -1510,6 +1603,18 @@ impl FakeNode {
                         Some(listing.aging.controls())
                     } else if slot == record_word_slot(listing.id, 13) {
                         Some(U256::from(listing.closed_after_s))
+                    } else if slot == record_word_slot(listing.id, 8) {
+                        Some(
+                            listing
+                                .bid
+                                .board(listing.aging.bid_nonce_ms),
+                        )
+                    } else if slot == record_word_slot(listing.id, 9) {
+                        Some(
+                            listing
+                                .ask
+                                .board(listing.aging.ask_nonce_ms),
+                        )
                     } else if slot == record_word_slot(listing.id, 2) {
                         // The live source's copy: its lane (on a chain whose builders land
                         // makers' updates, the primary's id, whose price contract the front
@@ -2214,6 +2319,17 @@ pub(super) fn left_out_of_a_poll(
 }
 
 /// The key a call is recorded under: its method and its parameters.
+/// Whether `slot` is a board word of a listing's record (words 8 and 9), of any id a recording
+/// scans.
+fn is_board_slot(slot: &Value) -> bool {
+    let Ok(slot) = serde_json::from_value::<U256>(slot.clone()) else { return false };
+    (1..=256u32).any(|id| {
+        [8, 9]
+            .iter()
+            .any(|word| record_word_slot(id, *word) == slot)
+    })
+}
+
 fn call_key(method: &Value, params: &Value) -> String {
     serde_json::json!([method, params]).to_string()
 }
@@ -2225,7 +2341,10 @@ fn call_key(method: &Value, params: &Value) -> String {
 /// `eth_getBlockByNumber`: the node answers it as a node that names no block, with no header,
 /// unless a test gives it a hash to name every block it is asked of by number (see
 /// [`Self::naming_blocks`]); the latest block it never names, so its listings are read at the
-/// latest block as recorded. Either way that read is not counted as unrecorded. A request naming
+/// latest block as recorded. Either way that read is not counted as unrecorded. Nor are the
+/// sides' board words (record words 8 and 9), which the recordings were also made before: the node
+/// answers them with an error, as one that lost them, and each side is sampled on its grid
+/// alone, as before a poll read them. A request naming
 /// its block by that hash (EIP-1898) is answered as the recorded request naming it by the number
 /// the header was last asked of: the same request of the same block, as a node holding one block of
 /// that number answers it.
@@ -2368,6 +2487,13 @@ impl RecordedNode {
                 );
                 *self.named.lock().unwrap() = Some(request["params"][0].clone());
                 return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": header });
+            }
+            if request["method"] == "eth_getStorageAt" && is_board_slot(&request["params"][1]) {
+                return serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32000, "message": "missing trie node" },
+                });
             }
             match self
                 .answers

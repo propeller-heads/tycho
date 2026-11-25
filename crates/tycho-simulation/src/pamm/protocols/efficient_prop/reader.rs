@@ -107,6 +107,26 @@ const TIED_SCOPES: u64 = 8;
 /// A listing record's controls word, read for how its levels age.
 const CONTROLS_WORD: u8 = 7;
 
+/// A listing record's board words, the fill memory of each side's depth post: the base in's, then
+/// the quote in's (see [`RungPost`]).
+const BOARD_WORDS: [u8; 2] = [8, 9];
+
+/// The controls word's flag that lets a standing word refill a side, its walk then starting from
+/// the post's first rung (`PropAMMWords.CTL_REFILL`).
+const CONTROLS_REFILL_BIT: usize = 66;
+
+/// The version of a depth post whose rungs [`RungPost`] reads: a depth word's bits 0-3.
+const DEPTH_VERSION: u64 = 1;
+
+/// The most rungs a side's depth post holds, three in its first depth word and seven in its
+/// second (`PropAMMFront.MAX_RUNGS`).
+const MAX_RUNGS: usize = 10;
+
+/// The largest size exponent a depth post holds, and board exponent a pair word holds, that the
+/// front writes: a post past either is not one [`RungPost`] reads.
+const MAX_DEPTH_EXP: u64 = 30;
+const MAX_BOARD_EXP: u64 = 16;
+
 /// A listing record's session word, read for a SESSION listing's closed phase: its `closedAfter`,
 /// bits 0-15, is zero where it has none (`PropAMMWords`, session word).
 const SESSION_WORD: u8 = 13;
@@ -372,12 +392,102 @@ pub(super) struct Hold {
 }
 
 /// What one side of a listing reads from its depth word: when it runs out, how fast its levels
-/// drift (ppm a second) and the depth's nonce (ms).
+/// drift (ppm a second) and the depth's nonce (ms), and its rungs where its words hold a post of
+/// the layout [`RungPost`] reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SideView {
     runs_out_ms: u64,
     drift: u64,
     nonce_ms: u64,
+    post: Option<RungPost>,
+}
+
+/// A side's depth post, as the front walks it (`PropAMMFront._walk`): at most ten rungs from the
+/// side's fill memory, each filled at one price, the output floored once. Between two rung
+/// boundaries the output is therefore one straight line of the input floored, and a side sampled
+/// at every boundary its walk crosses is quoted within a unit of the door wherever the rungs'
+/// prices worsen along the walk, as a maker's post does: the chord between two samples on one
+/// line is under it by less than the floor of either end (see `ladder.rs`).
+///
+/// The boundaries are only sizes the door is asked at, never prices: a post read wrong moves a
+/// sample, and every quote is still the door's own answer or a floored chord between two of
+/// them. The depth words are `doorView`'s, the bid's `depth[0..2]` and the ask's `depth[2..4]`:
+/// the version (bits 0-3), the size exponent (bits 112-117), whether the second word holds rungs
+/// (bit 118), and each rung's cumulative size in its low 16 of 36 bits, three from bit 120 of the
+/// first word and seven from bit 0 of the second. A size counts 10 to the size exponent board
+/// units, and a board unit 10 to the side's board exponent of its input token (the pair word's
+/// bits 112-119 for the base in, 120-127 for the quote in). The fill memory is the side's board
+/// word ([`BOARD_WORDS`]): the board units filled (bits 52-91), which count only while its tag
+/// (bits 4-51) is the depth's nonce.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RungPost {
+    /// Each rung's cumulative size, in size units, zero past the last.
+    sizes: [u16; MAX_RUNGS],
+    /// Input atoms a size unit counts.
+    scale: U256,
+    /// Input atoms a board unit counts.
+    unit: U256,
+}
+
+impl RungPost {
+    /// The post of a side whose depth words are `first` and `second`, on a pair whose word is
+    /// `pair_word`, the bid's where `bid`: `None` where the words are not of the layout read
+    /// here, a depth word of another version or an exponent past the front's.
+    fn of(first: U256, second: U256, pair_word: U256, bid: bool) -> Option<Self> {
+        let size_exp = field(first, 112, 6);
+        let unit_exp = field(pair_word, if bid { 112 } else { 120 }, 8);
+        if field(first, 0, 4) != DEPTH_VERSION ||
+            size_exp > MAX_DEPTH_EXP ||
+            unit_exp > MAX_BOARD_EXP
+        {
+            return None;
+        }
+        let ten = U256::from(10u8);
+        let unit = ten.pow(U256::from(unit_exp));
+        let mut sizes = [0u16; MAX_RUNGS];
+        for (j, size) in sizes.iter_mut().enumerate() {
+            if j == 3 && !first.bit(118) {
+                break;
+            }
+            let rung = if j < 3 {
+                field(first, 120 + 36 * j, 36)
+            } else {
+                field(second, 36 * (j - 3), 36)
+            };
+            *size = u16::try_from(rung & 0xffff).unwrap_or_default();
+            if *size == 0 {
+                break;
+            }
+        }
+        Some(Self { sizes, scale: ten.pow(U256::from(size_exp)) * unit, unit })
+    }
+
+    /// The inputs at which a walk from a fill memory of `filled` board units leaves each rung it
+    /// reaches, ascending: none of a rung the memory has used up, nor of one whose size does not
+    /// rise past the one before it.
+    fn edges(&self, filled: U256) -> Vec<U256> {
+        let cursor = filled.saturating_mul(self.unit);
+        let mut edges: Vec<U256> = Vec::new();
+        for size in self
+            .sizes
+            .iter()
+            .take_while(|size| **size != 0)
+        {
+            let end = U256::from(*size).saturating_mul(self.scale);
+            if end <= cursor {
+                continue;
+            }
+            let edge = end - cursor;
+            if edges
+                .last()
+                .is_some_and(|last| edge <= *last)
+            {
+                continue;
+            }
+            edges.push(edge);
+        }
+        edges
+    }
 }
 
 /// A listing the front has reserved, and where its door would be.
@@ -451,6 +561,30 @@ struct OpenSide {
     /// The input that read asked for (see [`probe`]).
     probe: U256,
     view: SideView,
+    /// Its board word at the read's block, where the node answered it ([`BOARD_WORDS`]).
+    board: Option<U256>,
+}
+
+impl OpenSide {
+    /// The inputs at which the front's walk leaves each rung of its depth post, from its fill
+    /// memory at the read and, where its standing word may refill it (`refills`), from the
+    /// post's start too, since a word in the next block's state may ask the refill: none where
+    /// its post or its board word is not read (see [`RungPost`]).
+    fn rung_edges(&self, refills: bool) -> Vec<U256> {
+        let (Some(post), Some(board)) = (self.view.post, self.board) else {
+            return Vec::new();
+        };
+        let filled = if field(board, 4, 48) == self.view.nonce_ms {
+            U256::from(field(board, 52, 40))
+        } else {
+            U256::ZERO
+        };
+        let mut edges = post.edges(filled);
+        if refills && !filled.is_zero() {
+            edges.extend(post.edges(U256::ZERO));
+        }
+        edges
+    }
 }
 
 /// The largest of a credit listing's first asks its door answered on one side, and what it pays
@@ -465,6 +599,10 @@ struct Reach {
 
 /// A door that answered as one of the front's, with the most each side fills.
 #[derive(Debug, Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent read of the listing's words"
+)]
 struct OpenDoor {
     listing: u32,
     door: Address,
@@ -485,6 +623,8 @@ struct OpenDoor {
     asset_module: bool,
     /// Where its pair sits in its pool.
     pair: PairPlace,
+    /// Whether its controls let a standing word refill a side ([`CONTROLS_REFILL_BIT`]).
+    refills: bool,
     /// The least fill, of the quote token: the bid's output or the ask's input.
     min_fill: U256,
     tip_cap_wei: Option<U256>,
@@ -2492,12 +2632,16 @@ impl DoorsReader {
             // `doorView`'s depth words by role: the bid's (the base in) first, then the ask's. Each
             // is paired with its fills once the door names its base (`open_doors`): `baseIndex` is
             // the base's place in the pool, not in the pair.
-            let side = |depth: U256| SideView {
-                runs_out_ms: runs_out_ms(view.word, depth, &timing),
-                drift: field(depth, 92, 20),
-                nonce_ms: field(depth, 12, 48),
+            let side = |first: U256, second: U256, bid: bool| SideView {
+                runs_out_ms: runs_out_ms(view.word, first, &timing),
+                drift: field(first, 92, 20),
+                nonce_ms: field(first, 12, 48),
+                post: RungPost::of(first, second, view.pairWord, bid),
             };
-            let (bid, ask) = (side(view.depth[0]), side(view.depth[2]));
+            let (bid, ask) = (
+                side(view.depth[0], view.depth[1], true),
+                side(view.depth[2], view.depth[3], false),
+            );
             found.push(Listing {
                 id,
                 view: keccak256(&answer.returnData),
@@ -2572,6 +2716,8 @@ impl DoorsReader {
                 record_word_slot(*id, SESSION_WORD),
                 record_word_slot(*id, SOURCES_WORD),
                 record_word_slot(*id, PRICE_WORD),
+                record_word_slot(*id, BOARD_WORDS[0]),
+                record_word_slot(*id, BOARD_WORDS[1]),
             ]);
         }
         // The implementation again, at the block every door is read at: the first request's read
@@ -2609,10 +2755,24 @@ impl DoorsReader {
                 Some(session),
                 Some(sources),
                 Some(price),
-            ) = (answers, words.next(), words.next(), words.next(), words.next(), words.next())
+                Some(bid_board),
+                Some(ask_board),
+            ) = (
+                answers,
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+            )
             else {
                 return Err(FeedError::Parsing("multicall answered too few calls".into()));
             };
+            // An unread board word leaves its side sampled as it would be with no post: its
+            // boundaries move sizes only, so the read is whole without them.
+            let (bid_board, ask_board) = (bid_board.ok(), ask_board.ok());
             let (settings, controls) = (settings?, controls?);
             if session.is_err() || sources.is_err() || price.is_err() {
                 answered = Answered::InPart;
@@ -2706,26 +2866,26 @@ impl DoorsReader {
                 );
                 continue;
             }
-            let side = |answer: &Call3Result, view: SideView, probe: U256| {
+            let side = |answer: &Call3Result, view: SideView, probe: U256, board: Option<U256>| {
                 let (fillable, fillable_out) =
                     decode::<quoteFillableCall>(answer, "door's quoteFillable")
                         .map_or((U256::ZERO, U256::ZERO), |fill| {
                             (fill.fillableAmountIn, fill.amountOut)
                         });
-                OpenSide { fillable, fillable_out, probe, view }
+                OpenSide { fillable, fillable_out, probe, view, board }
             };
             // `fill0` sells token0 and `fill1` token1: the bid's is the one selling the base.
             let (quote, bid, ask) = if base == listing.token0 {
                 (
                     listing.token1,
-                    side(fill0, listing.bid, *probe0),
-                    side(fill1, listing.ask, *probe1),
+                    side(fill0, listing.bid, *probe0, bid_board),
+                    side(fill1, listing.ask, *probe1, ask_board),
                 )
             } else if base == listing.token1 {
                 (
                     listing.token0,
-                    side(fill1, listing.bid, *probe1),
-                    side(fill0, listing.ask, *probe0),
+                    side(fill1, listing.bid, *probe1, bid_board),
+                    side(fill0, listing.ask, *probe0, ask_board),
                 )
             } else {
                 warn!(
@@ -2749,6 +2909,7 @@ impl DoorsReader {
                 guarded_lane,
                 asset_module: listing.asset_module,
                 pair: listing.pair,
+                refills: controls.bit(CONTROLS_REFILL_BIT),
                 min_fill: amount24(field(settings, 160, 24)),
                 tip_cap_wei: listing.tip_cap_wei,
                 carries: listing_carries(settings),
@@ -3614,6 +3775,18 @@ impl DoorsReader {
             door.min_fill
         };
         let mut all = sizes(side.fillable, self.rungs, floor);
+        // Every boundary of its depth post the walk crosses below the most it fills, so that no
+        // stretch between two samples spans one (see [`RungPost`]). Not on a credit listing,
+        // whose route may take over past its pool's custody at any size.
+        if door.credit.is_none() && !side.fillable.is_zero() {
+            all.extend(
+                side.rung_edges(door.refills)
+                    .into_iter()
+                    .filter(|edge| *edge >= floor && *edge < side.fillable),
+            );
+            all.sort_unstable();
+            all.dedup();
+        }
         if reach.size > side.fillable {
             if side.fillable.is_zero() {
                 all.extend(sizes(reach.size, self.rungs, floor));
@@ -4437,8 +4610,8 @@ pub(super) fn lagging(now: u64, number: u64, timestamp: u64) -> FeedError {
 const DOOR_CALLS: usize = 5;
 
 /// Words of each listing's record read in the second request: its settings, controls, session,
-/// source and live-source words.
-const RECORD_WORDS: usize = 5;
+/// source and live-source words, and its two board words.
+const RECORD_WORDS: usize = 7;
 
 /// The first millisecond at which a listing's side fills nothing, as the front reads its standing
 /// word and the side's depth word (`doorView`'s `word`, and `depth[0]` for the bid, where the
@@ -4803,6 +4976,83 @@ mod tests {
             .collect();
 
         assert_eq!(sizes(U256::from(fillable), rungs, U256::from(floor)), expected);
+    }
+
+    /// A bid's depth post of six rungs, at 0.07, 0.19, 0.33, 0.52, 0.71 and 1 WETH from its
+    /// start, three in each depth word: version 1, size units of 1e4 board units of 1e12 wei.
+    fn six_rungs() -> (U256, U256, U256) {
+        let rung = |size: u64, offset: u64, at: usize| {
+            (U256::from(size) | (U256::from(offset) << 16)) << at
+        };
+        let first = U256::from(DEPTH_VERSION) |
+            (U256::from(4u8) << 112) |
+            (U256::from(1u8) << 118) |
+            rung(7, 0, 120) |
+            rung(19, 40, 156) |
+            rung(33, 90, 192);
+        let second = rung(52, 160, 0) | rung(71, 250, 36) | rung(100, 400, 72);
+        (first, second, U256::from(12u8) << 112)
+    }
+
+    /// `hundredths` of a WETH each, in wei.
+    fn weth_hundredths(hundredths: &[u64]) -> Vec<U256> {
+        hundredths
+            .iter()
+            .map(|h| U256::from(*h) * U256::from(10_000_000_000_000_000u64))
+            .collect()
+    }
+
+    /// A depth post is read as the front walks it: each rung's end from the post's start, or
+    /// from the fill memory's place (0.25 WETH here, 250,000 board units), skipping the rungs it
+    /// used up; the second word's rungs only where the first says it holds them; nothing of a
+    /// post of another version or past the front's exponents. The ask reads its board exponent
+    /// from the pair word's next byte.
+    #[test]
+    fn a_depth_post_is_read_as_the_front_walks_it() {
+        let (first, second, pair) = six_rungs();
+        let post = RungPost::of(first, second, pair, true).unwrap();
+
+        assert_eq!(post.edges(U256::ZERO), weth_hundredths(&[7, 19, 33, 52, 71, 100]));
+        assert_eq!(post.edges(U256::from(250_000u64)), weth_hundredths(&[8, 27, 46, 75]));
+        let one_word = RungPost::of(first & !(U256::from(1u8) << 118usize), second, pair, true);
+        assert_eq!(one_word.unwrap().edges(U256::ZERO), weth_hundredths(&[7, 19, 33]));
+        assert!(RungPost::of(first + U256::from(1u8), second, pair, true).is_none());
+        assert!(RungPost::of(first | (U256::from(31u8) << 112usize), second, pair, true).is_none());
+        assert!(RungPost::of(first, second, U256::from(17u8) << 112usize, true).is_none());
+        assert_eq!(
+            RungPost::of(first, second, pair, false)
+                .unwrap()
+                .unit,
+            U256::from(1u8)
+        );
+    }
+
+    /// A side's fill memory counts only while its board word is tagged with the post's nonce;
+    /// where its controls let a standing word refill it, the boundaries from the post's start
+    /// are asked too; an unread board word, or no post, asks none.
+    #[test]
+    fn a_sides_boundaries_count_its_fill_memory_only_on_its_own_post() {
+        let (first, second, pair) = six_rungs();
+        let board = |tag: u64| (U256::from(tag) << 4) | (U256::from(250_000u64) << 52);
+        let side = |board: Option<U256>| OpenSide {
+            view: SideView {
+                nonce_ms: 77,
+                post: RungPost::of(first, second, pair, true),
+                ..SideView::default()
+            },
+            board,
+            ..OpenSide::default()
+        };
+        let (filled, whole) =
+            (weth_hundredths(&[8, 27, 46, 75]), weth_hundredths(&[7, 19, 33, 52, 71, 100]));
+
+        assert_eq!(side(Some(board(77))).rung_edges(false), filled);
+        assert_eq!(side(Some(board(77))).rung_edges(true), [filled, whole.clone()].concat());
+        assert_eq!(side(Some(board(78))).rung_edges(false), whole);
+        assert!(side(None).rung_edges(true).is_empty());
+        assert!(OpenSide { board: Some(board(77)), ..OpenSide::default() }
+            .rung_edges(true)
+            .is_empty());
     }
 
     /// At most [`MAX_LOW_SIZES`] sizes below the halvings, the floor the last of them.
