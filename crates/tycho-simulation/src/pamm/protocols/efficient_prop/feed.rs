@@ -480,8 +480,11 @@ impl EfficientPropFeedBuilder {
     /// answers with errors, the polls fail, and the snapshots are withdrawn 4 s after the last
     /// refresh. For such an endpoint, set a longer `poll_interval` with [`Self::feed_config`].
     ///
-    /// On Ethereum a poll is four requests to the node and one POST to each state URL, sent with
-    /// the first: four POSTs a second to each URL at 250 ms. The node is asked as on Base, less
+    /// On Ethereum a poll that samples is four requests to the node and one POST to each state
+    /// URL, sent with the first: four POSTs a second to each URL at 250 ms. The first request is
+    /// the latest header (`eth_getBlockByNumber`), and every request after it names its block by
+    /// that header's hash where the node answers it (EIP-1898), at the latest block or by its
+    /// number where it does not. The node is asked as on Base, less
     /// BaseTime, and, before the doors, each listing's quote contract (`ceil(n / 48)` `eth_call`s)
     /// and its settings and live-source words (`2n` `eth_getStorageAt` calls, and one for each desk
     /// contract and two a listing from it) at the
@@ -489,15 +492,17 @@ impl EfficientPropFeedBuilder {
     /// is asked at one block, the next, and again at the block after for the listings that carry:
     /// `ceil(32n / 46)` `eth_call`s for the quotes, and `ceil(32c / 46)` more for `c` carrying
     /// listings. No premium, print or hold asks are made. A credit listing served asks the front's
-    /// plan beside each of its quotes, twice its calls. The second request also reads its block's
-    /// header (`eth_getBlockByNumber`), for its hash, and on BNB Chain its parent's, for the time
-    /// between the two, and the requests after it name their block by that hash where the node
-    /// answers it (EIP-1898), by its number where it does not.
+    /// plan beside each of its quotes, twice its calls. On BNB Chain the second request also reads
+    /// the head's parent's header (`eth_getBlockByNumber`), for the time between the two.
     ///
-    /// A poll that finds nothing the doors read changed since the last poll that sampled them
-    /// asks no door: it is the first two requests and the POSTs alone, and publishes that poll's
-    /// samples (see the module doc of `efficient_prop`, "On Ethereum"). Between two blocks that
-    /// is every poll but the ones a state URL answers a new update on.
+    /// What the node answered at a head by its hash with no override is not asked again there:
+    /// the listings, the implementation and every storage word are read once a head, the
+    /// listings' words in the listings' request at a head not read yet. A poll that finds nothing
+    /// the doors read changed since the last poll that sampled them asks no door: it is the
+    /// header alone, one call, and the POSTs, and publishes that poll's samples (see the module
+    /// doc of `efficient_prop`, "On Ethereum"); so is a poll finding no state map for the next
+    /// block. Between two blocks that is every poll but the ones a state URL answers a new update
+    /// on, and each of those is the header and the doors' `eth_call`s alone.
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
             poll_interval: Duration::from_millis(250),
@@ -8139,10 +8144,12 @@ mod tests {
         }
 
         /// A poll that finds nothing changed asks no door: the head, the next block, the state
-        /// answer and every listing's words are as the last sampled poll found them, so it stops
-        /// after its second request to the node and publishes that poll's books, the credit
-        /// listing's among them. Before, every poll asked every door again. The poll that did ask
-        /// them named their block by the head's hash, so the node answered each from that block.
+        /// answer and every listing's words are as the last sampled poll found them, so it
+        /// publishes that poll's books, the credit listing's among them. Before, every poll asked
+        /// every door again. The poll that did ask them named their block by the head's hash, so
+        /// the node answered each from that block. Once the listings scanned are the same too, a
+        /// poll at the head asks the node its latest header alone: everything else it would ask
+        /// was answered at that hash.
         #[tokio::test]
         async fn a_poll_that_finds_nothing_changed_asks_no_door() {
             let (listings, map) = reuse_fixture();
@@ -8163,6 +8170,86 @@ mod tests {
             assert_eq!(polled._servers.0.request_count(), requests + 2);
             assert_eq!(polled.reuses(), 1);
             assert_eq!(kept, sampled);
+            let requests = polled._servers.0.request_count();
+            assert_eq!(published(&polled.source).await, sampled);
+            assert_eq!(polled._servers.0.request_count(), requests + 1);
+            assert_eq!(polled.reuses(), 2);
+        }
+
+        /// At a head it has read, a poll asks the node only what it has not answered at that
+        /// head's hash: one finding no state map for the next block sends the latest header
+        /// alone, and one whose state map moved sends that and the doors' requests, none of
+        /// which reads a storage word. A new head is read again: its listings, with the words the
+        /// last poll's second request read, in one request after the header.
+        #[tokio::test]
+        async fn a_poll_at_a_head_it_has_read_asks_only_what_moved() {
+            let (listings, map) = reuse_fixture();
+            let polled = Polled::new(FakeNode::ethereum(listings), map).await;
+            let sampled = published(&polled.source).await;
+            published(&polled.source).await;
+            let storage = || {
+                polled
+                    .node
+                    .lock()
+                    .unwrap()
+                    .storage_reads
+                    .load(Ordering::SeqCst)
+            };
+
+            let kept = polled.map.lock().unwrap().clone();
+            *polled.map.lock().unwrap() = reuse_map(ETHEREUM_BLOCK, ETHEREUM_SLOT - 1);
+            let (requests, words) = (polled._servers.0.request_count(), storage());
+            assert!(published(&polled.source)
+                .await
+                .is_empty());
+            assert_eq!(polled._servers.0.request_count(), requests + 1, "a dark poll");
+            assert_eq!(storage(), words);
+
+            *polled.map.lock().unwrap() =
+                written(kept, "desk-1", desk_cell(1), firm_slot(), B256::repeat_byte(0xf3));
+            let (requests, asked) = (polled._servers.0.request_count(), polled.door_quotes());
+            published(&polled.source).await;
+            assert!(polled.door_quotes() > asked, "the moved poll asked no door");
+            assert_eq!(storage(), words, "a word asked again at the head");
+            let doors = polled._servers.0.request_count() - requests;
+            assert!(doors >= 3, "{doors} requests");
+
+            head_moves_on(&polled, 1);
+            let requests = polled._servers.0.request_count();
+            assert_eq!(published(&polled.source).await.len(), sampled.len());
+            assert_eq!(polled._servers.0.request_count() - requests, doors + 1, "a new head");
+            assert!(storage() > words);
+        }
+
+        /// A node that names its latest block by no hash has its listings read at the latest
+        /// block, as before the header was read first, and is not asked that header again until a
+        /// poll has read a head 32 past the one it named none at.
+        #[tokio::test]
+        async fn a_node_naming_no_latest_hash_is_read_at_the_latest_block_for_32_heads() {
+            let (listings, map) = reuse_fixture();
+            let node = FakeNode { head_hash: None, ..FakeNode::ethereum(listings) };
+            let polled = Polled::new(node, map).await;
+            let headers = || {
+                polled
+                    .node
+                    .lock()
+                    .unwrap()
+                    .latest_headers
+                    .load(Ordering::SeqCst)
+            };
+
+            published(&polled.source).await;
+            assert_eq!(headers(), 1);
+            published(&polled.source).await;
+            head_moves_on(&polled, 31);
+            published(&polled.source).await;
+            assert_eq!(headers(), 1);
+
+            head_moves_on(&polled, 1);
+            published(&polled.source).await;
+            assert_eq!(headers(), 1);
+            assert_eq!(published(&polled.source).await.len(), 3);
+            assert_eq!(headers(), 2);
         }
 
         /// A node that does not name its blocks by hash is asked every door on every poll: no
@@ -8188,6 +8275,11 @@ mod tests {
         fn head_moves_on(polled: &Polled, blocks: u64) {
             let mut node = polled.node.lock().unwrap();
             node.block += blocks;
+            // Another block, another hash: its first eight bytes are its number.
+            let number = node.block.to_be_bytes();
+            if let Some(hash) = node.head_hash.as_mut() {
+                hash[..8].copy_from_slice(&number);
+            }
             node.timestamp += blocks * SLOT_SECS;
             for listing in &mut node.listings {
                 listing.maker_ms += blocks * SLOT_SECS * 1000;
@@ -8338,7 +8430,10 @@ mod tests {
 
         /// A backend that knows no block of the head's hash, one a block behind the backend that
         /// named the head, sets nothing aside, however many polls meet it: each is asked again
-        /// by number and tries the hash on the next. Once a backend knows the hash, that read is
+        /// by number and tries the hash on the next. A poll so met sends eight requests: the
+        /// latest header, the listings by its hash and again at the latest block, their words
+        /// by number with the header, the doors' first request by hash, and the doors' two by
+        /// number. Once a backend knows the hash, that read is
         /// kept and the poll after it asks no door. Before, three such polls in a row switched
         /// the hash form off for good.
         #[tokio::test]
@@ -8350,7 +8445,7 @@ mod tests {
             for poll in 1..=5 {
                 let before = polled._servers.0.request_count();
                 published(&polled.source).await;
-                assert_eq!(polled._servers.0.request_count() - before, 6, "poll {poll}");
+                assert_eq!(polled._servers.0.request_count() - before, 8, "poll {poll}");
             }
             assert_eq!(polled.door_quotes_by_number(), polled.door_quotes());
             assert_eq!(polled.reuses(), 0);
@@ -8394,7 +8489,8 @@ mod tests {
 
         /// A failure of the read by hash that ends the feed is not asked again by number: a
         /// front found on an implementation outside the allow-list at the block named by its
-        /// hash fails the poll at that request, its third.
+        /// hash fails the poll at that request, its second, the listings' read after the latest
+        /// header.
         #[tokio::test]
         async fn a_fatal_failure_of_the_read_by_hash_is_not_asked_again_by_number() {
             let (listings, map) = reuse_fixture();
@@ -8407,7 +8503,7 @@ mod tests {
             let error = polled.source.fetch().await.unwrap_err();
 
             assert!(matches!(error, FeedError::Fatal(_)), "{error:?}");
-            assert_eq!(polled._servers.0.request_count(), 3);
+            assert_eq!(polled._servers.0.request_count(), 2);
             assert_eq!(polled.door_quotes_by_number(), 0);
         }
 
@@ -8568,8 +8664,20 @@ mod tests {
         }
 
         impl Moved {
+            /// Moves it. A block's state never changes, and the reader asks a head it read by
+            /// its hash nothing again: what moves on the node moves the head's hash with it.
             fn on(self, node: &mut FakeNode, map: &mut serde_json::Value) {
                 let next = ETHEREUM_BLOCK + 1;
+                if !matches!(
+                    self,
+                    Self::HeadHash |
+                        Self::QuoteWordInTheAnswer |
+                        Self::FirmWordInTheAnswer |
+                        Self::PriceContractInTheAnswer |
+                        Self::ListingsServed
+                ) {
+                    node.head_hash = Some(B256::repeat_byte(0xb3));
+                }
                 match self {
                     Self::HeadHash => node.head_hash = Some(B256::repeat_byte(0xb2)),
                     Self::NextSecond => {
@@ -8727,6 +8835,7 @@ mod tests {
                         let mut node = polled.node.lock().unwrap();
                         node.block += 1;
                         node.timestamp += SLOT_SECS;
+                        node.head_hash = Some(B256::repeat_byte(0xb2));
                     }
                     assert!(published(&polled.source)
                         .await
@@ -9458,8 +9567,18 @@ mod tests {
                 source.clock = Arc::new(|| NOW_MS);
                 let mut served = Vec::new();
 
-                for spacing_ms in [400, 400, 450, 400] {
-                    node.lock().unwrap().head_spacing_ms = Some(spacing_ms);
+                // Each poll finds a head of its own: what a node answered at one hash is kept for
+                // the polls at it, the spacing to its parent included.
+                for (head, spacing_ms) in [400, 400, 450, 400]
+                    .into_iter()
+                    .enumerate()
+                {
+                    {
+                        let mut node = node.lock().unwrap();
+                        node.head_spacing_ms = Some(spacing_ms);
+                        node.head_hash =
+                            Some(B256::repeat_byte(0xc0 + u8::try_from(head).unwrap()));
+                    }
                     served.push(
                         source
                             .fetch()

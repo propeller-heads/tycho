@@ -25,7 +25,7 @@
 //! door and is answered that read's samples ([`SampledOn`]).
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
@@ -34,7 +34,7 @@ use std::{
 };
 
 use alloy::{
-    eips::BlockId,
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{
         address, aliases::U24, b256, keccak256, Address, Bytes as AlloyBytes, B256, U256, U64,
     },
@@ -824,8 +824,27 @@ impl FrontClock {
     }
 }
 
-/// One `aggregate3` call of a batch, awaiting its answer, and how many calls it carries.
-type SentChunk = (Waiter<AlloyBytes>, usize);
+/// One `aggregate3` call of a batch: awaiting its answer, with how many calls it carries and the
+/// key it is kept under where its block is named by hash, or answered already at that block.
+enum SentChunk {
+    Sent { waiter: Waiter<AlloyBytes>, count: usize, key: Option<B256> },
+    Kept(Vec<Call3Result>),
+}
+
+/// One storage word of a batch: awaiting its answer, or answered already at its block.
+enum SentWord {
+    Sent(Waiter<U256>),
+    Kept(U256),
+}
+
+impl SentWord {
+    async fn answer(self) -> Result<U256, TransportError> {
+        match self {
+            Self::Sent(waiter) => waiter.await,
+            Self::Kept(word) => Ok(word),
+        }
+    }
+}
 
 /// One `aggregate3` group of a batch: calls run at the batch's block, or under a block override.
 struct Group {
@@ -844,6 +863,10 @@ enum Also {
     ImplementationAndHead,
     /// That, and its parent's header: on BNB Chain, for the time between the two.
     ImplementationAndHeads,
+    /// The implementation, for a batch pinned to the hash of that head: and the head's parent's
+    /// header by its number, for the time between the two, which the head's header names no more
+    /// than the hash of the parent it is checked against.
+    ImplementationAndParentOf(LatestHead),
     /// The front's implementation slot and the node's gas price: on BNB Chain, whose base fee is
     /// zero, the least tip a taker's swap pays.
     ImplementationAndGasPrice,
@@ -860,6 +883,17 @@ impl Also {
 
     fn parent(self) -> bool {
         matches!(self, Self::ImplementationAndHeads)
+    }
+
+    fn parent_of(self) -> Option<LatestHead> {
+        match self {
+            Self::ImplementationAndParentOf(latest) => Some(latest),
+            Self::Nothing |
+            Self::Implementation |
+            Self::ImplementationAndHead |
+            Self::ImplementationAndHeads |
+            Self::ImplementationAndGasPrice => None,
+        }
     }
 
     fn gas_price(self) -> bool {
@@ -1044,6 +1078,62 @@ impl HashForm {
             .store(number.saturating_add(HASH_FORM_RETRY_HEADS), Ordering::Relaxed);
         true
     }
+}
+
+/// What a node answered at one block named by its hash with no override: the storage words read
+/// there, and each `aggregate3` run there, by the keccak of its calldata. A request so named is
+/// answered from that very block or refused, and a block's state never changes, so the same
+/// request at the same hash is answered from here and not sent again (see
+/// [`DoorsReader::batch`]). It holds one block: a request naming another hash empties it.
+#[derive(Debug, Default)]
+struct HeadAnswers {
+    hash: B256,
+    words: HashMap<(Address, U256), U256>,
+    calls: HashMap<B256, Vec<Call3Result>>,
+    /// Whether the milliseconds between the block and its parent were asked, and what they came
+    /// to where the headers name them: see [`Also::ImplementationAndParentOf`].
+    parent_asked: bool,
+    parent_ms: Option<u64>,
+}
+
+impl HeadAnswers {
+    /// The answers at `hash`, emptied where they were another block's.
+    fn at(&mut self, hash: B256) -> &mut Self {
+        if self.hash != hash {
+            *self = Self { hash, ..Self::default() };
+        }
+        self
+    }
+}
+
+/// The node's latest block as its header names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LatestHead {
+    number: u64,
+    hash: B256,
+    /// Its milliseconds, where the header names them ([`Header::ms`]).
+    ms: Option<u64>,
+    /// Its parent's hash, where the header names it.
+    parent_hash: Option<B256>,
+}
+
+/// The calls and storage words of a next-block read's second request (see
+/// [`DoorsReader::take_next_block`]), as the last read built them: the first request at a head
+/// the reader has not read yet carries them, so that a read finding the same listings there asks
+/// none of them again.
+#[derive(Debug, Clone, Default)]
+struct NextRequest {
+    calls: Vec<Call3>,
+    slots: Vec<(Address, U256)>,
+}
+
+/// One poll's reads at the node's latest block: its listings, and the block they were read at,
+/// named by its hash where the reader named it so.
+struct HeadRead {
+    clock: FrontClock,
+    listings: Vec<Listing>,
+    highest_listing: u32,
+    pinned: Option<LatestHead>,
 }
 
 /// Whether a node's `error` says it does not take the request's form (see
@@ -1267,6 +1357,16 @@ pub(super) struct DoorsReader {
     /// How many reads were answered from it.
     #[cfg(test)]
     pub(super) reuses: Arc<std::sync::atomic::AtomicUsize>,
+    /// What the node answered at the head named by its hash, with no override: a later poll at
+    /// that head asks none of it again (see [`HeadAnswers`]).
+    head_answers: Arc<Mutex<HeadAnswers>>,
+    /// The head from which the next-block read reads the latest header first again, after a node
+    /// answered it without a hash; zero while it does (see [`Self::read_head`]).
+    head_first_from: Arc<AtomicU64>,
+    /// The latest head a read found, which that is judged against.
+    last_head: Arc<AtomicU64>,
+    /// The last next-block read's second request (see [`NextRequest`]).
+    next_request: Arc<Mutex<Option<NextRequest>>>,
 }
 
 impl DoorsReader {
@@ -1317,6 +1417,10 @@ impl DoorsReader {
             hash_form: Arc::default(),
             #[cfg(test)]
             reuses: Arc::default(),
+            head_answers: Arc::default(),
+            head_first_from: Arc::default(),
+            last_head: Arc::default(),
+            next_request: Arc::default(),
         }
     }
 
@@ -1354,7 +1458,9 @@ impl DoorsReader {
                 .read_next_block(next_block, scan_to, decimals, hold)
                 .await;
         }
-        let (clock, listings, highest_listing) = self.read_listings(scan_to).await?;
+        let (clock, listings, highest_listing) = self
+            .read_listings(scan_to, BlockId::latest(), None)
+            .await?;
         telemetry::record_answer_age(answer_age(hold.from_ms, clock.timestamp));
         let started = hold.from_ms / 1000;
         if started >
@@ -1451,18 +1557,18 @@ impl DoorsReader {
     /// the listings' accounts of the maps as a state override and the next block as a block
     /// override.
     ///
-    /// The maps are read from every state URL while the first request reads the listings at the
-    /// latest block. Only a map for the block after the node's latest, at the slot right after its
-    /// (its time 12 s after the latest block's), is used: a map at or behind it is for a block
-    /// already made, one further ahead was made on state the node has not seen, and one at a later
-    /// slot would be sampled at a time the block does not land at. Where no map is used, the read
-    /// serves nothing, and its block, the node's latest, is not counted as read: neither a map far
-    /// ahead nor a state URL ahead of the node fails or holds back a later poll. A listing is
-    /// served only where one answer writes its quote's stamp slot with a stamp the next block
-    /// fills, and each price contract it reads (see [`Self::take_next_block`]). Each side is
-    /// sampled at the next block and, where its listing carries, at the one after under the same
-    /// state, and lives through the last of those its samples hold at (see
-    /// [`Self::sample_next_block`]). A read whose map's block is more than
+    /// The maps are read from every state URL while the first requests read the latest header and
+    /// the listings at the block it names (see [`Self::read_head`]). Only a map for the block after
+    /// the node's latest, at the slot right after its (its time 12 s after the latest block's), is
+    /// used: a map at or behind it is for a block already made, one further ahead was made on state
+    /// the node has not seen, and one at a later slot would be sampled at a time the block does not
+    /// land at. Where no map is used, the read serves nothing, and its block, the node's latest, is
+    /// not counted as read: neither a map far ahead nor a state URL ahead of the node fails or
+    /// holds back a later poll. A listing is served only where one answer writes its quote's stamp
+    /// slot with a stamp the next block fills, and each price contract it reads (see
+    /// [`Self::take_next_block`]). Each side is sampled at the next block and, where its listing
+    /// carries, at the one after under the same state, and lives through the last of those its
+    /// samples hold at (see [`Self::sample_next_block`]). A read whose map's block is more than
     /// `hold.max_lag_secs` behind the poll's start fails, and so does one whose node's latest block
     /// is more than two slots and `hold.max_lag_secs` behind it, map or none: that node has
     /// stalled, since with one slot missed its latest block is at most two slots old, and a poll
@@ -1472,14 +1578,14 @@ impl DoorsReader {
     /// The doors are asked only where something their answers are read from has changed since
     /// the last read that sampled them: a read finding the same head, the same next block, the
     /// same state override and the same listings as that one ([`SampledOn`]) is answered its
-    /// doors' reads, and stops after its second request. Its listings, their words at the head,
-    /// the state maps, the front's implementation and the lag are read and checked on every poll
-    /// all the same. A read that does ask its doors names their block by the head's hash, and is
-    /// kept for the polls after it only where the node answered all of it so. A node that does
-    /// not name the head by its hash, or refuses a block named so, is asked every door on every
-    /// poll, by number, and a read by hash that fails is asked again by number on that poll,
-    /// unless its failure is fatal ([`HashForm`]). Each read that is not kept is counted by its
-    /// reason ([`NotKept`]).
+    /// doors' reads. Its listings, their words at the head, the state maps, the front's
+    /// implementation and the lag are checked on every poll all the same, the node asked again
+    /// only what it has not answered at the head's hash ([`HeadAnswers`]). A read that does ask its
+    /// doors names their block by the head's hash, and is kept for the polls after it only where
+    /// the node answered all of it so. A node that does not name the head by its hash, or refuses a
+    /// block named so, is asked every door on every poll, by number, and a read by hash that fails
+    /// is asked again by number on that poll, unless its failure is fatal ([`HashForm`]). Each read
+    /// that is not kept is counted by its reason ([`NotKept`]).
     ///
     /// On BNB Chain ([`Cadence::Blocks`]) a map names its block alone, the next block falls in the
     /// head's second or the one after, and the block after it likewise: each is sampled at both,
@@ -1495,8 +1601,8 @@ impl DoorsReader {
         decimals: impl Fn(&Address) -> Option<u32>,
         hold: Hold,
     ) -> Result<DoorsRead, FeedError> {
-        let ((head, listings, highest_listing), maps) =
-            tokio::try_join!(self.read_listings(scan_to), next_block.read())?;
+        let (HeadRead { clock: head, listings, highest_listing, pinned }, maps) =
+            tokio::try_join!(self.read_head(scan_to), next_block.read())?;
         telemetry::record_answer_age(answer_age(hold.from_ms, head.timestamp));
         let started = hold.from_ms / 1000;
         if started >
@@ -1567,7 +1673,7 @@ impl DoorsReader {
             head_spacing_ms,
             implementation,
         } = self
-            .take_next_block(served, block, &next)
+            .take_next_block(served, head.number, pinned, &next)
             .await?;
         // On BNB Chain a side's life is the head's milliseconds and the chain's block time, which
         // must be the chain's own: the head's header names its milliseconds, and its parent's
@@ -1731,6 +1837,124 @@ impl DoorsReader {
         Ok(read)
     }
 
+    /// A next-block read's listings at the node's latest block, by its hash: the latest header,
+    /// then the listings and the front's implementation at the block that header names, required
+    /// canonical (EIP-1898), so that every request of the read after it names that very block
+    /// and a request answered at it once is not sent again ([`HeadAnswers`]): a poll finding the
+    /// head it last read sends the header alone. At a head not read yet, the request carries the
+    /// last read's second request ([`NextRequest`]), whose answers the read finding the same
+    /// listings there then takes as they are.
+    ///
+    /// Where the node answers the latest header without a hash, or refuses a block named by its
+    /// hash, the listings are read at the latest block, as they are on any poll whose read by hash
+    /// fails, and the header is not read again for [`HASH_FORM_RETRY_HEADS`] heads; nor is it
+    /// while the doors' hash form is set aside ([`HashForm`]).
+    async fn read_head(&self, scan_to: u32) -> Result<HeadRead, FeedError> {
+        let last = self.last_head.load(Ordering::Relaxed);
+        let head_first = last >=
+            self.head_first_from
+                .load(Ordering::Relaxed) &&
+            !self.hash_form.set_aside(last);
+        let mut set_aside = false;
+        if head_first {
+            match self.latest_head().await {
+                Ok(Some(latest)) => {
+                    let prefetch = self
+                        .next_request
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    self.hash_form
+                        .refused
+                        .store(false, Ordering::Relaxed);
+                    match self
+                        .read_listings(scan_to, BlockId::hash_canonical(latest.hash), prefetch)
+                        .await
+                    {
+                        Ok((clock, listings, highest_listing)) if clock.number == latest.number => {
+                            self.last_head
+                                .store(clock.number, Ordering::Relaxed);
+                            return Ok(HeadRead {
+                                clock,
+                                listings,
+                                highest_listing,
+                                pinned: Some(latest),
+                            });
+                        }
+                        Ok((clock, ..)) => debug!(
+                            front = %self.front,
+                            header = latest.number,
+                            read = clock.number,
+                            "the block named by the latest header's hash answered another number: \
+                             reading the listings at the latest block"
+                        ),
+                        Err(error @ FeedError::Fatal(_)) => return Err(error),
+                        Err(error) => {
+                            set_aside = self
+                                .hash_form
+                                .refused
+                                .load(Ordering::Relaxed);
+                            debug!(
+                                front = %self.front,
+                                header = latest.number,
+                                %error,
+                                "the listings' read by the latest header's hash failed: reading \
+                                 them at the latest block"
+                            );
+                        }
+                    }
+                }
+                Ok(None) => set_aside = true,
+                Err(error) => debug!(
+                    front = %self.front,
+                    error = %self.connection_error("latest header", error),
+                    "the latest header's read failed: reading the listings at the latest block"
+                ),
+            }
+        }
+        let (clock, listings, highest_listing) = self
+            .read_listings(scan_to, BlockId::latest(), None)
+            .await?;
+        self.last_head
+            .store(clock.number, Ordering::Relaxed);
+        if set_aside {
+            debug!(
+                front = %self.front,
+                head = clock.number,
+                heads = HASH_FORM_RETRY_HEADS,
+                "the node names its latest block by no hash, or refuses one: reading the listings \
+                 at the latest block until the header is read again"
+            );
+            self.head_first_from.store(
+                clock
+                    .number
+                    .saturating_add(HASH_FORM_RETRY_HEADS),
+                Ordering::Relaxed,
+            );
+        }
+        Ok(HeadRead { clock, listings, highest_listing, pinned: None })
+    }
+
+    /// The node's latest header: `None` where the node answers it with no block or with one
+    /// that names no hash or number, an error where the request fails.
+    async fn latest_head(&self) -> Result<Option<LatestHead>, TransportError> {
+        let header = self
+            .provider
+            .client()
+            .request::<_, Option<Header>>("eth_getBlockByNumber", (BlockNumberOrTag::Latest, false))
+            .await;
+        match header {
+            Ok(header) => Ok(header.map(|header| LatestHead {
+                number: header.number.to::<u64>(),
+                hash: header.hash,
+                ms: header.ms(),
+                parent_hash: header.parent_hash,
+            })),
+            Err(TransportError::DeserError { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The third and fourth requests of a next-block read, and a fifth with a credit listing: the
     /// doors of `served` opened and sampled at `block` under the next block's `clock` and
     /// `state` (see [`Self::open_doors`], [`Self::sample_next_block`]), and whether the node
@@ -1773,7 +1997,8 @@ impl DoorsReader {
     async fn take_next_block(
         &self,
         listings: Vec<(Listing, (U256, U256))>,
-        block: BlockId,
+        number: u64,
+        pinned: Option<LatestHead>,
         next: &NextBlock,
     ) -> Result<NextTaken, FeedError> {
         let listings: Vec<_> = listings
@@ -1791,7 +2016,7 @@ impl DoorsReader {
                 "Efficient PropAMM: no desk contract code hash is configured".into(),
             ));
         };
-        let calls = listings
+        let calls: Vec<_> = listings
             .iter()
             .map(|(listing, _)| SLOT_RULE.place_call(self.front, listing.desk))
             .collect();
@@ -1829,14 +2054,66 @@ impl DoorsReader {
                     [(account, quote), (account, firm)]
                 }),
         );
+        *self
+            .next_request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(NextRequest { calls: calls.clone(), slots: slots.clone() });
         // With them the front's implementation and the head's hash: what a read that asks no
         // door is checked on and matched by (see [`SampledOn`]). On BNB Chain also the head's
-        // parent, whose milliseconds the chain's block time is checked against.
+        // parent, whose milliseconds the chain's block time is checked against. At the head the
+        // listings were read at by its hash, where they were, else by its number with its header.
         let spaced = self
             .next_block
             .as_ref()
             .is_some_and(|next_block| matches!(next_block.cadence, Cadence::Blocks { .. }));
-        let also = if spaced { Also::ImplementationAndHeads } else { Also::ImplementationAndHead };
+        let by_number = || {
+            let also =
+                if spaced { Also::ImplementationAndHeads } else { Also::ImplementationAndHead };
+            self.batch(
+                BlockId::number(number),
+                vec![Group { calls: calls.clone(), at: None }],
+                &slots,
+                also,
+                None,
+                None,
+            )
+        };
+        let answers = match pinned {
+            Some(latest) => {
+                let also = if spaced {
+                    Also::ImplementationAndParentOf(latest)
+                } else {
+                    Also::Implementation
+                };
+                match self
+                    .batch(
+                        BlockId::hash_canonical(latest.hash),
+                        vec![Group { calls: calls.clone(), at: None }],
+                        &slots,
+                        also,
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(answers) => {
+                        BatchAnswers { head: Some(latest.hash), head_ms: latest.ms, ..answers }
+                    }
+                    Err(error @ FeedError::Fatal(_)) => return Err(error),
+                    Err(error) => {
+                        debug!(
+                            front = %self.front,
+                            head = number,
+                            %error,
+                            "the listings' words by the head's hash failed: asking by number"
+                        );
+                        by_number().await?
+                    }
+                }
+            }
+            None => by_number().await?,
+        };
         let BatchAnswers {
             groups,
             mut words,
@@ -1845,9 +2122,7 @@ impl DoorsReader {
             head_spacing_ms,
             implementation,
             ..
-        } = self
-            .batch(block, vec![Group { calls, at: None }], &slots, also, None, None)
-            .await?;
+        } = answers;
         let places = groups
             .into_iter()
             .next()
@@ -1969,12 +2244,16 @@ impl DoorsReader {
         })
     }
 
-    /// The first request: the block, the front's implementation and clock, every reserved
-    /// listing up to `scan_to` with its door's address, and on BNB Chain the node's gas price,
-    /// under which no listing's tip cap is served.
+    /// The first request: the block, the front's implementation and clock, and every reserved
+    /// listing up to `scan_to` with its door's address, at `block`; on BNB Chain also the node's
+    /// gas price, under which no listing's tip cap is served. With them, where given, the
+    /// calls and words of a next-block read's second request at that block (see
+    /// [`NextRequest`]), whose answers are kept and not looked at here.
     async fn read_listings(
         &self,
         scan_to: u32,
+        block: BlockId,
+        prefetch: Option<NextRequest>,
     ) -> Result<(FrontClock, Vec<Listing>, u32), FeedError> {
         let mut calls = vec![
             call(MULTICALL3_ADDRESS, getBlockNumberCall {}.abi_encode()),
@@ -2013,8 +2292,13 @@ impl DoorsReader {
         } else {
             Also::Implementation
         };
+        let mut groups = vec![Group { calls, at: None }];
+        let prefetch = prefetch.unwrap_or_default();
+        if !prefetch.calls.is_empty() {
+            groups.push(Group { calls: prefetch.calls, at: None });
+        }
         let (answers, approved_desks) = tokio::join!(
-            self.batch(BlockId::latest(), vec![Group { calls, at: None }], &[], also, None, None),
+            self.batch(block, groups, &prefetch.slots, also, None, None),
             self.desks.current()
         );
         let BatchAnswers { groups, gas_price, .. } = answers?;
@@ -3447,6 +3731,12 @@ impl DoorsReader {
     /// and its hash is answered only where the node answers that very block: a node that does not
     /// answer it, or answers another, fails nothing, and the batch's block is then not named. A
     /// batch with no call and no word reads no header.
+    ///
+    /// Where `block` names its block by hash, a call group with no override and every storage word
+    /// is answered from what the node answered at that block before, where it did: an
+    /// `aggregate3` by its calldata, a word by its account and slot ([`HeadAnswers`]). Only what
+    /// it has not answered is sent, and a batch whose every request was answered so sends
+    /// nothing. The implementation is checked all the same.
     async fn batch(
         &self,
         block: BlockId,
@@ -3485,8 +3775,47 @@ impl DoorsReader {
                     .store(true, Ordering::Relaxed);
             }
         };
+        // A request naming its block by hash with no override is answered once at that block:
+        // the node runs it there or refuses it, and the block's state never changes.
+        let kept_at = block.as_block_hash();
+        let head_answers = || {
+            self.head_answers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let kept_chunk = |key: &B256| {
+            kept_at.and_then(|hash| {
+                head_answers()
+                    .at(hash)
+                    .calls
+                    .get(key)
+                    .cloned()
+            })
+        };
+        let kept_word = |place: &(Address, U256)| {
+            kept_at.and_then(|hash| {
+                head_answers()
+                    .at(hash)
+                    .words
+                    .get(place)
+                    .copied()
+            })
+        };
+        // The milliseconds between the head the batch is pinned to by its hash and its parent,
+        // where an earlier batch at that hash asked for them.
+        let kept_parent_ms = || {
+            also.parent_of()
+                .filter(|latest| kept_at == Some(latest.hash))
+                .and_then(|latest| {
+                    let mut kept = head_answers();
+                    let kept = kept.at(latest.hash);
+                    kept.parent_asked
+                        .then_some(kept.parent_ms)
+                })
+        };
         let client = self.provider.client();
         let mut batch = BatchRequest::new(client);
+        let mut asked = 0usize;
         let mut sent: Vec<(Option<At>, usize, Vec<SentChunk>)> = Vec::new();
         for group in &groups {
             let mut waiters = Vec::new();
@@ -3498,13 +3827,19 @@ impl DoorsReader {
             {
                 let mut chunk = chunk.to_vec();
                 chunk.splice(0..0, checks.iter().cloned());
+                let input: AlloyBytes = aggregate3Call { calls: chunk.clone() }
+                    .abi_encode()
+                    .into();
+                let key = kept_at
+                    .filter(|_| group.at.is_none())
+                    .map(|_| keccak256(&input));
+                if let Some(answers) = key.as_ref().and_then(kept_chunk) {
+                    waiters.push(SentChunk::Kept(answers));
+                    continue;
+                }
                 let request = TransactionRequest::default()
                     .to(MULTICALL3_ADDRESS)
-                    .input(TransactionInput::new(
-                        aggregate3Call { calls: chunk.clone() }
-                            .abi_encode()
-                            .into(),
-                    ));
+                    .input(TransactionInput::new(input));
                 let waiter = match group.at {
                     None => batch.add_call::<_, AlloyBytes>("eth_call", &(request, block)),
                     Some(at) => batch.add_call::<_, AlloyBytes>(
@@ -3521,29 +3856,33 @@ impl DoorsReader {
                     ),
                 }
                 .map_err(|e| self.connection_error("multicall", e))?;
-                waiters.push((waiter, chunk.len()));
+                asked += 1;
+                waiters.push(SentChunk::Sent { waiter, count: chunk.len(), key });
             }
             sent.push((group.at, checks.len(), waiters));
         }
+        let mut word = |account: Address, slot: U256, what: &'static str| {
+            if let Some(word) = kept_word(&(account, slot)) {
+                return Ok(SentWord::Kept(word));
+            }
+            asked += 1;
+            batch
+                .add_call::<_, U256>("eth_getStorageAt", &(account, slot, block))
+                .map(SentWord::Sent)
+                .map_err(|e| self.connection_error(what, e))
+        };
         let mut words = Vec::with_capacity(slots.len());
         for (account, slot) in slots {
-            words.push(
-                batch
-                    .add_call::<_, U256>("eth_getStorageAt", &(*account, *slot, block))
-                    .map_err(|e| self.connection_error("listing record", e))?,
-            );
+            words.push(((*account, *slot), word(*account, *slot, "listing record")?));
         }
+        let implementation_slot = U256::from_be_bytes(IMPLEMENTATION_SLOT.0);
         let implementation = if also.implementation() {
-            let slot = U256::from_be_bytes(IMPLEMENTATION_SLOT.0);
-            Some(
-                batch
-                    .add_call::<_, U256>("eth_getStorageAt", &(self.front, slot, block))
-                    .map_err(|e| self.connection_error("implementation slot", e))?,
-            )
+            Some(word(self.front, implementation_slot, "implementation slot")?)
         } else {
             None
         };
         let gas_price = if also.gas_price() {
+            asked += 1;
             Some(
                 batch
                     .add_call::<_, U256>("eth_gasPrice", &[(); 0])
@@ -3553,6 +3892,7 @@ impl DoorsReader {
             None
         };
         let mut header_of = |number: u64| {
+            asked += 1;
             batch
                 .add_call::<_, Option<Header>>("eth_getBlockByNumber", &(U64::from(number), false))
                 .map_err(|e| self.connection_error("block header", e))
@@ -3561,22 +3901,34 @@ impl DoorsReader {
             Some(number) => Some((number, header_of(number)?)),
             None => None,
         };
-        let parent = match head
-            .as_ref()
-            .and_then(|(number, _)| number.checked_sub(1))
-            .filter(|_| also.parent())
-        {
+        // The parent's header, with the hash the head names for it: from the head's own header
+        // where the batch asks it by number, else for the head the batch is pinned to by its hash.
+        let parent_of = match (head.as_ref(), also.parent_of()) {
+            (Some((number, _)), _) if also.parent() => number.checked_sub(1),
+            (None, Some(latest)) if kept_parent_ms().is_none() => latest.number.checked_sub(1),
+            _ => None,
+        };
+        let parent = match parent_of {
             Some(number) => Some((number, header_of(number)?)),
             None => None,
         };
-        batch
-            .send()
-            .await
-            .map_err(|e| self.connection_error("batch", e))?;
+        if asked > 0 {
+            batch
+                .send()
+                .await
+                .map_err(|e| self.connection_error("batch", e))?;
+        }
+        // What the node answered at a block named by hash, kept for the requests after it.
+        let keep = |keep: &dyn Fn(&mut HeadAnswers)| {
+            if let Some(hash) = kept_at {
+                keep(head_answers().at(hash));
+            }
+        };
 
         let implementation = match implementation {
             Some(slot) => {
                 let word = slot
+                    .answer()
                     .await
                     .inspect_err(note)
                     .map_err(|e| self.connection_error("implementation slot", e))?;
@@ -3592,6 +3944,10 @@ impl DoorsReader {
                         .map_err(|e| self.connection_error("implementation code", e))?;
                     self.check_implementation_code(found, &code)?;
                 }
+                keep(&|kept| {
+                    kept.words
+                        .insert((self.front, implementation_slot), word);
+                });
                 Some(found)
             }
             None => None,
@@ -3620,19 +3976,47 @@ impl DoorsReader {
                     parent.number == U64::from(number) &&
                         header
                             .as_ref()
-                            .and_then(|header| header.parent_hash) ==
+                            .and_then(|header| header.parent_hash)
+                            .or_else(|| {
+                                also.parent_of()
+                                    .and_then(|latest| latest.parent_hash)
+                            }) ==
                             Some(parent.hash)
                 }),
             None => None,
         };
+        let parent_ms = match kept_parent_ms() {
+            Some(kept) => kept,
+            None => {
+                let ms = parent.as_ref().and_then(Header::ms);
+                if also.parent_of().is_some() {
+                    keep(&|kept| {
+                        kept.parent_asked = true;
+                        kept.parent_ms = ms;
+                    });
+                }
+                ms
+            }
+        };
         let head_spacing_ms = head_ms
-            .zip(parent.as_ref().and_then(Header::ms))
+            .or_else(|| {
+                also.parent_of()
+                    .and_then(|latest| latest.ms)
+            })
+            .zip(parent_ms)
             .and_then(|(head_ms, parent_ms)| head_ms.checked_sub(parent_ms));
         let mut answers = Vec::with_capacity(sent.len());
         for (at, checks, waiters) in sent {
             let mut group = Vec::new();
             let mut honoured = true;
-            for (waiter, count) in waiters {
+            for chunk in waiters {
+                let (waiter, count, key) = match chunk {
+                    SentChunk::Kept(answers) => {
+                        group.extend(answers);
+                        continue;
+                    }
+                    SentChunk::Sent { waiter, count, key } => (waiter, count, key),
+                };
                 let raw = match waiter.await {
                     Ok(raw) => raw,
                     Err(e) if at.is_some() => {
@@ -3654,6 +4038,11 @@ impl DoorsReader {
                         chunk.len()
                     )));
                 }
+                if let Some(key) = key {
+                    keep(&|kept| {
+                        kept.calls.insert(key, chunk.clone());
+                    });
+                }
                 let mut chunk = chunk.into_iter();
                 if let Some(at) = at {
                     let checks: Vec<_> = chunk.by_ref().take(checks).collect();
@@ -3666,12 +4055,18 @@ impl DoorsReader {
             answers.push(honoured.then_some(group));
         }
         let mut read = Vec::with_capacity(words.len());
-        for word in words {
-            read.push(
-                word.await
-                    .inspect_err(note)
-                    .map_err(|e| self.connection_error("listing record", e)),
-            );
+        for (place, word) in words {
+            let word = word
+                .answer()
+                .await
+                .inspect_err(note)
+                .map_err(|e| self.connection_error("listing record", e));
+            if let Ok(word) = word {
+                keep(&|kept| {
+                    kept.words.insert(place, word);
+                });
+            }
+            read.push(word);
         }
         let gas_price = match gas_price {
             Some(price) => Some(

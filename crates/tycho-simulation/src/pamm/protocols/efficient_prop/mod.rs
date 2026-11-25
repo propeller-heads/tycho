@@ -350,24 +350,30 @@
 //! hash and number, the next block's number and second, the whole state override sent, the
 //! front's implementation and every listing taken (its `doorView` answer, its record's settings
 //! and live-source words, its desk word and its pair's words at the head) are the same, it
-//! publishes that poll's samples again and stops after its second request. The head's hash
-//! stands for all the state the doors read that the poll does not: the pools' custody and pause,
-//! a credit listing's lender, the tokens' balances, the price contracts' code. It is read with
-//! the listings' words, and every request that asks a door then names its block by that hash and
-//! by no number (EIP-1898, the block required canonical): the node answers each from that very
-//! block or refuses it. A poll's samples are kept only where its doors were asked so and the node
-//! answered every word and every block asked for them: a read answered in part (a listing left
-//! out for an unread word, a side without its second block) is published by its own poll and
-//! asked again by the next. A node that does not answer the header, or refuses a block named by
-//! its hash, is asked every door on every poll, by number. A read by hash that fails is asked
-//! again by number on that poll, unless its failure ends the feed. Only a node's refusal of the
-//! form itself counts against the hash form (a JSON-RPC invalid-params or method-not-found
-//! error on a request naming its block by hash, on a poll the number form then answers): after
-//! three such polls in a row the feed sets the form aside for 32 heads, then tries it once more,
-//! and any answer by hash brings it back. A backend that does not know the head's hash yet, a
-//! block replaced under the read or a timeout sets nothing aside. The feed counts each read it
-//! does not keep, by reason (`efficient_prop_reads_not_kept_total`), and each time it sets the
-//! form aside (`efficient_prop_hash_form_set_aside_total`): see `telemetry.rs`. The key is one
+//! publishes that poll's samples again. The head's hash stands for all the state the doors read
+//! that the poll does not: the pools' custody and pause, a credit listing's lender, the tokens'
+//! balances, the price contracts' code. Each poll reads the node's latest header first, and every
+//! request after it names its block by that header's hash and by no number (EIP-1898, the block
+//! required canonical): the node answers each from that very block or refuses it. A block's
+//! state never changes, so a request the node answered at that hash with no override (the
+//! listings, the front's implementation, the listings' and desks' words, the doors' record words)
+//! is not sent again while the head stays: a poll at a head it has read sends the header alone
+//! where nothing the doors read changed, and only the doors' requests where a state map moved. A
+//! poll at a new head carries the last poll's request for the listings' words with its read of
+//! the listings, so its doors are asked after as many requests as before. A poll's samples are kept
+//! only where its doors were asked so and the node answered every word and every block asked for
+//! them: a read answered in part (a listing left out for an unread word, a side without its second
+//! block) is published by its own poll and asked again by the next. A node that does not answer the
+//! header, or refuses a block named by its hash, is asked every door on every poll, by number, and
+//! its listings are read at the latest block, the latest header not read again for 32 heads. A read
+//! by hash that fails is asked again by number on that poll, unless its failure ends the feed. Only
+//! a node's refusal of the form itself counts against the hash form (a JSON-RPC invalid-params or
+//! method-not-found error on a request naming its block by hash, on a poll the number form then
+//! answers): after three such polls in a row the feed sets the form aside for 32 heads, then tries
+//! it once more, and any answer by hash brings it back. A backend that does not know the head's
+//! hash yet, a block replaced under the read or a timeout sets nothing aside. The feed counts each
+//! read it does not keep, by reason (`efficient_prop_reads_not_kept_total`), and each time it sets
+//! the form aside (`efficient_prop_hash_form_set_aside_total`): see `telemetry.rs`. The key is one
 //! for the whole poll, not one a listing: a second maker's update samples every listing again. A
 //! poll that asks no door still stamps its snapshot as received at that poll: the stamp is the
 //! poll's time, not the time its samples were asked, and how long each book holds is in its

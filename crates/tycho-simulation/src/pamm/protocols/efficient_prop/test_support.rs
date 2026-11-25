@@ -961,6 +961,10 @@ pub(super) struct FakeNode {
     pub clock: FakeClock,
     /// How many `eth_call`s the node has answered.
     pub eth_calls: Arc<AtomicUsize>,
+    /// How many storage words the node has answered.
+    pub storage_reads: Arc<AtomicUsize>,
+    /// How many times the node was asked its latest block's header.
+    pub latest_headers: Arc<AtomicUsize>,
     /// How many times a call asked the lane for its `HOLD_MS`.
     pub hold_ms_reads: Arc<AtomicUsize>,
     /// Whether the node is one of a chain whose builders land makers' updates: see
@@ -1218,6 +1222,8 @@ impl FakeNode {
             refused_blocks: Vec::new(),
             clock: FakeClock::seal(),
             eth_calls: Arc::new(AtomicUsize::new(0)),
+            storage_reads: Arc::default(),
+            latest_headers: Arc::default(),
             hold_ms_reads: Arc::new(AtomicUsize::new(0)),
             lands_in_block: false,
             overridden: Arc::default(),
@@ -1340,14 +1346,24 @@ impl FakeNode {
                 }
                 answer
             }
-            Some("eth_getStorageAt") => self.answer_storage(request),
+            Some("eth_getStorageAt") => {
+                self.storage_reads
+                    .fetch_add(1, Ordering::SeqCst);
+                self.answer_storage(request)
+            }
             Some("eth_getBlockByNumber") => {
-                // The block the listings were read at, named by its hash where the node names it,
-                // and on BNB Chain its parent, whose milliseconds the chain's block time is
-                // checked against.
+                if request["params"][0] == "latest" {
+                    self.latest_headers
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                // The latest block, which the listings are read at, named by its hash where the
+                // node names it, and on BNB Chain its parent, whose milliseconds the chain's block
+                // time is checked against.
                 assert_eq!(request["params"][1], false, "a header without its transactions");
                 let parent = format!("0x{:x}", self.block - 1);
-                let header = if request["params"][0] == self.pinned() {
+                let header = if request["params"][0] == self.pinned() ||
+                    request["params"][0] == "latest"
+                {
                     self.head_hash.map(|hash| {
                         let mut header = serde_json::json!({
                             "hash": hash,
@@ -1443,7 +1459,7 @@ impl FakeNode {
             // A desk contract's desk word and its listings' pair words, read at the listings'
             // block: the word a listing landed on chain (see `FakeListing::landed`), and no firm
             // word.
-            assert_eq!(params[2], self.pinned(), "a desk contract is read at the listings' block");
+            assert!(self.names(&params[2]), "a desk contract is read at the listings' block");
             let (epoch, stopped) = self.head(desk);
             let word = if slot == U256::from(1u8) {
                 B256::from(
@@ -2207,10 +2223,12 @@ fn call_key(method: &Value, params: &Value) -> String {
 ///
 /// The recordings were made before a poll read its pinned block's header, so none holds an
 /// `eth_getBlockByNumber`: the node answers it as a node that names no block, with no header,
-/// unless a test gives it a hash to name every block by (see [`Self::naming_blocks`]). Either way
-/// that read is not counted as unrecorded. A request naming its block by that hash (EIP-1898) is
-/// answered as the recorded request naming it by the number the header was last asked of: the
-/// same request of the same block, as a node holding one block of that number answers it.
+/// unless a test gives it a hash to name every block it is asked of by number (see
+/// [`Self::naming_blocks`]); the latest block it never names, so its listings are read at the
+/// latest block as recorded. Either way that read is not counted as unrecorded. A request naming
+/// its block by that hash (EIP-1898) is answered as the recorded request naming it by the number
+/// the header was last asked of: the same request of the same block, as a node holding one block of
+/// that number answers it.
 pub(super) struct RecordedNode {
     answers: HashMap<String, Exchange>,
     unrecorded: Arc<AtomicUsize>,
@@ -2342,6 +2360,9 @@ impl RecordedNode {
                 return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": code });
             }
             if request["method"] == "eth_getBlockByNumber" {
+                if request["params"][0] == "latest" {
+                    return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null });
+                }
                 let header = self.head_hash.map(
                     |hash| serde_json::json!({ "hash": hash, "number": request["params"][0] }),
                 );

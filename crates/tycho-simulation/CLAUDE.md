@@ -202,6 +202,12 @@ for any protocol indexed by Tycho.
     (`Answered`); a node that names no block hash, or refuses one, is asked every door by number.
     Only a refusal of the form itself (JSON-RPC -32602 or -32601) counts against the hash form,
     and never for the reader's life: three in a row set it aside for 32 heads (`HashForm`)
+  - a next-block poll reads the latest header first and its listings and words at that hash
+    (`read_head`); `batch` answers a request naming a block by hash with no override from what
+    the node answered there before (`HeadAnswers`, one block), so a poll at a head already read
+    sends the header alone, or the doors' requests alone. Never key it by number or a tag, and
+    never keep a request under an override; a node naming no latest hash, or refusing one, reads
+    its listings at the latest block for 32 heads
   - the quote layout, front, factory, desk contract code hash and allow-list are builder
     arguments (`EfficientPropDeployment`); the one place that writes them down is the chain's
     preset: `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings
