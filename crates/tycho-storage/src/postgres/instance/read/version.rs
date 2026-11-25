@@ -274,7 +274,7 @@ mod tests {
         let map = unique_by_key(
             "contract_code",
             InstanceId(7),
-            ReadAt::Current(None),
+            ReadAt::Current,
             [(1, "a"), (2, "b")],
         )
         .unwrap();
