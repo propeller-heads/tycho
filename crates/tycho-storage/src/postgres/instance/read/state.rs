@@ -387,7 +387,7 @@ mod tests {
     };
 
     use super::{
-        active_instance_head, current_state_rows, history_state_rows, resolve_version, ReadAt,
+        active_instance_limits, current_state_rows, history_state_rows, resolve_version, ReadAt,
     };
     use crate::postgres::{
         db_fixtures,
@@ -1323,7 +1323,7 @@ mod tests {
                     .run(|reader| {
                         let writer = &mut writer;
                         async move {
-                            let active = active_instance_head("vm:curve", reader)
+                            let active = active_instance_limits("vm:curve", reader)
                                 .await
                                 .unwrap()
                                 .expect("vm:curve has an active instance");
