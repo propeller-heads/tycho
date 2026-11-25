@@ -18,7 +18,12 @@ use tycho_common::{
     Bytes,
 };
 
+#[cfg(feature = "proptest")]
+use crate::evm::protocol::checkable::generator::{
+    AnyTokens, AnyUint, Case, Domain, DomainExt, StateCases,
+};
 use crate::evm::protocol::{
+    checkable::{CheckableState, LimitKind},
     cpmm::protocol::{
         cpmm_fee, cpmm_get_amount_out, cpmm_spot_price, cpmm_swap_to_price, ProtocolFee,
     },
@@ -251,6 +256,56 @@ impl ProtocolSim for UniswapV2State {
         } else {
             false
         }
+    }
+}
+
+impl CheckableState for UniswapV2State {
+    /// The limit is the room left below uint112, and one unit more overflows the pair.
+    fn limit_kind(&self, _sell_token: &Bytes, _buy_token: &Bytes) -> LimitKind {
+        LimitKind::Hard
+    }
+
+    /// Always valid: `sync` writes the pair's token balances into its reserves whenever both fit
+    /// `uint112`, and before the first mint anyone can send the pair any amounts and call it.
+    fn check_valid(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The smallest input that buys any output, and one unit around it, where quoting turns from
+    /// an error into a quote of 1. For an input `a`, reserves `R_in` and `R_out`, and the fee
+    /// `F / P` (`FEE_NUMERATOR / FEE_PRECISION`), the pair pays
+    /// `floor(F a R_out / (P R_in + F a))`. That is at least 1 exactly when
+    /// `F a (R_out - 1) >= P R_in`, so with `R_out <= 1` no input buys any output.
+    fn amounts(&self, sell_token: &Bytes, buy_token: &Bytes) -> Vec<BigUint> {
+        let (reserve_in, reserve_out) = self.reserves(sell_token < buy_token);
+        let (reserve_in, reserve_out) = (U256::from(reserve_in), U256::from(reserve_out));
+        if reserve_out <= U256::ONE {
+            return Vec::new();
+        }
+        // Both products fit a `U256`: the reserves are `uint112`, and `F` and `P` are below `2^14`.
+        let smallest =
+            (reserve_in * FEE_PRECISION).div_ceil((reserve_out - U256::ONE) * FEE_NUMERATOR);
+        let mut amounts = vec![smallest + U256::ONE, smallest];
+        if !smallest.is_zero() {
+            amounts.push(smallest - U256::ONE);
+        }
+        amounts
+            .into_iter()
+            .map(u256_to_biguint)
+            .collect()
+    }
+}
+
+#[cfg(feature = "proptest")]
+impl StateCases for UniswapV2State {
+    type Tokens = [Token; 2];
+
+    /// Reserves anywhere in uint112, either of them possibly 0.
+    fn cases() -> impl Domain<Value = Case<Self, Self::Tokens>> {
+        (AnyUint, AnyUint, AnyTokens).map(|(reserve0, reserve1, tokens)| Case {
+            state: Self::new(reserve0, reserve1),
+            tokens,
+        })
     }
 }
 

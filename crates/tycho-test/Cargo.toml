@@ -39,7 +39,10 @@ urlencoding = "2.1.3"
 [dev-dependencies]
 mockito = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+pastey = "0.2.3"
 rstest = { workspace = true }
+# The state generators, for tests/state_properties.rs only: the library needs no proptest.
+tycho-simulation = { workspace = true, features = ["evm", "proptest"] }
 typetag = { workspace = true }
 
 [lints]
