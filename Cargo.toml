@@ -114,6 +114,11 @@ mockito = "1.1.1"
 pretty_assertions = "1.4.0"
 rstest = "0.24.0"
 
+[workspace.lints.rust]
+# `old_gateway` marks the code of the storage gateway on the old tables. It is never set, so that code
+# is not compiled until the cut-over deletes it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(old_gateway)"] }
+
 # Lints beyond clippy's default groups. Every member crate opts in with `[lints] workspace = true`.
 # A deliberate exception is suppressed at the site with `#[expect(clippy::<lint>, reason = "...")]`.
 [workspace.lints.clippy]

@@ -39,7 +39,8 @@ impl PostgresGatewayNew {
     ///   instance.
     ///
     /// Components without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
-    /// an unknown chain.
+    /// an unknown chain. `Unexpected` when two rows of one component and token are valid at the
+    /// version.
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
@@ -59,24 +60,23 @@ impl PostgresGatewayNew {
         Ok(component_balances_at(instance.id, ids, read, conn)
             .await?
             .into_iter()
-            .fold(
-                HashMap::new(),
-                |mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>>,
-                 ((external_id, token), (balance, balance_float))| {
-                    let balance = ComponentBalance::new(
-                        token.clone(),
-                        balance,
-                        balance_float,
-                        Bytes::zero(32),
-                        &external_id,
-                    );
-                    balances
-                        .entry(external_id)
-                        .or_default()
-                        .insert(token, balance);
-                    balances
-                },
-            ))
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, balance_float))| {
+                        let balance = ComponentBalance::new(
+                            token.clone(),
+                            balance,
+                            balance_float,
+                            Bytes::zero(32),
+                            &external_id,
+                        );
+                        (token, balance)
+                    })
+                    .collect();
+                (external_id, balances)
+            })
+            .collect())
     }
 
     /// Returns the state of the components of `system`'s active instance. The total is always
@@ -93,7 +93,8 @@ impl PostgresGatewayNew {
     /// - `pagination_params`: `Unsupported` when set. Page the component ids instead.
     ///
     /// A component without state attributes is absent, even with balances. `NotFound` for an
-    /// unknown chain.
+    /// unknown chain. `Unexpected` when two rows of one attribute, or of one balance, are valid at
+    /// the version.
     #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     pub async fn get_protocol_states(
         &self,
@@ -136,46 +137,31 @@ async fn states_of(
     let read = resolve_version(&active, at, conn).await?;
     let instance = active.id;
 
-    let rows = match read {
-        ReadAt::Current(_) => current_state_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_state_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
-    let attributes: HashMap<ComponentId, HashMap<String, Bytes>> = unique_by_key(
+    let mut rows = current_state_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
+    }
+    let attributes = unique_by_key(
         "protocol_state",
         instance,
         read,
         rows.into_iter()
             .map(|(external_id, name, value)| ((external_id, name), value)),
-    )?
-    .into_iter()
-    .fold(HashMap::new(), |mut attributes, ((external_id, name), value)| {
-        attributes
-            .entry(external_id)
-            .or_default()
-            .insert(name, value);
-        attributes
-    });
+    )?;
 
-    let mut balances = if retrieve_balances {
+    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = if retrieve_balances {
         component_balances_at(instance, ids, read, conn)
             .await?
             .into_iter()
-            .filter(|((external_id, _), _)| attributes.contains_key(external_id))
-            .fold(
-                HashMap::new(),
-                |mut balances: HashMap<ComponentId, HashMap<Address, Balance>>,
-                 ((external_id, token), (balance, _))| {
-                    balances
-                        .entry(external_id)
-                        .or_default()
-                        .insert(token, balance);
-                    balances
-                },
-            )
+            .filter(|(external_id, _)| attributes.contains_key(external_id))
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, _))| (token, balance))
+                    .collect();
+                (external_id, balances)
+            })
+            .collect()
     } else {
         HashMap::new()
     };
@@ -350,15 +336,11 @@ async fn component_balances_at(
     ids: Option<&[&str]>,
     read: ReadAt,
     conn: &mut AsyncPgConnection,
-) -> Result<HashMap<(ComponentId, Address), (Balance, f64)>, StorageError> {
-    let rows = match read {
-        ReadAt::Current(_) => current_balance_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_balance_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
+) -> Result<HashMap<ComponentId, HashMap<Address, (Balance, f64)>>, StorageError> {
+    let mut rows = current_balance_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
+    }
     unique_by_key(
         "component_balance",
         instance,
@@ -372,8 +354,8 @@ async fn component_balances_at(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
-    use diesel::{prelude::*, sql_types::Timestamp};
+    use chrono::{NaiveDate, NaiveDateTime};
+    use diesel::prelude::*;
     use diesel_async::{
         scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
     };
@@ -393,7 +375,8 @@ mod tests {
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
-            orm::ProtocolStateHistory,
+            orm::NewProtocolStateHistory,
+            read::testing::{before_retention, recent},
             schema::tycho::{
                 extraction_state, protocol_instance, protocol_state, protocol_state_history,
             },
@@ -434,13 +417,6 @@ mod tests {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .expect("a valid date")
-    }
-
-    /// Midnight UTC of the day `d` days after the day 10 days ago: inside the default retention.
-    fn recent(d: i64) -> NaiveDateTime {
-        (Utc::now().date_naive() - Duration::days(10 - d))
-            .and_hms_opt(0, 0, 0)
-            .expect("a valid time")
     }
 
     fn at(ts: NaiveDateTime) -> Version {
@@ -613,7 +589,7 @@ mod tests {
         db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
         let result =
-            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(5) - Duration::days(40))))
+            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(before_retention(recent(5)))))
                 .await;
 
         let Err(StorageError::Unsupported(msg)) = result else {
@@ -687,6 +663,89 @@ mod tests {
 
         assert_eq!(before["a"][&b("0x01")].balance, b("0x10"));
         assert!(deleted.is_empty(), "{deleted:?}");
+    }
+
+    /// Inserts a version of the balance of token 0x01 in `component` of "vm:curve".
+    async fn balance_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        component: i64,
+        balance: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_component_balance_version(
+            conn,
+            s.curve,
+            component,
+            b("0x01"),
+            b(balance),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, c, "0x20", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = s
+            .gateway
+            .get_component_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&["a"]),
+                Some(&at(recent(2))),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.keys().collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_see_the_last_update_of_a_block() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(2), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x30", recent(2), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in [(recent(2), "0x30"), (recent(1), "0x10")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(result["a"].len(), 1, "{ts}");
+            assert_eq!(result["a"][&b("0x01")].balance, b(expected), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_before_head_read_a_row_replaced_at_the_head() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(5))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(5), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(4))))
+            .await
+            .unwrap();
+
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
     }
 
     async fn states(
@@ -896,7 +955,7 @@ mod tests {
             Some("vm:curve"),
             None,
             None,
-            Some(at(recent(5) - Duration::days(40))),
+            Some(at(before_retention(recent(5)))),
         )
         .await;
 
@@ -1135,7 +1194,7 @@ mod tests {
         let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
         state_version(&mut conn, &s, c, "x", "0x01", recent(1), Some(recent(3))).await;
         diesel::insert_into(protocol_state_history::table)
-            .values(ProtocolStateHistory {
+            .values(NewProtocolStateHistory {
                 instance_id: s.curve,
                 protocol_component_id: c,
                 attribute_name: "x".to_string(),
@@ -1144,8 +1203,6 @@ mod tests {
                 valid_from: recent(1),
                 valid_to: recent(3),
                 tx_index: 1,
-                inserted_ts: recent(1),
-                modified_ts: recent(1),
             })
             .execute(&mut conn)
             .await
@@ -1246,7 +1303,7 @@ mod tests {
             .transaction::<_, diesel::result::Error, _>(|conn| {
                 async move {
                     let inserted = diesel::insert_into(protocol_state_history::table)
-                        .values(ProtocolStateHistory {
+                        .values(NewProtocolStateHistory {
                             instance_id: instance,
                             protocol_component_id: component,
                             attribute_name: "x".to_string(),
@@ -1255,8 +1312,6 @@ mod tests {
                             valid_from: recent(1),
                             valid_to: recent(4),
                             tx_index: 0,
-                            inserted_ts: recent(4),
-                            modified_ts: recent(4),
                         })
                         .execute(conn)
                         .await?;
@@ -1310,19 +1365,15 @@ mod tests {
                 )
                 .await;
                 db_fixtures::set_instance_head(&mut writer, s.curve, recent(3)).await;
-                diesel::sql_query(
-                    "SELECT partman.create_partition_time('tycho.protocol_state_history', \
-                     ARRAY[$1])",
-                )
-                .bind::<Timestamp, _>(recent(4))
-                .execute(&mut writer)
-                .await
-                .unwrap();
+                db_fixtures::create_history_day(&mut writer, "protocol_state_history", recent(4))
+                    .await;
 
                 let rows = snapshot_transaction(&mut reader)
                     .run(|reader| {
                         let writer = &mut writer;
                         async move {
+                            // Repeats the statements of `states_of` in its order, to move the row
+                            // between them. Keep it in step when `states_of` changes.
                             let active = active_instance_limits("vm:curve", reader)
                                 .await
                                 .unwrap()

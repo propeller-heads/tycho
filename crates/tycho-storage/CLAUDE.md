@@ -2,6 +2,21 @@
 
 PostgreSQL backend implementing the storage traits defined in `tycho-common`.
 
+## Old gateway: off
+
+The gateway on the old tables is off. The modules `chain`, `contract`, `protocol`,
+`component_pause`, `token_cache`, `component_index`, `entry_point`, `extraction_state`,
+`versioning` and `direct`, the `PostgresGateway` type, the entity-cache reads in `snapshot`, and
+their tests are marked `#[cfg(old_gateway)]`. That cfg is never set, so this code is not compiled.
+The cut-over deletes it.
+
+`CachedGateway` keeps the buffered write path and sends every batch to
+`execute_instance_write_op`. These fail with `StorageError::Unsupported`: a batch without an
+instance, every read, and every direct write that only the old gateway served.
+`GatewayBuilder::enable_token_cache` and `set_component_index` still set their flags, but nothing
+reads them until the token cache and the component index are ported. The module map
+and the Architecture section below still describe the old gateway.
+
 ## Module Map
 
 ```
@@ -35,8 +50,13 @@ postgres/
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — which rows answer a version (current, or current and history) and the one-row-per-key rule
     ├── write/          — its write methods, one file per domain
+    │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
-    │   └── extraction_state.rs — cursor and last block of each instance
+    │   ├── component.rs — the component id of each external id, in one instance
+    │   ├── extraction_state.rs — cursor and last block of each instance
+    │   ├── state.rs    — protocol state rows: their key, history row and table writes for versioning
+    │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins
+    │   └── versioning.rs — VersionedRowNew (renamed to VersionedRow at cut-over) + write_versions(): latest version in the current table, replaced versions in history
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -59,14 +79,20 @@ instances. No table has a DEFAULT partition.
   `drop_expired_partitions()` drops expired days of both the old partitioned tables and the
   history tables.
 - `public.protocol_system.active_instance_id` records which instance readers see.
-  `public.token.address` is how instance tables refer to tokens.
+  `public.token.address` is the key of a token (NOT NULL, UNIQUE; one chain per database), and
+  instance tables refer to tokens by it. A token has no `account` row.
 - `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
-  `execute_instance_write_op` on `PostgresGatewayNew`, instead of `execute_write_op` on the old
-  gateway. No transactions are stored: versioned rows take their block timestamp and tx index
-  from the batch (`instance::origins`), and `UpsertTx` writes nothing. It writes blocks and
-  `tycho.extraction_state` so far; any other op fails the whole batch with
-  `StorageError::Unsupported`. At cut-over, `execute_write_op` and the
-  old gateway are deleted, and `PostgresGatewayNew` is renamed.
+  `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows
+  take their block timestamp and tx index from the batch (`instance::origins`), and `UpsertTx`
+  writes nothing. It writes blocks, tokens, component balances and `tycho.extraction_state` so far;
+  any other op fails the whole batch with `StorageError::Unsupported`. At cut-over, the old
+  gateway is deleted and `PostgresGatewayNew` is renamed.
+- `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
+  `instance::write::versioning::VersionedRowNew` (protocol state and component balances so far).
+  The module doc of `write/versioning.rs` has the rules. A change that does not start after the
+  version it replaces fails the batch. The old versioning (`postgres/versioning.rs`) compares a change only
+  with the stored row. It skips a change that is not after that row. It does not compare the
+  changes of one key inside a batch, so it applies two changes with the same start.
 
 ## Architecture
 
