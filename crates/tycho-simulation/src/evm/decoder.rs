@@ -2778,4 +2778,95 @@ mod tests {
         assert!(decoder.admits("x", &component_with_id("c")));
         assert!(decoder.admits("y", &component_with_id("a")));
     }
+
+    /// A message with one empty state message per entry, each at its own header and sync state.
+    fn round_msg(entries: &[(&str, BlockHeader, SynchronizerState)]) -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::{Snapshot, StateSyncMessage};
+
+        FeedMessage {
+            state_msgs: entries
+                .iter()
+                .map(|(name, header, _)| {
+                    (
+                        name.to_string(),
+                        StateSyncMessage {
+                            header: header.clone(),
+                            snapshots: Snapshot {
+                                states: HashMap::new(),
+                                vm_storage: HashMap::new(),
+                            },
+                            deltas: None,
+                            removed_components: HashMap::new(),
+                        },
+                    )
+                })
+                .collect(),
+            sync_states: entries
+                .iter()
+                .map(|(name, _, state)| (name.to_string(), state.clone()))
+                .collect(),
+        }
+    }
+
+    /// Decodes a fresh `round_msg(entries)` 20 times and returns the block of each update. Each
+    /// message has its own `HashMap` seed, so the iteration order of its streams varies.
+    async fn decoded_blocks(entries: &[(&str, BlockHeader, SynchronizerState)]) -> HashSet<u64> {
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        let mut blocks = HashSet::new();
+        for _ in 0..20 {
+            let update = decoder
+                .decode(&round_msg(entries))
+                .await
+                .expect("decode failed");
+            blocks.insert(update.block_number);
+        }
+        blocks
+    }
+
+    /// A stream far behind the tip, such as one replaying an extractor that is still syncing,
+    /// must not set the block of the update.
+    #[tokio::test]
+    async fn test_decode_with_stream_behind_tip() {
+        let tip = header_at(2_000, 24_000, None);
+        let behind = header_at(1_000, 12_000, None);
+
+        let blocks = decoded_blocks(&[
+            ("uniswap_v2", tip.clone(), SynchronizerState::Ready(tip)),
+            ("ekubo_v3", behind.clone(), SynchronizerState::Stale(behind)),
+        ])
+        .await;
+
+        assert_eq!(blocks, HashSet::from([2_000]));
+    }
+
+    /// After a revert, a Ready stream's header names the block the chain went back to. A stream
+    /// that has not seen the revert yet can hold a higher block, which must not win.
+    #[tokio::test]
+    async fn test_decode_revert_with_delayed_stream_above_it() {
+        let revert = BlockHeader { revert: true, ..header_at(98, 1_176, None) };
+        let delayed = header_at(99, 1_188, None);
+
+        let blocks = decoded_blocks(&[
+            ("uniswap_v2", revert.clone(), SynchronizerState::Ready(revert)),
+            ("ekubo_v3", delayed.clone(), SynchronizerState::Delayed(delayed)),
+        ])
+        .await;
+
+        assert_eq!(blocks, HashSet::from([98]));
+    }
+
+    /// With no Ready stream, the update takes the newest header in the message.
+    #[tokio::test]
+    async fn test_decode_without_ready_stream() {
+        let newer = header_at(2_000, 24_000, None);
+        let older = header_at(1_000, 12_000, None);
+
+        let blocks = decoded_blocks(&[
+            ("uniswap_v2", newer.clone(), SynchronizerState::Delayed(newer)),
+            ("ekubo_v3", older.clone(), SynchronizerState::Stale(older)),
+        ])
+        .await;
+
+        assert_eq!(blocks, HashSet::from([2_000]));
+    }
 }
