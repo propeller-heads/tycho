@@ -516,24 +516,39 @@ mod tests {
         assert_ne!(executor("fallback:efficient_prop"), executor(EFFICIENT_PROP_PROTOCOL_SYSTEM));
     }
 
-    /// Base lists no executor for the listing doors or the Efficient pools yet: neither is served
-    /// there, so Base's default registry resolves no encoder for them. Each returns as a row at
-    /// the address of Base's PropAMMExecutor once it is.
+    /// Base lists no executor for the Efficient pools yet: they are not served there, so Base's
+    /// default registry resolves no encoder for them. They return as a row at the address of
+    /// Base's PropAMMExecutor once they are.
     #[test]
-    fn test_efficient_prop_and_flamm_have_no_executor_on_base_yet() {
+    fn test_flamm_has_no_executor_on_base_yet() {
         let registry = SwapEncoderRegistry::new_with_defaults(Chain::Base).unwrap();
 
-        for system in [EFFICIENT_PROP_PROTOCOL_SYSTEM, "flamm"] {
-            assert!(registry.get_encoder(system).is_none(), "Base lists an executor for {system}");
-        }
+        assert!(registry.get_encoder("flamm").is_none(), "Base lists an executor for flamm");
     }
 
-    /// The router test setup deploys one PropAMMExecutor, before any executor that depends on the
-    /// chain, so on a Base fork it lands where it lands on Ethereum, and the test addresses give
-    /// the listing doors that one on Base: the doors' Base tests encode against it. The executor
-    /// addresses and the deployment registry list neither the doors nor the pools on Base.
+    /// On Base the listing doors encode through the generic pAMM encoder against the
+    /// PropAMMExecutor Base already runs for its native IPropAMM venue.
     #[test]
-    fn test_efficient_prop_is_listed_on_base_in_the_test_addresses_alone() {
+    fn test_efficient_prop_resolves_to_the_base_propamm_executor() {
+        /// The PropAMMExecutor on Base.
+        const PROPAMM_EXECUTOR: &str = "0xF30f4c985fCA63913f421F78058031FA6514eF7f";
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Base).unwrap();
+
+        let doors = registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .expect("Base configures the listing doors' executor");
+
+        assert_eq!(doors.executor_address(), &Bytes::from(PROPAMM_EXECUTOR));
+    }
+
+    /// On Base the listing doors are an alias of the chain's one PropAMMExecutor, the one its
+    /// native IPropAMM venue deploys: at its address in the executor addresses and the deployment
+    /// registry, with no deployment of their own. The router test setup deploys one
+    /// PropAMMExecutor, before any executor that depends on the chain, so on a Base fork it lands
+    /// where it lands on Ethereum, and the test addresses give the listing doors that one: the
+    /// doors' Base tests encode against it. Neither file lists the Efficient pools on Base.
+    #[test]
+    fn test_efficient_prop_is_listed_as_an_alias_of_the_base_propamm_executor() {
         let config = |name: &str| -> serde_json::Value {
             serde_json::from_str(&std::fs::read_to_string(format!("config/{name}.json")).unwrap())
                 .unwrap()
@@ -544,20 +559,40 @@ mod tests {
             config("test_executor_addresses"),
             config("deployment_registry"),
         );
-        let ethereum: Vec<_> = deployments["ethereum"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .filter(|(_, deployment)| deployment["contract"] == "PropAMMExecutor")
-            .map(|(key, _)| key.clone())
-            .collect();
+        let deploying = |chain: &str| -> Vec<String> {
+            deployments[chain]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, deployment)| deployment["contract"] == "PropAMMExecutor")
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        let (base, ethereum) = (deploying("base"), deploying("ethereum"));
+        assert_eq!(base.len(), 1, "Base deploys one PropAMMExecutor");
         assert_eq!(ethereum.len(), 1, "Ethereum deploys one PropAMMExecutor");
+        let base = &base[0];
+        let listed = &registry["chains"]["base"]["executors"];
 
+        assert_ne!(base, EFFICIENT_PROP_PROTOCOL_SYSTEM);
+        let door = &addresses["base"][EFFICIENT_PROP_PROTOCOL_SYSTEM];
+        assert!(door.is_string(), "Base lists the listing doors' executor");
+        assert_eq!(door, &addresses["base"][base]);
+        assert_eq!(&listed[EFFICIENT_PROP_PROTOCOL_SYSTEM], door);
         assert_eq!(tests["base"][EFFICIENT_PROP_PROTOCOL_SYSTEM], tests["ethereum"][&ethereum[0]]);
-        for system in [EFFICIENT_PROP_PROTOCOL_SYSTEM, "flamm"] {
-            assert!(addresses["base"][system].is_null(), "{system}");
-            assert!(registry["chains"]["base"]["executors"][system].is_null(), "{system}");
-        }
+        assert!(addresses["base"]["flamm"].is_null());
+        assert!(listed["flamm"].is_null());
+    }
+
+    /// BNB Chain runs no PropAMMExecutor, and the generic pAMM encoder refuses the chain: its
+    /// default registry resolves no encoder for the listing doors, which are not encoded there.
+    #[test]
+    fn test_efficient_prop_has_no_executor_on_bsc() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Bsc).unwrap();
+
+        assert!(registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .is_none());
     }
 
     /// On Ethereum the listing doors encode through the generic pAMM encoder against the
