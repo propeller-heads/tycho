@@ -105,6 +105,10 @@ where
     /// reads the pool there then sees the swap's result, and the pool stays consistent for a
     /// hook that modifies a position in `afterSwap`. Bit layout of the first slot: v4-core
     /// `Slot0`.
+    ///
+    /// The native swap starts from the indexed pool, not from changes that `beforeSwap` made to
+    /// it. So the price and liquidity written here replace any that `beforeSwap` wrote, and
+    /// `afterSwap` sees the pool that the quote comes from.
     fn store_pool_state_after_swap(
         &self,
         overwrites: &mut HashMap<Address, HashMap<U256, U256>>,
