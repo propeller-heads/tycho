@@ -1,7 +1,7 @@
-substreams_yaml_path: ./ethereum-communityv3.yaml
-protocol_system: "communityv3"
+substreams_yaml_path: ./ethereum-community-v3.yaml
+protocol_system: "community_v3"
 protocol_type_names:
-  - "communityv3_pool"
+  - "community_v3_pool"
 module_name: "map_protocol_changes"
 skip_balance_check: false
 initialized_accounts:

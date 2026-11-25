@@ -84,7 +84,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
-        ("ethereum-communityv3", "ethereum-uniswap-v3-logs-only"),
+        ("ethereum-community-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
         ("robinhood-swaphood-v3", "ethereum-pancakeswap-v3"),
         ("elysium-kleos-v3", "ethereum-uniswap-v3-logs-only"),

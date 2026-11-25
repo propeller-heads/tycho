@@ -53,7 +53,7 @@ pub fn register_protocol(
             decoder_context,
         ),
         "uniswap_v3" | "pancakeswap_v3" | "sushiswap_v3" | "robinswap_v3" | "gigadex_v3" |
-        "swaphood_v3" | "kleos_v3" | "elyspump_v3" | "stockiumswap_v3" | "communityv3" => {
+        "swaphood_v3" | "kleos_v3" | "elyspump_v3" | "stockiumswap_v3" | "community_v3" => {
             stream_builder.exchange_with_decoder_context::<UniswapV3State>(
                 protocol_system,
                 tvl_filter,

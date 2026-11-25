@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
-  name: "ethereum_communityv3"
-  version: v0.1.5
+  name: "ethereum_community_v3"
+  version: v0.1.6
   url: "https://github.com/propeller-heads/tycho-indexer/tree/main/protocols/substreams/ethereum-uniswap-v3-logs-only"
 
 protobuf:
@@ -127,4 +127,4 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_pools_created: "factory_address=00a38533c68327aBE0Cc265436e036066E2D6B38&protocol_type_name=communityv3_pool"
+  map_pools_created: "factory_address=00a38533c68327aBE0Cc265436e036066E2D6B38&protocol_type_name=community_v3_pool"
