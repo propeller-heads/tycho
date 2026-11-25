@@ -353,7 +353,7 @@ async fn current_code_rows(
 }
 
 /// Loads the history code rows of the accounts `ids` of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 async fn history_code_rows(
     instance: InstanceId,
     ids: &[i64],
@@ -442,7 +442,7 @@ async fn current_slot_rows(
 }
 
 /// Loads the history slot rows of the accounts `ids` of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 async fn history_slot_rows(
     instance: InstanceId,
     ids: &[i64],
@@ -505,7 +505,7 @@ async fn current_account_balance_rows(
 }
 
 /// Loads the history balance rows of the accounts of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `accounts`: only these accounts; `None` for all of them. `skip`: leave out the balances of this
 /// token.
 async fn history_account_balance_rows(
