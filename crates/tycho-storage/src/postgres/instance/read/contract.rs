@@ -65,8 +65,9 @@ impl PostgresGatewayNew {
     ///   count too. Without it, all matching contracts are returned, and the total is their number.
     ///
     /// `NotFound` for an unknown chain, and for a contract without balances or without a balance
-    /// of the chain's native token. `balance_modify_tx` is always 32 zero bytes and `creation_tx`
-    /// is always `None`.
+    /// of the chain's native token. `Unexpected` when two rows of one code, slot or balance are
+    /// valid at the version. `balance_modify_tx` is always 32 zero bytes and `creation_tx` is
+    /// always `None`.
     #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     pub async fn get_contracts(
         &self,
@@ -233,7 +234,8 @@ impl PostgresGatewayNew {
     /// - `include_native`: add the balance of the chain's native token.
     ///
     /// Accounts without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
-    /// an unknown chain.
+    /// an unknown chain. `Unexpected` when two rows of one account and token are valid at the
+    /// version.
     pub async fn get_account_balances(
         &self,
         chain: &Chain,
