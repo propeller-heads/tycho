@@ -54,9 +54,8 @@ pub(super) async fn check_current(
 pub(super) enum ReadAt {
     /// The current tables answer: every current row is valid at this version, so the read takes
     /// them all, unfiltered. No current row is newer than the head, because the writer saves the
-    /// extraction state in the same transaction as the rows. `None` for the latest version, else
-    /// the timestamp of the version.
-    Current(Option<NaiveDateTime>),
+    /// extraction state in the same transaction as the rows.
+    Current,
     /// A version before the head: current rows with `valid_from <= ts`, and history rows with
     /// `valid_from <= ts < valid_to` and `valid_to <= head`.
     ///
@@ -71,9 +70,8 @@ pub(super) enum ReadAt {
 /// history horizon are the ones the read looked up with the instance.
 ///
 /// In this order:
-/// - `None` or the `Latest` block with kind `Last`: `Current(None)`. Reads nothing.
-/// - a timestamp at or after the head, or any timestamp when the instance has no head:
-///   `Current(Some(ts))`.
+/// - `None` or the `Latest` block with kind `Last`: `Current`. Reads nothing.
+/// - a timestamp at or after the head, or any timestamp when the instance has no head: `Current`.
 /// - a timestamp before the history horizon: `Unsupported`, because older history is dropped.
 /// - a timestamp before the base block of the instance: `Unsupported`, because the instance has no
 ///   history before it.
@@ -86,14 +84,14 @@ pub(super) async fn resolve_version(
     conn: &mut AsyncPgConnection,
 ) -> Result<ReadAt, StorageError> {
     let Some(at) = at else {
-        return Ok(ReadAt::Current(None));
+        return Ok(ReadAt::Current);
     };
     if let Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last) = at {
-        return Ok(ReadAt::Current(None));
+        return Ok(ReadAt::Current);
     }
     let ts = maybe_lookup_version_ts(at, conn).await?;
     let Some(head) = instance.head.filter(|head| ts < *head) else {
-        return Ok(ReadAt::Current(Some(ts)));
+        return Ok(ReadAt::Current);
     };
     if ts < instance.history_horizon {
         return Err(StorageError::Unsupported(format!(
@@ -139,10 +137,8 @@ where
                 Entry::Occupied(e) => {
                     counter!("storage_overlapping_versions", "entity" => entity).increment(1);
                     let version = match read {
-                        ReadAt::Current(None) => "the latest version".to_string(),
-                        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => {
-                            format!("version {ts}")
-                        }
+                        ReadAt::Current => "the head".to_string(),
+                        ReadAt::Past { ts, head: _ } => format!("version {ts}"),
                     };
                     return Err(StorageError::Unexpected(format!(
                         "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
