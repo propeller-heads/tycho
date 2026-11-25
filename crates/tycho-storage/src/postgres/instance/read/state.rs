@@ -15,7 +15,7 @@ use tycho_common::{
 use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     instance::{
-        active::active_instance_head,
+        active::active_instance_limits,
         gateway::PostgresGatewayNew,
         schema::tycho::{
             component_balance, component_balance_history, protocol_component, protocol_state,
@@ -50,7 +50,7 @@ impl PostgresGatewayNew {
     ) -> Result<HashMap<ComponentId, HashMap<Address, ComponentBalance>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(system)?;
-        let Some(instance) = active_instance_head(system, conn).await? else {
+        let Some(instance) = active_instance_limits(system, conn).await? else {
             return Ok(HashMap::new());
         };
 
@@ -130,7 +130,7 @@ async fn states_of(
     retrieve_balances: bool,
     conn: &mut AsyncPgConnection,
 ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
-    let Some(active) = active_instance_head(system, conn).await? else {
+    let Some(active) = active_instance_limits(system, conn).await? else {
         return Ok(WithTotal { entity: Vec::new(), total: None });
     };
     let read = resolve_version(&active, at, conn).await?;
@@ -146,6 +146,8 @@ async fn states_of(
     };
     let attributes: HashMap<ComponentId, HashMap<String, Bytes>> = unique_by_key(
         "protocol_state",
+        instance,
+        read,
         rows.into_iter()
             .map(|(external_id, name, value)| ((external_id, name), value)),
     )?
@@ -228,7 +230,7 @@ async fn current_state_rows(
 }
 
 /// Loads the history state rows of the components of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `ids`: only components with these external ids.
 async fn history_state_rows(
     instance: InstanceId,
@@ -302,7 +304,7 @@ async fn current_balance_rows(
 }
 
 /// Loads the history balance rows of the components of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `ids`: only components with these external ids.
 async fn history_balance_rows(
     instance: InstanceId,
@@ -359,6 +361,8 @@ async fn component_balances_at(
     };
     unique_by_key(
         "component_balance",
+        instance,
+        read,
         rows.into_iter()
             .map(|(id, token, balance, float)| ((id, token), (balance, float))),
     )
@@ -383,7 +387,7 @@ mod tests {
     };
 
     use super::{
-        active_instance_head, current_state_rows, history_state_rows, resolve_version, ReadAt,
+        active_instance_limits, current_state_rows, history_state_rows, resolve_version, ReadAt,
     };
     use crate::postgres::{
         db_fixtures,
@@ -1319,7 +1323,7 @@ mod tests {
                     .run(|reader| {
                         let writer = &mut writer;
                         async move {
-                            let active = active_instance_head("vm:curve", reader)
+                            let active = active_instance_limits("vm:curve", reader)
                                 .await
                                 .unwrap()
                                 .expect("vm:curve has an active instance");

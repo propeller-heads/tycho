@@ -17,7 +17,7 @@ use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
-        active::active_instance_head,
+        active::active_instance_limits,
         gateway::PostgresGatewayNew,
         schema::tycho::{
             account, account_balance, account_balance_history, contract_code,
@@ -80,7 +80,7 @@ impl PostgresGatewayNew {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(active) = active_instance_head(protocol_system, conn).await? else {
+        let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
         };
         let read = resolve_version(&active, at, conn).await?;
@@ -247,7 +247,7 @@ impl PostgresGatewayNew {
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(active) = active_instance_head(protocol_system, conn).await? else {
+        let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(HashMap::new());
         };
         let read = resolve_version(&active, at, conn).await?;
