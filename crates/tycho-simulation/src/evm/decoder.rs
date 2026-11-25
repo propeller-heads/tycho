@@ -10,7 +10,9 @@ use alloy::primitives::{Address, U256};
 use thiserror::Error;
 use tokio::sync::{watch, RwLock, RwLockReadGuard};
 use tracing::{debug, error, info, warn};
-use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader, FeedMessage, HeaderLike};
+use tycho_client::feed::{
+    synchronizer::ComponentWithState, BlockHeader, FeedMessage, HeaderLike, SynchronizerState,
+};
 use tycho_common::{
     dto::{ChangeType, ProtocolStateDelta},
     models::{blockchain::BlockAggregatedChanges, token::Token, Chain},
@@ -392,6 +394,30 @@ where
             .all(|predicate| predicate(snapshot))
     }
 
+    /// Picks the header of the block that `msg` advances the decoder to.
+    ///
+    /// A message can hold blocks from several heights: a stream that is behind the others, such
+    /// as one replaying an extractor that is still syncing, sends older blocks next to the newest
+    /// one. A Ready stream's header is the block the round reached. A message with no Ready
+    /// stream uses its newest header.
+    fn round_header(msg: &FeedMessage<H>) -> Option<&H> {
+        let ready = msg.state_msgs.iter().find(|(name, _)| {
+            matches!(msg.sync_states.get(*name), Some(SynchronizerState::Ready(_)))
+        });
+        ready
+            .or_else(|| {
+                msg.state_msgs
+                    .iter()
+                    .max_by_key(|(_, state_msg)| {
+                        state_msg
+                            .header
+                            .clone()
+                            .block_number_or_timestamp()
+                    })
+            })
+            .map(|(_, state_msg)| &state_msg.header)
+    }
+
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
     /// components
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
@@ -402,12 +428,8 @@ where
         let mut contracts_map = HashMap::new();
         let mut msg_failed_components = HashSet::new();
 
-        let header = msg
-            .state_msgs
-            .values()
-            .next()
+        let header = Self::round_header(msg)
             .ok_or_else(|| StreamDecodeError::Fatal("Missing block!".into()))?
-            .header
             .clone();
 
         let block_number = header
