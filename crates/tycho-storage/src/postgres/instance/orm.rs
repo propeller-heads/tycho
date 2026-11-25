@@ -493,7 +493,7 @@ pub struct ContractStorage {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::contract_storage)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewContractStorage {
@@ -504,6 +504,15 @@ pub struct NewContractStorage {
     pub previous_value: Option<Bytes>,
     pub valid_from: NaiveDateTime,
     pub tx_index: i32,
+}
+
+impl NewContractStorage {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 7;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Queryable, Selectable, Insertable)]
@@ -520,6 +529,29 @@ pub struct ContractStorageHistory {
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::contract_storage_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewContractStorageHistory {
+    pub instance_id: InstanceId,
+    pub account_id: i64,
+    pub slot: Bytes,
+    pub value: Option<Bytes>,
+    pub previous_value: Option<Bytes>,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
+}
+
+impl NewContractStorageHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
