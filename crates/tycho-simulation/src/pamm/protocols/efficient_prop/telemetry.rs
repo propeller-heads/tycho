@@ -106,7 +106,8 @@ pub(super) enum NotCovered {
     /// a front that ever names a fourth mode has its listings left out, and counted here, not
     /// dropped from both counts.
     CreditMode,
-    /// It caps the taker's tip under the feed's floor.
+    /// It caps the taker's tip under the feed's floor: the caller's, or on BNB Chain the node's
+    /// gas price where that is higher.
     TipCapUnderFloor,
     /// The feed was not given one of its tokens.
     UnknownToken,

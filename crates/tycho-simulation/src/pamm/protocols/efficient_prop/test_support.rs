@@ -129,6 +129,9 @@ pub(super) const ETHEREUM_BLOCK: u64 = 24_000_000;
 /// The hash a fake node names its latest block by, unless a test sets another.
 pub(super) const HEAD_HASH: B256 = B256::repeat_byte(0xb1);
 
+/// BNB Chain's gas price on the blocks read for the tests, 0.05 gwei: its base fee is zero.
+pub(super) const BNB_GAS_PRICE_WEI: u64 = 50_000_000;
+
 /// The hash the fake node's latest block names as its parent's.
 pub(super) const PARENT_HASH: B256 = B256::repeat_byte(0xb2);
 
@@ -992,6 +995,8 @@ pub(super) struct FakeNode {
     pub implementation_code: Vec<u8>,
     /// How many times the node was asked an account's code.
     pub code_reads: Arc<AtomicUsize>,
+    /// What the node answers for `eth_gasPrice`, wei: BNB Chain's minimum by default.
+    pub gas_price_wei: u64,
 }
 
 /// The fake front's clock, as `PropAMMClock.read` reads it, and the chain's blocks: in its mode 2
@@ -1223,6 +1228,7 @@ impl FakeNode {
             door_quotes_by_number: Arc::default(),
             implementation_code: IMPLEMENTATION_CODE.to_vec(),
             code_reads: Arc::default(),
+            gas_price_wei: BNB_GAS_PRICE_WEI,
         }
     }
 
@@ -1374,6 +1380,18 @@ impl FakeNode {
                     Some(header)
                 };
                 serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": header })
+            }
+            Some("eth_gasPrice") => {
+                assert_eq!(
+                    self.chain_id,
+                    Chain::Bsc.id(),
+                    "the gas price is read on BNB Chain alone"
+                );
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": format!("{:#x}", self.gas_price_wei),
+                })
             }
             Some("eth_getCode") => {
                 self.code_reads
@@ -1708,6 +1726,11 @@ impl FakeNode {
         landings: &Landings,
     ) -> Option<Vec<u8>> {
         if target == MS_PRECOMPILE {
+            assert_eq!(
+                data,
+                TIMESTAMP_MS_SELECTOR.as_slice(),
+                "the precompile is asked as the front asks it"
+            );
             return Some(
                 self.ms_precompile
                     .map(|ms| U256::from(ms).abi_encode())

@@ -225,6 +225,10 @@ impl EfficientPropFeedBuilder {
     /// default, every listing). A listing refuses a swap sent with a priority fee above its cap,
     /// which no book can enforce, so a caller who sends at a known priority fee sets it here to
     /// leave out the listings that would refuse its swaps. A listing with no cap is always served.
+    ///
+    /// On BNB Chain the floor is at least the node's gas price, read at every poll: the chain's
+    /// base fee is zero, so a swap's whole gas price is its tip, and a listing capping it under
+    /// the price a swap is sent at refuses every swap.
     pub fn min_tip_cap_wei(mut self, min_tip_cap_wei: U256) -> Self {
         self.min_tip_cap_wei = min_tip_cap_wei;
         self
@@ -9149,7 +9153,7 @@ mod tests {
         mod bnb {
             use super::*;
             use crate::pamm::protocols::efficient_prop::test_support::{
-                BNB_HEAD_SUB_MS, PARENT_HASH,
+                BNB_GAS_PRICE_WEI, BNB_HEAD_SUB_MS, PARENT_HASH,
             };
 
             /// The fake node's latest block's milliseconds.
@@ -9380,6 +9384,40 @@ mod tests {
                         .load(Ordering::Relaxed),
                     usize::from(!served)
                 );
+            }
+
+            /// BNB Chain's base fee is zero, so a swap's whole gas price is its tip, and a listing
+            /// capping the tip under the price a swap is sent at refuses every swap: a listing
+            /// whose cap is under the node's gas price is not served, nor one under the caller's
+            /// floor where that is higher. A listing with no cap is.
+            #[rstest]
+            #[case::under_the_gas_price(1 | (7 << 12), BNB_GAS_PRICE_WEI, 0, false)]
+            #[case::at_the_gas_price(5 | (7 << 12), BNB_GAS_PRICE_WEI, 0, true)]
+            #[case::under_a_higher_gas_price(5 | (7 << 12), 60_000_000, 0, false)]
+            #[case::under_the_callers_floor(5 | (7 << 12), BNB_GAS_PRICE_WEI, 60_000_000, false)]
+            #[case::no_cap(0, 60_000_000, 0, true)]
+            #[tokio::test]
+            async fn a_bnb_listing_capping_the_tip_under_the_gas_price_is_not_served(
+                #[case] tip_cap: u16,
+                #[case] gas_price_wei: u64,
+                #[case] min_tip_cap_wei: u64,
+                #[case] served: bool,
+            ) {
+                let listing = FakeListing { tip_cap, ..FakeListing::ethereum(1) };
+                let mut node = FakeNode::bnb(vec![listing]);
+                node.gas_price_wei = gas_price_wei;
+                let node = node.spawn().await;
+                let state = spawn_state_server(bnb_map(&[(1, false)])).await;
+                let mut source = bnb_builder(&node.url(), vec![state.url()])
+                    .min_tip_cap_wei(U256::from(min_tip_cap_wei))
+                    .build()
+                    .unwrap()
+                    .source;
+                source.clock = Arc::new(|| NOW_MS);
+
+                let books = source.fetch().await.unwrap().books;
+
+                assert_eq!(books.len(), usize::from(served));
             }
 
             /// A credit listing named with its gas is served on BNB Chain as on Ethereum: its
@@ -9768,7 +9806,8 @@ mod tests {
             };
 
             use crate::pamm::protocols::efficient_prop::reader::{
-                clockCall, deskCellOfCall, CELL_CODEHASHCall, FRONTCall, IMPLEMENTATION_SLOT,
+                clockCall, deskCellOfCall, timestampMsCall, CELL_CODEHASHCall, FRONTCall,
+                IMPLEMENTATION_SLOT,
             };
 
             let Ok(rpc) = std::env::var("EFFICIENT_PROP_BNB_RPC") else {
@@ -9832,9 +9871,12 @@ mod tests {
                     .clockMode,
                 U256::from(3)
             );
-            let precompile = call(address!("0000000000000000000000000000000000000070"), Vec::new())
-                .await
-                .unwrap();
+            let precompile = call(
+                address!("0000000000000000000000000000000000000070"),
+                timestampMsCall {}.abi_encode(),
+            )
+            .await
+            .unwrap();
             assert!(precompile.is_empty(), "the millisecond precompile answers");
             if provider
                 .get_code_at(factory)

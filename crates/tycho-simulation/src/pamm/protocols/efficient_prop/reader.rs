@@ -844,6 +844,9 @@ enum Also {
     ImplementationAndHead,
     /// That, and its parent's header: on BNB Chain, for the time between the two.
     ImplementationAndHeads,
+    /// The front's implementation slot and the node's gas price: on BNB Chain, whose base fee is
+    /// zero, the least tip a taker's swap pays.
+    ImplementationAndGasPrice,
 }
 
 impl Also {
@@ -857,6 +860,10 @@ impl Also {
 
     fn parent(self) -> bool {
         matches!(self, Self::ImplementationAndHeads)
+    }
+
+    fn gas_price(self) -> bool {
+        matches!(self, Self::ImplementationAndGasPrice)
     }
 }
 
@@ -875,6 +882,8 @@ struct BatchAnswers {
     head_spacing_ms: Option<u64>,
     /// The front's implementation at the batch's block, where it was asked.
     implementation: Option<Address>,
+    /// The node's gas price, wei, where it was asked.
+    gas_price: Option<U256>,
 }
 
 /// A block as `eth_getBlockByNumber` answers it: the fields read.
@@ -1834,6 +1843,7 @@ impl DoorsReader {
             head_ms,
             head_spacing_ms,
             implementation,
+            ..
         } = self
             .batch(block, vec![Group { calls, at: None }], &slots, also, None, None)
             .await?;
@@ -1958,8 +1968,9 @@ impl DoorsReader {
         })
     }
 
-    /// The first request: the block, the front's implementation and clock, and every reserved
-    /// listing up to `scan_to` with its door's address.
+    /// The first request: the block, the front's implementation and clock, every reserved
+    /// listing up to `scan_to` with its door's address, and on BNB Chain the node's gas price,
+    /// under which no listing's tip cap is served.
     async fn read_listings(
         &self,
         scan_to: u32,
@@ -1983,18 +1994,38 @@ impl DoorsReader {
             calls.push(call(BASE_TIME, timestampMsCall {}.abi_encode()));
         }
         // BNB Chain's millisecond precompile, which its fronts' clock mode 3 reads: served only
-        // while it answers nothing.
+        // while it answers nothing. Asked as the front asks it.
         if self.chain == Chain::Bsc {
-            calls.push(call(MS_PRECOMPILE, Vec::new()));
+            calls.push(call(MS_PRECOMPILE, timestampMsCall {}.abi_encode()));
         }
         let head_calls = calls.len();
         for id in 1..=scan_to {
             let listing = U24::from(id);
             calls.push(call(self.front, doorViewCall { listing }.abi_encode()));
         }
-        let (answers, approved_desks) =
-            tokio::join!(self.aggregate(calls, BlockId::latest()), self.desks.current());
-        let answers = answers?;
+        // One JSON-RPC batch with a read of the front's implementation slot, checked before any
+        // answer is looked at: after an upgrade those answers may well fail in a way that hides
+        // the cause. On BNB Chain also the node's gas price: its base fee is zero, so a taker's
+        // tip is its whole gas price.
+        let also = if self.chain == Chain::Bsc {
+            Also::ImplementationAndGasPrice
+        } else {
+            Also::Implementation
+        };
+        let (answers, approved_desks) = tokio::join!(
+            self.batch(BlockId::latest(), vec![Group { calls, at: None }], &[], also, None, None),
+            self.desks.current()
+        );
+        let BatchAnswers { groups, gas_price, .. } = answers?;
+        let answers = groups
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap_or_default();
+        // The lowest tip cap served: the caller's floor, and on BNB Chain the node's gas price,
+        // under which a listing's cap refuses every swap sent at it.
+        let tip_floor =
+            gas_price.map_or(self.min_tip_cap_wei, |price| price.max(self.min_tip_cap_wei));
         let (head, listings) = answers.split_at(head_calls.min(answers.len()));
         let [block_number, timestamp, chain_id, factory_front, door_codehash, clock, rest @ ..] =
             head
@@ -2162,10 +2193,11 @@ impl DoorsReader {
                 (None, None) => None,
             };
             let tip_cap_wei = tip_cap_wei(view.tipCap);
-            if tip_cap_wei.is_some_and(|cap| cap < self.min_tip_cap_wei) {
+            if tip_cap_wei.is_some_and(|cap| cap < tip_floor) {
                 debug!(
                     listing = id,
                     tip_cap_wei = ?tip_cap_wei,
+                    %tip_floor,
                     "skipping listing capping the tip under the floor"
                 );
                 left_out(NotCovered::TipCapUnderFloor);
@@ -3393,24 +3425,6 @@ impl DoorsReader {
         Ok(reaches)
     }
 
-    /// Sends `calls` at `block` as one JSON-RPC batch, with a read of the front's implementation
-    /// slot, checked before any answer is looked at: after an upgrade those answers may well fail
-    /// in a way that hides the cause.
-    async fn aggregate(
-        &self,
-        calls: Vec<Call3>,
-        block: BlockId,
-    ) -> Result<Vec<Call3Result>, FeedError> {
-        let BatchAnswers { groups, .. } = self
-            .batch(block, vec![Group { calls, at: None }], &[], Also::Implementation, None, None)
-            .await?;
-        Ok(groups
-            .into_iter()
-            .next()
-            .flatten()
-            .unwrap_or_default())
-    }
-
     /// Sends `groups` at `block` as one JSON-RPC batch of `aggregate3` calls, every call allowed
     /// to fail, with reads of the storage `slots` (account and slot) at the block and, when
     /// `also` asks it, of the front's implementation slot, checked before any answer is looked
@@ -3456,6 +3470,7 @@ impl DoorsReader {
                 head_ms: None,
                 head_spacing_ms: None,
                 implementation: None,
+                gas_price: None,
             });
         }
         // A request naming its block by hash that the node refuses the form of, which the read's
@@ -3522,6 +3537,15 @@ impl DoorsReader {
                 batch
                     .add_call::<_, U256>("eth_getStorageAt", &(self.front, slot, block))
                     .map_err(|e| self.connection_error("implementation slot", e))?,
+            )
+        } else {
+            None
+        };
+        let gas_price = if also.gas_price() {
+            Some(
+                batch
+                    .add_call::<_, U256>("eth_gasPrice", &[(); 0])
+                    .map_err(|e| self.connection_error("gas price", e))?,
             )
         } else {
             None
@@ -3647,6 +3671,14 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("listing record", e)),
             );
         }
+        let gas_price = match gas_price {
+            Some(price) => Some(
+                price
+                    .await
+                    .map_err(|e| self.connection_error("gas price", e))?,
+            ),
+            None => None,
+        };
         Ok(BatchAnswers {
             groups: answers,
             words: read,
@@ -3654,6 +3686,7 @@ impl DoorsReader {
             head_ms,
             head_spacing_ms,
             implementation,
+            gas_price,
         })
     }
 

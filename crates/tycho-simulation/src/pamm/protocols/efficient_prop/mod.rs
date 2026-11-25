@@ -621,15 +621,19 @@
 //! block's state map, by the slot rule above, and the rules of On Ethereum on which listings are
 //! served, credit and stock listings among them, hold there too. No fill was measured on BNB
 //! Chain: as on Base, a listing is served only where its gas is named
-//! ([`EfficientPropFeedBuilder::credit_listing`]). The fallback router is refused. What differs is
-//! the clock.
+//! ([`EfficientPropFeedBuilder::credit_listing`]). The fallback router is refused. The chain's
+//! base fee is zero, so a swap's whole gas price is its tip: a listing whose tip cap is under the
+//! node's gas price, read at every poll, refuses every swap sent at that price and is not served
+//! ([`EfficientPropFeedBuilder::min_tip_cap_wei`]). What differs most is the clock.
 //!
 //! A block lands every 450 ms. Its header names its milliseconds (`milliTimestamp`, or the low
 //! eight bytes of its `mixHash` where they are under a second), and its `timestamp` is its second.
 //! A front there runs the block's second as its clock: mode 0, or mode 3 while the millisecond
 //! precompile `0x70` it reads answers nothing, as it does today, the front then taking the start
-//! of the block's second. A front on any other clock, or one whose precompile answers, ends the
-//! feed: no block override sets the milliseconds it would read.
+//! of the block's second. Each poll asks the precompile as the front does, with `timestampMs()`.
+//! A front on any other clock, or one whose precompile answers, ends the feed: no block override
+//! sets the milliseconds it would read. So every feed on BNB Chain ends at the hard fork that
+//! gives `0x70` code, until this integration samples a block's milliseconds.
 //!
 //! A map names its block (`blockNumber`) and no slot, and only a map for the block after the
 //! node's latest is used. That block lands 450 ms after the head, in the head's second or the one
