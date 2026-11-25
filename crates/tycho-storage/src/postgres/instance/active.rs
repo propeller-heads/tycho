@@ -71,7 +71,7 @@ pub async fn active_instance(
 ///
 /// `None` if the protocol system has no active instance, or if no protocol system has that name.
 /// Filter with the returned id as a bound value, as for [`active_instance`].
-pub async fn active_instance_head(
+pub async fn active_instance_limits(
     name: &str,
     conn: &mut AsyncPgConnection,
 ) -> Result<Option<ActiveInstance>, StorageError> {
