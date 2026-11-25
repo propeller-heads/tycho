@@ -100,14 +100,28 @@ impl PostgresGatewayNew {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
-    use tycho_common::{storage::StorageError, Bytes};
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use tycho_common::{
+        models::{
+            blockchain::{Block, Transaction},
+            contract::Account as DomainAccount,
+            Chain,
+        },
+        storage::StorageError,
+        Bytes,
+    };
 
     use crate::postgres::{
+        cache::WriteOp,
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, schema::tycho::account},
+        instance::{
+            gateway::PostgresGatewayNew, origins::BatchOrigins, orm::Account,
+            schema::tycho::account, InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -175,5 +189,167 @@ mod tests {
             .unwrap();
 
         assert_eq!(ids[&address(1)], id);
+    }
+
+    fn ts(second: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 25)
+            .and_then(|date| date.and_hms_opt(12, 0, second))
+            .expect("a valid timestamp")
+    }
+
+    /// A batch of block 10 at second 10 with the transaction `0xa1` at index 1, and of block 11 at
+    /// second 11 with the transaction `0xb2` at index 2.
+    fn origins() -> BatchOrigins {
+        let block = |number: u8| {
+            Block::new(
+                number.into(),
+                Chain::Ethereum,
+                Bytes::from(vec![number]),
+                Bytes::default(),
+                ts(number.into()),
+            )
+        };
+        let tx = |hash: u8, block: &Block, index: u64| {
+            Transaction::new(
+                Bytes::from(vec![hash]),
+                block.hash.clone(),
+                Bytes::default(),
+                None,
+                index,
+            )
+        };
+        let (block_10, block_11) = (block(10), block(11));
+        let ops = vec![
+            WriteOp::UpsertBlock(vec![block_10.clone(), block_11.clone()]),
+            WriteOp::UpsertTx(vec![tx(0xa1, &block_10, 1), tx(0xb2, &block_11, 2)]),
+        ];
+        BatchOrigins::from_ops(&ops).expect("a valid batch")
+    }
+
+    fn new_account(id: u8, title: &str, creation_tx: Option<u8>) -> DomainAccount {
+        DomainAccount::new(
+            Chain::Ethereum,
+            address(id),
+            title.to_string(),
+            HashMap::new(),
+            Bytes::from(0u64),
+            HashMap::new(),
+            Bytes::default(),
+            Bytes::default(),
+            Bytes::default(),
+            Bytes::default(),
+            creation_tx.map(|hash| Bytes::from(vec![hash])),
+        )
+    }
+
+    async fn setup() -> (AsyncPgConnection, PostgresGatewayNew, InstanceId) {
+        let mut conn = instance_test_connection().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
+        let instance = db_fixtures::insert_instance(&mut conn, system, "0.0.1").await;
+        let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
+        (conn, gateway, instance)
+    }
+
+    async fn stored(conn: &mut AsyncPgConnection, instance: InstanceId) -> Vec<Account> {
+        account::table
+            .filter(account::instance_id.eq(instance))
+            .order_by(account::address)
+            .select(Account::as_select())
+            .load(conn)
+            .await
+            .expect("reading the accounts failed")
+    }
+
+    #[tokio::test]
+    async fn test_insert_contracts_stores_the_creation_of_each_account() {
+        let (mut conn, gateway, instance) = setup().await;
+        let accounts = [new_account(1, "pool", Some(0xa1)), new_account(2, "vault", Some(0xb2))];
+
+        gateway
+            .insert_contracts(instance, &origins(), &accounts, &mut conn)
+            .await
+            .unwrap();
+
+        let stored = stored(&mut conn, instance).await;
+        let creations: Vec<_> = stored
+            .iter()
+            .map(|row| {
+                (
+                    row.address.clone(),
+                    row.title.as_str(),
+                    row.created_at,
+                    row.creation_block,
+                    row.creation_tx_hash.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            creations,
+            vec![
+                (address(1), "pool", Some(ts(10)), Some(10), Some(Bytes::from("0xa1"))),
+                (address(2), "vault", Some(ts(11)), Some(11), Some(Bytes::from("0xb2"))),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_contracts_keeps_the_stored_account() {
+        let (mut conn, gateway, instance) = setup().await;
+        gateway
+            .insert_contracts(
+                instance,
+                &origins(),
+                &[new_account(1, "first", Some(0xa1))],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        gateway
+            .insert_contracts(
+                instance,
+                &origins(),
+                &[new_account(1, "second", Some(0xb2))],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let stored = stored(&mut conn, instance).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!((stored[0].title.as_str(), stored[0].creation_block), ("first", Some(10)));
+    }
+
+    #[tokio::test]
+    async fn test_insert_contracts_fails_for_a_creation_not_in_the_batch() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_contracts(
+                instance,
+                &origins(),
+                &[new_account(1, "pool", Some(0xff))],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Transaction".to_string(), Bytes::from("0xff").to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_contracts_fails_for_an_account_without_creation() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_contracts(instance, &origins(), &[new_account(1, "pool", None)], &mut conn)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
     }
 }
