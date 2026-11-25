@@ -10,7 +10,10 @@ use tycho_common::storage::{
     BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind,
 };
 
-use crate::postgres::{instance::active::ActiveInstance, maybe_lookup_version_ts};
+use crate::postgres::{
+    instance::{active::ActiveInstance, InstanceId},
+    maybe_lookup_version_ts,
+};
 
 /// Checks that the current tables of `instance` can answer the version `at`, and returns the
 /// timestamp of `at`. The head is the one the read looked up with the instance.
@@ -109,17 +112,26 @@ pub(super) async fn resolve_version(
 }
 
 /// Collects `rows` into a map by key. `Unexpected` if two rows have the same key: two rows of
-/// `entity` are then valid at one version, which the writer must prevent.
+/// `entity` are then valid at one version, which the writer must prevent. The error names the
+/// `instance` and the version of `read`.
 pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
     entity: &str,
+    instance: InstanceId,
+    read: ReadAt,
     rows: impl IntoIterator<Item = (K, V)>,
 ) -> Result<HashMap<K, V>, StorageError> {
     rows.into_iter()
         .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
-            Entry::Occupied(e) => Err(StorageError::Unexpected(format!(
-                "{entity}: two rows of {:?} are valid at one version",
-                e.key()
-            ))),
+            Entry::Occupied(e) => {
+                let version = match read {
+                    ReadAt::Current(None) => "the latest version".to_string(),
+                    ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
+                };
+                Err(StorageError::Unexpected(format!(
+                    "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
+                    e.key()
+                )))
+            }
             Entry::Vacant(e) => {
                 e.insert(value);
                 Ok(map)
