@@ -558,7 +558,16 @@ impl SynchronizerStream {
                 // catches up in the stale pass instead. This covers a stream that comes back from
                 // a gap and one that restarts behind the tip, such as a subscription to an
                 // extractor that is still syncing.
-                debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
+                if self.is_stale() {
+                    debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
+                } else {
+                    warn!(
+                        %extractor_id,
+                        %block,
+                        blocks_behind = blocks_behind_tip(block_history, &block),
+                        "SynchronizerStream transition to stale: too far behind tip"
+                    );
+                }
                 self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
@@ -615,6 +624,23 @@ impl SynchronizerStream {
     fn mark_stale(&mut self, header: &BlockHeader) {
         self.state = SynchronizerState::Stale(header.clone());
         self.modify_ts = Local::now().naive_utc();
+    }
+
+    /// Marks a stream whose `header` is behind `tip` as Delayed, or as Stale when it is more than
+    /// `max_missed_blocks` behind: as Delayed, its replay would hold the next round.
+    fn mark_behind(&mut self, header: BlockHeader, tip: &BlockHeader, max_missed_blocks: u64) {
+        let blocks_behind = tip.number.saturating_sub(header.number);
+        if blocks_behind > max_missed_blocks {
+            warn!(
+                extractor_id = %self.extractor_id,
+                block = %header,
+                blocks_behind,
+                "SynchronizerStream transition to stale: too far behind tip"
+            );
+            self.state = SynchronizerState::Stale(header);
+        } else {
+            self.state = SynchronizerState::Delayed(header);
+        }
     }
 
     /// Marks this stream as ready.
@@ -884,9 +910,9 @@ where
                         extractor_id=%stream.extractor_id,
                         synchronizer_block=header.number,
                         current_block=start_header.number,
-                        "Marking synchronizer as delayed during initialization"
+                        "Synchronizer behind the start block during initialization"
                     );
-                    stream.state = SynchronizerState::Delayed(header);
+                    stream.mark_behind(header, start_header, self.max_missed_blocks);
                 }
             }
         }
@@ -996,7 +1022,8 @@ where
             .iter()
             .any(SynchronizerStream::is_advanced)
         {
-            *block_history = Self::reinit_block_history(sync_streams, block_history)?;
+            *block_history =
+                Self::reinit_block_history(sync_streams, block_history, self.max_missed_blocks)?;
         } else if let Some(header) = Self::round_header(sync_streams) {
             if header.revert {
                 info!(%header, "RevertApplied");
@@ -1064,7 +1091,8 @@ where
     /// Reinitialise block history and reclassifies active synchronizers states.
     ///
     /// We call this if we detect a future detached block. This usually only happens if
-    /// a synchronizer has a restart.
+    /// a synchronizer has a restart. A stream more than `max_missed_blocks` behind the new tip
+    /// becomes Stale.
     ///
     /// ## Note
     /// This method assumes that at least one synchronizer is in Advanced, Ready or
@@ -1072,6 +1100,7 @@ where
     fn reinit_block_history(
         sync_streams: &mut [SynchronizerStream],
         block_history: &BlockHistory,
+        max_missed_blocks: u64,
     ) -> Result<BlockHistory, BlockSynchronizerError> {
         let previous = block_history
             .latest()
@@ -1112,7 +1141,7 @@ where
                 // or ended streams are not considered here
                 if let Some(header) = stream.get_current_header() {
                     if header.number < latest.number {
-                        stream.state = SynchronizerState::Delayed(header.clone());
+                        stream.mark_behind(header.clone(), latest, max_missed_blocks);
                     } else if header.number == latest.number {
                         stream.state = SynchronizerState::Ready(header.clone());
                     }
