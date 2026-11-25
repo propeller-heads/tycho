@@ -1,16 +1,20 @@
-use std::{clone::Clone, collections::HashMap, default::Default, env, fmt::Debug};
+use std::{
+    clone::Clone, collections::HashMap, default::Default, env, fmt::Debug, marker::PhantomData,
+};
 
 use alloy::primitives::{Address, Bytes, U256};
 use revm::{
     context::{
-        result::{EVMError, ExecutionResult, Output, ResultAndState},
+        result::{EVMError, ExecutionResult, HaltReason, Output, ResultAndState},
         BlockEnv, CfgEnv, Context, TxEnv,
     },
-    context_interface::JournalTr,
-    interpreter::{return_ok, InstructionResult},
+    context_interface::{ContextTr, JournalTr},
+    handler::{EthFrame, EvmTr, EvmTrError, FrameResult, Handler, MainnetHandler},
+    inspector::{InspectorEvmTr, InspectorHandler},
+    interpreter::{interpreter::EthInterpreter, return_ok, InstructionResult},
     primitives::{hardfork::SpecId, TxKind},
     state::EvmState,
-    DatabaseRef, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
+    Database, DatabaseRef, ExecuteEvm, Inspector, Journal, MainBuilder, MainContext,
 };
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use strum_macros::Display;
@@ -50,7 +54,8 @@ pub struct SimulationResult {
     pub state_updates: HashMap<Address, StateUpdate>,
     /// Gas used by the transaction (already reduced by the refunded gas)
     pub gas_used: u64,
-    /// Transient storage changes captured during the simulation
+    /// Transient storage at the end of the call: the given slots, with the call's changes. A slot
+    /// set to zero is not in it.
     pub transient_storage: HashMap<Address, HashMap<U256, U256>>,
 }
 
@@ -155,7 +160,7 @@ where
             .with_cfg(cfg_env)
             .with_ref_db(db_ref)
             .with_block(block_env)
-            .with_tx(tx_env.clone())
+            .with_tx(tx_env)
             .modify_journal_chained(|journal| {
                 if let Some(transient_storage) = params.transient_storage.clone() {
                     for (address, slots) in transient_storage {
@@ -174,32 +179,39 @@ where
                 }
             });
 
-        let evm_result = if self.trace {
+        let (evm_result, transient_storage) = if self.trace {
             let mut tracer = TracingInspector::new(TracingInspectorConfig::default());
 
-            let res = {
+            let (res, transient_storage) = {
                 let mut vm = context.build_mainnet_with_inspector(&mut tracer);
 
                 debug!(
                     "Starting simulation with tx parameters: {:#?} {:#?}",
                     vm.ctx.tx, vm.ctx.block
                 );
-                vm.inspect_tx(tx_env)
+                let mut handler = TransientStorageHandler::default();
+                let res = handler
+                    .inspect_run(&mut vm)
+                    .map(|result| ResultAndState::new(result, vm.finalize()));
+                (res, handler.transient_storage)
             };
 
             Self::print_traces(tracer, res.as_ref().ok())?;
 
-            res
+            (res, transient_storage)
         } else {
             let mut vm = context.build_mainnet();
 
             debug!("Starting simulation with tx parameters: {:#?} {:#?}", vm.ctx.tx, vm.ctx.block);
 
-            vm.replay()
+            let mut handler = TransientStorageHandler::default();
+            let res = handler
+                .run(&mut vm)
+                .map(|result| ResultAndState::new(result, vm.finalize()));
+            (res, handler.transient_storage)
         };
 
-        // TODO: update revm to 25.0.0 and get transient storage from the journaled state
-        interpret_evm_result(evm_result, HashMap::new())
+        interpret_evm_result(evm_result, transient_storage)
     }
 
     pub fn clear_temp_storage(&mut self) -> Result<(), <D as EngineDatabaseInterface>::Error> {
@@ -276,6 +288,64 @@ where
 
         Ok(())
     }
+}
+
+/// Runs a transaction as revm's `MainnetHandler` does, and copies the transient storage that the
+/// transaction leaves before `execution_result` clears it with `commit_tx`. It only reads the
+/// journal, so execution is the same as with `MainnetHandler`.
+///
+/// A successful simulation returns the copy in [`SimulationResult::transient_storage`].
+struct TransientStorageHandler<EVM, ERROR> {
+    transient_storage: HashMap<Address, HashMap<U256, U256>>,
+    types: PhantomData<(EVM, ERROR)>,
+}
+
+impl<EVM, ERROR> Default for TransientStorageHandler<EVM, ERROR> {
+    fn default() -> Self {
+        Self { transient_storage: HashMap::new(), types: PhantomData }
+    }
+}
+
+impl<EVM, ERROR, DB> Handler for TransientStorageHandler<EVM, ERROR>
+where
+    DB: Database,
+    EVM: EvmTr<Context: ContextTr<Journal = Journal<DB>>, Frame = EthFrame>,
+    ERROR: EvmTrError<EVM>,
+{
+    type Evm = EVM;
+    type Error = ERROR;
+    type HaltReason = HaltReason;
+
+    fn execution_result(
+        &mut self,
+        evm: &mut EVM,
+        result: FrameResult,
+    ) -> Result<ExecutionResult, ERROR> {
+        for ((address, slot), value) in &evm
+            .ctx_ref()
+            .journal()
+            .inner
+            .transient_storage
+        {
+            self.transient_storage
+                .entry(*address)
+                .or_default()
+                .insert(*slot, *value);
+        }
+        MainnetHandler::default().execution_result(evm, result)
+    }
+}
+
+impl<EVM, ERROR, DB> InspectorHandler for TransientStorageHandler<EVM, ERROR>
+where
+    DB: Database,
+    EVM: InspectorEvmTr<
+        Context: ContextTr<Journal = Journal<DB>>,
+        Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
+    >,
+    ERROR: EvmTrError<EVM>,
+{
+    type IT = EthInterpreter;
 }
 
 /// Convert a complex EVMResult into a simpler structure
@@ -642,6 +712,7 @@ mod tests {
             Account, AccountInfo, AccountStatus, Bytecode, EvmState as rState, EvmStorageSlot,
         },
     };
+    use rstest::rstest;
     use tycho_client::feed::BlockHeader;
 
     use super::*;
@@ -832,29 +903,13 @@ mod tests {
         SimulationDB::new(client, runtime, None)
     }
 
-    #[test]
-    fn test_simulate_applies_block_env_overrides() {
+    /// A database at block 1 with `code` at a contract address, which it returns, and an empty
+    /// caller account at the zero address.
+    fn state_with_contract(code: &'static [u8]) -> (PreCachedDB, Address) {
         let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
         let contract =
             Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
-        // Minimal runtime bytecode equivalent to the following Solidity contract:
-        //
-        // // SPDX-License-Identifier: UNLICENSED
-        // pragma solidity ^0.8.26;
-        //
-        // contract BlockNumberTest {
-        //     function test() external view returns (uint256) {
-        //         return block.number;
-        //     }
-        // }
-        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
-            0x43, // NUMBER
-            0x60, 0x00, // PUSH1 0
-            0x52, // MSTORE
-            0x60, 0x20, // PUSH1 32
-            0x60, 0x00, // PUSH1 0
-            0xf3, // RETURN
-        ]));
+        let bytecode = Bytecode::new_raw(Bytes::from_static(code));
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state
             .init_account(contract, account, None, true)
@@ -865,6 +920,29 @@ mod tests {
         state
             .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
             .expect("block header update succeeds");
+        (state, contract)
+    }
+
+    #[test]
+    fn test_simulate_applies_block_env_overrides() {
+        // Minimal runtime bytecode equivalent to the following Solidity contract:
+        //
+        // // SPDX-License-Identifier: UNLICENSED
+        // pragma solidity ^0.8.26;
+        //
+        // contract BlockNumberTest {
+        //     function test() external view returns (uint256) {
+        //         return block.number;
+        //     }
+        // }
+        let (state, contract) = state_with_contract(&[
+            0x43, // NUMBER
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]);
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
@@ -885,27 +963,14 @@ mod tests {
 
     #[test]
     fn test_simulate_applies_native_balance_overrides() {
-        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
-        let contract =
-            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
-        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+        let (state, contract) = state_with_contract(&[
             0x47, // SELFBALANCE
             0x60, 0x00, // PUSH1 0
             0x52, // MSTORE
             0x60, 0x20, // PUSH1 32
             0x60, 0x00, // PUSH1 0
             0xf3, // RETURN
-        ]));
-        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
-        state
-            .init_account(contract, account, None, true)
-            .expect("contract account init succeeds");
-        state
-            .init_account(Address::ZERO, AccountInfo::default(), None, true)
-            .expect("caller account init succeeds");
-        state
-            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
-            .expect("block header update succeeds");
+        ]);
         let expected_balance = U256::from(4_200_000_000_000_000_000u64);
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
@@ -919,6 +984,38 @@ mod tests {
             .expect("simulation should apply the native balance override");
 
         assert_eq!(U256::from_be_slice(result.result.as_ref()), expected_balance);
+    }
+
+    /// The result holds the transient storage at the end of the call: the input slots, with the
+    /// call's TSTOREs applied. A slot set to zero is not in it.
+    #[rstest]
+    #[case::without_tracing(false)]
+    #[case::with_tracing(true)]
+    fn test_simulate_transient_storage(#[case] trace: bool) {
+        let (state, contract) = state_with_contract(&[
+            0x60, 0x2a, // PUSH1 42
+            0x60, 0x07, // PUSH1 7
+            0x5d, // TSTORE: slot 7 = 42
+            0x60, 0x00, // PUSH1 0
+            0x60, 0x09, // PUSH1 9
+            0x5d, // TSTORE: slot 9 = 0
+            0x00, // STOP
+        ]);
+        let input = HashMap::from([(U256::from(8), U256::from(3)), (U256::from(9), U256::from(5))]);
+        let sim_params = SimulationParameters {
+            caller: Address::ZERO,
+            to: contract,
+            transient_storage: Some(HashMap::from([(contract, input)])),
+            ..Default::default()
+        };
+
+        let result = SimulationEngine::new(state, trace)
+            .simulate(&sim_params)
+            .expect("simulation should succeed");
+
+        let expected =
+            HashMap::from([(U256::from(7), U256::from(42)), (U256::from(8), U256::from(3))]);
+        assert_eq!(result.transient_storage, HashMap::from([(contract, expected)]));
     }
 
     #[test]

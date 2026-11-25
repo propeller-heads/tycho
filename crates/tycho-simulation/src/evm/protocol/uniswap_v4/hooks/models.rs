@@ -70,21 +70,23 @@ impl BalanceDelta {
         BalanceDelta(specified_shifted | unspecified_masked)
     }
 
-    /// Creates a BalanceDelta from swap result's amount_calculated based on swap direction
+    /// The delta of an exact-input swap as `Pool.swap` returns it to the PoolManager: the input
+    /// the pool took, negative, and the output it pays, positive.
     ///
-    /// For exact input swaps:
-    /// - amount_calculated is negative (amount of output token received)
-    /// - We convert it to positive for the appropriate amount field
-    /// - The other amount field is set to zero
-    pub fn from_swap_result(amount_calculated: I256, zero_for_one: bool) -> BalanceDelta {
-        // For exact input swaps, amount_calculated is negative (output amount from pool's
-        // perspective) We negate it to convert to positive amount from user's perspective
+    /// `amount_specified_used` is the input the pool took, negative (`amountSpecified -
+    /// amountSpecifiedRemaining` in v4-core). `amount_calculated` is the output, negative as the
+    /// native swap counts it.
+    pub fn from_swap_result(
+        amount_specified_used: I256,
+        amount_calculated: I256,
+        zero_for_one: bool,
+    ) -> BalanceDelta {
+        let amount_in = get_lower_i128(amount_specified_used);
+        let amount_out = get_lower_i128(-amount_calculated);
         if zero_for_one {
-            // Swapping token0 for token1: amount_calculated represents change in token1
-            BalanceDelta::new(I128::ZERO, get_lower_i128(-amount_calculated))
+            BalanceDelta::new(amount_in, amount_out)
         } else {
-            // Swapping token1 for token0: amount_calculated represents change in token0
-            BalanceDelta::new(get_lower_i128(-amount_calculated), I128::ZERO)
+            BalanceDelta::new(amount_out, amount_in)
         }
     }
 
@@ -219,5 +221,27 @@ sol! {
     struct GetLimitsSolReturn {
         uint256 amount_in_upper_limit;
         uint256 amount_out_upper_limit;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// The delta holds, on each currency, the input the pool took as a negative amount and the
+    /// output it pays as a positive one.
+    #[rstest]
+    #[case::zero_for_one(true, (-100, 90))]
+    #[case::one_for_zero(false, (90, -100))]
+    fn test_from_swap_result(#[case] zero_for_one: bool, #[case] expected: (i64, i64)) {
+        let input_taken = I256::try_from(-100i64).unwrap();
+        let output_calculated = I256::try_from(-90i64).unwrap();
+
+        let delta = BalanceDelta::from_swap_result(input_taken, output_calculated, zero_for_one);
+
+        let expected = (I128::try_from(expected.0).unwrap(), I128::try_from(expected.1).unwrap());
+        assert_eq!((delta.amount0(), delta.amount1()), expected);
     }
 }

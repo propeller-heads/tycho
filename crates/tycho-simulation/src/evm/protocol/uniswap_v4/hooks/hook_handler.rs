@@ -80,7 +80,8 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError>;
 
-    /// Simulates the afterSwap Solidity behaviour
+    /// Simulates the afterSwap Solidity behaviour. `transient_storage` is what `before_swap`
+    /// returned, because on chain both calls run in one transaction.
     fn after_swap(
         &self,
         params: AfterSwapParameters,
