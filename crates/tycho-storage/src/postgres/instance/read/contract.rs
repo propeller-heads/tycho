@@ -850,6 +850,32 @@ mod tests {
         assert_eq!(result, [(b("0xaa"), [balance("0xaa", b("0x02"), "0x04")].into())].into());
     }
 
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version_of_some_accounts() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let aa = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        let bb = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xbb")).await;
+        balance_version(&mut conn, &s, aa, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, bb, b("0x02"), "0x06", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = s
+            .gateway
+            .get_account_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&[b("0xbb")]),
+                Some(&at(recent(2))),
+                true,
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xbb"), [balance("0xbb", b("0x02"), "0x06")].into())].into());
+    }
+
     /// Inserts an account at `address` with the code `code`, code hash `0xc1`, code tx `0xc2`, the
     /// given slots, a native balance of `0x01` and a balance of `0x05` in the token `0x02`.
     /// Returns the account id.
