@@ -1758,6 +1758,57 @@ mod tests {
         }
     }
 
+    /// A close frame ends the connection, so it does not reset the reconnect count: a server that
+    /// accepts each connection and closes it at once uses up `max_reconnects`.
+    #[test_log::test(tokio::test)]
+    async fn test_close_frame_does_not_reset_reconnect_count() {
+        let max_reconnects = 3;
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let mut stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
+                let _ = accepted_tx.send(());
+                // Lets `connect()` see the connection before it closes.
+                sleep(Duration::from_millis(10)).await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the client may already have dropped the connection"
+                )]
+                let _ = stream.close(None).await;
+            }
+        });
+        let client = WsDeltasClient::new_with_reconnects(
+            &format!("ws://{addr}"),
+            None,
+            max_reconnects,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        let jh = client.connect().await.unwrap();
+
+        let res = timeout(Duration::from_secs(5), jh)
+            .await
+            .expect("client kept reconnecting")
+            .unwrap();
+        assert!(matches!(res, Err(DeltasError::ConnectionClosed)));
+        let mut accepted = 0;
+        while accepted_rx.try_recv().is_ok() {
+            accepted += 1;
+        }
+        assert_eq!(accepted, max_reconnects);
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_subscribe_dead_client_after_max_attempts() {
         let (addr, _) = mock_bad_connection_tycho_ws(true).await;
