@@ -408,7 +408,10 @@
 //! mode is published direct, as [`PROTOCOL_SYSTEM`], whatever the builder says, and charged the
 //! gas named for it: the router's quote would run its route a second time, which that gas does
 //! not count. The fallback encoder needs the swap's `user_data` to name the pool to fall back on,
-//! so a caller that names none builds the feed `without_fallback_router()`.
+//! so a caller that names none builds the feed `without_fallback_router()`. This default changes
+//! what existing Ethereum callers receive: their listings' components move from [`PROTOCOL_SYSTEM`]
+//! to [`FALLBACK_PROTOCOL_SYSTEM`], and a caller that keeps the direct path builds
+//! `without_fallback_router()`.
 //!
 //! Each poll reads, at once, the listings at the node's latest block (the first request, as on
 //! Base, less BaseTime: that predeploy is Base's and has no code on Ethereum) and the next block's
@@ -699,8 +702,8 @@
 //! at the addresses it has on Ethereum, with its listing-door factory, its implementation, whose
 //! code differs from Ethereum's, and its first desk contract; an ignored test reads them from a
 //! node), and its price source 1, the QQQB/USD1 price contract, is registered, though
-//! [`EfficientPropFeedBuilder::bnb`] approves no source. No listing exists there, the deployment's
-//! composed record has not landed, no state URL serving chain 56 is known, and tycho-execution runs
+//! [`EfficientPropFeedBuilder::bnb`] approves no source. No listing exists there, no state URL
+//! serving chain 56 is known, and tycho-execution runs
 //! no `PropAMMExecutor` there: its pAMM encoder refuses the chain, so no book there could be
 //! encoded. The path runs in this module's offline tests.
 //!

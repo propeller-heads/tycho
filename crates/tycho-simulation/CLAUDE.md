@@ -222,8 +222,8 @@ for any protocol indexed by Tycho.
     hold it (a test holds the two equal), `base()` from Base's deployment record and `bnb()` from
     BNB Chain's protocol record (a test holds each desk contract code hash to its record's first desk),
     which `EfficientPropFeedBuilder::ethereum`, `base` and `bnb` build on with the deployment's
-    price sources (none on BNB Chain, whose registered source its deployment's owner has not approved). No other code reads them as
-    constants; `with_door_code_hash` pins the doors'
+    price sources (none on BNB Chain, whose one registered source is the caller's to approve).
+    No other code reads them as constants; `with_door_code_hash` pins the doors'
   - Base and BNB Chain serve no book yet: neither lists anything, and BNB Chain has no state URL
     and no `PropAMMExecutor`. Their paths run in the offline tests, and against the deployed
     fronts in ignored tests
