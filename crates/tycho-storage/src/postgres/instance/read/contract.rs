@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::warn;
@@ -84,29 +84,27 @@ impl PostgresGatewayNew {
             return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
         };
         let read = resolve_version(&active, at, conn).await?;
-        let ts = match read {
-            ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => ts,
-            // The latest version is the head: no account was created or deleted after it.
-            ReadAt::Current(None) => active
-                .head
-                .unwrap_or_else(|| Utc::now().naive_utc()),
-        };
         let instance = active.id;
 
         let filtered = || {
             let mut query = account::table
                 .filter(account::instance_id.eq(instance))
-                .filter(
-                    account::created_at
-                        .is_null()
-                        .or(account::created_at.le(ts)),
-                )
-                .filter(
-                    account::deleted_at
-                        .is_null()
-                        .or(account::deleted_at.gt(ts)),
-                )
                 .into_boxed::<Pg>();
+            query = match read {
+                // No account was created or deleted after the head.
+                ReadAt::Current => query.filter(account::deleted_at.is_null()),
+                ReadAt::Past { ts, head: _ } => query
+                    .filter(
+                        account::created_at
+                            .is_null()
+                            .or(account::created_at.le(ts)),
+                    )
+                    .filter(
+                        account::deleted_at
+                            .is_null()
+                            .or(account::deleted_at.gt(ts)),
+                    ),
+            };
             match addresses {
                 Some(addresses) => query = query.filter(account::address.eq_any(addresses)),
                 None => {
@@ -114,10 +112,10 @@ impl PostgresGatewayNew {
                         .filter(contract_code::instance_id.eq(instance))
                         .filter(contract_code::account_id.eq(account::id));
                     query = match read {
-                        ReadAt::Current(_) => query.filter(exists(current)),
+                        ReadAt::Current => query.filter(exists(current)),
                         // The writer can move the code of a deleted account to history, so an
                         // account deleted after `ts` can have no current code row.
-                        ReadAt::Past { head, .. } => query.filter(
+                        ReadAt::Past { ts, head } => query.filter(
                             exists(current.filter(contract_code::valid_from.le(ts))).or(exists(
                                 contract_code_history::table
                                     .filter(contract_code_history::instance_id.eq(instance))
