@@ -45,10 +45,10 @@ postgres/
     ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
-    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at the latest version
-    │   ├── state.rs    — protocol state and component balances of the active instance at the latest version
+    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at a version within the history retention and not before the base block of the instance
+    │   ├── state.rs    — protocol state and component balances of the active instance at a version within the history retention and not before the base block of the instance
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
-    │   └── version.rs  — the check that the current tables can answer a version
+    │   └── version.rs  — `resolve_version`: which rows answer a version (`ReadAt`: current, or current and history); the one-row-per-key rule (`unique_by_key`, `unique_by_key_nested`)
     ├── write/          — its write methods, one file per domain
     │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too

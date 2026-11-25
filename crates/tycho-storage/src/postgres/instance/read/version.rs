@@ -16,39 +16,6 @@ use crate::postgres::{
     maybe_lookup_version_ts,
 };
 
-/// Checks that the current tables of `instance` can answer the version `at`, and returns the
-/// timestamp of `at`. The head is the one the read looked up with the instance.
-///
-/// - `None` or the `Latest` block: the latest version, which the current tables always answer.
-///   Returns `None` and reads nothing.
-/// - a timestamp at or after the head of the instance (its extraction state), or any timestamp when
-///   the instance has no extraction state yet: returns the timestamp.
-/// - a timestamp before the head: `Unsupported`, because past versions need the history tables.
-///
-/// The current tables hold every row valid at or after the head, because the writer saves the
-/// extraction state in the same transaction as the rows. A version kind other than `Last` is
-/// `Unsupported`.
-pub(super) async fn check_current(
-    instance: &ActiveInstance,
-    at: Option<&Version>,
-    conn: &mut AsyncPgConnection,
-) -> Result<Option<NaiveDateTime>, StorageError> {
-    let Some(at) = at else {
-        return Ok(None);
-    };
-    if let Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last) = at {
-        return Ok(None);
-    }
-    let ts = maybe_lookup_version_ts(at, conn).await?;
-    match instance.head {
-        Some(head) if ts < head => Err(StorageError::Unsupported(format!(
-            "version {ts} is before the head of instance {}: past versions need the history tables",
-            instance.id
-        ))),
-        _ => Ok(Some(ts)),
-    }
-}
-
 /// Which rows answer a read at a version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadAt {
@@ -125,7 +92,7 @@ pub(super) async fn resolve_version(
 /// same outer and inner key: two rows of `entity` are then valid at one version, which the writer
 /// must prevent. The error names the `instance` and the version of `read`, and
 /// `storage_overlapping_versions{entity}` counts it.
-pub(super) fn unique_by_key<O, I, V>(
+pub(super) fn unique_by_key_nested<O, I, V>(
     entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
@@ -146,20 +113,48 @@ where
                     e.get_mut().insert(inner, value);
                 }
                 Entry::Occupied(e) => {
-                    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
-                    let version = match read {
-                        ReadAt::Current => "the head".to_string(),
-                        ReadAt::Past { ts, head: _ } => format!("version {ts}"),
-                    };
-                    return Err(StorageError::Unexpected(format!(
-                        "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
-                        (e.key(), &inner)
-                    )));
+                    return Err(overlap(entity, instance, read, (e.key(), &inner)));
                 }
             }
             Ok(map)
         },
     )
+}
+
+/// Collects `rows` into a map by key. `Unexpected` if two rows have the same key, as for
+/// [`unique_by_key_nested`].
+pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
+    entity: &'static str,
+    instance: InstanceId,
+    read: ReadAt,
+    rows: impl IntoIterator<Item = (K, V)>,
+) -> Result<HashMap<K, V>, StorageError> {
+    rows.into_iter()
+        .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
+            Entry::Vacant(e) => {
+                e.insert(value);
+                Ok(map)
+            }
+            Entry::Occupied(e) => Err(overlap(entity, instance, read, e.key())),
+        })
+}
+
+/// The error for two rows of `key` of `entity` valid at the version of `read`. Counts it in
+/// `storage_overlapping_versions{entity}`.
+fn overlap(
+    entity: &'static str,
+    instance: InstanceId,
+    read: ReadAt,
+    key: impl Debug,
+) -> StorageError {
+    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
+    let version = match read {
+        ReadAt::Current => "the head".to_string(),
+        ReadAt::Past { ts, head: _ } => format!("version {ts}"),
+    };
+    StorageError::Unexpected(format!(
+        "{entity} of instance {instance} at {version}: two rows of {key:?} are valid"
+    ))
 }
 
 #[cfg(test)]
@@ -173,7 +168,7 @@ mod tests {
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::{check_current, resolve_version, unique_by_key, ReadAt};
+    use super::{resolve_version, unique_by_key, unique_by_key_nested, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -199,70 +194,6 @@ mod tests {
             BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
             VersionKind::Last,
         )
-    }
-
-    #[tokio::test]
-    async fn test_no_version_is_current() {
-        let mut conn = instance_test_connection().await;
-        let instance = instance(None, None);
-
-        assert_eq!(
-            check_current(&instance, None, &mut conn)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn test_version_at_or_after_head_is_current() {
-        let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)), None);
-
-        for ts in [day(2), day(3)] {
-            assert_eq!(
-                check_current(&instance, Some(&at(ts)), &mut conn)
-                    .await
-                    .unwrap(),
-                Some(ts)
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_version_before_head_is_unsupported() {
-        let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)), None);
-
-        let result = check_current(&instance, Some(&at(day(1))), &mut conn).await;
-
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn test_check_current_answers_latest_without_a_block() {
-        let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)), None);
-
-        assert_eq!(
-            check_current(&instance, Some(&latest()), &mut conn)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn test_instance_without_head_is_current() {
-        let mut conn = instance_test_connection().await;
-        let instance = instance(None, None);
-
-        assert_eq!(
-            check_current(&instance, Some(&at(day(1))), &mut conn)
-                .await
-                .unwrap(),
-            Some(day(1))
-        );
     }
 
     #[rstest]
@@ -297,8 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_by_key_collects_rows() {
-        let map = unique_by_key(
+    fn test_unique_by_key_nested_collects_rows() {
+        let map = unique_by_key_nested(
             "protocol_state",
             InstanceId(7),
             ReadAt::Current,
@@ -318,8 +249,11 @@ mod tests {
     #[rstest]
     #[case::current(ReadAt::Current, "the head")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
-    fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
-        let result = unique_by_key(
+    fn test_unique_by_key_nested_fails_on_a_repeated_key(
+        #[case] read: ReadAt,
+        #[case] version: &str,
+    ) {
+        let result = unique_by_key_nested(
             "protocol_state",
             InstanceId(7),
             read,
@@ -332,6 +266,29 @@ mod tests {
         assert_eq!(
             msg,
             format!("protocol_state of instance 7 at {version}: two rows of (42, \"x\") are valid")
+        );
+    }
+
+    #[test]
+    fn test_unique_by_key_collects_rows() {
+        let map =
+            unique_by_key("contract_code", InstanceId(7), ReadAt::Current, [(1, "a"), (2, "b")])
+                .unwrap();
+
+        assert_eq!(map, HashMap::from([(1, "a"), (2, "b")]));
+    }
+
+    #[test]
+    fn test_unique_by_key_fails_on_a_repeated_key() {
+        let read = ReadAt::Past { ts: day(3), head: day(5) };
+        let result = unique_by_key("contract_code", InstanceId(7), read, [(42, "a"), (42, "b")]);
+
+        let Err(StorageError::Unexpected(msg)) = result else {
+            panic!("expected Unexpected, got {result:?}");
+        };
+        assert_eq!(
+            msg,
+            "contract_code of instance 7 at version 2020-01-03 00:00:00: two rows of 42 are valid"
         );
     }
 }

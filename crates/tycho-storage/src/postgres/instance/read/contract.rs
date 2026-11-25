@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::Utc;
+use chrono::NaiveDateTime;
 use diesel::{dsl::exists, pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::warn;
@@ -13,13 +13,16 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::version::{resolve_version, unique_by_key, unique_by_key_nested, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
         active::active_instance_limits,
         gateway::PostgresGatewayNew,
-        schema::tycho::{account, account_balance, contract_code, contract_storage},
+        schema::tycho::{
+            account, account_balance, account_balance_history, contract_code,
+            contract_code_history, contract_storage, contract_storage_history,
+        },
         InstanceId,
     },
     PostgresError,
@@ -53,16 +56,18 @@ impl PostgresGatewayNew {
     ///   an unknown name. A protocol system without an active instance has no contracts.
     /// - `addresses`: only the accounts at these addresses. An account without code is left out
     ///   with a warning. Without addresses, all accounts with code.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance. Accounts
-    ///   created after it or deleted at or before it are left out.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance. Accounts created after the version or deleted at or before it are left out.
     /// - `include_slots`: add the storage slots. A slot without a value has empty bytes.
     /// - `pagination_params`: the page of accounts to return, in account id order. The total is
     ///   then the number of matching accounts on all pages. With `addresses`, accounts without code
     ///   count too. Without it, all matching contracts are returned, and the total is their number.
     ///
     /// `NotFound` for an unknown chain, and for a contract without balances or without a balance
-    /// of the chain's native token. `balance_modify_tx` is always 32 zero bytes and `creation_tx`
-    /// is always `None`.
+    /// of the chain's native token. `Unexpected` when two rows of one code, slot or balance are
+    /// valid at the version. `balance_modify_tx` is always 32 zero bytes and `creation_tx` is
+    /// always `None`.
     #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     pub async fn get_contracts(
         &self,
@@ -79,35 +84,49 @@ impl PostgresGatewayNew {
         let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
         };
-        // The latest version is the head: no account was created or deleted after it.
-        let ts = check_current(&active, at, conn)
-            .await?
-            .or(active.head)
-            .unwrap_or_else(|| Utc::now().naive_utc());
+        let read = resolve_version(&active, at, conn).await?;
         let instance = active.id;
 
         let filtered = || {
             let mut query = account::table
                 .filter(account::instance_id.eq(instance))
-                .filter(
-                    account::created_at
-                        .is_null()
-                        .or(account::created_at.le(ts)),
-                )
-                .filter(
-                    account::deleted_at
-                        .is_null()
-                        .or(account::deleted_at.gt(ts)),
-                )
                 .into_boxed::<Pg>();
+            query = match read {
+                // No account was created or deleted after the head.
+                ReadAt::Current => query.filter(account::deleted_at.is_null()),
+                ReadAt::Past { ts, head: _ } => query
+                    .filter(
+                        account::created_at
+                            .is_null()
+                            .or(account::created_at.le(ts)),
+                    )
+                    .filter(
+                        account::deleted_at
+                            .is_null()
+                            .or(account::deleted_at.gt(ts)),
+                    ),
+            };
             match addresses {
                 Some(addresses) => query = query.filter(account::address.eq_any(addresses)),
                 None => {
-                    query = query.filter(exists(
-                        contract_code::table
-                            .filter(contract_code::instance_id.eq(instance))
-                            .filter(contract_code::account_id.eq(account::id)),
-                    ))
+                    let current = contract_code::table
+                        .filter(contract_code::instance_id.eq(instance))
+                        .filter(contract_code::account_id.eq(account::id));
+                    query = match read {
+                        ReadAt::Current => query.filter(exists(current)),
+                        // The code valid at `ts` can be in history: replaced after `ts`, or moved
+                        // there when the account was deleted.
+                        ReadAt::Past { ts, head } => query.filter(
+                            exists(current.filter(contract_code::valid_from.le(ts))).or(exists(
+                                contract_code_history::table
+                                    .filter(contract_code_history::instance_id.eq(instance))
+                                    .filter(contract_code_history::account_id.eq(account::id))
+                                    .filter(contract_code_history::valid_from.le(ts))
+                                    .filter(contract_code_history::valid_to.gt(ts))
+                                    .filter(contract_code_history::valid_to.le(head)),
+                            )),
+                        ),
+                    };
                 }
             }
             query
@@ -145,18 +164,7 @@ impl PostgresGatewayNew {
             .map(|(id, _, _)| *id)
             .collect();
 
-        let mut codes: HashMap<i64, (Bytes, Bytes, Bytes)> = contract_code::table
-            .filter(contract_code::instance_id.eq(instance))
-            .filter(contract_code::account_id.eq_any(&ids))
-            .select((
-                contract_code::account_id,
-                (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
-            ))
-            .load::<(i64, (Bytes, Bytes, Bytes))>(conn)
-            .await
-            .map_err(PostgresError::from)?
-            .into_iter()
-            .collect();
+        let mut codes = codes_at(instance, &ids, read, conn).await?;
         let missing: Vec<String> = accounts
             .iter()
             .filter(|(id, _, _)| !codes.contains_key(id))
@@ -174,28 +182,12 @@ impl PostgresGatewayNew {
             .map(|(_, address, _)| address.clone())
             .collect();
         let mut balances =
-            load_account_balances(chain, instance, Some(&page_addresses), true, conn).await?;
-
-        let mut slots: HashMap<i64, HashMap<Bytes, Bytes>> = HashMap::new();
-        if include_slots {
-            let rows: Vec<(i64, Bytes, Option<Bytes>)> = contract_storage::table
-                .filter(contract_storage::instance_id.eq(instance))
-                .filter(contract_storage::account_id.eq_any(&ids))
-                .select((
-                    contract_storage::account_id,
-                    contract_storage::slot,
-                    contract_storage::value,
-                ))
-                .load(conn)
-                .await
-                .map_err(PostgresError::from)?;
-            for (account_id, slot, value) in rows {
-                slots
-                    .entry(account_id)
-                    .or_default()
-                    .insert(slot, value.unwrap_or_default());
-            }
-        }
+            account_balances_at(chain, instance, Some(&page_addresses), true, read, conn).await?;
+        let mut slots = if include_slots {
+            slots_at(instance, &ids, read, conn).await?
+        } else {
+            HashMap::new()
+        };
 
         let mut contracts = Vec::with_capacity(accounts.len());
         for (id, address, title) in accounts {
@@ -236,11 +228,14 @@ impl PostgresGatewayNew {
     /// - `protocol_system`: the protocol system whose copy of the accounts to read. `NotFound` for
     ///   an unknown name. A protocol system without an active instance has no balances.
     /// - `accounts`: only these accounts.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     /// - `include_native`: add the balance of the chain's native token.
     ///
     /// Accounts without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
-    /// an unknown chain.
+    /// an unknown chain. `Unexpected` when two rows of one account and token are valid at the
+    /// version.
     pub async fn get_account_balances(
         &self,
         chain: &Chain,
@@ -255,20 +250,214 @@ impl PostgresGatewayNew {
         let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(HashMap::new());
         };
-        check_current(&active, at, conn).await?;
-        load_account_balances(chain, active.id, accounts, include_native, conn).await
+        let read = resolve_version(&active, at, conn).await?;
+        account_balances_at(chain, active.id, accounts, include_native, read, conn).await
     }
 }
 
-/// Loads the token balances of the accounts of `instance`, by account address and token address.
-/// `accounts`: only these accounts; `None` for all of them.
-async fn load_account_balances(
+/// Returns the token balances valid at `read` of the accounts of `instance`, by account address and
+/// token address. `accounts`: only these accounts; `None` for all of them.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// account and token are valid at the version.
+async fn account_balances_at(
     chain: &Chain,
     instance: InstanceId,
     accounts: Option<&[Address]>,
     include_native: bool,
+    read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
+    let native = (!include_native).then(|| chain.native_token().address);
+    let skip = native.as_ref();
+    let mut rows =
+        current_account_balance_rows(instance, accounts, skip, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_account_balance_rows(instance, accounts, skip, ts, head, conn).await?);
+    }
+    Ok(unique_by_key_nested(
+        "account_balance",
+        instance,
+        read,
+        rows.into_iter()
+            .map(|(address, token, balance)| ((address, token), balance)),
+    )?
+    .into_iter()
+    .map(|(address, balances)| {
+        let balances = balances
+            .into_iter()
+            .map(|(token, balance)| {
+                let balance =
+                    AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
+                (token, balance)
+            })
+            .collect();
+        (address, balances)
+    })
+    .collect())
+}
+
+/// A code row: account id, and code, code hash and the hash of the transaction that set it.
+type CodeRow = (i64, (Bytes, Bytes, Bytes));
+
+/// Returns the code valid at `read` of the accounts `ids` of `instance`, by account id, as code,
+/// code hash and the hash of the transaction that set it.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two code rows of one
+/// account are valid at the version.
+async fn codes_at(
+    instance: InstanceId,
+    ids: &[i64],
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, (Bytes, Bytes, Bytes)>, StorageError> {
+    let mut rows = current_code_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_code_rows(instance, ids, ts, head, conn).await?);
+    }
+    unique_by_key("contract_code", instance, read, rows)
+}
+
+/// Loads the current code rows of the accounts `ids` of `instance`.
+/// `ts`: only rows with `valid_from <= ts`.
+async fn current_code_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<CodeRow>, StorageError> {
+    let mut query = contract_code::table
+        .filter(contract_code::instance_id.eq(instance))
+        .filter(contract_code::account_id.eq_any(ids))
+        .select((
+            contract_code::account_id,
+            (contract_code::code, contract_code::hash, contract_code::modify_tx_hash),
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(contract_code::valid_from.le(ts));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history code rows of the accounts `ids` of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
+async fn history_code_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<CodeRow>, StorageError> {
+    Ok(contract_code_history::table
+        .filter(contract_code_history::instance_id.eq(instance))
+        .filter(contract_code_history::account_id.eq_any(ids))
+        .filter(contract_code_history::valid_from.le(ts))
+        .filter(contract_code_history::valid_to.gt(ts))
+        .filter(contract_code_history::valid_to.le(head))
+        .select((
+            contract_code_history::account_id,
+            (
+                contract_code_history::code,
+                contract_code_history::hash,
+                contract_code_history::modify_tx_hash,
+            ),
+        ))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// A slot row: account id, slot and value. A deleted slot has no value.
+type SlotRow = (i64, Bytes, Option<Bytes>);
+
+/// Returns the storage slots valid at `read` of the accounts `ids` of `instance`, by account id and
+/// slot. A slot without a value has empty bytes.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// account and slot are valid at the version.
+async fn slots_at(
+    instance: InstanceId,
+    ids: &[i64],
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, HashMap<Bytes, Bytes>>, StorageError> {
+    let mut rows = current_slot_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_slot_rows(instance, ids, ts, head, conn).await?);
+    }
+    unique_by_key_nested(
+        "contract_storage",
+        instance,
+        read,
+        rows.into_iter()
+            .map(|(account_id, slot, value)| ((account_id, slot), value.unwrap_or_default())),
+    )
+}
+
+/// Loads the current slot rows of the accounts `ids` of `instance`.
+/// `ts`: only rows with `valid_from <= ts`.
+async fn current_slot_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<SlotRow>, StorageError> {
+    let mut query = contract_storage::table
+        .filter(contract_storage::instance_id.eq(instance))
+        .filter(contract_storage::account_id.eq_any(ids))
+        .select((contract_storage::account_id, contract_storage::slot, contract_storage::value))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(contract_storage::valid_from.le(ts));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history slot rows of the accounts `ids` of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
+async fn history_slot_rows(
+    instance: InstanceId,
+    ids: &[i64],
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<SlotRow>, StorageError> {
+    Ok(contract_storage_history::table
+        .filter(contract_storage_history::instance_id.eq(instance))
+        .filter(contract_storage_history::account_id.eq_any(ids))
+        .filter(contract_storage_history::valid_from.le(ts))
+        .filter(contract_storage_history::valid_to.gt(ts))
+        .filter(contract_storage_history::valid_to.le(head))
+        .select((
+            contract_storage_history::account_id,
+            contract_storage_history::slot,
+            contract_storage_history::value,
+        ))
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// An account balance row: account address, token and balance.
+type AccountBalanceRow = (Address, Address, Balance);
+
+/// Loads the current balance rows of the accounts of `instance`.
+/// `accounts`: only these accounts; `None` for all of them. `skip`: leave out the balances of this
+/// token. `ts`: only rows with `valid_from <= ts`.
+async fn current_account_balance_rows(
+    instance: InstanceId,
+    accounts: Option<&[Address]>,
+    skip: Option<&Address>,
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<AccountBalanceRow>, StorageError> {
     let mut query = account_balance::table
         .inner_join(
             account::table.on(account::instance_id
@@ -279,27 +468,60 @@ async fn load_account_balances(
         .filter(account::instance_id.eq(instance))
         .select((account::address, account_balance::token, account_balance::balance))
         .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(account_balance::valid_from.le(ts));
+    }
     if let Some(accounts) = accounts {
         query = query.filter(account::address.eq_any(accounts));
     }
-    if !include_native {
-        query = query.filter(account_balance::token.ne(chain.native_token().address));
+    if let Some(skip) = skip {
+        query = query.filter(account_balance::token.ne(skip));
     }
-    let rows: Vec<(Address, Address, Balance)> = query
+    Ok(query
         .load(conn)
         .await
-        .map_err(PostgresError::from)?;
+        .map_err(PostgresError::from)?)
+}
 
-    let mut balances: HashMap<Address, HashMap<Address, AccountBalance>> = HashMap::new();
-    for (address, token, balance) in rows {
-        let account_balance =
-            AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
-        balances
-            .entry(address)
-            .or_default()
-            .insert(token, account_balance);
+/// Loads the history balance rows of the accounts of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
+/// `accounts`: only these accounts; `None` for all of them. `skip`: leave out the balances of this
+/// token.
+async fn history_account_balance_rows(
+    instance: InstanceId,
+    accounts: Option<&[Address]>,
+    skip: Option<&Address>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<AccountBalanceRow>, StorageError> {
+    let mut query = account_balance_history::table
+        .inner_join(
+            account::table.on(account::instance_id
+                .eq(account_balance_history::instance_id)
+                .and(account::id.eq(account_balance_history::account_id))),
+        )
+        .filter(account_balance_history::instance_id.eq(instance))
+        .filter(account::instance_id.eq(instance))
+        .filter(account_balance_history::valid_from.le(ts))
+        .filter(account_balance_history::valid_to.gt(ts))
+        .filter(account_balance_history::valid_to.le(head))
+        .select((
+            account::address,
+            account_balance_history::token,
+            account_balance_history::balance,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(accounts) = accounts {
+        query = query.filter(account::address.eq_any(accounts));
     }
-    Ok(balances)
+    if let Some(skip) = skip {
+        query = query.filter(account_balance_history::token.ne(skip));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
 }
 
 #[cfg(test)]
@@ -319,7 +541,11 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
+        instance::{
+            gateway::PostgresGatewayNew,
+            read::testing::{before_retention, recent},
+            InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -511,15 +737,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_account_balances_before_head_are_unsupported() {
+    async fn test_account_balances_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
-        let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(day(1)))).await;
+        let result = balances(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            true,
+            Some(&at(before_retention(recent(5)))),
+        )
+        .await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    /// Inserts a version of the balance of `token` in an account of curve.
+    async fn balance_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        account: i64,
+        token: Address,
+        value: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_account_balance_version(
+            conn,
+            s.curve,
+            account,
+            token,
+            b(value),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        db_fixtures::insert_instance_account_balance(&mut conn, s.curve, id, eth(), b("0x01"))
+            .await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x05", recent(3), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, token_balance) in [(recent(2), "0x04"), (recent(4), "0x05")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result,
+                [(
+                    b("0xaa"),
+                    [balance("0xaa", eth(), "0x01"), balance("0xaa", b("0x02"), token_balance)]
+                        .into()
+                )]
+                .into(),
+                "{ts}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version_skip_other_instances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        db_fixtures::insert_instance_account_balance_version(
+            &mut conn,
+            s.uniswap_v4,
+            id,
+            b("0x02"),
+            b("0x06"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", true, Some(&at(recent(2))))
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xaa"), [balance("0xaa", b("0x02"), "0x04")].into())].into());
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version_skip_the_native_token() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        balance_version(&mut conn, &s, id, eth(), "0x01", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, id, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", false, Some(&at(recent(2))))
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xaa"), [balance("0xaa", b("0x02"), "0x04")].into())].into());
+    }
+
+    #[tokio::test]
+    async fn test_account_balances_at_a_past_version_of_some_accounts() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let aa = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        let bb = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xbb")).await;
+        balance_version(&mut conn, &s, aa, b("0x02"), "0x04", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, bb, b("0x02"), "0x06", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = s
+            .gateway
+            .get_account_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&[b("0xbb")]),
+                Some(&at(recent(2))),
+                true,
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, [(b("0xbb"), [balance("0xbb", b("0x02"), "0x06")].into())].into());
     }
 
     /// Inserts an account at `address` with the code `code`, code hash `0xc1`, code tx `0xc2`, the
@@ -836,16 +1190,336 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_contracts_before_head_are_unsupported() {
+    async fn test_contracts_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = contracts(
+            &s.gateway,
+            &mut conn,
+            "vm:curve",
+            None,
+            None,
+            Some(&at(before_retention(recent(5)))),
+        )
+        .await;
+
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_contracts_before_the_base_block_are_unsupported() {
+        use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
+
+        use crate::postgres::instance::schema::tycho::protocol_instance;
+
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        diesel::update(protocol_instance::table.find(s.curve))
+            .set(protocol_instance::base_block_ts.eq(recent(2)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
 
         let result =
-            contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&at(day(1)))).await;
+            contracts(&s.gateway, &mut conn, "vm:curve", None, None, Some(&at(recent(1)))).await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("base block"), "{msg}");
+    }
+
+    /// Inserts a version of the code of an account of curve.
+    async fn code_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        account: i64,
+        code: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_code_version(
+            conn,
+            s.curve,
+            account,
+            b(code),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    /// Inserts a version of a storage slot of an account of curve. `value` `None`: a deleted slot.
+    async fn slot_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        account: i64,
+        slot: &str,
+        value: Option<&str>,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_slot_version(
+            conn,
+            s.curve,
+            account,
+            b(slot),
+            value.map(b),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    /// Sets when an account of curve was created and deleted.
+    async fn set_lifetime(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        id: i64,
+        created_at: Option<NaiveDateTime>,
+        deleted_at: Option<NaiveDateTime>,
+    ) {
+        use diesel::prelude::*;
+        use diesel_async::RunQueryDsl;
+
+        use crate::postgres::instance::schema::tycho::account;
+
+        diesel::update(account::table.find((s.curve, id)))
+            .set((account::created_at.eq(created_at), account::deleted_at.eq(deleted_at)))
+            .execute(conn)
+            .await
+            .unwrap();
+    }
+
+    /// Reads the contracts of curve at `ts`, without addresses, on the page `pagination` if set.
+    async fn curve_contracts_at(
+        s: &Setup,
+        conn: &mut AsyncPgConnection,
+        pagination: Option<&PaginationParams>,
+        ts: NaiveDateTime,
+    ) -> Result<(Vec<Account>, Option<i64>), StorageError> {
+        contracts(&s.gateway, conn, "vm:curve", None, pagination, Some(&at(ts))).await
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_a_past_version_read_history() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, s.curve, b("0xaa")).await;
+        code_version(&mut conn, &s, id, "0xc0de01", recent(1), Some(recent(3))).await;
+        code_version(&mut conn, &s, id, "0xc0de02", recent(3), None).await;
+        slot_version(&mut conn, &s, id, "0x01", Some("0x0a"), recent(1), Some(recent(3))).await;
+        slot_version(&mut conn, &s, id, "0x01", Some("0x0b"), recent(3), None).await;
+        db_fixtures::insert_instance_slots(&mut conn, s.curve, id, &[(b("0x02"), b("0x0c"))]).await;
+        balance_version(&mut conn, &s, id, eth(), "0x01", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, id, eth(), "0x02", recent(3), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, code, slot, native) in
+            [(recent(2), "0xc0de01", "0x0a", "0x01"), (recent(4), "0xc0de02", "0x0b", "0x02")]
+        {
+            let (result, _) = curve_contracts_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(addresses(&result), vec![b("0xaa")], "{ts}");
+            assert_eq!(result[0].code, b(code), "{ts}");
+            assert_eq!(
+                result[0].slots,
+                [(b("0x01"), b(slot)), (b("0x02"), b("0x0c"))].into(),
+                "{ts}"
+            );
+            assert_eq!(result[0].native_balance, b(native), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_a_past_version_read_a_deleted_slot_as_empty() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        slot_version(&mut conn, &s, id, "0x01", Some("0x0a"), recent(1), Some(recent(3))).await;
+        slot_version(&mut conn, &s, id, "0x01", None, recent(3), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, value) in [(recent(4), Bytes::new()), (recent(2), b("0x0a"))] {
+            let (result, _) = curve_contracts_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(result[0].slots, [(b("0x01"), value)].into(), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_a_past_version_skip_deleted_and_new_accounts() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let deleted = contract(&mut conn, s.curve, "0xaa", "0xc0de", &[]).await;
+        set_lifetime(&mut conn, &s, deleted, None, Some(recent(2))).await;
+        let created = contract(&mut conn, s.curve, "0xbb", "0xc0de", &[]).await;
+        set_lifetime(&mut conn, &s, created, Some(recent(3)), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in
+            [(recent(1), vec![b("0xaa")]), (recent(2), vec![]), (recent(3), vec![b("0xbb")])]
+        {
+            let (result, _) = curve_contracts_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(addresses(&result), expected, "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_without_addresses_at_a_past_version_list_deleted_accounts() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = account_with_balances(&mut conn, s.curve, "0xbb", "0x01", "0x05").await;
+        code_version(&mut conn, &s, id, "0xc0de", day(1), Some(recent(3))).await;
+        set_lifetime(&mut conn, &s, id, None, Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        let page = PaginationParams::new(0, 10);
+
+        let (before, _) = curve_contracts_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+        let (paged, paged_total) = curve_contracts_at(&s, &mut conn, Some(&page), recent(2))
+            .await
+            .unwrap();
+        let (after, after_total) = curve_contracts_at(&s, &mut conn, Some(&page), recent(4))
+            .await
+            .unwrap();
+
+        assert_eq!(addresses(&before), vec![b("0xbb")]);
+        assert_eq!(before[0].code, b("0xc0de"));
+        assert_eq!(addresses(&paged), vec![b("0xbb")]);
+        assert_eq!(paged_total, Some(1));
+        assert!(after.is_empty(), "{after:?}");
+        assert_eq!(after_total, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_contracts_without_addresses_at_a_past_version_skip_code_from_later() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        code_version(&mut conn, &s, id, "0xc0de", recent(3), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        let page = PaginationParams::new(0, 10);
+
+        let (before, before_total) = curve_contracts_at(&s, &mut conn, Some(&page), recent(2))
+            .await
+            .unwrap();
+        let (after, after_total) = curve_contracts_at(&s, &mut conn, Some(&page), recent(4))
+            .await
+            .unwrap();
+
+        assert!(before.is_empty(), "{before:?}");
+        assert_eq!(before_total, Some(0));
+        assert_eq!(addresses(&after), vec![b("0xaa")]);
+        assert_eq!(after_total, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_a_past_version_find_unchanged_code() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        contract(&mut conn, s.curve, "0xaa", "0xc0de", &[("0x01", "0x0a")]).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        let id = ContractId::new(Chain::Ethereum, b("0xaa"));
+
+        for ts in [recent(1), recent(4)] {
+            let (all, _) = curve_contracts_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+            let one = s
+                .gateway
+                .get_contract(&id, "vm:curve", Some(&at(ts)), true, &mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(addresses(&all), vec![b("0xaa")], "{ts}");
+            assert_eq!(one.code, b("0xc0de"), "{ts}");
+            assert_eq!(one.slots, [(b("0x01"), b("0x0a"))].into(), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_contracts_at_a_past_version_skip_other_instances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        code_version(&mut conn, &s, id, "0xc0de01", recent(1), Some(recent(3))).await;
+        code_version(&mut conn, &s, id, "0xc0de02", recent(3), None).await;
+        slot_version(&mut conn, &s, id, "0x01", Some("0x0a"), recent(1), Some(recent(3))).await;
+        slot_version(&mut conn, &s, id, "0x01", Some("0x0b"), recent(3), None).await;
+        db_fixtures::insert_instance_code_version(
+            &mut conn,
+            s.uniswap_v4,
+            id,
+            b("0xdead"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::insert_instance_slot_version(
+            &mut conn,
+            s.uniswap_v4,
+            id,
+            b("0x01"),
+            Some(b("0xbb")),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        let later = account_with_balances(&mut conn, s.curve, "0xbb", "0x01", "0x05").await;
+        code_version(&mut conn, &s, later, "0xc0de03", recent(3), None).await;
+        db_fixtures::insert_instance_code_version(
+            &mut conn,
+            s.uniswap_v4,
+            later,
+            b("0xdead"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let page = PaginationParams::new(0, 10);
+
+        let (result, total) = curve_contracts_at(&s, &mut conn, Some(&page), recent(2))
+            .await
+            .unwrap();
+
+        assert_eq!(addresses(&result), vec![b("0xaa")]);
+        assert_eq!(total, Some(1));
+        assert_eq!(result[0].code, b("0xc0de01"));
+        assert_eq!(result[0].slots, [(b("0x01"), b("0x0a"))].into());
+    }
+
+    #[tokio::test]
+    async fn test_contracts_with_two_valid_code_rows_fail() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let id = account_with_balances(&mut conn, s.curve, "0xaa", "0x01", "0x05").await;
+        code_version(&mut conn, &s, id, "0xc0de01", recent(1), Some(recent(3))).await;
+        code_version(&mut conn, &s, id, "0xc0de02", recent(1), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_contracts_at(&s, &mut conn, None, recent(2)).await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
     }
 
     #[tokio::test]
