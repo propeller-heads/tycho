@@ -285,19 +285,24 @@
 //! branch. [`EXPECTED_GAS_ATTRIBUTE`] is what a fill the pool's custody pays is measured to cost,
 //! in the charge's own terms: the dearer direction's custody fill sent direct (its charge), and
 //! through the fallback router at least that fill and the least of the router's additions
-//! (48,794), less the 40,000 the estimator adds itself. A book with a credit route sent direct
+//! (48,794), less the 40,000 the estimator adds itself. A listing with a credit mode sent direct
 //! carries none: its routed fills cost several times its custody fills, and each swap's charge is
 //! already its own path's figure. [`GAS_LIMIT_ADDITION_ATTRIBUTE`] is what one swap's call adds
 //! to a gas limit by this section's rule, not a transaction's limit: the dearest fill the listing
-//! has a figure for before refunds, and 25% on top. Inside custody that is the fill and its
-//! refund of 19,900; through the fallback router the custody fill, the most of the router's
-//! additions (74,415) and the refund. On a book with a credit route it is the dearest fill
-//! measured on that listing, whatever the size, which `credit_listing` names as a fifth figure
+//! has a figure for before refunds, and 25% on top. On a listing in no credit mode that is the
+//! custody fill and its refund of 19,900, or the dearest fill `credit_listing` names as a fifth
+//! figure where that is more; through the fallback router that fill and the most of the router's
+//! additions (74,415). On a listing with a credit mode it is the dearest fill measured on that
+//! listing, whatever the size, which `credit_listing` names as a fifth figure
 //! ([`CreditGas::most_before_refunds`]: 1,134,823 on the first pool's listing, so 1,418,529); the
 //! book carries none where no such figure is named, since the route's charges are the least seen
-//! and size no limit. A listing with no figure of its own carries neither attribute through the
-//! fallback router. Neither figure counts the pool a solver names to fall back on, and the
-//! headroom was measured sent direct.
+//! and size no limit. That holds for a credit listing served its custody sizes alone (one sharing
+//! its pool) as for one served its route: the front sends a fill through the credit route
+//! wherever custody falls short at the fill, so a custody figure is never that book's limit. A
+//! fifth figure is at least the dearest of the four charges and 19,900, the least refund traced:
+//! a charge is net of its refund. A listing with no figure of its own carries neither attribute
+//! through the fallback router. Neither figure counts the pool a solver names to fall back on,
+//! and the headroom was measured sent direct.
 //!
 //! # The tip cap: a limit no book can enforce
 //!
@@ -524,7 +529,7 @@
 //! name the least seen: the figures are charges, never over what a first fill in a fresh block
 //! spends. They are not limits. A size sampled inside custody fills through the route where
 //! another fill of the block takes the pool's balance first (the front routes what custody cannot
-//! pay), at several times the gas, so a solver's gas limit on any listing that has a route must
+//! pay), at several times the gas, so a solver's gas limit on any listing with a credit mode must
 //! cover the route's figure; the next poll samples the pool as that fill left it, and the size is
 //! then served as routed, at the route's figure.
 //! In mode 3 sizes its custody fills whole route too,
@@ -680,17 +685,18 @@ pub const ASK_VALID_UNTIL_MS_ATTRIBUTE: &str = "ask_valid_until_ms";
 /// measured to cost its transaction, big-endian, in the terms of a swap's charge (beside what
 /// tycho-execution's gas estimator adds): the dearer direction's. Sent direct it is that
 /// direction's charge; through the fallback router it is the door's branch at the least, which
-/// the charge there, the cheaper branch's, is 64,000 to 121,000 under. Absent on a book with a
-/// credit route sent direct, whose routed fills cost several times that, and through the fallback
+/// the charge there, the cheaper branch's, is 64,000 to 121,000 under. Absent on a listing with a
+/// credit mode sent direct, whose routed fills cost several times that, and through the fallback
 /// router for a listing with no figure of its own. See the module doc, Gas.
 pub const EXPECTED_GAS_ATTRIBUTE: &str = "expected_gas";
 
 /// Static attribute holding, on Ethereum, what one swap's call adds to a transaction's gas limit,
 /// big-endian: the dearest fill the listing has a figure for, before refunds, and 25% on top. An
-/// addition for the swap's call, not the transaction's limit. On a book with a credit route it is
-/// sized from the dearest fill measured on the listing, and absent where the listing's gas names
-/// none. Absent too through the fallback router for a listing with no figure of its own, and it
-/// never covers the pool a solver falls back on. See the module doc, Gas.
+/// addition for the swap's call, not the transaction's limit. On a listing with a credit mode it
+/// is sized from the dearest fill measured on the listing, and absent where the listing's gas
+/// names none, whether its book serves a routed size or its custody sizes alone. Absent too
+/// through the fallback router for a listing with no figure of its own, and it never covers the
+/// pool a solver falls back on. See the module doc, Gas.
 pub const GAS_LIMIT_ADDITION_ATTRIBUTE: &str = "gas_limit_addition";
 
 /// The one quote contract layout this integration reads: see

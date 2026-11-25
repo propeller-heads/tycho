@@ -186,7 +186,7 @@ for any protocol indexed by Tycho.
     (`FALLBACK_SWAP_GAS`). The charge stays that floor: what a fill is expected to cost and what
     its call adds to a gas limit go out as data beside it (`expected_gas`, `gas_limit_addition`,
     `GasOutlook`), each only where a figure measured on the listing states it, never under and
-    never over: a book with a credit route names no expected gas, and an addition only from the
+    never over: a listing with a credit mode names no expected gas, and an addition only from the
     dearest fill `credit_listing` names (`CreditGas::most_before_refunds`), not from a charge
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and

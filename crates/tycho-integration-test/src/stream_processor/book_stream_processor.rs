@@ -765,8 +765,8 @@ fn efficient_prop_approved_desks(
 /// The listings served with gas named for them, each with the gas its fills are charged, from
 /// `EFFICIENT_PROP_CREDIT_LISTINGS` (comma-separated `listing=custody sell:custody buy:route
 /// sell:route buy`, the four figures measured on that listing's pool, and optionally a fifth, its
-/// dearest fill before refunds, which its book's gas limit addition is sized from): none when it is
-/// unset, so
+/// dearest fill before refunds, which its book's gas limit addition is sized from and which is at
+/// least the dearest of the four and 19,900): none when it is unset, so
 /// no listing with a credit mode, of a stock token's pair, or of a pair and place the feed holds
 /// no measured figure for is served. The feed refuses one on Base.
 fn efficient_prop_credit_listings(
@@ -1172,10 +1172,17 @@ mod tests {
     }
 
     /// On Ethereum the listing doors serve the credit listings `EFFICIENT_PROP_CREDIT_LISTINGS`
-    /// names with their gas; an entry that is not `listing=four figures` fails the run, and so
-    /// does any on Base.
+    /// names with their gas; an entry that is not `listing=four figures`, or five with a dearest
+    /// fill before refunds that is at least the dearest of the four and 19,900, fails the run,
+    /// and so does any on Base.
     #[rstest::rstest]
     #[case::one_listing(Chain::Ethereum, "1=137909:133427:925544:1035811", None)]
+    #[case::its_dearest_fill_named(Chain::Ethereum, "1=137909:133427:925544:1035811:1134823", None)]
+    #[case::a_dearest_fill_under_a_charge_and_its_refund(
+        Chain::Ethereum,
+        "1=137909:133427:925544:1035811:1055710",
+        Some("1055710 is under 1055711")
+    )]
     #[case::two_listings(
         Chain::Ethereum,
         "1=137909:133427:925544:1035811, 7=187000:192000:610501:610501",

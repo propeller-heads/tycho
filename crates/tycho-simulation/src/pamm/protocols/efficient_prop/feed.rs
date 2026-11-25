@@ -222,8 +222,10 @@ impl EfficientPropFeedBuilder {
     ///
     /// The four charges are the least seen, so they size no gas limit. Name the dearest fill
     /// measured on the listing before refunds as well ([`CreditGas::most_before_refunds`]) and
-    /// its book carries what a swap's call adds to a gas limit; a book with a route carries none
-    /// otherwise.
+    /// its book carries what a swap's call adds to a gas limit; a listing with a credit mode
+    /// carries none otherwise, on a pool of its own or on one it shares, where it is served its
+    /// custody sizes alone. On a listing in no credit mode that figure sizes the limit where it
+    /// is over the custody fill and its refund.
     pub fn credit_listing(mut self, listing: u32, gas: CreditGas) -> Self {
         self.credit_listings
             .push((listing, gas));
@@ -833,7 +835,9 @@ impl EfficientPropBookAssembler {
                 .find(|read| read.door.as_slice() == door.as_ref());
             let tip_cap_wei = door_read.and_then(|read| read.tip_cap_wei);
             // What its fills are measured to cost, beside each swap's charge: each figure only
-            // where one measured on the listing states it.
+            // where one measured on the listing states it. By the listing's credit mode, not by
+            // the sizes this book serves: a credit listing cut to its custody sizes (it shares
+            // its pool) still fills through the route where custody falls short at the fill.
             let outlook = state.gas_outlook(door_read.is_some_and(|read| read.credit.is_some()));
             let mut book = pair_book(
                 self.protocol_system,
@@ -4600,25 +4604,53 @@ mod tests {
 
         /// A book sent direct names beside its swaps' charges what a fill its pool's custody
         /// pays is measured to cost, the dearer direction's figure, and what its call adds to a
-        /// gas limit: that figure, the custody fill's refund of 19,900 and a quarter on top. A
-        /// book with a credit route names no expected gas, and an addition only where its gas
-        /// names the dearest fill measured on the listing: that fill and a quarter on top.
+        /// gas limit: that figure, the custody fill's refund of 19,900 and a quarter on top, or
+        /// the dearest fill its gas names and a quarter on top where that is more. A listing
+        /// with a credit mode names no expected gas, and an addition only where its gas names
+        /// the dearest fill measured on the listing: that fill and a quarter on top. So does one
+        /// sharing its pool, served its custody sizes alone: the front sends such a fill through
+        /// the credit route where custody falls short at the fill, so the custody figures
+        /// (160,877, and 225,972 for a limit) are not this book's.
         #[rstest]
         #[case::a_listing_in_no_credit_mode(
             FakeListing::ethereum(1),
             named_gas(),
+            false,
             Some(96_239),
             Some(145_174)
+        )]
+        #[case::a_listing_in_no_credit_mode_naming_its_dearest_fill(
+            FakeListing::ethereum(1),
+            CreditGas { most_before_refunds: std::num::NonZeroU64::new(150_000), ..named_gas() },
+            false,
+            Some(96_239),
+            Some(187_500)
         )]
         #[case::a_credit_listing_naming_four_figures(
             FakeListing::ethereum_credit(1),
             credit_gas(),
+            false,
             None,
             None
         )]
         #[case::a_credit_listing_naming_its_dearest_fill(
             FakeListing::ethereum_credit(1),
             CreditGas { most_before_refunds: std::num::NonZeroU64::new(700_000), ..credit_gas() },
+            false,
+            None,
+            Some(875_000)
+        )]
+        #[case::a_credit_listing_served_its_custody_alone_naming_four_figures(
+            FakeListing::ethereum_credit(1),
+            credit_gas(),
+            true,
+            None,
+            None
+        )]
+        #[case::a_credit_listing_served_its_custody_alone_naming_its_dearest_fill(
+            FakeListing::ethereum_credit(1),
+            CreditGas { most_before_refunds: std::num::NonZeroU64::new(700_000), ..credit_gas() },
+            true,
             None,
             Some(875_000)
         )]
@@ -4626,16 +4658,33 @@ mod tests {
         async fn a_book_names_its_expected_gas_and_its_gas_limit_addition(
             #[case] listing: FakeListing,
             #[case] gas: CreditGas,
+            #[case] shares_its_pool: bool,
             #[case] expected_gas: Option<u64>,
             #[case] gas_limit_addition: Option<u64>,
         ) {
-            let books =
-                books_naming(vec![listing], vec![next_map(&[(1, false)])], &[(1, gas)]).await;
+            // A second listing of the pair on the listing's pool cuts a credit listing to the
+            // sizes its pool's custody fills.
+            let sibling = FakeListing { pool: listing.pool, ..FakeListing::ethereum(2) };
+            let (listings, desks, named) = if shares_its_pool {
+                (
+                    vec![listing.clone(), sibling],
+                    vec![(1, false), (2, false)],
+                    vec![(1, gas), (2, named_gas())],
+                )
+            } else {
+                (vec![listing.clone()], vec![(1, false)], vec![(1, gas)])
+            };
+            let books = books_naming(listings, vec![next_map(&desks)], &named).await;
 
-            let attributes = &books
-                .values()
-                .next()
-                .unwrap()
+            let id = door_component_id(
+                &bytes(listing.base),
+                &bytes(listing.quote),
+                &bytes(door_of(listing.id)),
+            );
+            let state = state_for(&books, &listing);
+            let serves_a_routed_size = state.bid.routes() || state.ask.routes();
+            assert_eq!(serves_a_routed_size, listing.credit_mode != 0 && !shares_its_pool);
+            let attributes = &books[&id.to_string()]
                 .component
                 .static_attributes;
             let number = |number: u64| Bytes::from(U256::from(number).to_be_bytes_trimmed_vec());
