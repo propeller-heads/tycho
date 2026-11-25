@@ -26,9 +26,11 @@ use crate::{
         map_store_ticks::{gross_liquidity_key, net_liquidity_key},
         store_plugin_beacons::{
             beacon_bindings, beacon_pools_keys, followed_plugin_at, implementation_known_at,
-            plugin_beacon_key, tracked_beacon_key,
+            plugin_beacon_key, tracked_beacon_key, ListStore,
         },
-        store_pool_plugins::{decode_plugin, plugin_at, plugin_pool_key, StringStore},
+        store_pool_plugins::{
+            decode_plugin, plugin_pool_key, plugin_switch, PluginSwitch, StringStore,
+        },
     },
     pb::algebra::integral::v1::{events::pool_event::Typ, Events, LiquidityChanges, TickDeltas},
     plugin::{
@@ -231,25 +233,17 @@ pub fn map_protocol_changes(
         }
 
         if let Typ::Plugin(named) = &typ {
-            let change = trace_of(tx.index).and_then(|trace| {
-                naming_change(
-                    trace,
-                    &event.pool_address,
-                    &named.plugin,
-                    event.log_ordinal,
-                    &modules,
-                    &pool_plugins_store,
-                    &plugin_beacons_store,
-                )
-            });
-            if let Some(change) = change {
-                if change.followed {
-                    if let Ok(index) = u32::try_from(tx.index) {
-                        namings.insert((index, named.plugin.clone()));
-                    }
-                }
-                apply_naming_change(builder, &event.pool_address.to_hex(), change);
-            }
+            name_plugin(
+                builder,
+                trace_of(tx.index),
+                &event.pool_address,
+                &named.plugin,
+                event.log_ordinal,
+                &modules,
+                &pool_plugins_store,
+                &plugin_beacons_store,
+                &mut namings,
+            );
         }
 
         let attributes = event_to_attributes_updates(typ);
@@ -262,29 +256,78 @@ pub fn map_protocol_changes(
         });
     }
 
+    let later_changes = followed_plugin_changes(
+        &block,
+        &modules,
+        &namings,
+        &pool_plugins_store,
+        &plugin_beacons_store,
+        &beacon_pools_store,
+    );
+    for change in later_changes {
+        let tx: Transaction = change.trace.into();
+        transaction_changes
+            .entry(tx.index)
+            .or_insert_with(|| TransactionChangesBuilder::new(&tx))
+            .add_entity_change(&EntityChanges {
+                component_id: change.pool.to_hex(),
+                attributes: change.attributes,
+            });
+    }
+
+    BlockChanges {
+        block: Some((&block).into()),
+        changes: transaction_changes
+            .drain()
+            .sorted_unstable_by_key(|(index, _)| *index)
+            .filter_map(|(_, builder)| builder.build())
+            .collect::<Vec<_>>(),
+        // Only the Dynamic Contract Indexer reads the block's storage changes.
+        storage_changes: if params.dci { get_block_storage_changes(&block) } else { Vec::new() },
+    }
+}
+
+/// A change to the attributes a pool carries for its plugin, made in `trace` by something
+/// other than the pool's own events.
+struct PluginChange<'a> {
+    trace: &'a eth::TransactionTrace,
+    pool: Vec<u8>,
+    attributes: Vec<Attribute>,
+}
+
+/// What the block changes on pools that follow a plugin named earlier: module configuration
+/// the plugin wrote, the plugin's move to another beacon, and upgrades of the beacon it is
+/// bound to. `namings` lists the transactions whose `Plugin` event already emitted the
+/// plugin's writes.
+fn followed_plugin_changes<'a>(
+    block: &'a eth::Block,
+    modules: &[&PluginModule],
+    namings: &HashSet<(u32, Vec<u8>)>,
+    pool_plugins: &impl StringStore,
+    plugin_beacons: &impl StringStore,
+    beacon_pools: &impl ListStore,
+) -> Vec<PluginChange<'a>> {
+    let mut changes = Vec::new();
+
     // Module configuration a pool's plugin wrote after it was named. The slot filter comes
     // first: a swap writes only the plugin's volatility oracle, which no module lists, so it
     // costs no store read.
     for trace in block.transactions() {
-        for (plugin, ordinal) in module_slot_writers(trace, &modules) {
+        for (plugin, ordinal) in module_slot_writers(trace, modules) {
             if namings.contains(&(trace.index, plugin.clone())) {
                 continue;
             }
-            let Some(pool) = current_pool_of(&pool_plugins_store, &plugin, ordinal) else {
+            let Some(pool) = current_pool_of(pool_plugins, &plugin, ordinal) else {
                 continue;
             };
-            if !follows_after(&plugin_beacons_store, trace, &pool, &plugin) {
+            if !follows_after(plugin_beacons, trace, &pool, &plugin) {
                 continue;
             }
-            let attributes = updated_plugin_attributes(trace, &plugin, &modules);
+            let attributes = updated_plugin_attributes(trace, &plugin, modules);
             if attributes.is_empty() {
                 continue;
             }
-            let tx: Transaction = trace.into();
-            transaction_changes
-                .entry(tx.index)
-                .or_insert_with(|| TransactionChangesBuilder::new(&tx))
-                .add_entity_change(&EntityChanges { component_id: pool.to_hex(), attributes });
+            changes.push(PluginChange { trace, pool, attributes });
         }
     }
 
@@ -293,18 +336,22 @@ pub fn map_protocol_changes(
     // transaction; when the trace does not show that read the implementation is unknown and
     // the attribute is removed, which stops quotes for the pool where no VM fallback exists.
     // It stays unknown until the pool names another plugin.
-    for binding in beacon_bindings(&block, &pool_plugins_store) {
+    for binding in beacon_bindings(block, pool_plugins) {
         if namings.contains(&(binding.tx_index, binding.plugin.clone())) {
             continue;
         }
-        let Some(trace) = trace_of(u64::from(binding.tx_index)) else {
+        let Some(trace) = block
+            .transaction_traces
+            .iter()
+            .find(|trace| trace.index == binding.tx_index)
+        else {
             continue;
         };
-        if !follows_after(&plugin_beacons_store, trace, &binding.pool, &binding.plugin) {
+        if !follows_after(plugin_beacons, trace, &binding.pool, &binding.plugin) {
             continue;
         }
         let had_implementation = implementation_known_at(
-            &plugin_beacons_store,
+            plugin_beacons,
             binding.ordinal.saturating_sub(1),
             &binding.plugin,
         );
@@ -318,14 +365,7 @@ pub fn map_protocol_changes(
             (None, true) => implementation_attribute(&[], ChangeType::Deletion),
             (None, false) => continue,
         };
-        let tx: Transaction = trace.into();
-        transaction_changes
-            .entry(tx.index)
-            .or_insert_with(|| TransactionChangesBuilder::new(&tx))
-            .add_entity_change(&EntityChanges {
-                component_id: binding.pool.to_hex(),
-                attributes: vec![attribute],
-            });
+        changes.push(PluginChange { trace, pool: binding.pool, attributes: vec![attribute] });
     }
 
     // A beacon's upgrade changes the implementation of every pool whose plugin is bound to it.
@@ -334,8 +374,8 @@ pub fn map_protocol_changes(
     // bound to it and the pool has a `plugin_impl` to update.
     for trace in block.transactions() {
         for upgrade in beacon_upgrades(trace) {
-            if plugin_beacons_store
-                .get_at(upgrade.ordinal, tracked_beacon_key(&upgrade.beacon))
+            if plugin_beacons
+                .value_at(upgrade.ordinal, &tracked_beacon_key(&upgrade.beacon))
                 .is_none()
             {
                 continue;
@@ -343,54 +383,38 @@ pub fn map_protocol_changes(
             let beacon = hex::encode(&upgrade.beacon);
             let mut pools = HashSet::new();
             for key in beacon_pools_keys(&upgrade.beacon) {
-                pools.extend(
-                    beacon_pools_store
-                        .get_at(upgrade.ordinal, key)
-                        .unwrap_or_default(),
-                );
+                pools.extend(beacon_pools.list_at(upgrade.ordinal, &key));
             }
-            let tx: Transaction = trace.into();
             for pool in pools.into_iter().sorted() {
-                let Some(plugin) = decode_plugin(pool_plugins_store.get_at(upgrade.ordinal, &pool))
+                let Some(plugin) = decode_plugin(pool_plugins.value_at(upgrade.ordinal, &pool))
                 else {
                     continue;
                 };
-                let bound_to_beacon = plugin_beacons_store
-                    .get_at(upgrade.ordinal, plugin_beacon_key(&plugin))
+                let bound_to_beacon = plugin_beacons
+                    .value_at(upgrade.ordinal, &plugin_beacon_key(&plugin))
                     .is_some_and(|current| current == beacon);
                 let Ok(pool_address) = hex::decode(&pool) else {
                     continue;
                 };
                 if !bound_to_beacon ||
-                    !follows_after(&plugin_beacons_store, trace, &pool_address, &plugin) ||
-                    !implementation_known_at(&plugin_beacons_store, upgrade.ordinal, &plugin)
+                    !follows_after(plugin_beacons, trace, &pool_address, &plugin) ||
+                    !implementation_known_at(plugin_beacons, upgrade.ordinal, &plugin)
                 {
                     continue;
                 }
-                transaction_changes
-                    .entry(tx.index)
-                    .or_insert_with(|| TransactionChangesBuilder::new(&tx))
-                    .add_entity_change(&EntityChanges {
-                        component_id: format!("0x{pool}"),
-                        attributes: vec![implementation_attribute(
-                            &upgrade.implementation,
-                            ChangeType::Update,
-                        )],
-                    });
+                changes.push(PluginChange {
+                    trace,
+                    pool: pool_address,
+                    attributes: vec![implementation_attribute(
+                        &upgrade.implementation,
+                        ChangeType::Update,
+                    )],
+                });
             }
         }
     }
 
-    BlockChanges {
-        block: Some((&block).into()),
-        changes: transaction_changes
-            .drain()
-            .sorted_unstable_by_key(|(index, _)| *index)
-            .filter_map(|(_, builder)| builder.build())
-            .collect::<Vec<_>>(),
-        // Only the Dynamic Contract Indexer reads the block's storage changes.
-        storage_changes: if params.dci { get_block_storage_changes(&block) } else { Vec::new() },
-    }
+    changes
 }
 
 /// The contracts that wrote a slot one of `modules` lists in `trace`, outside reverted calls,
@@ -422,12 +446,12 @@ fn module_slot_writers(
 
 /// The pool whose plugin was `plugin` at `ordinal`, if any.
 fn current_pool_of(
-    pool_plugins_store: &StoreGetString,
+    pool_plugins: &impl StringStore,
     plugin: &[u8],
     ordinal: u64,
 ) -> Option<Vec<u8>> {
-    let pool = pool_plugins_store.get_at(ordinal, plugin_pool_key(plugin))?;
-    if pool_plugins_store.get_at(ordinal, &pool)? != hex::encode(plugin) {
+    let pool = pool_plugins.value_at(ordinal, &plugin_pool_key(plugin))?;
+    if pool_plugins.value_at(ordinal, &pool)? != hex::encode(plugin) {
         return None;
     }
     hex::decode(pool).ok()
@@ -479,11 +503,8 @@ fn naming_change(
     plugin_beacons: &impl StringStore,
 ) -> Option<NamingChange> {
     let before = ordinal.saturating_sub(1);
-    let old_plugin = plugin_at(pool_plugins, before, pool);
-    let new_plugin = decode_plugin(Some(hex::encode(named)));
-    if old_plugin == new_plugin {
-        return None;
-    }
+    let PluginSwitch { old: old_plugin, new: new_plugin } =
+        plugin_switch(pool_plugins, ordinal, pool, named)?;
 
     let was_followed =
         old_plugin.is_some() && followed_plugin_at(plugin_beacons, before, pool) == old_plugin;
@@ -504,10 +525,13 @@ fn naming_change(
         }
     }
 
+    // Whether the pool follows the new plugin is the store's decision, read back here.
+    let followed =
+        new_plugin.is_some() && followed_plugin_at(plugin_beacons, ordinal, pool) == new_plugin;
     let created = new_plugin
         .as_ref()
+        .filter(|_| followed)
         .and_then(|plugin| named_plugin_attributes(trace, plugin, modules));
-    let followed = created.is_some();
     let paused = new_plugin.is_some() && !followed;
 
     // What the new plugin sets is an update of an attribute the pool had when the transaction
@@ -546,6 +570,34 @@ fn naming_change(
         (true, true) | (false, false) => None,
     };
     Some(NamingChange { attributes, pause, followed })
+}
+
+/// Applies the `Plugin` event at `ordinal` to the pool's changes, and records in `namings` a
+/// transaction that named a plugin it created.
+#[allow(clippy::too_many_arguments)]
+fn name_plugin(
+    builder: &mut TransactionChangesBuilder,
+    trace: Option<&eth::TransactionTrace>,
+    pool: &[u8],
+    named: &[u8],
+    ordinal: u64,
+    modules: &[&PluginModule],
+    pool_plugins: &impl StringStore,
+    plugin_beacons: &impl StringStore,
+    namings: &mut HashSet<(u32, Vec<u8>)>,
+) {
+    let Some(trace) = trace else {
+        return;
+    };
+    let Some(change) =
+        naming_change(trace, pool, named, ordinal, modules, pool_plugins, plugin_beacons)
+    else {
+        return;
+    };
+    if change.followed {
+        namings.insert((trace.index, named.to_vec()));
+    }
+    apply_naming_change(builder, &pool.to_vec().to_hex(), change);
 }
 
 fn apply_naming_change(

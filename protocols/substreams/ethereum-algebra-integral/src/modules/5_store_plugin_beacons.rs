@@ -9,14 +9,15 @@
 //! deletes only attributes that exist: see [`followed_plugin_key`].
 
 use substreams::store::{
-    Appender, StoreAppend, StoreGet, StoreGetString, StoreNew, StoreSet, StoreSetString,
+    Appender, StoreAppend, StoreGet, StoreGetArray, StoreGetString, StoreNew, StoreSet,
+    StoreSetString,
 };
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
 
 use crate::{
     abi::beacon::events::BeaconUpgraded,
     modules::store_pool_plugins::{
-        decode_plugin, plugin_at, plugin_pool_key, StoreWrite, StringStore,
+        decode_plugin, plugin_pool_key, plugin_switch, StoreWrite, StringStore,
     },
     pb::algebra::integral::v1::{events::pool_event::Typ, Events},
     plugin::{
@@ -151,8 +152,8 @@ pub fn beacon_bindings(
 /// - whether that pool has a `plugin_impl`, under [`known_implementation_key`], when a plugin is
 ///   named and each time it logs its beacon.
 ///
-/// `map_protocol_changes` emits the attributes and reads these keys to tell which exist, so
-/// both use `named_plugin_attributes` and `plugin_beacon` on the same transactions.
+/// `map_protocol_changes` emits the attributes. It does not decide again whether a pool follows
+/// the plugin it names: it reads [`followed_plugin_key`] after the `Plugin` event.
 pub fn plugin_beacon_writes(
     block: &eth::Block,
     events: &Events,
@@ -194,11 +195,11 @@ pub fn plugin_beacon_writes(
         };
         let ordinal = event.log_ordinal;
         let pool = &event.pool_address;
-        let plugin = decode_plugin(Some(hex::encode(&named.plugin)));
         // Naming the plugin the pool already names changes nothing it carries.
-        if plugin == plugin_at(pool_plugins_store, ordinal.saturating_sub(1), pool) {
+        let Some(switch) = plugin_switch(pool_plugins_store, ordinal, pool, &named.plugin) else {
             continue;
-        }
+        };
+        let plugin = switch.new;
         let attributes = plugin.as_ref().and_then(|plugin| {
             let trace = trace_of(
                 event
@@ -244,6 +245,35 @@ pub fn store_plugin_beacons(
     }
 }
 
+/// A store of string lists as the pool modules read it. Unit tests implement it over a map.
+pub trait ListStore {
+    /// The list under `key` after every append of the block up to `ordinal`.
+    fn list_at(&self, ordinal: u64, key: &str) -> Vec<String>;
+}
+
+impl ListStore for StoreGetArray<String> {
+    fn list_at(&self, ordinal: u64, key: &str) -> Vec<String> {
+        self.get_at(ordinal, key)
+            .unwrap_or_default()
+    }
+}
+
+/// What the block appends to `store_beacon_pools`: each pool (hex) whose plugin logs a beacon,
+/// under that beacon's shard key.
+pub fn beacon_pool_writes(
+    block: &eth::Block,
+    pool_plugins_store: &impl StringStore,
+) -> Vec<StoreWrite> {
+    beacon_bindings(block, pool_plugins_store)
+        .into_iter()
+        .map(|binding| StoreWrite {
+            ordinal: binding.ordinal,
+            key: beacon_pools_key(&binding.beacon, &binding.pool),
+            value: hex::encode(&binding.pool),
+        })
+        .collect()
+}
+
 /// Lists the pools (hex) whose plugin has been bound to each beacon, under the keys of
 /// [`beacon_pools_keys`]. A pool stays listed after its plugin moves to another beacon, so a
 /// reader checks the plugin's current beacon in [`store_plugin_beacons`].
@@ -253,12 +283,8 @@ pub fn store_beacon_pools(
     pool_plugins_store: StoreGetString,
     store: StoreAppend<String>,
 ) {
-    for binding in beacon_bindings(&block, &pool_plugins_store) {
-        store.append(
-            binding.ordinal,
-            beacon_pools_key(&binding.beacon, &binding.pool),
-            hex::encode(&binding.pool),
-        );
+    for write in beacon_pool_writes(&block, &pool_plugins_store) {
+        store.append(write.ordinal, write.key, write.value);
     }
 }
 

@@ -40,6 +40,29 @@ pub fn plugin_at(pool_plugins: &impl StringStore, ordinal: u64, pool: &[u8]) -> 
     decode_plugin(pool_plugins.value_at(ordinal, &hex::encode(pool)))
 }
 
+/// A `Plugin` event that changes the plugin a pool names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSwitch {
+    /// The plugin the pool named before the event, if any.
+    pub old: Option<Vec<u8>>,
+    /// The plugin it names from the event on, if any.
+    pub new: Option<Vec<u8>>,
+}
+
+/// What the `Plugin` event at `ordinal`, naming `named`, changes on `pool`, or `None` when it
+/// names the plugin the pool already names. The one place that decides whether such an event
+/// changes anything the pool carries.
+pub fn plugin_switch(
+    pool_plugins: &impl StringStore,
+    ordinal: u64,
+    pool: &[u8],
+    named: &[u8],
+) -> Option<PluginSwitch> {
+    let old = plugin_at(pool_plugins, ordinal.saturating_sub(1), pool);
+    let new = decode_plugin(Some(hex::encode(named)));
+    (old != new).then_some(PluginSwitch { old, new })
+}
+
 /// What the block's events write: each pool's current plugin address (hex), keyed by pool
 /// address (hex), and the reverse, keyed by `plugin_pool_key`.
 pub fn pool_plugin_writes(events: &Events) -> Vec<StoreWrite> {
