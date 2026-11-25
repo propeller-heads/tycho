@@ -129,6 +129,9 @@ pub(super) const ETHEREUM_BLOCK: u64 = 24_000_000;
 /// The hash a fake node names its latest block by, unless a test sets another.
 pub(super) const HEAD_HASH: B256 = B256::repeat_byte(0xb1);
 
+/// The hash the fake node's latest block names as its parent's.
+pub(super) const PARENT_HASH: B256 = B256::repeat_byte(0xb2);
+
 /// The BaseTime predeploy, whose `timestampMs()` answers the block's milliseconds.
 const BASE_TIME: Address = address!("4200000000000000000000000000000000000030");
 
@@ -967,6 +970,12 @@ pub(super) struct FakeNode {
     /// The latest block's milliseconds its header names (`milliTimestamp`, BNB Chain's), where
     /// it names them.
     pub head_ms: Option<u64>,
+    /// How many milliseconds before the latest block's its parent's header names, where it names
+    /// any: BNB Chain's 450 by default.
+    pub head_spacing_ms: Option<u64>,
+    /// The hash the latest block's parent's header answers: the one the latest block's header
+    /// names as its parent, [`PARENT_HASH`], by default.
+    pub parent_hash: B256,
     /// What BNB Chain's millisecond precompile at `0x70` answers, ms; `None` for no code.
     pub ms_precompile: Option<u64>,
     /// What the node does with a request naming its block by that hash.
@@ -1205,6 +1214,8 @@ impl FakeNode {
             desk_word_spare: U256::ZERO,
             head_hash: Some(HEAD_HASH),
             head_ms: None,
+            head_spacing_ms: Some(450),
+            parent_hash: PARENT_HASH,
             ms_precompile: None,
             hash_pins: HashPins::Taken,
             implementation_by_hash: None,
@@ -1319,20 +1330,49 @@ impl FakeNode {
             }
             Some("eth_getStorageAt") => self.answer_storage(request),
             Some("eth_getBlockByNumber") => {
-                // The block the listings were read at, named by its hash where the node names it.
-                assert_eq!(request["params"][0], self.pinned(), "the header of the pinned block");
+                // The block the listings were read at, named by its hash where the node names it,
+                // and on BNB Chain its parent, whose milliseconds the chain's block time is
+                // checked against.
                 assert_eq!(request["params"][1], false, "a header without its transactions");
-                let header = self.head_hash.map(|hash| {
+                let parent = format!("0x{:x}", self.block - 1);
+                let header = if request["params"][0] == self.pinned() {
+                    self.head_hash.map(|hash| {
+                        let mut header = serde_json::json!({
+                            "hash": hash,
+                            "parentHash": PARENT_HASH,
+                            "number": self.pinned(),
+                            "timestamp": format!("{:#x}", self.timestamp),
+                        });
+                        if let Some(ms) = self.head_ms {
+                            header["milliTimestamp"] = serde_json::json!(format!("{ms:#x}"));
+                        }
+                        header
+                    })
+                } else {
+                    assert_eq!(
+                        request["params"][0], parent,
+                        "the header of the pinned block or its parent"
+                    );
+                    assert_eq!(
+                        self.chain_id,
+                        Chain::Bsc.id(),
+                        "a parent's header is read on BNB Chain alone"
+                    );
+                    let ms = self
+                        .head_ms
+                        .zip(self.head_spacing_ms)
+                        .map(|(ms, spacing)| ms - spacing);
                     let mut header = serde_json::json!({
-                        "hash": hash,
-                        "number": self.pinned(),
-                        "timestamp": format!("{:#x}", self.timestamp),
+                        "hash": self.parent_hash,
+                        "parentHash": B256::repeat_byte(0xb0),
+                        "number": parent,
+                        "timestamp": format!("{:#x}", ms.map_or(self.timestamp, |ms| ms / 1000)),
                     });
-                    if let Some(ms) = self.head_ms {
+                    if let Some(ms) = ms {
                         header["milliTimestamp"] = serde_json::json!(format!("{ms:#x}"));
                     }
-                    header
-                });
+                    Some(header)
+                };
                 serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": header })
             }
             Some("eth_getCode") => {

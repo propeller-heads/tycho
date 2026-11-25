@@ -643,6 +643,19 @@
 //! alone only where it answers within about 300 ms of the head. A node whose latest block is more
 //! than a second and the lag allowance (4 s) behind the poll's start has stalled.
 //!
+//! Both the 450 ms and the host's clock time a side's life, so both are checked. Each poll reads
+//! the head's parent's header beside the head's, and serves nothing where the head's header names
+//! no milliseconds, or its parent, of the hash the head names, is not 450 ms before it: after a
+//! hard fork that shortens the chain's blocks, the next block would seal before a side timed by
+//! 450 ms ends. A head later than that (a validator that missed its turn) serves nothing for that
+//! head alone. A side is served until its life's end on the host's clock, so a host clock 100 ms
+//! behind the chain's, the landing allowance, serves a side past its block's seal: a poll whose
+//! host clock reads earlier than the head's milliseconds when it ends serves nothing. A host
+//! clock behind by less than the head's age at the poll's end goes unseen, so keep the host's
+//! clock synchronised. Each condition logs a warning at the first poll that finds it, and its
+//! polls count under the outcomes `off_cadence` and `clock_behind` of
+//! `efficient_prop_polls_total`.
+//!
 //! Nothing is served on BNB Chain yet. Its deployment's record has not landed
 //! ([`EfficientPropDeployment::bnb`] holds the front as its rehearsal on a fork of the chain
 //! deployed it, and an ignored test reads the front's values from a node), no listing exists

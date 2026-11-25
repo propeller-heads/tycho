@@ -63,6 +63,14 @@ pub(super) enum PollOutcome {
     Reused,
     /// No state URL answered a map for the block after the node's latest: nothing was served.
     NoStateMap,
+    /// On BNB Chain, the head's header named no milliseconds, or its parent's were not one block
+    /// time, 450 ms, before them: a side's life is timed by that block time, and nothing was
+    /// served.
+    OffCadence,
+    /// On BNB Chain, the wall clock at the poll's end read earlier than the head's milliseconds:
+    /// it runs behind the chain's, a side's life would be served past its end, and nothing was
+    /// served.
+    ClockBehind,
     /// The poll failed and published nothing.
     Failed,
 }

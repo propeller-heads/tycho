@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -13,7 +13,7 @@ use std::{
 
 use alloy::primitives::{address, Address, B256, U256};
 use reqwest::Url;
-use tracing::debug;
+use tracing::{debug, info, warn};
 use tycho_common::{models::Chain, simulation::protocol_sim::ProtocolSim as _, Bytes};
 
 use crate::{
@@ -390,9 +390,10 @@ impl EfficientPropFeedBuilder {
     /// after a builder sealed the block to land in a later one, where the maker's next update
     /// prices it (or none does and it reverts), held only by the route's minimum output; a longer
     /// one serves each book for less of its slot. On BNB Chain the same, 100 ms by default, before
-    /// the next block's milliseconds (its header's latest and 450 ms), or the block after's where
-    /// the listing carries: a route must reach 48 Club, which carries the makers' updates, before
-    /// it seals the block.
+    /// the next block's milliseconds (the head's and 450 ms), or the block after's where the
+    /// listing carries: a route must reach 48 Club, which carries the makers' updates, before it
+    /// seals the block. A host clock running behind the chain's by as much as this serves a side
+    /// past its block's seal (see the module doc of `efficient_prop`, "On BNB Chain").
     pub fn landing_allowance(mut self, landing_allowance: Duration) -> Self {
         self.landing_allowance = Some(landing_allowance);
         self
@@ -485,8 +486,9 @@ impl EfficientPropFeedBuilder {
     /// `ceil(32n / 46)` `eth_call`s for the quotes, and `ceil(32c / 46)` more for `c` carrying
     /// listings. No premium, print or hold asks are made. A credit listing served asks the front's
     /// plan beside each of its quotes, twice its calls. The second request also reads its block's
-    /// header (`eth_getBlockByNumber`), for its hash, and the requests after it name their block
-    /// by that hash where the node answers it (EIP-1898), by its number where it does not.
+    /// header (`eth_getBlockByNumber`), for its hash, and on BNB Chain its parent's, for the time
+    /// between the two, and the requests after it name their block by that hash where the node
+    /// answers it (EIP-1898), by its number where it does not.
     ///
     /// A poll that finds nothing the doors read changed since the last poll that sampled them
     /// asks no door: it is the first two requests and the POSTs alone, and publishes that poll's
@@ -745,6 +747,9 @@ impl EfficientPropFeedBuilder {
                 clock: Arc::new(unix_now_ms),
                 last_block: Arc::new(AtomicU64::new(0)),
                 highest_listing: Arc::new(AtomicU32::new(0)),
+                clock_behind: Arc::new(AtomicBool::new(false)),
+                #[cfg(test)]
+                clock_behind_warnings: Arc::default(),
             },
         })
     }
@@ -791,6 +796,12 @@ pub(super) struct EfficientPropBookSource {
     pub(super) last_block: Arc<AtomicU64>,
     /// The highest listing id a poll has found reserved, which the next poll scans past.
     pub(super) highest_listing: Arc<AtomicU32>,
+    /// Whether the last poll found the wall clock behind the chain's (see
+    /// [`Self::clock_behind`]): its warning is logged when a poll first finds it so.
+    pub(super) clock_behind: Arc<AtomicBool>,
+    /// How many times that warning was logged.
+    #[cfg(test)]
+    pub(super) clock_behind_warnings: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl HttpSource for EfficientPropBookSource {
@@ -847,10 +858,15 @@ impl EfficientPropBookSource {
                 },
             )
             .await?;
+        let mut read = read;
         let now_ms = (self.clock)();
         let now = now_ms / 1000;
         if now > read.timestamp + MAX_READ_LAG_SECS {
             return Err(lagging(now, read.block_number, read.timestamp));
+        }
+        if self.clock_behind(&read, now_ms) {
+            read.doors.clear();
+            read.outcome = PollOutcome::ClockBehind;
         }
         // A builder chain's poll that found no map for the next block serves nothing: its block
         // is the node's latest, which may lag a block served before, and is not counted as read.
@@ -877,6 +893,42 @@ impl EfficientPropBookSource {
             )));
         }
         Ok((BookSnapshot::received_now(self.assembler.books(&read, now_ms)), read.outcome))
+    }
+
+    /// Whether the wall clock, reading `now_ms` at the poll's end, runs behind the chain's: it
+    /// reads earlier than the milliseconds of the head the read timed its sides from (BNB
+    /// Chain). Each side is served until its life's end on the wall clock, so a clock that runs
+    /// behind serves it that much longer: past its block's seal where it runs 100 ms behind, the
+    /// landing allowance. A clock behind by less than the head's age at the poll's end goes
+    /// unseen. Logs a warning the first poll that finds it so, until a poll finds it caught up.
+    fn clock_behind(&self, read: &DoorsRead, now_ms: u64) -> bool {
+        let Some(head_ms) = read.head_ms else {
+            return false;
+        };
+        let behind = now_ms < head_ms;
+        let changed = self
+            .clock_behind
+            .swap(behind, Ordering::Relaxed) !=
+            behind;
+        if behind && changed {
+            warn!(
+                front = %self.reader.front(),
+                head_ms,
+                now_ms,
+                "serving no listing while the host's clock runs behind the chain's: it reads \
+                 earlier than the head's milliseconds"
+            );
+            #[cfg(test)]
+            self.clock_behind_warnings
+                .fetch_add(1, Ordering::Relaxed);
+        } else if changed {
+            info!(
+                front = %self.reader.front(),
+                "serving this front's listings again: the host's clock reads past the head's \
+                 milliseconds"
+            );
+        }
+        behind
     }
 }
 
@@ -9096,7 +9148,9 @@ mod tests {
         /// that fills them, read as on Ethereum with BNB Chain's clock.
         mod bnb {
             use super::*;
-            use crate::pamm::protocols::efficient_prop::test_support::BNB_HEAD_SUB_MS;
+            use crate::pamm::protocols::efficient_prop::test_support::{
+                BNB_HEAD_SUB_MS, PARENT_HASH,
+            };
 
             /// The fake node's latest block's milliseconds.
             const HEAD_MS: u64 = ETHEREUM_NEXT_TIME * 1000 + BNB_HEAD_SUB_MS;
@@ -9219,6 +9273,113 @@ mod tests {
                 .unwrap();
 
                 assert!(books.is_empty());
+            }
+
+            /// A side's life is timed from the head's milliseconds by the chain's 450 ms blocks, so
+            /// the read checks both against the chain: the head's header must name its
+            /// milliseconds, and its parent's, of the hash the head names, must be 450 ms before
+            /// them. A chain whose blocks come faster seals the next block before such a side
+            /// ends; one whose head came later than that (a missed turn) serves nothing for that
+            /// head alone.
+            #[rstest]
+            #[case::on_its_cadence(Some(HEAD_MS), Some(450), PARENT_HASH, true)]
+            #[case::faster_blocks(Some(HEAD_MS), Some(400), PARENT_HASH, false)]
+            #[case::a_later_head(Some(HEAD_MS), Some(900), PARENT_HASH, false)]
+            #[case::a_parent_naming_no_milliseconds(Some(HEAD_MS), None, PARENT_HASH, false)]
+            #[case::another_parent(Some(HEAD_MS), Some(450), B256::repeat_byte(0xbb), false)]
+            #[case::a_head_naming_no_milliseconds(None, Some(450), PARENT_HASH, false)]
+            #[tokio::test]
+            async fn a_bnb_head_off_the_chains_block_time_serves_nothing(
+                #[case] head_ms: Option<u64>,
+                #[case] spacing_ms: Option<u64>,
+                #[case] parent_hash: B256,
+                #[case] served: bool,
+            ) {
+                let listing = FakeListing::ethereum(1);
+                let mut node = FakeNode::bnb(vec![listing]);
+                node.head_ms = head_ms;
+                node.head_spacing_ms = spacing_ms;
+                node.parent_hash = parent_hash;
+
+                let books = bnb_fetch(node, vec![bnb_map(&[(1, false)])], NOW_MS)
+                    .await
+                    .unwrap();
+
+                assert_eq!(books.len(), usize::from(served));
+            }
+
+            /// A chain found off its block time is warned of once, at the first poll that finds
+            /// it so, and served again the first poll that finds it back on it.
+            #[tokio::test]
+            async fn a_bnb_chain_off_its_block_time_is_warned_of_once() {
+                let listing = FakeListing::ethereum(1);
+                let mut node = FakeNode::bnb(vec![listing]);
+                node.head_spacing_ms = Some(400);
+                let node = Arc::new(Mutex::new(node));
+                let server = FakeNode::spawn_shared(Arc::clone(&node)).await;
+                let state = spawn_state_server(bnb_map(&[(1, false)])).await;
+                let mut source = bnb_builder(&server.url(), vec![state.url()])
+                    .build()
+                    .unwrap()
+                    .source;
+                source.clock = Arc::new(|| NOW_MS);
+                let mut served = Vec::new();
+
+                for spacing_ms in [400, 400, 450, 400] {
+                    node.lock().unwrap().head_spacing_ms = Some(spacing_ms);
+                    served.push(
+                        source
+                            .fetch()
+                            .await
+                            .unwrap()
+                            .books
+                            .len(),
+                    );
+                }
+
+                assert_eq!(served, [0, 0, 1, 0]);
+                assert_eq!(
+                    source
+                        .reader
+                        .off_cadence_warnings
+                        .load(Ordering::Relaxed),
+                    2
+                );
+            }
+
+            /// Each side is served until its life's end on the host's clock: one running behind
+            /// the chain's serves it past its block's seal. A poll ending on a clock that reads
+            /// earlier than the head's milliseconds serves nothing, and is warned of once.
+            #[rstest]
+            #[case::behind(HEAD_MS - 1, false)]
+            #[case::at_the_head(HEAD_MS, true)]
+            #[tokio::test]
+            async fn a_bnb_poll_on_a_clock_behind_the_chain_serves_nothing(
+                #[case] now_ms: u64,
+                #[case] served: bool,
+            ) {
+                let listing = FakeListing::ethereum(1);
+                let node = FakeNode::bnb(vec![listing])
+                    .spawn()
+                    .await;
+                let state = spawn_state_server(bnb_map(&[(1, false)])).await;
+                let mut source = bnb_builder(&node.url(), vec![state.url()])
+                    .build()
+                    .unwrap()
+                    .source;
+                source.clock = Arc::new(move || now_ms);
+
+                for _ in 0..2 {
+                    let books = source.fetch().await.unwrap().books;
+                    assert_eq!(books.len(), usize::from(served));
+                }
+
+                assert_eq!(
+                    source
+                        .clock_behind_warnings
+                        .load(Ordering::Relaxed),
+                    usize::from(!served)
+                );
             }
 
             /// A credit listing named with its gas is served on BNB Chain as on Ethereum: its

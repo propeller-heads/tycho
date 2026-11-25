@@ -352,6 +352,10 @@ pub(super) struct DoorsRead {
     pub answered_at_block: bool,
     /// How the read ended, as its poll is counted where it publishes.
     pub outcome: PollOutcome,
+    /// The milliseconds of the head the sides are timed from, where the chain names them and
+    /// the read timed its sides by them (BNB Chain): a wall clock reading earlier at the poll's
+    /// end is behind the chain's.
+    pub head_ms: Option<u64>,
 }
 
 /// How long a read's books must hold: from the later of `from_ms` (Unix ms, the wall clock when
@@ -838,15 +842,21 @@ enum Also {
     Implementation,
     /// That, and the block's header, for its hash.
     ImplementationAndHead,
+    /// That, and its parent's header: on BNB Chain, for the time between the two.
+    ImplementationAndHeads,
 }
 
 impl Also {
     fn implementation(self) -> bool {
-        matches!(self, Self::Implementation | Self::ImplementationAndHead)
+        !matches!(self, Self::Nothing)
     }
 
     fn head(self) -> bool {
-        matches!(self, Self::ImplementationAndHead)
+        matches!(self, Self::ImplementationAndHead | Self::ImplementationAndHeads)
+    }
+
+    fn parent(self) -> bool {
+        matches!(self, Self::ImplementationAndHeads)
     }
 }
 
@@ -860,6 +870,9 @@ struct BatchAnswers {
     head: Option<B256>,
     /// That block's milliseconds, where its header names them ([`Header::ms`]).
     head_ms: Option<u64>,
+    /// The milliseconds between that block and its parent, where both headers were asked and
+    /// name their milliseconds, and the parent's hash is the one the block names.
+    head_spacing_ms: Option<u64>,
     /// The front's implementation at the batch's block, where it was asked.
     implementation: Option<Address>,
 }
@@ -868,6 +881,8 @@ struct BatchAnswers {
 #[derive(Debug, Deserialize)]
 struct Header {
     hash: B256,
+    #[serde(default, rename = "parentHash")]
+    parent_hash: Option<B256>,
     number: U64,
     #[serde(default)]
     timestamp: Option<U64>,
@@ -1047,6 +1062,8 @@ struct NextTaken {
     head: Option<B256>,
     /// The head's milliseconds, where its header names them (BNB Chain).
     head_ms: Option<u64>,
+    /// The milliseconds between the head and its parent, where read (BNB Chain).
+    head_spacing_ms: Option<u64>,
     implementation: Option<Address>,
 }
 
@@ -1066,9 +1083,9 @@ struct NextMoments {
 }
 
 impl NextMoments {
-    /// The moments of the next block `number` after a head of milliseconds `head_ms` (its
-    /// second's start where its header names none), the next block's first time being `time`,
-    /// on a front whose clock at the head is `head`.
+    /// The moments of the next block `number` after a head of milliseconds `head_ms` (on BNB
+    /// Chain, from its header; unused on Ethereum), the next block's first time being `time`, on
+    /// a front whose clock at the head is `head`.
     fn new(cadence: Cadence, head: &FrontClock, number: u64, time: u64, head_ms: u64) -> Self {
         let at = |number: u64, time: u64| head.at_block(number, time).read_at();
         match cadence {
@@ -1226,6 +1243,12 @@ pub(super) struct DoorsReader {
     /// How many times that warning was logged.
     #[cfg(test)]
     pub(super) step_back_warnings: Arc<std::sync::atomic::AtomicUsize>,
+    /// Whether the last next-block read on BNB Chain found the chain off its block time: its
+    /// warning is logged when a read first finds it so (see [`Self::on_cadence`]).
+    off_cadence: Arc<AtomicBool>,
+    /// How many times that warning was logged.
+    #[cfg(test)]
+    pub(super) off_cadence_warnings: Arc<std::sync::atomic::AtomicUsize>,
     /// The last next-block read whose doors were sampled, with what they were asked on: a read
     /// asked on the same is answered from it, and no door is asked (see [`SampledOn`]).
     sampled: Arc<Mutex<Option<Sampled>>>,
@@ -1277,11 +1300,19 @@ impl DoorsReader {
             stepping_back: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             step_back_warnings: Arc::default(),
+            off_cadence: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            off_cadence_warnings: Arc::default(),
             sampled: Arc::default(),
             hash_form: Arc::default(),
             #[cfg(test)]
             reuses: Arc::default(),
         }
+    }
+
+    /// The front's proxy.
+    pub(super) fn front(&self) -> Address {
+        self.front
     }
 
     /// Whether no price source is approved.
@@ -1369,6 +1400,7 @@ impl DoorsReader {
                 block_lives: false,
                 answered_at_block: true,
                 outcome: PollOutcome::Sampled,
+                head_ms: None,
             });
         }
         let block = BlockId::number(clock.number);
@@ -1397,6 +1429,7 @@ impl DoorsReader {
             block_lives: false,
             answered_at_block: true,
             outcome: PollOutcome::Sampled,
+            head_ms: None,
         })
     }
 
@@ -1441,10 +1474,10 @@ impl DoorsReader {
     /// On BNB Chain ([`Cadence::Blocks`]) a map names its block alone, the next block falls in the
     /// head's second or the one after, and the block after it likewise: each is sampled at both,
     /// a size served only where both fill it by one path, at the lesser output. A side lives
-    /// until the head's milliseconds (its header's `milliTimestamp`, or the start of its second
-    /// where the header names none) and one block, 450 ms, or two where it carries. The front's
-    /// clock mode 3 reads the block's second there while the millisecond precompile answers
-    /// nothing, and is served as mode 0 is.
+    /// until the head's milliseconds and one block, 450 ms, or two where it carries. The head's
+    /// header must name its milliseconds, and its parent's must be 450 ms before them: otherwise
+    /// the read serves nothing ([`Self::on_cadence`]). The front's clock mode 3 reads the block's
+    /// second there while the millisecond precompile answers nothing, and is served as mode 0 is.
     async fn read_next_block(
         &self,
         next_block: &NextBlockReader,
@@ -1475,6 +1508,7 @@ impl DoorsReader {
             block_lives: true,
             answered_at_block: false,
             outcome: PollOutcome::NoStateMap,
+            head_ms: None,
         };
         let Some(next) = maps.for_block_after_in(head.number, head.timestamp, next_block.cadence)
         else {
@@ -1514,15 +1548,39 @@ impl DoorsReader {
                 Some((listing, probes?))
             })
             .collect();
-        let NextTaken { served, state, listings, head: taken_at, head_ms, implementation } = self
+        let NextTaken {
+            served,
+            state,
+            listings,
+            head: taken_at,
+            head_ms,
+            head_spacing_ms,
+            implementation,
+        } = self
             .take_next_block(served, block, &next)
             .await?;
+        // On BNB Chain a side's life is the head's milliseconds and the chain's block time, which
+        // must be the chain's own: the head's header names its milliseconds, and its parent's
+        // are one block time before them. Otherwise no side is served (see [`Self::on_cadence`]).
+        let head_ms = match next_block.cadence {
+            Cadence::Slots => None,
+            Cadence::Blocks { block_ms } => {
+                match self.on_cadence(head.number, head_ms, head_spacing_ms, block_ms) {
+                    Some(head_ms) => Some(head_ms),
+                    None => {
+                        read.outcome = PollOutcome::OffCadence;
+                        return Ok(read);
+                    }
+                }
+            }
+        };
+        read.head_ms = head_ms;
         let moments = NextMoments::new(
             next_block.cadence,
             &head,
             next.number,
             next.time,
-            head_ms.unwrap_or_else(|| head.timestamp.saturating_mul(1000)),
+            head_ms.unwrap_or_default(),
         );
         let asked_on = taken_at
             .zip(implementation)
@@ -1762,16 +1820,22 @@ impl DoorsReader {
                 }),
         );
         // With them the front's implementation and the head's hash: what a read that asks no
-        // door is checked on and matched by (see [`SampledOn`]).
-        let BatchAnswers { groups, mut words, head: taken_at, head_ms, implementation } = self
-            .batch(
-                block,
-                vec![Group { calls, at: None }],
-                &slots,
-                Also::ImplementationAndHead,
-                None,
-                None,
-            )
+        // door is checked on and matched by (see [`SampledOn`]). On BNB Chain also the head's
+        // parent, whose milliseconds the chain's block time is checked against.
+        let spaced = self
+            .next_block
+            .as_ref()
+            .is_some_and(|next_block| matches!(next_block.cadence, Cadence::Blocks { .. }));
+        let also = if spaced { Also::ImplementationAndHeads } else { Also::ImplementationAndHead };
+        let BatchAnswers {
+            groups,
+            mut words,
+            head: taken_at,
+            head_ms,
+            head_spacing_ms,
+            implementation,
+        } = self
+            .batch(block, vec![Group { calls, at: None }], &slots, also, None, None)
             .await?;
         let places = groups
             .into_iter()
@@ -1889,6 +1953,7 @@ impl DoorsReader {
             listings: read,
             head: taken_at,
             head_ms,
+            head_spacing_ms,
             implementation,
         })
     }
@@ -3389,6 +3454,7 @@ impl DoorsReader {
                 words: Vec::new(),
                 head: None,
                 head_ms: None,
+                head_spacing_ms: None,
                 implementation: None,
             });
         }
@@ -3460,16 +3526,21 @@ impl DoorsReader {
         } else {
             None
         };
+        let mut header_of = |number: u64| {
+            batch
+                .add_call::<_, Option<Header>>("eth_getBlockByNumber", &(U64::from(number), false))
+                .map_err(|e| self.connection_error("block header", e))
+        };
         let head = match block.as_u64().filter(|_| also.head()) {
-            Some(number) => Some((
-                number,
-                batch
-                    .add_call::<_, Option<Header>>(
-                        "eth_getBlockByNumber",
-                        &(U64::from(number), false),
-                    )
-                    .map_err(|e| self.connection_error("block header", e))?,
-            )),
+            Some(number) => Some((number, header_of(number)?)),
+            None => None,
+        };
+        let parent = match head
+            .as_ref()
+            .and_then(|(number, _)| number.checked_sub(1))
+            .filter(|_| also.parent())
+        {
+            Some(number) => Some((number, header_of(number)?)),
             None => None,
         };
         batch
@@ -3513,6 +3584,24 @@ impl DoorsReader {
             .as_ref()
             .map(|header| header.hash);
         let head_ms = header.as_ref().and_then(Header::ms);
+        // The parent's header, where the node answered that very block and it is the head's own.
+        let parent = match parent {
+            Some((number, parent)) => parent
+                .await
+                .ok()
+                .flatten()
+                .filter(|parent| {
+                    parent.number == U64::from(number) &&
+                        header
+                            .as_ref()
+                            .and_then(|header| header.parent_hash) ==
+                            Some(parent.hash)
+                }),
+            None => None,
+        };
+        let head_spacing_ms = head_ms
+            .zip(parent.as_ref().and_then(Header::ms))
+            .and_then(|(head_ms, parent_ms)| head_ms.checked_sub(parent_ms));
         let mut answers = Vec::with_capacity(sent.len());
         for (at, checks, waiters) in sent {
             let mut group = Vec::new();
@@ -3558,7 +3647,14 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("listing record", e)),
             );
         }
-        Ok(BatchAnswers { groups: answers, words: read, head, head_ms, implementation })
+        Ok(BatchAnswers {
+            groups: answers,
+            words: read,
+            head,
+            head_ms,
+            head_spacing_ms,
+            implementation,
+        })
     }
 
     /// The calls that open each `aggregate3` run under a block override, from which the front's
@@ -3598,6 +3694,56 @@ impl DoorsReader {
             )));
         }
         Ok(())
+    }
+
+    /// The head's milliseconds on a chain of `block_ms` blocks, where the head's header names
+    /// them and its parent's are `block_ms` before them; else `None`, and a warning the first
+    /// read that finds it so, until a read finds the chain on its cadence again. A chain whose
+    /// blocks come faster than `block_ms` (a fork that shortens them) seals the next block before
+    /// a side timed by `block_ms` ends, and a route priced from it then lands in a later block
+    /// than it quoted; a head later than its parent's time and `block_ms` (a validator that
+    /// missed its turn) serves nothing for that head alone.
+    fn on_cadence(
+        &self,
+        number: u64,
+        head_ms: Option<u64>,
+        spacing_ms: Option<u64>,
+        block_ms: u64,
+    ) -> Option<u64> {
+        let on = head_ms.filter(|_| spacing_ms == Some(block_ms));
+        let changed = self
+            .off_cadence
+            .swap(on.is_none(), Ordering::Relaxed) !=
+            on.is_none();
+        match on {
+            Some(_) if changed => info!(
+                front = %self.front,
+                head = number,
+                "serving this front's listings again: the chain's blocks are {block_ms} ms apart"
+            ),
+            Some(_) => {}
+            None if changed => {
+                warn!(
+                    front = %self.front,
+                    head = number,
+                    ?head_ms,
+                    ?spacing_ms,
+                    "serving no listing until the chain's blocks are {block_ms} ms apart: the \
+                     head's header names no milliseconds, its parent is not read, or the time \
+                     between them is another, and a side's life is timed by {block_ms} ms"
+                );
+                #[cfg(test)]
+                self.off_cadence_warnings
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            None => debug!(
+                front = %self.front,
+                head = number,
+                ?spacing_ms,
+                "serving no listing: the chain is off its {block_ms} ms blocks"
+            ),
+        }
+        on
     }
 
     /// Whether the implementation `found` is to have its code read: the caller pinned code hashes,
