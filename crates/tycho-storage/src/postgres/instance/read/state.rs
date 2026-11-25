@@ -665,6 +665,53 @@ mod tests {
         assert!(deleted.is_empty(), "{deleted:?}");
     }
 
+    /// Inserts a version of the balance of token 0x01 in `component` of "vm:curve".
+    async fn balance_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        component: i64,
+        balance: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_component_balance_version(
+            conn,
+            s.curve,
+            component,
+            b("0x01"),
+            b(balance),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, c, "0x20", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = s
+            .gateway
+            .get_component_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&["a"]),
+                Some(&at(recent(2))),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.keys().collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
+    }
+
     async fn states(
         gateway: &PostgresGatewayNew,
         conn: &mut AsyncPgConnection,
