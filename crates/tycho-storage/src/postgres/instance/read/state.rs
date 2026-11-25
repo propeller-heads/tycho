@@ -135,14 +135,10 @@ async fn states_of(
     let read = resolve_version(&active, at, conn).await?;
     let instance = active.id;
 
-    let rows = match read {
-        ReadAt::Current(_) => current_state_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_state_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
+    let mut rows = current_state_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
+    }
     let attributes = unique_by_key(
         "protocol_state",
         instance,
@@ -339,14 +335,10 @@ async fn component_balances_at(
     read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<ComponentId, HashMap<Address, (Balance, f64)>>, StorageError> {
-    let rows = match read {
-        ReadAt::Current(_) => current_balance_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_balance_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
+    let mut rows = current_balance_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
+    }
     unique_by_key(
         "component_balance",
         instance,
