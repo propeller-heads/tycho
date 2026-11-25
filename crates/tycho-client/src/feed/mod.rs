@@ -1507,6 +1507,9 @@ mod tests {
         }
     }
 
+    /// `max_missed_blocks` for the reinit tests, larger than any gap they build.
+    const REINIT_MAX_MISSED_BLOCKS: u64 = 10;
+
     /// Builds a `SynchronizerStream` pinned to a given state, for exercising state-transition
     /// logic without a live synchronizer. The receiver is never polled by these tests.
     fn stream_in_state(name: &str, state: SynchronizerState) -> SynchronizerStream {
@@ -1698,9 +1701,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(325, 325, 324))),
         ];
 
-        let mut new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         // A revert to block 325 must still find its fork point (324) in the retained history.
         let revert = BlockHeader {
@@ -1735,9 +1741,12 @@ mod tests {
             SynchronizerState::Advanced(full_header(400, 400, 399)),
         )];
 
-        let new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1785,9 +1794,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1814,9 +1826,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let mut new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         // The stream proceeds normally: the last partial seals 326 with the correct hash, then
         // the first partial of 327 arrives on top of it.
@@ -2357,6 +2372,70 @@ mod tests {
         }
 
         shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream that starts more than `max_missed_blocks` behind the start block is stale from
+    /// the first feed, so its replay does not hold the first round.
+    #[test(tokio::test)]
+    async fn test_synchronizer_starting_behind_tip() {
+        let block_time = Duration::from_millis(300);
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync = BlockSynchronizer::new(block_time, Duration::from_millis(10), 1)
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                v2_sync.clone(),
+            )
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                v3_sync.clone(),
+            );
+        v2_sync
+            .send_header(header_message(5))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(header_message(2))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+
+        let first = receive_message(&mut rx).await;
+        assert!(matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))));
+        let feed = v2_round(&v2_sync, &mut rx, 6, block_time / 2).await;
+        assert_ready_at(&feed, "uniswap-v2", 6, None);
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// When the block history is rebuilt, a stream more than `max_missed_blocks` behind the new
+    /// tip becomes stale, and one within that distance becomes delayed.
+    #[test]
+    fn test_reinit_with_streams_behind_tip() {
+        let old_history = BlockHistory::new(
+            vec![full_header(323, 323, 322), full_header(324, 324, 323)],
+            BLOCK_HISTORY_SIZE,
+        )
+        .unwrap();
+        let mut streams = vec![
+            stream_in_state("aerodrome", SynchronizerState::Advanced(full_header(400, 400, 399))),
+            stream_in_state("uniswap_v2", SynchronizerState::Delayed(full_header(395, 395, 394))),
+            stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(324, 324, 323))),
+        ];
+
+        BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
+
+        assert!(matches!(streams[0].state, SynchronizerState::Ready(_)));
+        assert!(matches!(streams[1].state, SynchronizerState::Delayed(_)));
+        assert!(matches!(streams[2].state, SynchronizerState::Stale(_)));
     }
 
     /// With every stream stale there is no round to keep up with, so each round still waits
