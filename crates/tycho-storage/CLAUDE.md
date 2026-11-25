@@ -48,7 +48,7 @@ postgres/
     │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at a version within the history retention and not before the base block of the instance
     │   ├── state.rs    — protocol state and component balances of the active instance at a version within the history retention and not before the base block of the instance
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
-    │   └── version.rs  — which rows answer a version (current, or current and history) and the one-row-per-key rule
+    │   └── version.rs  — `resolve_version`: which rows answer a version (`ReadAt`: current, or current and history); the one-row-per-key rule (`unique_by_key`, `unique_by_key_nested`)
     ├── write/          — its write methods, one file per domain
     │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
