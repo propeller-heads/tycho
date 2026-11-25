@@ -71,7 +71,7 @@ impl ReadAt {
     /// row, and `ts` for `Past`.
     pub(super) fn current_until(self) -> Option<NaiveDateTime> {
         match self {
-            ReadAt::Current(_) => None,
+            ReadAt::Current => None,
             ReadAt::Past { ts, .. } => Some(ts),
         }
     }
