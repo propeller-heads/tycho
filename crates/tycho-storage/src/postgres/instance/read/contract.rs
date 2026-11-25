@@ -285,6 +285,8 @@ async fn load_account_balances(
     };
     Ok(unique_by_key(
         "account_balance",
+        instance,
+        read,
         rows.into_iter()
             .map(|(address, token, balance)| ((address, token), balance)),
     )?
@@ -322,7 +324,7 @@ async fn codes_at(
             rows
         }
     };
-    unique_by_key("contract_code", rows)
+    unique_by_key("contract_code", instance, read, rows)
 }
 
 /// Loads the current code rows of the accounts `ids` of `instance`.
@@ -402,6 +404,8 @@ async fn slots_at(
     };
     Ok(unique_by_key(
         "contract_storage",
+        instance,
+        read,
         rows.into_iter()
             .map(|(account_id, slot, value)| ((account_id, slot), value)),
     )?
