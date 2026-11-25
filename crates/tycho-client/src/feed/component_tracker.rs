@@ -217,7 +217,7 @@ where
             .get_protocol_components_paginated(paginated_params)
             .await?;
         self.components = self
-            .not_paused(response)
+            .not_paused_components(response)
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .filter(|(id, _)| !self.filter.is_blocklisted(id))
@@ -317,7 +317,7 @@ where
             .await?
             .into_data();
         let components = self
-            .not_paused(response)
+            .not_paused_components(response)
             .into_iter()
             .map(|comp| (comp.id.clone(), comp))
             .collect::<HashMap<_, _>>();
@@ -445,7 +445,7 @@ where
 
     /// Records the components `response` reported as paused, and returns the components the
     /// tracker does not consider paused.
-    fn not_paused(&mut self, response: ComponentsWithPauses) -> Vec<ProtocolComponent> {
+    fn not_paused_components(&mut self, response: ComponentsWithPauses) -> Vec<ProtocolComponent> {
         self.record_paused(response.paused_component_ids().clone());
         response
             .into_components()
@@ -548,7 +548,7 @@ where
             .get_protocol_components_paginated(params)
             .await?;
         Ok(self
-            .not_paused(response)
+            .not_paused_components(response)
             .into_iter()
             .map(|component| component.id)
             .filter(|id| !self.filter.is_blocklisted(id))
