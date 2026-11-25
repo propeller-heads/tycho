@@ -73,7 +73,7 @@ The package emits, on the pool's component:
 | `fee` | the pool's stored fee, used when the plugin does not override it | `Fee` events; zero at creation |
 | `plugin` | 20-byte address of the pool's plugin: absent until the pool's first `Plugin` event, zero after one that names no plugin | `Plugin` events |
 | `plugin_config` | the pool's plugin flags, one byte | `PluginConfig` events; zero at creation |
-| `paused` | present, with value `1`, while the pool names a plugin whose configuration is not known | see [Wiring the pool modules](#wiring-the-pool-modules) |
+| `paused` | `1` while the pool names a plugin whose configuration is not known. On a DCI chain, `2` once the trace of the pool's `beforeSwap` entrypoint fails: the indexer writes it and nothing clears it, not even a later trace that succeeds | `1`: see [Wiring the pool modules](#wiring-the-pool-modules). `2`: the indexer's DCI, not this package |
 | `plugin_impl` | 20-byte address of the implementation the plugin runs | the plugin's read of `beacon.implementation()` in its creation transaction, then the beacon's `Upgraded` events |
 | `<module>/<field>` | the field's bytes: big-endian, exactly as wide as the field | the plugin's storage writes, decoded through the module slot table |
 

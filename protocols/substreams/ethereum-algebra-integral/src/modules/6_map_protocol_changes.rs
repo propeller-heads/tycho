@@ -190,8 +190,9 @@ pub fn map_protocol_changes(
     // for VM simulation. It is registered on `PluginConfig` rather than on `Plugin` because the
     // plugin's oracle is only initialized once the pool is, and a trace before that reverts.
     // `setPlugin` resets the config to zero, so a new plugin always gets a `PluginConfig` of its
-    // own. A trace that fails, as for a plugin that refuses swaps until a start time, is retried
-    // by the indexer on the pool's later changes, up to its retry cap.
+    // own. When the trace fails, as for a plugin that refuses swaps until a start time, the
+    // indexer writes `paused = 2` on the pool and nothing clears it, not even a later trace that
+    // succeeds.
     let mut registered_entrypoints = HashSet::new();
     // The transactions in which a pool names a plugin they created, whose writes are emitted
     // as creations.
