@@ -146,6 +146,7 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{Duration, NaiveDate, NaiveDateTime};
+    use rstest::rstest;
     use tycho_common::{
         models::Chain,
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
@@ -356,19 +357,30 @@ mod tests {
 
     #[test]
     fn test_unique_by_key_collects_rows() {
-        let map = unique_by_key("protocol_state", [(1, "a"), (2, "b"), (3, "c")]).unwrap();
+        let map = unique_by_key(
+            "protocol_state",
+            InstanceId(7),
+            ReadAt::Current(None),
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        .unwrap();
 
         assert_eq!(map, HashMap::from([(1, "a"), (2, "b"), (3, "c")]));
     }
 
-    #[test]
-    fn test_unique_by_key_fails_on_a_repeated_key() {
-        let result = unique_by_key("protocol_state", [(1, "a"), (1, "b")]);
+    #[rstest]
+    #[case::latest(ReadAt::Current(None), "the latest version")]
+    #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
+    #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
+    fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
+        let result = unique_by_key("protocol_state", InstanceId(7), read, [(42, "a"), (42, "b")]);
 
         let Err(StorageError::Unexpected(msg)) = result else {
             panic!("expected Unexpected, got {result:?}");
         };
-        assert!(msg.contains("protocol_state"), "{msg}");
-        assert!(msg.contains('1'), "{msg}");
+        assert_eq!(
+            msg,
+            format!("protocol_state of instance 7 at {version}: two rows of 42 are valid")
+        );
     }
 }
