@@ -45,8 +45,8 @@ postgres/
     ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
     ├── read/           — its read methods, one file per domain
     │   ├── component.rs — protocol components and their TVL from the active instance of each protocol
-    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at a version within the history retention
-    │   ├── state.rs    — protocol state and component balances of the active instance at a version within the history retention
+    │   ├── contract.rs — contracts, slots and account balances of a protocol's active instance at a version within the history retention and not before the base block of the instance
+    │   ├── state.rs    — protocol state and component balances of the active instance at a version within the history retention and not before the base block of the instance
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — which rows answer a version (current, or current and history) and the one-row-per-key rule
     ├── write/          — its write methods, one file per domain
