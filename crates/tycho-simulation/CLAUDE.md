@@ -195,7 +195,9 @@ for any protocol indexed by Tycho.
     sampled poll's (`SampledOn` in `reader.rs`): the head's hash and number, the next block's
     number and second, the whole state override sent, each listing taken with its `doorView`
     bytes and its record's and desk's words, the implementation. Whatever a door's calls are
-    newly derived from joins that key; a node that names no block hash is asked every door
+    newly derived from joins that key. The doors' requests name their block by the head's hash
+    (EIP-1898), and a read is kept only where they did and the node answered all of it
+    (`Answered`); a node that names no block hash, or refuses one, is asked every door by number
   - the quote layout, front, factory, desk contract code hash and allow-list are builder
     arguments (`EfficientPropDeployment`); the one place that writes them down is
     `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings hold it

@@ -27,7 +27,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -160,6 +160,10 @@ const MAX_CREDIT_MODE: u8 = 3;
 /// The input the most-fillable read asks for, in whole tokens: 10^12, past any listing's depth,
 /// so the answer is the listing's own prefix.
 const PROBE_WHOLE_TOKENS_EXP: u32 = 12;
+
+/// How many polls in a row may find the node answering by number what it refused by the head's
+/// hash before the reader stops naming a block by its hash, for its life (see [`SampledOn`]).
+const HASH_PIN_TRIES: u32 = 3;
 
 // The front's listing view, the factory's door address and the listing door's IPropAMM surface,
 // as the PropAMM front, `PropAMMListingDoors` and `PropAMMListingDoor` declare them.
@@ -804,9 +808,6 @@ struct Group {
     at: Option<At>,
 }
 
-/// A batch's answers: per group, its calls' results, or `None` where the node refused the group's
-/// block override or ran its calls at another moment on the front's clock; and the storage
-/// words asked for, in order, each failing where the node did not answer it.
 /// What a batch reads of its block beside its calls and storage words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Also {
@@ -814,8 +815,7 @@ enum Also {
     /// The front's implementation slot, checked against the allow-list before any answer is
     /// looked at.
     Implementation,
-    /// The block's header, for its hash.
-    Head,
+    /// That, and the block's header, for its hash.
     ImplementationAndHead,
 }
 
@@ -825,10 +825,13 @@ impl Also {
     }
 
     fn head(self) -> bool {
-        matches!(self, Self::Head | Self::ImplementationAndHead)
+        matches!(self, Self::ImplementationAndHead)
     }
 }
 
+/// A batch's answers: per group, its calls' results, or `None` where the node refused the group's
+/// block override or ran its calls at another moment on the front's clock; and the storage
+/// words asked for, in order, each failing where the node did not answer it.
 struct BatchAnswers {
     groups: Vec<Option<Vec<Call3Result>>>,
     words: Vec<Result<U256, FeedError>>,
@@ -876,9 +879,14 @@ struct TakenListing {
 ///   its desk word and its probes, the front's implementation, the tip cap floor and the sizes
 ///   sampled per side.
 ///
-/// The head's hash is read with the listings' words and again with each batch that asks a door,
-/// all pinned to the head's number: a read is kept only where every one of them names the same
-/// block, so no answer kept came from another block of that number.
+/// The head's hash is read with the listings' words, in the one batch pinned to the head's
+/// number. Every batch that asks a door is then pinned to that hash and to no number (EIP-1898,
+/// the block required canonical): the node runs it on that very block or refuses it, so an
+/// answer kept is that block's by the node's own check, not by a header read beside it. The
+/// words read beside that one header are members themselves and only decide which calls are
+/// made. A read is kept only where its doors were so pinned and every word and block asked for
+/// them was answered ([`Answered`]). A node that names no block, or refuses a block named by its
+/// hash, is asked by number, and nothing of it is kept.
 #[derive(Debug, Clone, PartialEq)]
 struct SampledOn {
     head: B256,
@@ -890,6 +898,24 @@ struct SampledOn {
     rungs: u32,
     state: serde_json::Value,
     listings: Vec<TakenListing>,
+}
+
+/// Whether a read of the doors was answered everything it asked: one answered in part serves
+/// what it has for its own poll (a shorter life, a listing left out), and is not kept for the
+/// polls after it, which ask again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answered {
+    Whole,
+    InPart,
+}
+
+impl Answered {
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Whole, Self::Whole) => Self::Whole,
+            _ => Self::InPart,
+        }
+    }
 }
 
 /// A next-block read's doors as sampled, and what they were asked on.
@@ -1017,6 +1043,9 @@ pub(super) struct DoorsReader {
     /// The last next-block read whose doors were sampled, with what they were asked on: a read
     /// asked on the same is answered from it, and no door is asked (see [`SampledOn`]).
     sampled: Arc<Mutex<Option<Sampled>>>,
+    /// How many polls in a row found the node answering by number what it refused by the head's
+    /// hash: at [`HASH_PIN_TRIES`] the reader names no block by its hash any more.
+    hash_refusals: Arc<AtomicU32>,
     /// How many reads were answered from it.
     #[cfg(test)]
     pub(super) reuses: Arc<std::sync::atomic::AtomicUsize>,
@@ -1062,6 +1091,7 @@ impl DoorsReader {
             #[cfg(test)]
             step_back_warnings: Arc::default(),
             sampled: Arc::default(),
+            hash_refusals: Arc::default(),
             #[cfg(test)]
             reuses: Arc::default(),
         }
@@ -1214,8 +1244,10 @@ impl DoorsReader {
     /// same state override and the same listings as that one ([`SampledOn`]) is answered its
     /// doors' reads, and stops after its second request. Its listings, their words at the head,
     /// the state maps, the front's implementation and the lag are read and checked on every poll
-    /// all the same. A node that does not name the head by its hash is asked every door on every
-    /// poll.
+    /// all the same. A read that does ask its doors names their block by the head's hash, and is
+    /// kept for the polls after it only where the node answered all of it so. A node that does
+    /// not name the head by its hash, or refuses a block named so, is asked every door on every
+    /// poll, by number.
     async fn read_next_block(
         &self,
         next_block: &NextBlockReader,
@@ -1319,26 +1351,68 @@ impl DoorsReader {
                 doors
             }
             None => {
-                let (open, opened_at) = self
-                    .open_doors(&served, block, Some((&clock, &state)))
-                    .await?;
-                let (doors, sampled_at) = self
-                    .sample_next_block(&open, &clock, block, &state)
-                    .await?;
-                // Kept only where every batch that asked a door names the block the listings'
-                // words were read at.
-                if let Some(asked_on) = asked_on.filter(|asked_on| {
-                    std::iter::once(&opened_at)
-                        .chain(&sampled_at)
-                        .all(|at| *at == Some(asked_on.head))
-                }) {
-                    *self
-                        .sampled
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(Sampled { on: asked_on, doors: doors.clone() });
+                // The doors' block by its hash, where the node named it: the node then answers
+                // from that very block or refuses.
+                let by_hash = asked_on
+                    .as_ref()
+                    .filter(|_| {
+                        self.hash_refusals
+                            .load(Ordering::Relaxed) <
+                            HASH_PIN_TRIES
+                    })
+                    .map(|asked_on| BlockId::hash_canonical(asked_on.head));
+                let pinned = match by_hash {
+                    Some(by_hash) => self
+                        .ask_doors(&served, by_hash, &clock, &state)
+                        .await
+                        .inspect_err(|error| {
+                            debug!(
+                                front = %self.front,
+                                head = head.number,
+                                %error,
+                                "the doors' read by the head's hash failed: asking by number"
+                            );
+                        })
+                        .ok(),
+                    None => None,
+                };
+                match pinned {
+                    Some((doors, answered)) => {
+                        self.hash_refusals
+                            .store(0, Ordering::Relaxed);
+                        if let Some(asked_on) = asked_on.filter(|_| answered == Answered::Whole) {
+                            *self
+                                .sampled
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(Sampled { on: asked_on, doors: doors.clone() });
+                        }
+                        doors
+                    }
+                    // By number, as before any read was kept: the node may answer from another
+                    // block of that number, so nothing of it is kept.
+                    None => {
+                        let (doors, _) = self
+                            .ask_doors(&served, block, &clock, &state)
+                            .await?;
+                        // The node answers by number what it did not by hash: a refusal of the
+                        // hash form, unless the block was replaced under the read.
+                        if by_hash.is_some() &&
+                            self.hash_refusals
+                                .fetch_add(1, Ordering::Relaxed) +
+                                1 ==
+                                HASH_PIN_TRIES
+                        {
+                            warn!(
+                                front = %self.front,
+                                polls = HASH_PIN_TRIES,
+                                "the node answers the doors by block number and not by block \
+                                 hash: asking every door on every poll from here on"
+                            );
+                        }
+                        doors
+                    }
                 }
-                doors
             }
         };
         read.until_ms = read
@@ -1347,6 +1421,26 @@ impl DoorsReader {
             .flat_map(|door| [door.bid_until_ms, door.ask_until_ms])
             .fold(read.until_ms, u64::max);
         Ok(read)
+    }
+
+    /// The third and fourth requests of a next-block read, and a fifth with a credit listing: the
+    /// doors of `served` opened and sampled at `block` under the next block's `clock` and
+    /// `state` (see [`Self::open_doors`], [`Self::sample_next_block`]), and whether the node
+    /// answered all that was asked for them.
+    async fn ask_doors(
+        &self,
+        served: &[(Listing, (U256, U256))],
+        block: BlockId,
+        clock: &FrontClock,
+        state: &serde_json::Value,
+    ) -> Result<(Vec<DoorRead>, Answered), FeedError> {
+        let (open, opened) = self
+            .open_doors(served, block, Some((clock, state)))
+            .await?;
+        let (doors, sampled) = self
+            .sample_next_block(&open, clock, block, state)
+            .await?;
+        Ok((doors, opened.and(sampled)))
     }
 
     /// The listings of `listings` the next block's state serves, and the state override their
@@ -1780,14 +1874,15 @@ impl DoorsReader {
     /// state override of the listings it serves (see [`Self::take_next_block`]): the doors are
     /// asked under both, and a listing reading a print from a guarded source is left out, since
     /// that chain's sources are price contracts and no lane holds a print there. A node that
-    /// refuses or ignores the next block's overrides fails the read. Beside the doors there, the
-    /// batch's block as the node names it (see [`SampledOn`]).
+    /// refuses or ignores the next block's overrides fails the read. Beside the doors, whether
+    /// the node answered every word asked for them: an unread session, sources or live-source
+    /// word leaves its listing out of this read alone ([`Answered`]).
     async fn open_doors(
         &self,
         listings: &[(Listing, (U256, U256))],
         block: BlockId,
         next: Option<(&FrontClock, &serde_json::Value)>,
-    ) -> Result<(Vec<OpenDoor>, Option<B256>), FeedError> {
+    ) -> Result<(Vec<OpenDoor>, Answered), FeedError> {
         let mut calls = Vec::with_capacity(listings.len() * DOOR_CALLS);
         let mut slots = Vec::with_capacity(listings.len() * RECORD_WORDS);
         for (Listing { id, token0, token1, door, .. }, (probe0, probe1)) in listings {
@@ -1817,8 +1912,7 @@ impl DoorsReader {
         // The implementation again, at the block every door is read at: the first request's read
         // at the latest block may have come from another backend than its listings.
         let at = next.map(|(clock, _)| clock.read_at());
-        let also = if next.is_some() { Also::ImplementationAndHead } else { Also::Implementation };
-        let BatchAnswers { groups, words, head, .. } = self
+        let BatchAnswers { groups, words, .. } = self
             .batch(
                 block,
                 vec![Group { calls, at }],
@@ -1826,7 +1920,7 @@ impl DoorsReader {
                     .iter()
                     .map(|slot| (self.front, *slot))
                     .collect::<Vec<_>>(),
-                also,
+                Also::Implementation,
                 next.map(|(clock, _)| clock),
                 next.map(|(_, state)| state),
             )
@@ -1838,6 +1932,7 @@ impl DoorsReader {
         let answers = answers.unwrap_or_default();
         let mut words = words.into_iter();
         let mut open = Vec::new();
+        let mut answered = Answered::Whole;
         for ((listing, (probe0, probe1)), answers) in listings
             .iter()
             .zip(answers.chunks(DOOR_CALLS))
@@ -1854,6 +1949,9 @@ impl DoorsReader {
                 return Err(FeedError::Parsing("multicall answered too few calls".into()));
             };
             let (settings, controls) = (settings?, controls?);
+            if session.is_err() || sources.is_err() || price.is_err() {
+                answered = Answered::InPart;
+            }
             let prints = matches!(field(settings, 228, 2), FENCE_PRINT | FENCE_SESSION);
             // A listing reading a print fills at its source's answer, and a source's code can tell
             // a fill from a quote: the listing is served only where each source it is bound to is
@@ -1994,7 +2092,7 @@ impl DoorsReader {
                 pool: listing.pool,
             });
         }
-        Ok((open, head))
+        Ok((open, answered))
     }
 
     /// The third request: every open door's quotes at each side's sampled sizes, at the read's
@@ -2513,7 +2611,8 @@ impl DoorsReader {
     /// its samples are then the least of the two. Elsewhere it lives through the next block alone,
     /// with its samples there. The samples are the door's own answers at every block of the side's
     /// life, so they hold through it, whatever its word, depth, premium, print or source. Beside
-    /// the reads, the block of each batch sent, as the node names it (see [`SampledOn`]).
+    /// the reads, whether the node answered every block asked: one refusing the block after
+    /// leaves the sides that carry their next block's life alone, in this read ([`Answered`]).
     ///
     /// On a credit listing each size is also asked of the front's `quoteFrom` with `PLAN_ONLY`,
     /// beside the door's quote in the same call: an answer tagged `ROUTED` shows the size fills
@@ -2530,11 +2629,10 @@ impl DoorsReader {
         clock: &FrontClock,
         block: BlockId,
         state: &serde_json::Value,
-    ) -> Result<(Vec<DoorRead>, Vec<Option<B256>>), FeedError> {
+    ) -> Result<(Vec<DoorRead>, Answered), FeedError> {
         if doors.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Answered::Whole));
         }
-        let mut asked_at = Vec::new();
         let target = clock.read_at();
         let after_time = target.time.saturating_add(SLOT_SECS);
         let after = At {
@@ -2547,7 +2645,7 @@ impl DoorsReader {
         // A credit listing's route fills sizes its door's most-fillable read does not report:
         // each side that may route is first asked how far it reaches.
         let reaches = self
-            .reaches(doors, target, clock, block, state, &mut asked_at)
+            .reaches(doors, target, clock, block, state)
             .await?;
         // Per side: its sizes, and its door's quote at each, then on a credit listing the
         // front's plan at each.
@@ -2582,19 +2680,21 @@ impl DoorsReader {
             .flat_map(|(_, (_, calls))| calls.iter().cloned())
             .collect();
         let mut groups = vec![Group { calls: all, at: Some(target) }];
-        if !carried.is_empty() {
+        let carries = !carried.is_empty();
+        if carries {
             groups.push(Group { calls: carried, at: Some(after) });
         }
-        let BatchAnswers { groups: answers, head, .. } = self
-            .batch(block, groups, &[], Also::Head, Some(clock), Some(state))
+        let BatchAnswers { groups: answers, .. } = self
+            .batch(block, groups, &[], Also::Nothing, Some(clock), Some(state))
             .await?;
-        asked_at.push(head);
         let mut answers = answers.into_iter();
         let at_target = answers
             .next()
             .flatten()
             .ok_or_else(refused_next_block)?;
         let at_after = answers.next().flatten();
+        let answered =
+            if carries && at_after.is_none() { Answered::InPart } else { Answered::Whole };
         let (mut offset, mut after_offset) = (0, 0);
         let mut taken = Vec::with_capacity(sides.len());
         for (s, (sizes, calls)) in sides.iter().enumerate() {
@@ -2694,7 +2794,7 @@ impl DoorsReader {
                 pool_lacks,
             });
         }
-        Ok((reads, asked_at))
+        Ok((reads, answered))
     }
 
     /// The front's plan for each of `sizes` on one side of a credit listing's `door`, the bid
@@ -2789,8 +2889,7 @@ impl DoorsReader {
     /// `PropAMMFront`), so it reports none of a route that fills less than that depth, and the
     /// route fills an input whole or not at all. Each such side is therefore asked its door's
     /// `quote` at [`reach_probes`], one more batch in a poll that serves such a listing, and its
-    /// reach is the largest answered. The batch's block, as the node names it, is added to
-    /// `asked_at`.
+    /// reach is the largest answered.
     async fn reaches(
         &self,
         doors: &[OpenDoor],
@@ -2798,7 +2897,6 @@ impl DoorsReader {
         clock: &FrontClock,
         block: BlockId,
         state: &serde_json::Value,
-        asked_at: &mut Vec<Option<B256>>,
     ) -> Result<Vec<[Reach; 2]>, FeedError> {
         let mut reaches = vec![[Reach::default(); 2]; doors.len()];
         let asked: Vec<_> = doors
@@ -2819,17 +2917,16 @@ impl DoorsReader {
             .iter()
             .flat_map(|(d, bid, probes)| quote_calls(&doors[*d], *bid, probes))
             .collect();
-        let BatchAnswers { groups, head, .. } = self
+        let BatchAnswers { groups, .. } = self
             .batch(
                 block,
                 vec![Group { calls, at: Some(target) }],
                 &[],
-                Also::Head,
+                Also::Nothing,
                 Some(clock),
                 Some(state),
             )
             .await?;
-        asked_at.push(head);
         let answers = groups
             .into_iter()
             .next()
@@ -3125,14 +3222,14 @@ pub(super) fn listing_carries(settings: U256) -> bool {
     field(settings, 230, 2) != 0 && field(settings, 228, 2) != FENCE_NONE
 }
 
-/// The failure of a read whose node refused or ignored the next block's overrides: on a chain whose
-/// builders land makers' updates, nothing can be quoted without them.
 /// How old the node's answer is at a poll that started at `from_ms` on the wall clock, its latest
 /// block's time `timestamp`: seconds, negative where the block's time is ahead of the clock.
 fn answer_age(from_ms: u64, timestamp: u64) -> f64 {
     Duration::from_millis(from_ms).as_secs_f64() - Duration::from_secs(timestamp).as_secs_f64()
 }
 
+/// The failure of a read whose node refused or ignored the next block's overrides: on a chain whose
+/// builders land makers' updates, nothing can be quoted without them.
 fn refused_next_block() -> FeedError {
     FeedError::Connection(
         "Efficient PropAMM node refused or ignored the next block's overrides, without which no \

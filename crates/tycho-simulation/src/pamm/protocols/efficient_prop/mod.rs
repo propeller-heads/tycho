@@ -338,10 +338,18 @@
 //! publishes that poll's samples again and stops after its second request. The head's hash
 //! stands for all the state the doors read that the poll does not: the pools' custody and pause,
 //! a credit listing's lender, the tokens' balances, the price contracts' code. It is read with
-//! the listings' words and again with every batch that asks a door, and a poll's samples are kept
-//! only where all of them name one block. A node that does not answer the header is asked every
-//! door on every poll. The key is one for the whole poll, not one a listing: a second maker's
-//! update samples every listing again.
+//! the listings' words, and every request that asks a door then names its block by that hash and
+//! by no number (EIP-1898, the block required canonical): the node answers each from that very
+//! block or refuses it. A poll's samples are kept only where its doors were asked so and the node
+//! answered every word and every block asked for them: a read answered in part (a listing left
+//! out for an unread word, a side without its second block) is published by its own poll and
+//! asked again by the next. A node that does not answer the header, or refuses a block named by
+//! its hash, is asked every door on every poll, by number; after three polls in a row that find
+//! the hash form refused and the number form answered, the feed stops naming blocks by hash. The
+//! key is one for the whole poll, not one a listing: a second maker's update samples every
+//! listing again. A poll that asks no door still stamps its snapshot as received at that poll:
+//! the stamp is the poll's time, not the time its samples were asked, and how long each book
+//! holds is in its validity attributes, which follow the target block.
 //!
 //! A route through a door therefore reverts whole where it lands in a block without the update.
 //! [`EfficientPropFeedBuilder::with_fallback_router`] (off by default) publishes the same books as

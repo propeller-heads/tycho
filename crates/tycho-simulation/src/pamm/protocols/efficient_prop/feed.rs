@@ -390,8 +390,9 @@ impl EfficientPropFeedBuilder {
     /// is asked at one block, the next, and again at the block after for the listings that carry:
     /// `ceil(32n / 46)` `eth_call`s for the quotes, and `ceil(32c / 46)` more for `c` carrying
     /// listings. No premium, print or hold asks are made. A credit listing served asks the front's
-    /// plan beside each of its quotes, twice its calls. Each request after the first also reads
-    /// its block's header (`eth_getBlockByNumber`), for its hash.
+    /// plan beside each of its quotes, twice its calls. The second request also reads its block's
+    /// header (`eth_getBlockByNumber`), for its hash, and the requests after it name their block
+    /// by that hash where the node answers it (EIP-1898), by its number where it does not.
     ///
     /// A poll that finds nothing the doors read changed since the last poll that sampled them
     /// asks no door: it is the first two requests and the POSTs alone, and publishes that poll's
@@ -4387,9 +4388,9 @@ mod tests {
                     approved_desks, credit_gas, desk_cell, ethereum_deployment, left_out_of_a_poll,
                     named_gas, price_contract, quote_word, read_state_map,
                     spawn_shared_state_server, spawn_state_server, state_map, state_map_of,
-                    with_account, FakeAging, RecordedEthereumPoll, RecordedListing, RecordedSide,
-                    ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME, ETHEREUM_SLOT, FENCE_NONE, IMPLEMENTATION,
-                    QUOTE_BASE, VECTOR_WORDS,
+                    with_account, FakeAging, HashPins, RecordedEthereumPoll, RecordedListing,
+                    RecordedSide, ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME, ETHEREUM_SLOT, FENCE_NONE,
+                    IMPLEMENTATION, QUOTE_BASE, VECTOR_WORDS,
                 },
             },
             protocol::models::ProtocolComponent,
@@ -7471,6 +7472,13 @@ mod tests {
                 node.door_quotes.load(Ordering::SeqCst)
             }
 
+            /// How many of those it was asked at a block named by its number, not its hash.
+            fn door_quotes_by_number(&self) -> usize {
+                let node = self.node.lock().unwrap();
+                node.door_quotes_by_number
+                    .load(Ordering::SeqCst)
+            }
+
             /// How many of the source's polls asked no door.
             fn reuses(&self) -> usize {
                 self.source
@@ -7555,7 +7563,8 @@ mod tests {
         /// A poll that finds nothing changed asks no door: the head, the next block, the state
         /// answer and every listing's words are as the last sampled poll found them, so it stops
         /// after its second request to the node and publishes that poll's books, the credit
-        /// listing's among them. Before, every poll asked every door again.
+        /// listing's among them. Before, every poll asked every door again. The poll that did ask
+        /// them named their block by the head's hash, so the node answered each from that block.
         #[tokio::test]
         async fn a_poll_that_finds_nothing_changed_asks_no_door() {
             let (listings, map) = reuse_fixture();
@@ -7568,6 +7577,11 @@ mod tests {
             assert_eq!(sampled.len(), 3);
             assert!(asked > 0);
             assert_eq!(polled.door_quotes(), asked, "an unchanged poll asked a door");
+            assert_eq!(
+                polled.door_quotes_by_number(),
+                0,
+                "a door asked at a block named by number"
+            );
             assert_eq!(polled._servers.0.request_count(), requests + 2);
             assert_eq!(polled.reuses(), 1);
             assert_eq!(kept, sampled);
@@ -7586,8 +7600,104 @@ mod tests {
             let again = published(&polled.source).await;
 
             assert_eq!(polled.door_quotes(), 2 * asked);
+            assert_eq!(polled.door_quotes_by_number(), 2 * asked);
             assert_eq!(polled.reuses(), 0);
             assert_eq!(again, sampled);
+        }
+
+        /// A node that refuses a block named by its hash is asked every door on every poll, by
+        /// number, as every poll was before any read was kept, and publishes what a node taking
+        /// the hash does. The reader asks by hash first on three polls, one request more each,
+        /// finds the number form answered every time, and names no block by its hash again.
+        #[tokio::test]
+        async fn a_node_refusing_a_block_named_by_its_hash_is_asked_every_door_by_number() {
+            let (listings, map) = reuse_fixture();
+            let taking = Polled::new(FakeNode::ethereum(listings.clone()), map.clone()).await;
+            let node = FakeNode { hash_pins: HashPins::Refused, ..FakeNode::ethereum(listings) };
+            let polled = Polled::new(node, map).await;
+
+            let sampled = published(&polled.source).await;
+            let asked = polled.door_quotes();
+            let mut requests = vec![polled._servers.0.request_count()];
+            for poll in 2..=5 {
+                assert_eq!(published(&polled.source).await, sampled);
+                assert_eq!(polled.door_quotes(), poll * asked);
+                requests.push(polled._servers.0.request_count());
+            }
+
+            assert!(asked > 0);
+            assert_eq!(polled.door_quotes_by_number(), 5 * asked);
+            assert_eq!(polled.reuses(), 0);
+            assert_eq!(sampled, published(&taking.source).await);
+            let a_poll: Vec<_> = requests
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .collect();
+            assert_eq!(a_poll, [6, 6, 5, 5]);
+        }
+
+        /// What a node leaves unanswered of one read of the doors, which fails no poll.
+        #[derive(Debug, Clone, Copy)]
+        enum Unanswered {
+            /// The sources word of the listing reading a print, which is then left out.
+            SourcesWord,
+            /// The block after the next, which the carrying listing's sides then do not live to.
+            BlockAfter,
+        }
+
+        impl Unanswered {
+            fn on(self, node: &mut FakeNode, unanswered: bool) {
+                match self {
+                    Self::SourcesWord => {
+                        node.listings[1].unread_words =
+                            if unanswered { vec![10] } else { Vec::new() };
+                    }
+                    Self::BlockAfter => {
+                        node.refused_blocks =
+                            if unanswered { vec![ETHEREUM_BLOCK + 2] } else { Vec::new() };
+                    }
+                }
+            }
+        }
+
+        /// A read of the doors the node answered in part is published by its own poll and not
+        /// kept: the next poll asks every door again, where before it would have published the
+        /// listing left out, or the shorter life, for as long as the head stood. Once the node
+        /// answers all of it, that read is kept and the poll after it asks no door.
+        #[rstest]
+        #[case::a_listings_sources_word(Unanswered::SourcesWord)]
+        #[case::the_block_after_the_next(Unanswered::BlockAfter)]
+        #[tokio::test]
+        async fn a_read_answered_in_part_is_not_kept(#[case] unanswered: Unanswered) {
+            let (mut listings, map) = reuse_fixture();
+            // The first listing and its word carry: its sides live to the block after the next
+            // where the door fills there.
+            listings[0].carry = true;
+            let map = written(
+                map,
+                "desk-1",
+                desk_cell(1),
+                U256::from(QUOTE_BASE),
+                quote_word(ETHEREUM_BLOCK + 1, 0, true, true),
+            );
+            let mut node = FakeNode::ethereum(listings);
+            unanswered.on(&mut node, true);
+            let polled = Polled::new(node, map).await;
+
+            let in_part = published(&polled.source).await;
+            let asked = polled.door_quotes();
+            assert_eq!(published(&polled.source).await, in_part);
+            assert!(polled.door_quotes() > asked, "the poll after a read in part asked no door");
+            assert_eq!(polled.reuses(), 0);
+
+            unanswered.on(&mut polled.node.lock().unwrap(), false);
+            let whole = published(&polled.source).await;
+            let asked = polled.door_quotes();
+            assert_ne!(whole, in_part);
+            assert_eq!(polled.reuses(), 0);
+            assert_eq!(published(&polled.source).await, whole);
+            assert_eq!(polled.door_quotes(), asked, "the poll after a whole read asked a door");
+            assert_eq!(polled.reuses(), 1);
         }
 
         /// One thing the doors' answers are read from, which a test moves alone on the fake node
@@ -7603,6 +7713,8 @@ mod tests {
             PriceContractInTheAnswer,
             DeskWord,
             DoorView,
+            /// A byte of the front's `doorView` answer that no field of the listing is read from.
+            DoorViewByteNoFieldReads,
             SettingsWord,
             LiveSourceWord,
             Implementation,
@@ -7646,6 +7758,7 @@ mod tests {
                     Self::DeskWord => node.desk_word_spare = U256::from(1u8) << 192usize,
                     // A tip cap of 5 gwei.
                     Self::DoorView => node.listings[0].tip_cap = 5 | (9 << 12),
+                    Self::DoorViewByteNoFieldReads => node.listings[0].conf_mul = 7,
                     Self::SettingsWord => node.listings[0].carry = true,
                     Self::LiveSourceWord => node.listings[1].guarded = true,
                     Self::Implementation => {
@@ -7681,6 +7794,7 @@ mod tests {
         #[case::its_price_contracts_bytes_in_the_state_answer(Moved::PriceContractInTheAnswer)]
         #[case::its_desk_word(Moved::DeskWord)]
         #[case::its_door_view(Moved::DoorView)]
+        #[case::a_byte_of_its_door_view_no_field_reads(Moved::DoorViewByteNoFieldReads)]
         #[case::its_settings_word(Moved::SettingsWord)]
         #[case::its_live_source_word(Moved::LiveSourceWord)]
         #[case::the_fronts_implementation(Moved::Implementation)]
@@ -7867,6 +7981,9 @@ mod tests {
         /// maker sending none, a new block, a block replaced at the same height, a desk stopped
         /// or revived. Every change of a door's answer comes as on chain, with other bytes in the
         /// state answer or under another head hash; some steps ask no door and some ask them all.
+        /// The fake's doors read the block they are asked at: under another head hash each quotes
+        /// other amounts, whatever else that block holds, so a block replaced by one that
+        /// differs in nothing a poll reads but its hash publishes other books too.
         #[rstest]
         #[case::seed_1(1)]
         #[case::seed_2(2)]
@@ -7886,6 +8003,7 @@ mod tests {
             let mut chance = Seeded(seed);
             let mut hashes = 0u8;
             let mut sampled = 0;
+            let mut served_under_another_head = 0;
 
             for step in 0..40 {
                 let mut node = polled.node.lock().unwrap().clone();
@@ -7932,9 +8050,13 @@ mod tests {
                         "a new block"
                     }
                     10 => {
-                        // Another block at the same height: its pool holds, or lacks, the base.
-                        let listing = &mut node.listings[chance.below(4)];
-                        listing.pool_lacks.0 = !listing.pool_lacks.0;
+                        // Another block at the same height: on one in two its pool holds, or
+                        // lacks, the base, and on the other nothing a poll reads differs but
+                        // its hash.
+                        if chance.below(2) == 0 {
+                            let listing = &mut node.listings[chance.below(4)];
+                            listing.pool_lacks.0 = !listing.pool_lacks.0;
+                        }
                         new_head = true;
                         "a block replaced"
                     }
@@ -7962,18 +8084,22 @@ mod tests {
                 let kept = published(&polled.source).await;
 
                 sampled += usize::from(polled.reuses() == reuses);
+                served_under_another_head += usize::from(new_head && !kept.is_empty());
                 let fresh = published(&polled.fresh()).await;
                 assert_eq!(kept, fresh, "seed {seed}, step {step}, after {did}");
             }
             assert!(polled.reuses() > 0, "seed {seed}: no poll asked no door");
             assert!(sampled > 1, "seed {seed}: no poll after the first asked its doors");
+            assert!(served_under_another_head > 0, "seed {seed}: no book under another head");
+            assert_eq!(polled.door_quotes_by_number(), 0, "seed {seed}: a door asked by number");
         }
 
         /// The door quotes a poll of each recorded Ethereum read asks, on a node naming its
         /// blocks by hash: the first poll asks every door as before, and a second one finding the
         /// same asks none and publishes the same books. The recordings hold no header, so the
-        /// hash is the test's own; on a node naming no block (the recordings as they are) both
-        /// polls ask every door, as every poll did before.
+        /// hash is the test's own, and the node answers a request naming its block by that hash
+        /// as the recorded request naming it by its number; on a node naming no block (the
+        /// recordings as they are) both polls ask every door, as every poll did before.
         #[rstest]
         #[case::no_update(include_str!("testdata/ethereum_fork_26482068.json"), 0)]
         #[case::served(include_str!("testdata/ethereum_fork_26479480_served.json"), 43)]
@@ -7991,7 +8117,8 @@ mod tests {
             let node = RecordedNode::new(&poll.rpc);
             let node =
                 if names_blocks { node.naming_blocks(B256::repeat_byte(0xb1)) } else { node };
-            let (unrecorded, door_quotes) = (node.unrecorded(), node.door_quotes());
+            let (unrecorded, door_quotes, by_hash) =
+                (node.unrecorded(), node.door_quotes(), node.by_hash());
             let node = node.spawn().await;
             let mut servers = Vec::new();
             for map in &poll.maps {
@@ -8001,6 +8128,9 @@ mod tests {
 
             let first = published(&source).await;
             let asked = door_quotes.load(Ordering::SeqCst);
+            // Where the node names its blocks, the doors' requests named theirs by its hash,
+            // which the node answers as the recorded requests of that number.
+            assert_eq!(by_hash.load(Ordering::SeqCst) > 0, names_blocks);
             // The recording holds one scan of the listings, the first poll's from no listing
             // known: the second poll scans as that one did.
             source

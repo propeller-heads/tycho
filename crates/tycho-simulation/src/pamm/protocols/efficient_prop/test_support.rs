@@ -566,6 +566,8 @@ pub(super) struct FakeListing {
     /// The listing's taker tip cap as the front stores it, `doorView`'s `tipCap`: a 12-bit
     /// mantissa and a 4-bit exponent of 10, wei per gas; 0 off.
     pub tip_cap: u16,
+    /// `doorView`'s `confMul`, a byte of the answer no reader's field is read from.
+    pub conf_mul: u8,
     /// How its levels age with the word.
     pub aging: FakeAging,
     /// Whether it is a tied listing, whose levels age with its price's print rather than the word.
@@ -667,6 +669,7 @@ impl FakeListing {
             credit_mode: 0,
             // 1 x 10^8 wei, 0.1 gwei.
             tip_cap: 1 | (8 << 12),
+            conf_mul: 0,
             aging: FakeAging::default(),
             tied: false,
             fence: FENCE_WORD,
@@ -752,6 +755,7 @@ impl FakeListing {
             ],
             creditMode: self.credit_mode,
             tipCap: self.tip_cap,
+            confMul: self.conf_mul,
             desk: self.desk,
             wordIndex: self.word_index,
             ..DoorView::default()
@@ -965,9 +969,13 @@ pub(super) struct FakeNode {
     pub desk_word_spare: U256,
     /// The hash the node names its latest block by; `None` for a node that names no block.
     pub head_hash: Option<B256>,
+    /// What the node does with a request naming its block by that hash.
+    pub hash_pins: HashPins,
     /// How many quotes the node has answered at a door, its most-fillable reads among them, or
     /// at the front for a door's plan.
     pub door_quotes: Arc<AtomicUsize>,
+    /// How many of those it was asked at a block named by its number, not its hash.
+    pub door_quotes_by_number: Arc<AtomicUsize>,
 }
 
 /// The fake front's clock, as `PropAMMClock.read` reads it, and the chain's blocks: in its mode 2
@@ -1135,6 +1143,15 @@ impl FakeClock {
     }
 }
 
+/// What a node does with a request naming its block by hash (EIP-1898).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HashPins {
+    /// Answers it at the block of that hash, its latest.
+    Taken,
+    /// Answers it with an error, as a node that reads a block by number or tag alone.
+    Refused,
+}
+
 /// What a node does with an `eth_call`'s block override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Overrides {
@@ -1176,7 +1193,9 @@ impl FakeNode {
             desk_heads: BTreeMap::new(),
             desk_word_spare: U256::ZERO,
             head_hash: Some(HEAD_HASH),
+            hash_pins: HashPins::Taken,
             door_quotes: Arc::default(),
+            door_quotes_by_number: Arc::default(),
         }
     }
 
@@ -1235,11 +1254,33 @@ impl FakeNode {
     }
 
     fn answer_one(&self, request: &serde_json::Value) -> serde_json::Value {
+        let by_hash = request["params"]
+            .as_array()
+            .is_some_and(|params| {
+                params
+                    .iter()
+                    .any(|param| param.get("blockHash").is_some())
+            });
+        if by_hash && self.hash_pins == HashPins::Refused {
+            return serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "error": { "code": -32602, "message": "invalid argument: a block tag or number" },
+            });
+        }
         match request["method"].as_str() {
             Some("eth_call") => {
                 self.eth_calls
                     .fetch_add(1, Ordering::SeqCst);
-                self.answer_call(request)
+                let before = self.door_quotes.load(Ordering::SeqCst);
+                let answer = self.answer_call(request);
+                if !by_hash {
+                    self.door_quotes_by_number.fetch_add(
+                        self.door_quotes.load(Ordering::SeqCst) - before,
+                        Ordering::SeqCst,
+                    );
+                }
+                answer
             }
             Some("eth_getStorageAt") => self.answer_storage(request),
             Some("eth_getBlockByNumber") => {
@@ -1293,12 +1334,12 @@ impl FakeNode {
             let implementation = if params[2] == "latest" {
                 self.implementation
             } else {
-                assert_eq!(params[2], self.pinned(), "the slot is read at the listings' block");
+                assert!(self.names(&params[2]), "the slot is read at the listings' block");
                 self.pinned_implementation
             };
             implementation.into_word()
         } else {
-            assert_eq!(params[2], self.pinned(), "a listing's record is read at its block");
+            assert!(self.names(&params[2]), "a listing's record is read at its block");
             if self.listings.iter().any(|listing| {
                 listing
                     .unread_words
@@ -1346,9 +1387,27 @@ impl FakeNode {
         serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": word })
     }
 
-    /// The block the listings were read at, as a request names it.
+    /// The block the listings were read at, as a request names it by its number.
     fn pinned(&self) -> String {
         format!("0x{:x}", self.block)
+    }
+
+    /// Whether `block` names the block the listings were read at: by its number, or by the hash
+    /// the node names it by, required canonical (EIP-1898).
+    fn names(&self, block: &serde_json::Value) -> bool {
+        *block == self.pinned().as_str() ||
+            self.head_hash.is_some_and(|hash| {
+                *block == serde_json::json!({ "blockHash": hash, "requireCanonical": true })
+            })
+    }
+
+    /// What the node's latest block takes off every quote and plan of a door, in atoms: its
+    /// hash's last byte against [`HEAD_HASH`]'s. A door's answer is read from the block it is
+    /// asked at, so another block of the same number answers other amounts, whatever else it
+    /// holds.
+    fn head_dust(&self) -> U256 {
+        self.head_hash
+            .map_or(U256::ZERO, |hash| U256::from(hash[31] ^ HEAD_HASH[31]))
     }
 
     /// One `aggregate3`: the listings' read at the latest block, and every other pinned to the
@@ -1360,7 +1419,7 @@ impl FakeNode {
     fn answer_call(&self, request: &serde_json::Value) -> serde_json::Value {
         let block = &request["params"][1];
         let latest = *block == "latest";
-        assert!(latest || *block == self.pinned().as_str(), "read at block {block}");
+        assert!(latest || self.names(block), "read at block {block}");
         let mut at = (self.block, self.timestamp, self.clock.base_time_sub_ms);
         let overridden = request["params"]
             .get(2)
@@ -1615,6 +1674,7 @@ impl FakeNode {
                 return Some(
                     listing
                         .plan_at(call.tokenIn, call.tokenOut, call.amountIn, ms)
+                        .saturating_sub(self.head_dust())
                         .abi_encode(),
                 );
             }
@@ -1681,6 +1741,7 @@ impl FakeNode {
                         call.amountIn,
                         self.clock.ms_with(at.0, at.1, at.2),
                     )?
+                    .saturating_sub(self.head_dust())
                     .abi_encode()
             }
             quoteFillableCall::SELECTOR => {
@@ -1991,12 +2052,17 @@ fn call_key(method: &Value, params: &Value) -> String {
 /// The recordings were made before a poll read its pinned block's header, so none holds an
 /// `eth_getBlockByNumber`: the node answers it as a node that names no block, with no header,
 /// unless a test gives it a hash to name every block by (see [`Self::naming_blocks`]). Either way
-/// that read is not counted as unrecorded.
+/// that read is not counted as unrecorded. A request naming its block by that hash (EIP-1898) is
+/// answered as the recorded request naming it by the number the header was last asked of: the
+/// same request of the same block, as a node holding one block of that number answers it.
 pub(super) struct RecordedNode {
     answers: HashMap<String, Exchange>,
     unrecorded: Arc<AtomicUsize>,
     head_hash: Option<B256>,
+    /// The number the header was last asked of, which the hash then names.
+    named: Mutex<Option<Value>>,
     door_quotes: Arc<AtomicUsize>,
+    by_hash: Arc<AtomicUsize>,
 }
 
 impl RecordedNode {
@@ -2010,7 +2076,41 @@ impl RecordedNode {
                 )
             })
             .collect();
-        Self { answers, unrecorded: Arc::default(), head_hash: None, door_quotes: Arc::default() }
+        Self {
+            answers,
+            unrecorded: Arc::default(),
+            head_hash: None,
+            named: Mutex::default(),
+            door_quotes: Arc::default(),
+            by_hash: Arc::default(),
+        }
+    }
+
+    /// How many requests named their block by the node's hash.
+    pub(super) fn by_hash(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.by_hash)
+    }
+
+    /// `params` with a block named by the node's hash named by its number instead.
+    fn by_number(&self, params: &Value) -> Value {
+        let (Some(hash), Some(number), Some(params)) =
+            (self.head_hash, self.named.lock().unwrap().clone(), params.as_array())
+        else {
+            return params.clone();
+        };
+        let named = serde_json::json!({ "blockHash": hash, "requireCanonical": true });
+        params
+            .iter()
+            .map(|param| {
+                if *param == named {
+                    self.by_hash
+                        .fetch_add(1, Ordering::SeqCst);
+                    number.clone()
+                } else {
+                    param.clone()
+                }
+            })
+            .collect()
     }
 
     /// The node naming every block it is asked the header of by `hash`: a hash made by the test,
@@ -2072,11 +2172,12 @@ impl RecordedNode {
                 let header = self.head_hash.map(
                     |hash| serde_json::json!({ "hash": hash, "number": request["params"][0] }),
                 );
+                *self.named.lock().unwrap() = Some(request["params"][0].clone());
                 return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": header });
             }
             match self
                 .answers
-                .get(&call_key(&request["method"], &request["params"]))
+                .get(&call_key(&request["method"], &self.by_number(&request["params"])))
             {
                 Some(Exchange { error: Some(error), .. }) => {
                     serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": error })
