@@ -117,7 +117,7 @@ where
             .entry(self.pool_manager)
             .or_default();
         // Keep the protocol and LP fees (bits 184..232); replace the tick and the price below them.
-        let fees = self.stored_word(storage, state_slot)? >> 184 << 184;
+        let fees = self.stored_value(storage, state_slot)? >> 184 << 184;
         let tick = U256::from(pool.tick.cast_unsigned() & 0xFF_FFFF) << 160;
         storage.insert(state_slot, fees | tick | pool.sqrt_price);
         storage.insert(state_slot + LIQUIDITY_OFFSET, U256::from(pool.liquidity));
@@ -146,8 +146,8 @@ where
         } else {
             (state_slot + FEE_GROWTH_GLOBAL1_OFFSET, state_slot + FEE_GROWTH_GLOBAL0_OFFSET)
         };
-        let input_growth = self.stored_word(storage, input_growth_slot)?;
-        let other_growth = self.stored_word(storage, other_growth_slot)?;
+        let input_growth = self.stored_value(storage, input_growth_slot)?;
+        let other_growth = self.stored_value(storage, other_growth_slot)?;
         for (tick, growth_at_cross) in &accrual.crossed_ticks {
             let input_global = input_growth.wrapping_add(*growth_at_cross);
             let globals = if zero_for_one {
@@ -164,28 +164,28 @@ where
                 (TICK_FEE_GROWTH_OUTSIDE1_OFFSET, globals[1]),
             ] {
                 let slot = tick_slot + offset;
-                let outside = self.stored_word(storage, slot)?;
+                let outside = self.stored_value(storage, slot)?;
                 storage.insert(slot, global.wrapping_sub(outside));
             }
         }
         storage.insert(input_growth_slot, input_growth.wrapping_add(accrual.fee_growth));
         if !accrual.protocol_fee.is_zero() {
             let slot = mapping_slot(input, PROTOCOL_FEES_ACCRUED_SLOT);
-            let accrued = self.stored_word(storage, slot)?;
+            let accrued = self.stored_value(storage, slot)?;
             storage.insert(slot, accrued.wrapping_add(accrual.protocol_fee));
         }
         Ok(())
     }
 
-    /// A PoolManager storage word: from `storage` when the call already overrides it, otherwise
-    /// from the engine's database.
-    fn stored_word(
+    /// The value of a PoolManager storage slot: from `storage` when the call already overrides it,
+    /// otherwise from the engine's database.
+    fn stored_value(
         &self,
         storage: &HashMap<U256, U256>,
         slot: U256,
     ) -> Result<U256, SimulationError> {
-        if let Some(word) = storage.get(&slot) {
-            return Ok(*word);
+        if let Some(value) = storage.get(&slot) {
+            return Ok(*value);
         }
         self.contract
             .engine
