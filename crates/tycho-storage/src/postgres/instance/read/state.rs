@@ -360,8 +360,8 @@ async fn component_balances_at(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
-    use diesel::{prelude::*, sql_types::Timestamp};
+    use chrono::{NaiveDate, NaiveDateTime};
+    use diesel::prelude::*;
     use diesel_async::{
         scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
     };
@@ -382,6 +382,7 @@ mod tests {
         instance::{
             gateway::PostgresGatewayNew,
             orm::NewProtocolStateHistory,
+            read::testing::{before_retention, recent},
             schema::tycho::{
                 extraction_state, protocol_instance, protocol_state, protocol_state_history,
             },
@@ -422,13 +423,6 @@ mod tests {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .expect("a valid date")
-    }
-
-    /// Midnight UTC of the day `d` days after the day 10 days ago: inside the default retention.
-    fn recent(d: i64) -> NaiveDateTime {
-        (Utc::now().date_naive() - Duration::days(10 - d))
-            .and_hms_opt(0, 0, 0)
-            .expect("a valid time")
     }
 
     fn at(ts: NaiveDateTime) -> Version {
@@ -601,7 +595,7 @@ mod tests {
         db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
         let result =
-            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(5) - Duration::days(40))))
+            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(before_retention(recent(5)))))
                 .await;
 
         let Err(StorageError::Unsupported(msg)) = result else {
@@ -884,7 +878,7 @@ mod tests {
             Some("vm:curve"),
             None,
             None,
-            Some(at(recent(5) - Duration::days(40))),
+            Some(at(before_retention(recent(5)))),
         )
         .await;
 
@@ -1294,14 +1288,8 @@ mod tests {
                 )
                 .await;
                 db_fixtures::set_instance_head(&mut writer, s.curve, recent(3)).await;
-                diesel::sql_query(
-                    "SELECT partman.create_partition_time('tycho.protocol_state_history', \
-                     ARRAY[$1])",
-                )
-                .bind::<Timestamp, _>(recent(4))
-                .execute(&mut writer)
-                .await
-                .unwrap();
+                db_fixtures::create_history_day(&mut writer, "protocol_state_history", recent(4))
+                    .await;
 
                 let rows = snapshot_transaction(&mut reader)
                     .run(|reader| {
