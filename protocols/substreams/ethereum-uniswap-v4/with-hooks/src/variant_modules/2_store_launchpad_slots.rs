@@ -1,70 +1,60 @@
-//! Maps each hook storage slot of a Montra or Ascend pool back to the pool and word it holds.
+//! Maps each hook storage slot of a launchpad pool back to the pool and word it holds.
 //!
 //! A storage change names only its contract and slot, and a slot is a keccak of the pool id, which
-//! cannot be inverted; this store is how `map_montra_enriched_block_changes` tells which pool a
-//! hook write belongs to. It holds six keys per pool (`PoolConfig` words 0 to 2, `PoolKey` words 0
-//! to 2), each keyed by the pool's hook and the slot, set when the pool is created and never
-//! changed. An Ascend pool has five (`PoolData` words 2 and 3, `Bid` words 0 to 2): the hook's
-//! membership in `ascend_hooks`, the module's only parameter, picks the layout; the creation module
-//! creates pools of no other hooks than the Montra and Ascend ones.
-
-use std::collections::BTreeSet;
+//! cannot be inverted; this store is how `map_launchpad_enriched_block_changes` tells which pool a
+//! hook write belongs to. Each key names the pool's hook and the slot, and is set when the pool is
+//! created and never changed. A Montra pool has six (`PoolConfig` words 0 to 2, `PoolKey` words 0
+//! to 2), an Ascend pool five (`PoolData` words 2 and 3, `Bid` words 0 to 2). The layout comes
+//! from the same parameters the creation and terminal modules read, so the three cannot disagree.
 
 use substreams::store::{StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsString};
 use tycho_substreams::prelude::*;
 
-use crate::{
-    address_list::Address,
-    ascend,
-    montra::{
-        params::parse_ascend_hooks,
-        pool_config::{pool_slots, slot_store_key, HookWord, SlotOwner},
-    },
+use crate::launchpad::{
+    params::Params,
+    slots::{pool_slots, slot_store_key, SlotOwner},
 };
 
 #[substreams::handlers::store]
-pub fn store_montra_slots(
+pub fn store_launchpad_slots(
     params: String,
     pools_created: BlockEntityChanges,
     store: StoreSetIfNotExistsString,
 ) {
-    let ascend_hooks = parse_ascend_hooks(&params)
-        .unwrap_or_else(|e| panic!("store_montra_slots cannot read its params: {e}"));
-    for (key, value) in slot_entries(&ascend_hooks, &pools_created) {
+    let params = Params::parse(&params)
+        .unwrap_or_else(|e| panic!("store_launchpad_slots cannot read its params: {e}"));
+    for (key, value) in slot_entries(&params, &pools_created) {
         store.set_if_not_exists(0, key, &value);
     }
 }
 
-/// The store entries of every pool `pools_created` creates; a pool of a hook in `ascend_hooks`
-/// has the Ascend layout, any other the Montra one.
-fn slot_entries(
-    ascend_hooks: &BTreeSet<Address>,
-    pools_created: &BlockEntityChanges,
-) -> Vec<(String, String)> {
+/// The store entries of every pool `pools_created` creates, in the layout of the pool's hook.
+///
+/// Panics when a component lacks the 32-byte `pool_id` or 20-byte `hooks` that
+/// `map_launchpad_pools_created` writes, or when its hook is in neither hook list: that module
+/// creates pools of listed hooks only, so either means the manifest wired another module in.
+fn slot_entries(params: &Params, pools_created: &BlockEntityChanges) -> Vec<(String, String)> {
     pools_created
         .changes
         .iter()
         .flat_map(|change| &change.component_changes)
         .flat_map(|component| {
-            // `map_montra_pools_created` writes the 32-byte pool id and the 20-byte hook of every
-            // component it creates.
             let pool_id = component
                 .get_attribute_value("pool_id")
                 .and_then(|value| <[u8; 32]>::try_from(value).ok())
-                .expect("map_montra_pools_created emits a 32-byte pool_id");
+                .expect("map_launchpad_pools_created emits a 32-byte pool_id");
             let hook = component
                 .get_attribute_value("hooks")
-                .and_then(|value| Address::try_from(value).ok())
-                .expect("map_montra_pools_created emits a 20-byte hooks");
-            let slots = if ascend_hooks.contains(&hook) {
-                ascend::pool_slots(&pool_id)
-                    .into_iter()
-                    .map(|(word, slot)| (HookWord::Ascend(word), slot))
-                    .collect()
-            } else {
-                pool_slots(&pool_id)
-            };
-            slots
+                .and_then(|value| <[u8; 20]>::try_from(value).ok())
+                .expect("map_launchpad_pools_created emits a 20-byte hooks");
+            let layout = params.layout(&hook).unwrap_or_else(|| {
+                panic!(
+                    "pool {} has hook 0x{}, which no hook list names",
+                    component.id,
+                    hex::encode(hook)
+                )
+            });
+            pool_slots(layout, &pool_id)
                 .into_iter()
                 .map(move |(word, slot)| {
                     let owner = SlotOwner { component_id: component.id.clone(), word };
@@ -77,7 +67,7 @@ fn slot_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::montra::test_fixtures::{ASCEND_HOOK, HOOK};
+    use crate::launchpad::test_fixtures::{params, ASCEND_HOOK, ASCEND_POOL, ASCEND_POOL_ID, HOOK};
 
     #[test]
     fn test_created_pool_maps_its_six_slots_to_its_words() {
@@ -93,7 +83,7 @@ mod tests {
             }],
         };
 
-        let entries = slot_entries(&BTreeSet::from([ASCEND_HOOK]), &pools_created);
+        let entries = slot_entries(&params(), &pools_created);
 
         let hook = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
         let config = format!(
@@ -121,19 +111,19 @@ mod tests {
     /// `cast index bytes32 <id> 2` plus 0 to 2, for pool 0xa138ea3b... (foundry's cast).
     #[test]
     fn test_created_ascend_pool_maps_its_five_slots_to_its_words() {
-        let id = "0xa138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5";
+        let id = ASCEND_POOL;
         let pools_created = BlockEntityChanges {
             block: None,
             changes: vec![TransactionEntityChanges {
                 component_changes: vec![ProtocolComponent::new(id).with_attributes(&[
-                    ("pool_id", hex::decode(&id[2..]).unwrap()),
+                    ("pool_id", ASCEND_POOL_ID.to_vec()),
                     ("hooks", ASCEND_HOOK.to_vec()),
                 ])],
                 ..Default::default()
             }],
         };
 
-        let entries = slot_entries(&BTreeSet::from([ASCEND_HOOK]), &pools_created);
+        let entries = slot_entries(&params(), &pools_created);
 
         let hook = "0xe0def4221b9840a610d4e7d55812a79a6431a8ec";
         let pool_data = "0xeed4aedf482dc31cd5db10dafcce24e9cd678d08586286766e5957130525";
@@ -149,5 +139,25 @@ mod tests {
         .map(|(slot, index)| (slot, format!("{id}:{index}")))
         .collect();
         assert_eq!(entries, expected);
+    }
+
+    /// A pool whose hook is in neither list cannot come from `map_launchpad_pools_created`, so
+    /// the store refuses it rather than guess a layout.
+    #[test]
+    #[should_panic(expected = "which no hook list names")]
+    fn test_pool_of_an_unlisted_hook_panics() {
+        let id = "0x1f3bfa7c7d85bb77019e40018f2d179c04e413d7d853d9c77017a221ac4c2e6a";
+        let pools_created = BlockEntityChanges {
+            block: None,
+            changes: vec![TransactionEntityChanges {
+                component_changes: vec![ProtocolComponent::new(id).with_attributes(&[
+                    ("pool_id", hex::decode(&id[2..]).unwrap()),
+                    ("hooks", [0x80; 20].to_vec()),
+                ])],
+                ..Default::default()
+            }],
+        };
+
+        slot_entries(&params(), &pools_created);
     }
 }

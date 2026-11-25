@@ -1,4 +1,4 @@
-//! Elysium values the Montra modules' tests share.
+//! Elysium values the launchpad modules' tests share.
 
 use std::collections::BTreeSet;
 
@@ -9,7 +9,7 @@ use substreams_ethereum::pb::eth::v2::{
 
 use crate::{
     address_list::Address,
-    montra::params::Params,
+    launchpad::params::Params,
     storage::{pad32, Word},
 };
 
@@ -28,6 +28,23 @@ pub(crate) const TOKEN: Address = hex!("32193afd14c53f12c45a4c04eca9f7ba98e3ec71
 /// The transaction that launched [`POOL_ID`].
 pub(crate) const LAUNCH_TX: [u8; 32] =
     hex!("e69565883dcf7ff890325eb1bf34bed5c281be88e89ffebdbdddd9837134a255");
+
+/// Ascend pool 0xa138ea3b... of [`ASCEND_HOOK`].
+pub(crate) const ASCEND_POOL_ID: Word =
+    hex!("a138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5");
+/// [`ASCEND_POOL_ID`]'s component id.
+pub(crate) const ASCEND_POOL: &str =
+    "0xa138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5";
+/// [`ASCEND_POOL_ID`]'s `PoolData` word 2 at block 8365800 (`cast storage`): fee 10000
+/// (0x002710), startTick -168600 (0xfd6d68), launchedAt 1794307976 (0x6af2f788), tokenIs0 0, then
+/// the creator, whose bytes here are arbitrary.
+pub(crate) const ASCEND_TERMS_WORD: Word =
+    hex!("002710fd6d68006af2f78800aabbccddeeff00112233445566778899aabbccdd");
+/// A `PoolData` word 3 as a launch writes it: d = 0, observedTick = start - 200 = -400800
+/// (0xf9e260) for a pool starting at -400600, emaUpdatedAt = 1794362659 (0x6afecd23), and an
+/// arbitrary 20-byte EMA.
+pub(crate) const ASCEND_LAUNCH_OBSERVATION_WORD: Word =
+    hex!("00000000f9e260006afecd2300000000000000000883956ab34ccb0338ab12cd");
 
 const INITIALIZE_TOPIC: Word =
     hex!("dd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438");

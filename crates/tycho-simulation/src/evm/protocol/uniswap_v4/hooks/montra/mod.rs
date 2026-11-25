@@ -5,7 +5,7 @@
 //! Montra pools are `uniswap_v4_hooks` components. The Elysium manifest of the with-hooks
 //! Substreams package (`elysium-uniswap-v4-with-hooks.yaml`) decodes the hook's `PoolConfig`
 //! storage writes into the `montra_*` state attributes [`MontraPoolConfig`] reads, and its
-//! `map_montra_enriched_block_changes` module decides when a pool is paused.
+//! `map_launchpad_enriched_block_changes` module decides when a pool is paused.
 pub mod hook_handler;
 pub mod hook_handler_creator;
 

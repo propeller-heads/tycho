@@ -116,7 +116,7 @@ mod tests {
     use hex_literal::hex;
 
     use super::*;
-    use crate::montra::test_fixtures::{
+    use crate::launchpad::test_fixtures::{
         initialize_log, launch_block, HOOK, LAUNCH_TX, POOL_MANAGER, TOKEN,
     };
 

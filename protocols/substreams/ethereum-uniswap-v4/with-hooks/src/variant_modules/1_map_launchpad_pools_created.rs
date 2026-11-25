@@ -6,10 +6,10 @@ use ethereum_uniswap_v4_shared::abi::pool_manager::events::Initialize;
 use substreams_ethereum::{pb::eth::v2 as eth, Event};
 use tycho_substreams::prelude::*;
 
-use crate::{map_pool_created::pool_creation, montra::params::Params};
+use crate::{launchpad::params::Params, map_pool_created::pool_creation};
 
 #[substreams::handlers::map]
-pub fn map_montra_pools_created(
+pub fn map_launchpad_pools_created(
     params: String,
     block: eth::Block,
 ) -> Result<BlockEntityChanges, substreams::errors::Error> {
@@ -25,10 +25,7 @@ pub fn map_montra_pools_created(
 /// `ascend_*` attributes carry its fees.
 ///
 /// Deployment assumption: the Ascend launch writes its pool's hook storage in the `Initialize`
-/// transaction; the Readme's "Deployment assumption" paragraph has the evidence and its limits.
-/// `map_montra_enriched_block_changes` reads those writes for the pool's `ascend_*` attributes, so
-/// a pool initialised without them would get zero for every attribute, and the simulation refuses
-/// a pool whose fee or EMA is zero.
+/// transaction; the Readme's "Deployment assumption" paragraph has the evidence.
 pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<TransactionEntityChanges> {
     block
         .logs()
@@ -38,9 +35,7 @@ pub(crate) fn pools_created(params: &Params, block: &eth::Block) -> Vec<Transact
         .filter_map(|view| {
             Initialize::match_and_decode(view.log).map(|event| (view.receipt.transaction, event))
         })
-        .filter(|(_, event)| {
-            params.is_montra_hook(&event.hooks) || params.is_ascend_hook(&event.hooks)
-        })
+        .filter(|(_, event)| params.layout(&event.hooks).is_some())
         .map(|(tx, event)| pool_creation(tx, event, params.pool_manager()))
         .collect()
 }
@@ -54,14 +49,14 @@ mod tests {
     use super::*;
     use crate::{
         address_list::Address,
-        montra::test_fixtures::{
+        launchpad::test_fixtures::{
             initialize_log, launch_block, params, params_with_montra_hooks, ASCEND_HOOK, HOOK,
             LAUNCH_TX, POOL_MANAGER,
         },
     };
 
     /// `map_pools_created`'s tests pin every field `pool_creation` builds; this one checks what
-    /// the Montra module passes it: the transaction, the event and the `PoolManager`.
+    /// the launchpad module passes it: the transaction, the event and the `PoolManager`.
     #[test]
     fn test_montra_initialize_creates_the_pool() {
         let changes =

@@ -2,33 +2,30 @@
 
 ## v0.9.0
 
-- Index Ascend launchpad pools on Elysium in `elysium-uniswap-v4-with-hooks.yaml`, next to the
-  Montra pools. The parameter `ascend_hooks` (`map_montra_pools_created`,
-  `store_montra_slots`, `map_montra_enriched_block_changes`) lists the Ascend hooks; it is
-  required, refuses the zero address, and may not share a hook with `montra_hooks`.
-- `map_montra_pools_created` creates a pool for each `Initialize` of a listed Montra or Ascend
-  hook.
-- `store_montra_slots` takes one param, `ascend_hooks`, and keeps five keys per Ascend pool
-  (`PoolData` words 2 and 3, `Bid` words 0 to 2), valued with word indexes 7 to 11.
-- `map_montra_enriched_block_changes` decodes those words into the `ascend_*` state attributes
-  (fee, orientation, start tick, EMA, observation time, observed tick, discount, bid inventory,
-  filled in window, window start, max clip), created with the pool and updated by every write to
-  them. Ascend pools are never paused: `setPaused` stops launches only.
+- Add the Elysium manifest `elysium-uniswap-v4-with-hooks.yaml`, which indexes the launchpad
+  pools of the Montra and Ascend hooks under `uniswap_v4_hooks`. Its three launchpad modules,
+  `map_launchpad_pools_created`, `store_launchpad_slots` and
+  `map_launchpad_enriched_block_changes`, take one parameter string: `pool_manager`,
+  `montra_hooks` and `ascend_hooks`. Each list is required, refuses the zero address, and may not
+  share a hook with the other.
+- `map_launchpad_pools_created` creates a pool for each `Initialize` of a listed Montra or Ascend
+  hook, and no other pool.
+- `store_launchpad_slots` keys each watched slot by the pool's hook and the slot, so a write is
+  attributed to a pool only when the pool's own hook made it: six keys per Montra pool
+  (`PoolConfig` and `PoolKey` words 0 to 2), five per Ascend pool (`PoolData` words 2 and 3,
+  `Bid` words 0 to 2), valued with word indexes 0 to 11.
+- `map_launchpad_enriched_block_changes` decodes the Montra hook's `PoolConfig` writes into
+  `montra_*` state attributes and the Ascend hook's writes into `ascend_*` state attributes (fee,
+  orientation, start tick, EMA, observation time, observed tick, discount, bid inventory, filled
+  in window, window start, max clip), created with the pool and updated by every write to them.
+- That module also emits `paused` for Montra pools. A Montra pool is paused until a transaction
+  places its seed, and that transaction unpauses it. A `PoolKey` word that changes after the
+  pool's creation pauses the pool; only a seed placed on the pool unpauses it. Ascend pools are
+  never paused: `setPaused` stops launches only.
+- The module fails the block on a launchpad hook storage change whose key or value is longer than
+  32 bytes. A storage change whose address is not 20 bytes is skipped.
 - The Elysium manifest's `initialBlock` is 423647, the Ascend hook's deployment block, on every
   module.
-- Add the Elysium manifest `elysium-uniswap-v4-with-hooks.yaml`, which indexes Montra launchpad
-  pools under `uniswap_v4_hooks`. Its own creation module, `map_montra_pools_created`, creates
-  only pools whose hook is listed in its `montra_hooks` parameter.
-- The terminal module `map_montra_enriched_block_changes` decodes the Montra hook's `PoolConfig`
-  storage writes into `montra_*` state attributes.
-- That module also emits `paused`. A pool is paused until a transaction places its seed, and that
-  transaction unpauses it.
-- A `PoolKey` word that changes after the pool's creation pauses the pool. Only a seed placed on
-  the pool unpauses it.
-- The module fails the block on a Montra hook storage change whose key or value is longer than 32
-  bytes. A storage change whose address is not 20 bytes is skipped.
-- `store_montra_slots` keys each slot by the pool's hook and the slot, so a write is attributed
-  to a pool only when the pool's own hook made it.
 - Address-list parameters (`montra_hooks`, and Pons' `pons_hooks`) are parsed by one shared parser
   that also refuses the zero address. Pons' error texts change with it: "entry N `x` is not
   exactly 20 bytes" becomes "value `x` is N bytes, not 20", and "duplicates an earlier address"

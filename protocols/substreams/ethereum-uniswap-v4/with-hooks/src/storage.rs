@@ -1,8 +1,11 @@
 //! Solidity storage-slot arithmetic and word decoding over the storage writes that extended
 //! Substreams blocks carry per call.
 //!
-//! Every reader here is total: malformed input yields `None` rather than a panic, because a panic
-//! inside a Substreams module fails the block for every consumer of the stream.
+//! Every reader of a storage change here is total: malformed input yields `None` rather than a
+//! panic, because a panic inside a Substreams module fails the block for every consumer of the
+//! stream. The field types ([`Field`], [`SignedField`], [`BytesField`]) check their window when
+//! constructed; every field is a constant, so a bad window fails the build, and their readers are
+//! total.
 
 use std::collections::HashMap;
 
@@ -72,12 +75,15 @@ pub fn read_uint(word: &Word, low_byte_offset: usize, width: usize) -> Option<u6
         return None;
     }
 
+    Some(read_window(word, low_byte_offset, width))
+}
+
+/// The unsigned big-endian integer in a window [`is_uint_window`] admits.
+fn read_window(word: &Word, low_byte_offset: usize, width: usize) -> u64 {
     let start = 32 - low_byte_offset - width;
-    let mut value = 0u64;
-    for byte in &word[start..start + width] {
-        value = (value << 8) | u64::from(*byte);
-    }
-    Some(value)
+    word[start..start + width]
+        .iter()
+        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
 }
 
 /// A field packed into a storage word: `width` bytes starting `low` bytes from the low end.
@@ -98,8 +104,7 @@ impl Field {
 
     /// The field read as an unsigned big-endian integer.
     pub(crate) fn unsigned(self, word: &Word) -> u64 {
-        read_uint(word, self.low, self.width)
-            .expect("Field::new admits only windows read_uint reads")
+        read_window(word, self.low, self.width)
     }
 
     /// The field as the 8-byte big-endian `u64` the attributes carry.
@@ -157,9 +162,9 @@ impl BytesField {
 }
 
 /// A watched word of a pool's hook storage and the state attributes it holds.
-pub(crate) trait StateWord: Copy {
-    /// The word's position among its struct's watched words.
-    fn position(self) -> usize;
+pub(crate) trait StateWord: Copy + Eq + std::hash::Hash + 'static {
+    /// Every watched word of the layout, in the order their attributes are emitted.
+    const ALL: &'static [Self];
 
     /// The attributes the word holds, as (name, value) pairs, in the formats the simulation
     /// decoder reads. A byte the simulation does not read holds none.

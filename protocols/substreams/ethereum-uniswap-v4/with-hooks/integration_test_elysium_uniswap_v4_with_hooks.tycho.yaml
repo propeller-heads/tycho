@@ -3,7 +3,7 @@ substreams_yaml_path: ./elysium-uniswap-v4-with-hooks.yaml
 protocol_system: "uniswap_v4_hooks"
 protocol_type_names:
   - "uniswap_v4_pool"
-module_name: "map_montra_enriched_block_changes"
+module_name: "map_launchpad_enriched_block_changes"
 # Every direction of every pool: the hook reverts any input past the bound get_limits reports. A
 # buy past the seed's extreme tick reverts PartialFillRejected; a sell past the opening price
 # reverts PastOpening or PartialFillRejected. The exception is the dust band near the opening,
@@ -16,11 +16,11 @@ module_name: "map_montra_enriched_block_changes"
 # The Ascend pools (the last two tests) are hard too, with no rounding: the launchpad's one position
 # per pool is never removed, so no tick has zero net liquidity. A buy past the curve end or a sell
 # past the position's start edge leaves input unconsumed, and the PoolManager reverts
-# CurrencyNotSettled on it: the Elysium PoolManager's runtime code at block 8365800 equals v4-core's
-# PoolManager's but for the 20-byte self-address immutable, and its unlock reverts
+# CurrencyNotSettled on it. The Elysium PoolManager's runtime code at block 8365800 equals
+# v4-core's PoolManager's but for the 20-byte self-address immutable. Its unlock reverts
 # CurrencyNotSettled (0x5212cba1) on any nonzero delta at the end of the callback, a credit
-# included; an unlock whose callback settles 1 wei of native it does not owe reverts so on Elysium
-# at 8365800 and 8660000.
+# included. On Elysium at 8365800 and 8660000, an unlock whose callback settles 1 wei of native it
+# does not owe reverts so.
 limits:
   kind: hard
 # The PoolManager holds every pool's tokens in one balance and accounts no per-pool amount; the
@@ -596,10 +596,11 @@ tests:
         creation_tx: "0x54927397bb63df048da4b39e7bb4fda890d3697afec41354b2b5c4bc2b44db5f"
         tvl_only: *ascend_tvl_only
   # The one fill whose pool launches inside a bounded range: pool 0x21e12450... launched at 3437284,
-  # its bid funded at 3527638 and filled at 3527702, so the range covers the bid words and the fill
-  # path. The hook emitted 777 Filled events on 43 pools to block 8365800; this is the only pool of
-  # them that launches inside a range this short. No fill of a mirrored pool (tokenIs0 false) has a
-  # range test: the mirrored fill path is not covered by this file.
+  # its bid funded at 3527638 and filled at 3527702, so the range covers the indexing of the bid
+  # words through a fund and a fill. The fill leaves an inventory of 1, so the quotes at the stop
+  # block take no fill: the simulated fill path (sizing, fill delta, fill gas) is covered by the
+  # simulation's golden vectors, not by this file. The hook emitted 777 Filled events on 43 pools
+  # to block 8365800; this is the only pool of them that launches inside a range this short.
   - name: test_ascend_bid_funded_and_filled
     start_block: 3437200
     stop_block: 3528400

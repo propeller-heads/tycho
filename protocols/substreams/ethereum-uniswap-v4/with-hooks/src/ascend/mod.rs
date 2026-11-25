@@ -6,7 +6,8 @@
 //! balances. The Ascend hook adds a fee, a price observation (an EMA and a discount) and a bid
 //! inventory, which the simulation reads. This package decodes them from the hook's storage writes
 //! into `ascend_*` state attributes, with the same modules as the Montra pools
-//! (`map_montra_pools_created`, `store_montra_slots`, `map_montra_enriched_block_changes`).
+//! (`map_launchpad_pools_created`, `store_launchpad_slots`,
+//! `map_launchpad_enriched_block_changes`).
 //!
 //! The hook's source is not verified on Blockscout. Its layout was established from its bytecode
 //! (all 30 `SSTORE` sites, mapped to traced functions, at block 8365800) and from `cast storage`
@@ -56,7 +57,7 @@ const EMA_SQRT_PRICE: BytesField = BytesField::new(0, 20);
 const MAX_CLIP: BytesField = BytesField::new(5, 16);
 
 /// A watched word of an Ascend pool's hook storage; the discriminant is the word's position among
-/// the five.
+/// the five, which the slot store's word index is built from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(crate) enum AscendWord {
@@ -72,15 +73,9 @@ pub(crate) enum AscendWord {
     Window = 4,
 }
 
-impl AscendWord {
-    pub(crate) const ALL: [Self; 5] =
-        [Self::Terms, Self::Observation, Self::Inventory, Self::Filled, Self::Window];
-}
-
 impl StateWord for AscendWord {
-    fn position(self) -> usize {
-        self as usize
-    }
+    const ALL: &'static [Self] =
+        &[Self::Terms, Self::Observation, Self::Inventory, Self::Filled, Self::Window];
 
     fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)> {
         match self {
@@ -125,27 +120,18 @@ mod tests {
     use hex_literal::hex;
 
     use super::*;
+    use crate::launchpad::test_fixtures::{
+        ASCEND_LAUNCH_OBSERVATION_WORD, ASCEND_POOL_ID, ASCEND_TERMS_WORD,
+    };
 
     fn u64_bytes(value: u64) -> Vec<u8> {
         value.to_be_bytes().to_vec()
     }
 
-    /// Pool 0xa138ea3b...'s `PoolData` word 2 at block 8365800 (`cast storage`): fee 10000
-    /// (0x002710), startTick -168600 (0xfd6d68), launchedAt 1794307976 (0x6af2f788), tokenIs0 0,
-    /// then the creator, whose bytes here are arbitrary.
-    const POOL_A138_WORD_2: Word =
-        hex!("002710fd6d68006af2f78800aabbccddeeff00112233445566778899aabbccdd");
-
-    /// A `PoolData` word 3 as a launch writes it: d = 0, observedTick = start - 200 = -400800
-    /// (0xf9e260) for a pool starting at -400600, emaUpdatedAt = 1794362659 (0x6afecd23), and an
-    /// arbitrary 20-byte EMA.
-    const LAUNCH_WORD_3: Word =
-        hex!("00000000f9e260006afecd2300000000000000000883956ab34ccb0338ab12cd");
-
     #[test]
     fn test_word_2_decodes_fee_orientation_and_start_tick() {
         assert_eq!(
-            AscendWord::Terms.attributes(&POOL_A138_WORD_2),
+            AscendWord::Terms.attributes(&ASCEND_TERMS_WORD),
             vec![
                 ("ascend_fee_pips", u64_bytes(10000)),
                 ("ascend_token_is_currency0", vec![0]),
@@ -196,7 +182,7 @@ mod tests {
     /// A byte other than 0 or 1 reaches the attribute as it is, so the decoder can refuse it.
     #[test]
     fn test_word_2_passes_a_token_is_currency0_byte_other_than_0_or_1_through() {
-        let mut word = POOL_A138_WORD_2;
+        let mut word = ASCEND_TERMS_WORD;
         word[11] = 2;
 
         assert_eq!(AscendWord::Terms.attributes(&word)[1], ("ascend_token_is_currency0", vec![2]));
@@ -205,7 +191,7 @@ mod tests {
     #[test]
     fn test_word_3_decodes_the_observation() {
         assert_eq!(
-            AscendWord::Observation.attributes(&LAUNCH_WORD_3),
+            AscendWord::Observation.attributes(&ASCEND_LAUNCH_OBSERVATION_WORD),
             vec![
                 (
                     "ascend_ema_sqrt_price_x96",
@@ -220,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_word_3_decodes_a_discount_in_the_top_four_bytes() {
-        let mut word = LAUNCH_WORD_3;
+        let mut word = ASCEND_LAUNCH_OBSERVATION_WORD;
         word[..4].copy_from_slice(&hex!("f0000000"));
 
         assert_eq!(
@@ -265,7 +251,6 @@ mod tests {
     /// `cast storage` reads for the pool.
     #[test]
     fn test_pool_slots_are_the_pool_data_and_bid_words() {
-        let pool_id = hex!("a138ea3bc220ee819a81be441ad1fd95f84e5ff228a6c1d862376c66e60a01a5");
         let pool_data = hex!("eed4aedf482dc31cd5db10dafcce24e9cd678d08586286766e595713052566");
         let bid = hex!("3fc5cc6e735d08aa6f82fe1e4f7818d4372f3a52e5f4ac7f60a89c2c4a4d4f");
         let slot = |prefix: [u8; 31], last: u8| {
@@ -276,7 +261,7 @@ mod tests {
         };
 
         assert_eq!(
-            pool_slots(&pool_id),
+            pool_slots(&ASCEND_POOL_ID),
             vec![
                 (AscendWord::Terms, slot(pool_data, 0xe1)),
                 (AscendWord::Observation, slot(pool_data, 0xe2)),
