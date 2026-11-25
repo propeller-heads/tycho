@@ -214,7 +214,20 @@ impl VersionedRowNew for NewComponentBalance {
                 .values(chunk)
                 .execute(conn)
                 .await
-                .map_err(|err| storage_error_from_diesel(err, Self::ENTITY, "history", None))?;
+                .map_err(|err| {
+                    // The detail names the failing row, for example the `valid_to` that has no
+                    // history day.
+                    let detail = if let diesel::result::Error::DatabaseError(_, info) = &err {
+                        info.details().unwrap_or_default()
+                    } else {
+                        ""
+                    };
+                    StorageError::Unexpected(format!(
+                        "{} history of instance {}: {err} {detail}",
+                        Self::ENTITY,
+                        chunk[0].instance_id
+                    ))
+                })?;
         }
         Ok(())
     }
