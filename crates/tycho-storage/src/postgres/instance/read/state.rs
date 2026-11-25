@@ -59,24 +59,23 @@ impl PostgresGatewayNew {
         Ok(component_balances_at(instance.id, ids, read, conn)
             .await?
             .into_iter()
-            .fold(
-                HashMap::new(),
-                |mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>>,
-                 ((external_id, token), (balance, balance_float))| {
-                    let balance = ComponentBalance::new(
-                        token.clone(),
-                        balance,
-                        balance_float,
-                        Bytes::zero(32),
-                        &external_id,
-                    );
-                    balances
-                        .entry(external_id)
-                        .or_default()
-                        .insert(token, balance);
-                    balances
-                },
-            ))
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, balance_float))| {
+                        let balance = ComponentBalance::new(
+                            token.clone(),
+                            balance,
+                            balance_float,
+                            Bytes::zero(32),
+                            &external_id,
+                        );
+                        (token, balance)
+                    })
+                    .collect();
+                (external_id, balances)
+            })
+            .collect())
     }
 
     /// Returns the state of the components of `system`'s active instance. The total is always
@@ -144,38 +143,27 @@ async fn states_of(
             rows
         }
     };
-    let attributes: HashMap<ComponentId, HashMap<String, Bytes>> = unique_by_key(
+    let attributes = unique_by_key(
         "protocol_state",
         instance,
         read,
         rows.into_iter()
             .map(|(external_id, name, value)| ((external_id, name), value)),
-    )?
-    .into_iter()
-    .fold(HashMap::new(), |mut attributes, ((external_id, name), value)| {
-        attributes
-            .entry(external_id)
-            .or_default()
-            .insert(name, value);
-        attributes
-    });
+    )?;
 
-    let mut balances = if retrieve_balances {
+    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = if retrieve_balances {
         component_balances_at(instance, ids, read, conn)
             .await?
             .into_iter()
-            .filter(|((external_id, _), _)| attributes.contains_key(external_id))
-            .fold(
-                HashMap::new(),
-                |mut balances: HashMap<ComponentId, HashMap<Address, Balance>>,
-                 ((external_id, token), (balance, _))| {
-                    balances
-                        .entry(external_id)
-                        .or_default()
-                        .insert(token, balance);
-                    balances
-                },
-            )
+            .filter(|(external_id, _)| attributes.contains_key(external_id))
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, _))| (token, balance))
+                    .collect();
+                (external_id, balances)
+            })
+            .collect()
     } else {
         HashMap::new()
     };
@@ -350,7 +338,7 @@ async fn component_balances_at(
     ids: Option<&[&str]>,
     read: ReadAt,
     conn: &mut AsyncPgConnection,
-) -> Result<HashMap<(ComponentId, Address), (Balance, f64)>, StorageError> {
+) -> Result<HashMap<ComponentId, HashMap<Address, (Balance, f64)>>, StorageError> {
     let rows = match read {
         ReadAt::Current(_) => current_balance_rows(instance, ids, None, conn).await?,
         ReadAt::Past { ts, head } => {
