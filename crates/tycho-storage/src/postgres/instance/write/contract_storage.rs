@@ -153,3 +153,165 @@ impl VersionedRowNew for NewContractStorage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+    use diesel::prelude::*;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use tycho_common::Bytes;
+
+    use crate::postgres::{
+        db_fixtures,
+        instance::{
+            gateway::PostgresGatewayNew,
+            orm::{ContractStorage, ContractStorageHistory, NewContractStorage},
+            schema::tycho::{contract_storage, contract_storage_history},
+            write::versioning::VersionedChange,
+            InstanceId,
+        },
+        testing::instance_test_connection,
+    };
+
+    struct Setup {
+        conn: AsyncPgConnection,
+        gateway: PostgresGatewayNew,
+        instance: InstanceId,
+        account: i64,
+    }
+
+    /// An instance with one account, whose slot `0x01` holds `0x0a` since 2020-01-01.
+    async fn setup() -> Setup {
+        let mut conn = instance_test_connection().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
+        let instance = db_fixtures::insert_instance(&mut conn, system, "0.0.2").await;
+        let account =
+            db_fixtures::insert_instance_account(&mut conn, instance, Bytes::from([1u8; 20])).await;
+        db_fixtures::insert_instance_slots(
+            &mut conn,
+            instance,
+            account,
+            &[(Bytes::from("0x01"), Bytes::from("0x0a"))],
+        )
+        .await;
+        let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
+        Setup { conn, gateway, instance, account }
+    }
+
+    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
+    fn minutes_ago(minutes: i64) -> NaiveDateTime {
+        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
+        ts.with_nanosecond(0)
+            .expect("zero nanoseconds is valid")
+    }
+
+    fn stored_since() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date")
+    }
+
+    fn update(
+        setup: &Setup,
+        slot: &str,
+        value: Option<&str>,
+        valid_from: NaiveDateTime,
+    ) -> VersionedChange<NewContractStorage> {
+        VersionedChange::Update(NewContractStorage {
+            instance_id: setup.instance,
+            account_id: setup.account,
+            slot: Bytes::from(slot),
+            value: value.map(Bytes::from),
+            previous_value: None,
+            valid_from,
+            tx_index: 0,
+        })
+    }
+
+    async fn write(setup: &mut Setup, changes: Vec<VersionedChange<NewContractStorage>>) {
+        setup
+            .gateway
+            .write_versions(setup.instance, changes, &mut setup.conn)
+            .await
+            .expect("writing the storage failed");
+    }
+
+    async fn current(setup: &mut Setup) -> Vec<ContractStorage> {
+        contract_storage::table
+            .filter(contract_storage::instance_id.eq(setup.instance))
+            .order_by(contract_storage::slot)
+            .select(ContractStorage::as_select())
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the current storage failed")
+    }
+
+    async fn history(setup: &mut Setup) -> Vec<ContractStorageHistory> {
+        contract_storage_history::table
+            .filter(contract_storage_history::instance_id.eq(setup.instance))
+            .select(ContractStorageHistory::as_select())
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the storage history failed")
+    }
+
+    #[tokio::test]
+    async fn test_new_slot_is_current_without_previous_value() {
+        let mut setup = setup().await;
+        let at = minutes_ago(1);
+
+        let change = update(&setup, "0x02", Some("0x0b"), at);
+        write(&mut setup, vec![change]).await;
+
+        let current = current(&mut setup).await;
+        assert_eq!(current.len(), 2);
+        assert_eq!(
+            (
+                &current[1].slot,
+                &current[1].value,
+                &current[1].previous_value,
+                current[1].valid_from
+            ),
+            (&Bytes::from("0x02"), &Some(Bytes::from("0x0b")), &None, at)
+        );
+        assert!(history(&mut setup).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_links_the_previous_value_and_moves_it_to_history() {
+        let mut setup = setup().await;
+        let at = minutes_ago(1);
+
+        let change = update(&setup, "0x01", Some("0x0b"), at);
+        write(&mut setup, vec![change]).await;
+
+        let current = current(&mut setup).await;
+        assert_eq!(
+            (&current[0].value, &current[0].previous_value),
+            (&Some(Bytes::from("0x0b")), &Some(Bytes::from("0x0a")))
+        );
+        let history = history(&mut setup).await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            (&history[0].value, history[0].valid_from, history[0].valid_to),
+            (&Some(Bytes::from("0x0a")), stored_since(), at)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_slot_without_value_is_a_version_with_null_value() {
+        let mut setup = setup().await;
+        let at = minutes_ago(1);
+
+        let change = update(&setup, "0x01", None, at);
+        write(&mut setup, vec![change]).await;
+
+        let current = current(&mut setup).await;
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            (&current[0].value, &current[0].previous_value, current[0].valid_from),
+            (&None, &Some(Bytes::from("0x0a")), at)
+        );
+        assert_eq!(history(&mut setup).await.len(), 1);
+    }
+}
