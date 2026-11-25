@@ -2864,6 +2864,127 @@ mod tests {
         }
     }
 
+    /// Hook that records the pool that `afterSwap` gets, and asks for the swap's fees when
+    /// `wants_fees` is set.
+    #[derive(Debug, Clone)]
+    struct RecordingAfterSwapHook {
+        wants_fees: bool,
+        seen: Arc<std::sync::Mutex<Option<PoolAfterSwap>>>,
+    }
+
+    impl HookHandler for RecordingAfterSwapHook {
+        fn address(&self) -> Address {
+            construct_hook_address(&[HookOptions::AfterSwap])
+        }
+
+        fn needs_swap_fee_accrual(&self) -> bool {
+            self.wants_fees
+        }
+
+        fn before_swap(
+            &self,
+            _: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            Err(SimulationError::RecoverableError("hook has no beforeSwap permission".into()))
+        }
+
+        #[expect(
+            clippy::unwrap_in_result,
+            reason = "test mock; a poisoned lock means a test already failed"
+        )]
+        fn after_swap(
+            &self,
+            params: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            *self.seen.lock().unwrap() = Some(params.pool_after_swap);
+            Ok(WithGasEstimate { gas_estimate: 0, result: I128::ZERO })
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|other| Arc::ptr_eq(&other.seen, &self.seen))
+        }
+    }
+
+    /// `afterSwap` gets the pool that the native swap left, and the swap's fees only when its
+    /// handler asks for them.
+    #[rstest]
+    #[case::without_fees(false)]
+    #[case::with_fees(true)]
+    fn test_after_swap_pool(#[case] wants_fees: bool) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("hookless swap should succeed");
+        let after = hookless
+            .new_state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .expect("the swap returns a V4 state");
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(RecordingAfterSwapHook {
+            wants_fees,
+            seen: Arc::clone(&seen),
+        }));
+        pool.get_amount_out(amount_in, &token_in, &token_out)
+            .expect("hooked swap should succeed");
+
+        let pool_after_swap = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("afterSwap ran");
+        assert_eq!(
+            (pool_after_swap.sqrt_price, pool_after_swap.tick, pool_after_swap.liquidity),
+            (after.sqrt_price, after.tick.value(), after.liquidity)
+        );
+        assert_ne!(pool_after_swap.sqrt_price, pool.sqrt_price);
+        assert_eq!(
+            pool_after_swap
+                .fees
+                .is_some_and(|fees| !fees.fee_growth.is_zero()),
+            wants_fees
+        );
+    }
+
     /// Hook that fills part of an exact-in swap from its own inventory, the way a limit order
     /// does: only when the taker's price limit reaches the order's price.
     #[derive(Debug, Clone, PartialEq, Eq)]
