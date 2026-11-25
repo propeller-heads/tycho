@@ -232,13 +232,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_extraction_state() {
+    async fn test_active_instance_limits_has_the_extraction_state() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         db_fixtures::set_instance_head(&mut conn, setup.curve, day(2)).await;
         db_fixtures::set_instance_head(&mut conn, setup.uniswap_v4, day(3)).await;
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap();
 
@@ -246,11 +246,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_without_extraction_state() {
+    async fn test_active_instance_limits_without_extraction_state() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap();
 
@@ -258,14 +258,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_of_an_inactive_or_unknown_protocol() {
+    async fn test_active_instance_limits_of_an_inactive_or_unknown_protocol() {
         let mut conn = instance_test_connection().await;
         setup_protocols(&mut conn).await;
 
-        let inactive = active_instance_head("vm:old", &mut conn)
+        let inactive = active_instance_limits("vm:old", &mut conn)
             .await
             .unwrap();
-        let unknown = active_instance_head("not-a-protocol", &mut conn)
+        let unknown = active_instance_limits("not-a-protocol", &mut conn)
             .await
             .unwrap();
 
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_base_block() {
+    async fn test_active_instance_limits_has_the_base_block() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         diesel::update(protocol_instance::table.filter(protocol_instance::id.eq(setup.curve)))
@@ -283,11 +283,11 @@ mod tests {
             .await
             .unwrap();
 
-        let curve = active_instance_head("vm:curve", &mut conn)
+        let curve = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap()
             .unwrap();
-        let uniswap_v4 = active_instance_head("uniswap_v4", &mut conn)
+        let uniswap_v4 = active_instance_limits("uniswap_v4", &mut conn)
             .await
             .unwrap()
             .unwrap();
@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_history_horizon() {
+    async fn test_active_instance_limits_has_the_history_horizon() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         diesel::sql_query("UPDATE partition_retention_config SET retention = '7 days'")
@@ -309,7 +309,7 @@ mod tests {
             .await
             .unwrap();
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap()
             .unwrap();
