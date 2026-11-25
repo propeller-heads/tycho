@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::NaiveDateTime;
 use diesel::{pg::Pg, prelude::*};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
@@ -11,13 +12,15 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::check_current;
+use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     instance::{
         active::active_instance_limits,
         gateway::PostgresGatewayNew,
-        orm as iorm,
-        schema::tycho::{component_balance, protocol_component, protocol_state},
+        schema::tycho::{
+            component_balance, component_balance_history, protocol_component, protocol_state,
+            protocol_state_history,
+        },
         InstanceId,
     },
     PostgresError,
@@ -31,10 +34,13 @@ impl PostgresGatewayNew {
     ///   id can repeat across protocol systems. `NotFound` for an unknown name. A protocol system
     ///   without an active instance has no balances.
     /// - `ids`: only components with these external ids.
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     ///
     /// Components without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
-    /// an unknown chain.
+    /// an unknown chain. `Unexpected` when two rows of one component and token are valid at the
+    /// version.
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
@@ -48,30 +54,37 @@ impl PostgresGatewayNew {
         let Some(instance) = active_instance_limits(system, conn).await? else {
             return Ok(HashMap::new());
         };
-        check_current(&instance, at, conn).await?;
 
-        let rows = balance_rows(instance.id, ids, conn).await?;
-        let mut balances: HashMap<ComponentId, HashMap<Address, ComponentBalance>> = HashMap::new();
-        for (external_id, row) in rows {
-            let balance = ComponentBalance::new(
-                row.token.clone(),
-                row.new_balance,
-                row.balance_float,
-                Bytes::zero(32),
-                &external_id,
-            );
-            balances
-                .entry(external_id)
-                .or_default()
-                .insert(row.token, balance);
-        }
-        Ok(balances)
+        let read = resolve_version(&instance, at, conn).await?;
+
+        Ok(component_balances_at(instance.id, ids, read, conn)
+            .await?
+            .into_iter()
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, balance_float))| {
+                        let balance = ComponentBalance::new(
+                            token.clone(),
+                            balance,
+                            balance_float,
+                            Bytes::zero(32),
+                            &external_id,
+                        );
+                        (token, balance)
+                    })
+                    .collect();
+                (external_id, balances)
+            })
+            .collect())
     }
 
     /// Returns the state of the components of `system`'s active instance. The total is always
     /// `None`.
     ///
-    /// - `at`: the version. `Unsupported` for a version before the head of the instance.
+    /// - `at`: the version. Before the head of the instance, the history tables answer too.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     /// - `system`: the protocol system. Required, because a pool id can repeat across protocol
     ///   systems: `None` is `Unsupported`. `NotFound` for an unknown name. A protocol system
     ///   without an active instance has no states.
@@ -80,7 +93,8 @@ impl PostgresGatewayNew {
     /// - `pagination_params`: `Unsupported` when set. Page the component ids instead.
     ///
     /// A component without state attributes is absent, even with balances. `NotFound` for an
-    /// unknown chain.
+    /// unknown chain. `Unexpected` when two rows of one attribute, or of one balance, are valid at
+    /// the version.
     #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     pub async fn get_protocol_states(
         &self,
@@ -120,9 +134,61 @@ async fn states_of(
     let Some(active) = active_instance_limits(system, conn).await? else {
         return Ok(WithTotal { entity: Vec::new(), total: None });
     };
-    check_current(&active, at, conn).await?;
+    let read = resolve_version(&active, at, conn).await?;
     let instance = active.id;
 
+    let mut rows = current_state_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
+    }
+    let attributes = unique_by_key(
+        "protocol_state",
+        instance,
+        read,
+        rows.into_iter()
+            .map(|(external_id, name, value)| ((external_id, name), value)),
+    )?;
+
+    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = if retrieve_balances {
+        component_balances_at(instance, ids, read, conn)
+            .await?
+            .into_iter()
+            .filter(|(external_id, _)| attributes.contains_key(external_id))
+            .map(|(external_id, balances)| {
+                let balances = balances
+                    .into_iter()
+                    .map(|(token, (balance, _))| (token, balance))
+                    .collect();
+                (external_id, balances)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let states = attributes
+        .into_iter()
+        .map(|(external_id, attributes)| {
+            let balances = balances
+                .remove(&external_id)
+                .unwrap_or_default();
+            ProtocolComponentState::new(&external_id, attributes, balances)
+        })
+        .collect();
+    Ok(WithTotal { entity: states, total: None })
+}
+
+/// A state row: external id of the component, attribute name and value.
+type StateRow = (ComponentId, String, Bytes);
+
+/// Loads the current state rows of the components of `instance`.
+/// `ids`: only components with these external ids. `ts`: only rows with `valid_from <= ts`.
+async fn current_state_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<StateRow>, StorageError> {
     let mut query = protocol_state::table
         .inner_join(
             protocol_component::table.on(protocol_component::instance_id
@@ -137,62 +203,44 @@ async fn states_of(
             protocol_state::attribute_value,
         ))
         .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(protocol_state::valid_from.le(ts));
+    }
     if let Some(ids) = ids {
         query = query.filter(protocol_component::external_id.eq_any(ids));
     }
-    let rows: Vec<(ComponentId, String, Bytes)> = query
+    Ok(query
         .load(conn)
         .await
-        .map_err(PostgresError::from)?;
-
-    let mut attributes: HashMap<ComponentId, HashMap<String, Bytes>> = HashMap::new();
-    for (external_id, name, value) in rows {
-        attributes
-            .entry(external_id)
-            .or_default()
-            .insert(name, value);
-    }
-
-    let mut balances: HashMap<ComponentId, HashMap<Address, Balance>> = HashMap::new();
-    if retrieve_balances {
-        for (external_id, row) in balance_rows(instance, ids, conn).await? {
-            if attributes.contains_key(&external_id) {
-                balances
-                    .entry(external_id)
-                    .or_default()
-                    .insert(row.token, row.new_balance);
-            }
-        }
-    }
-
-    let states = attributes
-        .into_iter()
-        .map(|(external_id, attributes)| {
-            let balances = balances
-                .remove(&external_id)
-                .unwrap_or_default();
-            ProtocolComponentState::new(&external_id, attributes, balances)
-        })
-        .collect();
-    Ok(WithTotal { entity: states, total: None })
+        .map_err(PostgresError::from)?)
 }
 
-/// Loads the balance rows of the components of `instance`, each with its component's external id.
+/// Loads the history state rows of the components of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `ids`: only components with these external ids.
-async fn balance_rows(
+async fn history_state_rows(
     instance: InstanceId,
     ids: Option<&[&str]>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
     conn: &mut AsyncPgConnection,
-) -> Result<Vec<(ComponentId, iorm::ComponentBalance)>, StorageError> {
-    let mut query = component_balance::table
+) -> Result<Vec<StateRow>, StorageError> {
+    let mut query = protocol_state_history::table
         .inner_join(
             protocol_component::table.on(protocol_component::instance_id
-                .eq(component_balance::instance_id)
-                .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+                .eq(protocol_state_history::instance_id)
+                .and(protocol_component::id.eq(protocol_state_history::protocol_component_id))),
         )
-        .filter(component_balance::instance_id.eq(instance))
+        .filter(protocol_state_history::instance_id.eq(instance))
         .filter(protocol_component::instance_id.eq(instance))
-        .select((protocol_component::external_id, iorm::ComponentBalance::as_select()))
+        .filter(protocol_state_history::valid_from.le(ts))
+        .filter(protocol_state_history::valid_to.gt(ts))
+        .filter(protocol_state_history::valid_to.le(head))
+        .select((
+            protocol_component::external_id,
+            protocol_state_history::attribute_name,
+            protocol_state_history::attribute_value,
+        ))
         .into_boxed::<Pg>();
     if let Some(ids) = ids {
         query = query.filter(protocol_component::external_id.eq_any(ids));
@@ -203,13 +251,114 @@ async fn balance_rows(
         .map_err(PostgresError::from)?)
 }
 
+/// A balance row: external id of the component, token, balance and its float value.
+type BalanceRow = (ComponentId, Address, Balance, f64);
+
+/// Loads the current balance rows of the components of `instance`.
+/// `ids`: only components with these external ids. `ts`: only rows with `valid_from <= ts`.
+async fn current_balance_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: Option<NaiveDateTime>,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<BalanceRow>, StorageError> {
+    let mut query = component_balance::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(component_balance::instance_id)
+                .and(protocol_component::id.eq(component_balance::protocol_component_id))),
+        )
+        .filter(component_balance::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .select((
+            protocol_component::external_id,
+            component_balance::token,
+            component_balance::new_balance,
+            component_balance::balance_float,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ts) = ts {
+        query = query.filter(component_balance::valid_from.le(ts));
+    }
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Loads the history balance rows of the components of `instance` that are valid at `ts`:
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
+/// `ids`: only components with these external ids.
+async fn history_balance_rows(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    ts: NaiveDateTime,
+    head: NaiveDateTime,
+    conn: &mut AsyncPgConnection,
+) -> Result<Vec<BalanceRow>, StorageError> {
+    let mut query = component_balance_history::table
+        .inner_join(
+            protocol_component::table.on(protocol_component::instance_id
+                .eq(component_balance_history::instance_id)
+                .and(protocol_component::id.eq(component_balance_history::protocol_component_id))),
+        )
+        .filter(component_balance_history::instance_id.eq(instance))
+        .filter(protocol_component::instance_id.eq(instance))
+        .filter(component_balance_history::valid_from.le(ts))
+        .filter(component_balance_history::valid_to.gt(ts))
+        .filter(component_balance_history::valid_to.le(head))
+        .select((
+            protocol_component::external_id,
+            component_balance_history::token,
+            component_balance_history::new_balance,
+            component_balance_history::balance_float,
+        ))
+        .into_boxed::<Pg>();
+    if let Some(ids) = ids {
+        query = query.filter(protocol_component::external_id.eq_any(ids));
+    }
+    Ok(query
+        .load(conn)
+        .await
+        .map_err(PostgresError::from)?)
+}
+
+/// Returns the balances valid at `read`, as balance and float value by external id and token.
+/// `ids`: only components with these external ids.
+///
+/// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
+/// component and token are valid at the version.
+async fn component_balances_at(
+    instance: InstanceId,
+    ids: Option<&[&str]>,
+    read: ReadAt,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<ComponentId, HashMap<Address, (Balance, f64)>>, StorageError> {
+    let mut rows = current_balance_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
+    }
+    unique_by_key(
+        "component_balance",
+        instance,
+        read,
+        rows.into_iter()
+            .map(|(id, token, balance, float)| ((id, token), (balance, float))),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
-    use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+    use diesel_async::{
+        scoped_futures::ScopedFutureExt, AsyncConnection, AsyncPgConnection, RunQueryDsl,
+    };
     use tycho_common::{
         models::{
             protocol::{ComponentBalance, ProtocolComponentState},
@@ -219,11 +368,18 @@ mod tests {
         Bytes,
     };
 
+    use super::{
+        active_instance_limits, current_state_rows, history_state_rows, resolve_version, ReadAt,
+    };
     use crate::postgres::{
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
-            schema::tycho::{extraction_state, protocol_state},
+            orm::NewProtocolStateHistory,
+            read::testing::{before_retention, recent},
+            schema::tycho::{
+                extraction_state, protocol_instance, protocol_state, protocol_state_history,
+            },
             InstanceId,
         },
         snapshot::snapshot_transaction,
@@ -426,15 +582,170 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_balances_before_head_are_unsupported() {
+    async fn test_balances_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         component_with_balance(&mut conn, s.curve, "a", "0x01").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
 
-        let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(day(1)))).await;
+        let result =
+            balances(&s.gateway, &mut conn, "vm:curve", Some(&at(before_retention(recent(5)))))
+                .await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_read_history() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x20"),
+            recent(3),
+            None,
+        )
+        .await;
+        component_with_balance(&mut conn, s.curve, "c", "0x30").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in [(recent(2), "0x10"), (recent(4), "0x20")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(result["a"].len(), 1, "{ts}");
+            assert_eq!(result["a"][&b("0x01")].balance, b(expected), "{ts}");
+            assert_eq!(result["c"][&b("0x01")].balance, b("0x30"), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_skip_deleted_balances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let before = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(2))))
+            .await
+            .unwrap();
+        let deleted = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(3))))
+            .await
+            .unwrap();
+
+        assert_eq!(before["a"][&b("0x01")].balance, b("0x10"));
+        assert!(deleted.is_empty(), "{deleted:?}");
+    }
+
+    /// Inserts a version of the balance of token 0x01 in `component` of "vm:curve".
+    async fn balance_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        component: i64,
+        balance: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_component_balance_version(
+            conn,
+            s.curve,
+            component,
+            b("0x01"),
+            b(balance),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(3))).await;
+        balance_version(&mut conn, &s, c, "0x20", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = s
+            .gateway
+            .get_component_balances(
+                &Chain::Ethereum,
+                "vm:curve",
+                Some(&["a"]),
+                Some(&at(recent(2))),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.keys().collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
+    }
+
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_see_the_last_update_of_a_block() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(2), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x30", recent(2), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in [(recent(2), "0x30"), (recent(1), "0x10")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(result["a"].len(), 1, "{ts}");
+            assert_eq!(result["a"][&b("0x01")].balance, b(expected), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_before_head_read_a_row_replaced_at_the_head() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(5))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(5), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(4))))
+            .await
+            .unwrap();
+
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
     }
 
     async fn states(
@@ -632,17 +943,279 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_states_before_head_are_unsupported() {
+    async fn test_states_before_retention_are_unsupported() {
         let mut conn = instance_test_connection().await;
         let s = setup(&mut conn).await;
         component_with_state(&mut conn, s.curve, "a", "0x01").await;
-        db_fixtures::set_instance_head(&mut conn, s.curve, day(2)).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = states(
+            &s.gateway,
+            &mut conn,
+            Some("vm:curve"),
+            None,
+            None,
+            Some(at(before_retention(recent(5)))),
+        )
+        .await;
+
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("retention"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn test_states_before_the_base_block_are_unsupported() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+        diesel::update(protocol_instance::table.find(s.curve))
+            .set(protocol_instance::base_block_ts.eq(recent(2)))
+            .execute(&mut conn)
+            .await
+            .unwrap();
 
         let result =
-            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(day(1)))).await;
+            states(&s.gateway, &mut conn, Some("vm:curve"), None, None, Some(at(recent(1)))).await;
 
-        assert!(matches!(result, Err(StorageError::Unsupported(_))), "{result:?}");
+        let Err(StorageError::Unsupported(msg)) = result else {
+            panic!("expected Unsupported, got {result:?}");
+        };
+        assert!(msg.contains("base block"), "{msg}");
     }
+
+    /// Inserts a version of the attribute `name` of a component of curve.
+    async fn state_version(
+        conn: &mut AsyncPgConnection,
+        s: &Setup,
+        component: i64,
+        name: &str,
+        value: &str,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        db_fixtures::insert_instance_state_version(
+            conn,
+            s.curve,
+            component,
+            name,
+            b(value),
+            valid_from,
+            valid_to,
+        )
+        .await;
+    }
+
+    async fn curve_states_at(
+        s: &Setup,
+        conn: &mut AsyncPgConnection,
+        ids: Option<&[&str]>,
+        ts: NaiveDateTime,
+    ) -> Result<Vec<ProtocolComponentState>, StorageError> {
+        states(&s.gateway, conn, Some("vm:curve"), ids, None, Some(at(ts)))
+            .await
+            .map(|(states, _)| states)
+    }
+
+    fn state(external_id: &str, attributes: &[(&str, &str)]) -> ProtocolComponentState {
+        ProtocolComponentState::new(
+            external_id,
+            attributes
+                .iter()
+                .map(|(name, value)| (name.to_string(), b(value)))
+                .collect(),
+            HashMap::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_read_history() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(3), None).await;
+        db_fixtures::insert_instance_state(&mut conn, s.curve, a, "y", b("0x0b")).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, x) in [(recent(2), "0x01"), (recent(4), "0x02")] {
+            let result = curve_states_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(result, vec![state("a", &[("x", x), ("y", "0x0b")])], "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_see_the_last_update_of_a_block() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(2))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(2), Some(recent(2))).await;
+        state_version(&mut conn, &s, a, "x", "0x03", recent(2), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, x) in [(recent(2), "0x03"), (recent(1), "0x01")] {
+            let result = curve_states_at(&s, &mut conn, None, ts)
+                .await
+                .unwrap();
+
+            assert_eq!(result, vec![state("a", &[("x", x)])], "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_skip_deleted_attributes() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let before = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+        let deleted = curve_states_at(&s, &mut conn, None, recent(3))
+            .await
+            .unwrap();
+
+        assert_eq!(before, vec![state("a", &[("x", "0x01")])]);
+        assert!(deleted.is_empty(), "{deleted:?}");
+    }
+
+    #[tokio::test]
+    async fn test_states_before_head_read_a_row_replaced_at_the_head() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(5))).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(5), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(4))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_with_ids() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        state_version(&mut conn, &s, c, "x", "0x02", recent(1), Some(recent(3))).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, Some(&["a"]), recent(2))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_skip_other_instances() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), Some(recent(3))).await;
+        db_fixtures::insert_instance_state_version(
+            &mut conn,
+            s.uniswap_v4,
+            a,
+            "x",
+            b("0x02"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+
+        assert_eq!(result, vec![state("a", &[("x", "0x01")])]);
+    }
+
+    #[tokio::test]
+    async fn test_states_at_a_past_version_have_balances_at_that_version() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = component_with_state(&mut conn, s.curve, "a", "0x01").await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x10"),
+            recent(1),
+            Some(recent(3)),
+        )
+        .await;
+        db_fixtures::insert_instance_component_balance_version(
+            &mut conn,
+            s.curve,
+            a,
+            b("0x01"),
+            b("0x20"),
+            recent(3),
+            None,
+        )
+        .await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = curve_states_at(&s, &mut conn, None, recent(2))
+            .await
+            .unwrap();
+
+        let expected = vec![ProtocolComponentState::new(
+            "a",
+            [("reserve".to_string(), b("0x01"))].into(),
+            [(b("0x01"), b("0x10"))].into(),
+        )];
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_states_with_two_valid_rows_fail() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        state_version(&mut conn, &s, a, "x", "0x01", recent(1), None).await;
+        state_version(&mut conn, &s, a, "x", "0x02", recent(1), Some(recent(3))).await;
+        let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
+        state_version(&mut conn, &s, c, "x", "0x01", recent(1), Some(recent(3))).await;
+        diesel::insert_into(protocol_state_history::table)
+            .values(NewProtocolStateHistory {
+                instance_id: s.curve,
+                protocol_component_id: c,
+                attribute_name: "x".to_string(),
+                attribute_value: b("0x02"),
+                previous_value: None,
+                valid_from: recent(1),
+                valid_to: recent(3),
+                tx_index: 1,
+            })
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for id in ["a", "c"] {
+            let result = curve_states_at(&s, &mut conn, Some(&[id]), recent(2)).await;
+
+            assert!(matches!(result, Err(StorageError::Unexpected(_))), "{id}: {result:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_states_by_id_need_a_protocol() {
         let mut conn = instance_test_connection().await;
@@ -714,5 +1287,126 @@ mod tests {
             assert_eq!(during, Ok((expected, None)));
         })
         .await;
+    }
+
+    /// Where the race test moves the row, between the statements of a past read.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Gap {
+        BeforeCurrentQuery,
+        BetweenQueries,
+    }
+
+    /// Moves the attribute "x" of `component` to history at `recent(4)` in one transaction, as the
+    /// writer does: a history row with the old value, the new current value and the new head.
+    async fn move_x_to_history(conn: &mut AsyncPgConnection, instance: InstanceId, component: i64) {
+        let counts = conn
+            .transaction::<_, diesel::result::Error, _>(|conn| {
+                async move {
+                    let inserted = diesel::insert_into(protocol_state_history::table)
+                        .values(NewProtocolStateHistory {
+                            instance_id: instance,
+                            protocol_component_id: component,
+                            attribute_name: "x".to_string(),
+                            attribute_value: b("0x01"),
+                            previous_value: None,
+                            valid_from: recent(1),
+                            valid_to: recent(4),
+                            tx_index: 0,
+                        })
+                        .execute(conn)
+                        .await?;
+                    let updated = diesel::update(
+                        protocol_state::table
+                            .filter(protocol_state::instance_id.eq(instance))
+                            .filter(protocol_state::protocol_component_id.eq(component))
+                            .filter(protocol_state::attribute_name.eq("x")),
+                    )
+                    .set((
+                        protocol_state::attribute_value.eq(b("0x02")),
+                        protocol_state::valid_from.eq(recent(4)),
+                    ))
+                    .execute(conn)
+                    .await?;
+                    let head = diesel::update(extraction_state::table.find(instance))
+                        .set(extraction_state::block_ts.eq(recent(4)))
+                        .execute(conn)
+                        .await?;
+                    Ok([inserted, updated, head])
+                }
+                .scope_boxed()
+            })
+            .await
+            .expect("moving the row to history failed");
+        assert_eq!(
+            counts,
+            [1, 1, 1],
+            "rows changed by the history insert, state update, head update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serial_db_past_state_read_sees_a_moved_row_once() {
+        for gap in [Gap::BeforeCurrentQuery, Gap::BetweenQueries] {
+            run_against_db(move |pool| async move {
+                let mut reader = pool.get().await.unwrap();
+                let mut writer = pool.get().await.unwrap();
+                let s = setup(&mut writer).await;
+                let a =
+                    db_fixtures::insert_instance_component(&mut writer, s.curve, "a", &[b("0x01")])
+                        .await;
+                db_fixtures::insert_instance_state_version(
+                    &mut writer,
+                    s.curve,
+                    a,
+                    "x",
+                    b("0x01"),
+                    recent(1),
+                    None,
+                )
+                .await;
+                db_fixtures::set_instance_head(&mut writer, s.curve, recent(3)).await;
+                db_fixtures::create_history_day(&mut writer, "protocol_state_history", recent(4))
+                    .await;
+
+                let rows = snapshot_transaction(&mut reader)
+                    .run(|reader| {
+                        let writer = &mut writer;
+                        async move {
+                            // Repeats the statements of `states_of` in its order, to move the row
+                            // between them. Keep it in step when `states_of` changes.
+                            let active = active_instance_limits("vm:curve", reader)
+                                .await
+                                .unwrap()
+                                .expect("vm:curve has an active instance");
+                            let read = resolve_version(&active, Some(&at(recent(2))), reader)
+                                .await
+                                .unwrap();
+                            let (ts, head) = (recent(2), recent(3));
+                            assert_eq!(read, ReadAt::Past { ts, head });
+                            if gap == Gap::BeforeCurrentQuery {
+                                move_x_to_history(writer, s.curve, a).await;
+                            }
+                            let mut rows = current_state_rows(active.id, None, Some(ts), reader)
+                                .await
+                                .unwrap();
+                            if gap == Gap::BetweenQueries {
+                                move_x_to_history(writer, s.curve, a).await;
+                            }
+                            rows.extend(
+                                history_state_rows(active.id, None, ts, head, reader)
+                                    .await
+                                    .unwrap(),
+                            );
+                            Ok::<_, PostgresError>(rows)
+                        }
+                        .scope_boxed()
+                    })
+                    .await
+                    .unwrap();
+
+                assert_eq!(rows, vec![("a".to_string(), "x".to_string(), b("0x01"))], "{gap:?}");
+            })
+            .await;
+        }
     }
 }

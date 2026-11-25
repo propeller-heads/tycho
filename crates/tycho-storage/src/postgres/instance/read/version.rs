@@ -66,6 +66,17 @@ pub(super) enum ReadAt {
     Past { ts: NaiveDateTime, head: NaiveDateTime },
 }
 
+impl ReadAt {
+    /// The `valid_from` bound of the current rows: `None` for `Current`, which takes every current
+    /// row, and `ts` for `Past`.
+    pub(super) fn current_until(self) -> Option<NaiveDateTime> {
+        match self {
+            ReadAt::Current => None,
+            ReadAt::Past { ts, .. } => Some(ts),
+        }
+    }
+}
+
 /// Resolves the version `at` of `instance` to the rows that answer it. The head, the base and the
 /// history horizon are the ones the read looked up with the instance.
 ///

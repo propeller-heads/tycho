@@ -1696,6 +1696,63 @@ pub mod db_fixtures {
             .expect("inserting the component balance failed");
     }
 
+    /// Creates the day of `day` in the history table `table` of the `tycho` schema. Binds `day` as
+    /// UTC, so the day does not depend on the session TimeZone.
+    pub async fn create_history_day(conn: &mut AsyncPgConnection, table: &str, day: NaiveDateTime) {
+        sql_query(format!("SELECT partman.create_partition_time('tycho.{table}', ARRAY[$1])"))
+            .bind::<diesel::sql_types::Timestamptz, _>(day)
+            .execute(conn)
+            .await
+            .expect("creating the history day failed");
+    }
+
+    /// Inserts a version of the balance of `token` in a component of the instance, with balance
+    /// float 1.0, previous value `0x00` and transaction index 0. `valid_to` `None`: the current
+    /// row. `Some`: a history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_component_balance_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        token: Bytes,
+        balance: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::component_balance::table)
+                .values(instance::orm::NewComponentBalance {
+                    instance_id,
+                    protocol_component_id: component_id,
+                    token,
+                    new_balance: balance,
+                    previous_value: Bytes::from("0x00"),
+                    balance_float: 1.0,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the component balance failed");
+            return;
+        };
+        create_history_day(conn, "component_balance_history", valid_to).await;
+        diesel::insert_into(instance::schema::tycho::component_balance_history::table)
+            .values(instance::orm::NewComponentBalanceHistory {
+                instance_id,
+                protocol_component_id: component_id,
+                token,
+                new_balance: balance,
+                previous_value: Bytes::from("0x00"),
+                balance_float: 1.0,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the component balance history failed");
+    }
+
     /// The `valid_from` of the state attributes that [`insert_instance_state`] inserts:
     /// 2020-01-01 00:00.
     pub const INSTANCE_STATE_VALID_FROM: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 1)
@@ -1725,6 +1782,51 @@ pub mod db_fixtures {
             .execute(conn)
             .await
             .expect("inserting the protocol state failed");
+    }
+
+    /// Inserts a version of the state attribute `attribute_name` of a component of the instance,
+    /// with no previous value and transaction index 0. `valid_to` `None`: the current row. `Some`:
+    /// a history row, after the creation of the history partition of that day.
+    pub async fn insert_instance_state_version(
+        conn: &mut AsyncPgConnection,
+        instance_id: InstanceId,
+        component_id: i64,
+        attribute_name: &str,
+        value: Bytes,
+        valid_from: NaiveDateTime,
+        valid_to: Option<NaiveDateTime>,
+    ) {
+        let Some(valid_to) = valid_to else {
+            diesel::insert_into(instance::schema::tycho::protocol_state::table)
+                .values(instance::orm::NewProtocolState {
+                    instance_id,
+                    protocol_component_id: component_id,
+                    attribute_name: attribute_name.to_string(),
+                    attribute_value: value,
+                    previous_value: None,
+                    valid_from,
+                    tx_index: 0,
+                })
+                .execute(conn)
+                .await
+                .expect("inserting the protocol state failed");
+            return;
+        };
+        create_history_day(conn, "protocol_state_history", valid_to).await;
+        diesel::insert_into(instance::schema::tycho::protocol_state_history::table)
+            .values(instance::orm::NewProtocolStateHistory {
+                instance_id,
+                protocol_component_id: component_id,
+                attribute_name: attribute_name.to_string(),
+                attribute_value: value,
+                previous_value: None,
+                valid_from,
+                valid_to,
+                tx_index: 0,
+            })
+            .execute(conn)
+            .await
+            .expect("inserting the protocol state history failed");
     }
 
     /// Inserts the TVL of a component of the instance.
