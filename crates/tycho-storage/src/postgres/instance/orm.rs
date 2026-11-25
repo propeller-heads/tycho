@@ -273,7 +273,8 @@ impl NewComponentBalance {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable)]
+#[expect(dead_code, reason = "only tests read history rows, and only some fields")]
+#[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = tycho::component_balance_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ComponentBalanceHistory {
