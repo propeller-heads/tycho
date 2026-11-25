@@ -623,11 +623,11 @@
 //!
 //! # What this integration depends on
 //!
-//! On Ethereum the quote contract's layout is configured
+//! On Ethereum and BNB Chain the quote contract's layout is configured
 //! ([`EfficientPropDeployment::quote_layout`]), and the only one read is `"builder"`, the layout on
-//! Ethereum and BNB Chain described above; any other value, or none, is refused when the feed is
-//! built. On Base the setting is refused if given: Base's path samples the doors and reads no quote
-//! contract (its layout there is not read).
+//! both described above; any other value, or none, is refused when the feed is built. On Base the
+//! setting is refused if given: Base's path samples the doors and reads no quote contract (its
+//! layout there is not read).
 //!
 //! Each poll reads the front proxy's EIP-1967 implementation slot, at the latest block and again
 //! at the block every door is read at, and ends the feed when it holds an implementation outside
@@ -635,11 +635,14 @@
 //! door's quote means. The listing records' settings, controls, session and source words are read
 //! from the front's storage at their layout in those implementations. The factory and the front are
 //! configured by the caller ([`EfficientPropDeployment`]), with the desk contract creation code
-//! hash on Ethereum ([`EfficientPropDeployment::ethereum`] holds the deployed front's, and
-//! [`EfficientPropFeedBuilder::ethereum`] builds on it, so a caller there sets a node, a state URL
-//! and its approved desks); the feed checks that the factory serves that front and, on Ethereum,
-//! that the front's `CELL_CODEHASH` is the configured one: a mismatch ends the feed, so nothing is
-//! listed that cannot be simulated.
+//! hash. [`EfficientPropDeployment::ethereum`] and [`EfficientPropDeployment::base`] hold the
+//! deployed fronts', and [`EfficientPropFeedBuilder::ethereum`] and
+//! [`EfficientPropFeedBuilder::base`] build on them, so a caller sets a node, its approved desks,
+//! on Ethereum a state URL, and on Base each listing's gas. [`EfficientPropDeployment::bnb`] holds
+//! the front as its rehearsal on a fork of BNB Chain deployed it, which
+//! [`EfficientPropFeedBuilder::bnb`] builds on, approving no price source. The feed checks that the
+//! factory serves that front and that the front's `CELL_CODEHASH` is the configured one: a mismatch
+//! ends the feed, so nothing is listed that cannot be simulated.
 
 use alloy::primitives::{address, b256};
 use tycho_common::Bytes;
@@ -716,9 +719,9 @@ pub const QUOTE_LAYOUT_BUILDER: &str = "builder";
 /// feed's [`BookFeedConfig`](crate::book::BookFeedConfig).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EfficientPropDeployment {
-    /// The layout of the quote contract the makers' updates write, on Ethereum, where the feed
-    /// reads it: required there and only [`QUOTE_LAYOUT_BUILDER`], the layout on Ethereum and BNB
-    /// Chain (one desk contract a maker, a pair of words a listing). Any other value is refused
+    /// The layout of the quote contract the makers' updates write, on Ethereum and BNB Chain,
+    /// where the feed reads it: required there and only [`QUOTE_LAYOUT_BUILDER`], the layout on
+    /// both (one desk contract a maker, a pair of words a listing). Any other value is refused
     /// when the feed is built. Unset on Base, and refused if set: Base's path samples the doors
     /// and reads no quote contract, whose layout there is not read.
     pub quote_layout: Option<String>,
@@ -728,8 +731,9 @@ pub struct EfficientPropDeployment {
     pub factory: Bytes,
     /// The creation code hash of the desk contracts, which the front's `CELL_CODEHASH` names: a
     /// desk contract is the front's CREATE2 child at salt `(1 << 252) | desk` under it. Required
-    /// on Ethereum, where makers' updates land in blocks; refused on Base. The doors' creation
-    /// code hash is not configured: it is read from `factory`.
+    /// on every chain: a listing is served only where its desk contract is approved, and on
+    /// Ethereum and BNB Chain the hash also places the quote the next block's map writes. The
+    /// doors' creation code hash is not configured: it is read from `factory`.
     pub cell_codehash: Option<Bytes>,
     /// The front implementations this integration was checked against. A poll that finds the
     /// proxy on any other ends the feed.
@@ -739,6 +743,12 @@ pub struct EfficientPropDeployment {
 /// The ids of the front's price sources at its deployment on Ethereum: the price contracts of the
 /// four pairs listed there, which [`EfficientPropFeedBuilder::ethereum`] approves.
 pub const ETHEREUM_PRICE_SOURCES: [u32; 4] = [1, 2, 3, 4];
+
+/// The ids of the front's price sources at its deployment on Base: the USDe/USDC lane
+/// `0xd42d07791f520d86ac827463e40D07101c5f2329`, the price contract of the one pair listed
+/// there, which [`EfficientPropFeedBuilder::base`] approves. It is a guarded lane: the reader
+/// samples its hold (see the module doc, A book's life).
+pub const BASE_PRICE_SOURCES: [u32; 1] = [1];
 
 impl EfficientPropDeployment {
     /// The front deployed on Ethereum, as this integration was checked against it and as its
@@ -777,6 +787,40 @@ impl EfficientPropDeployment {
                     .to_vec(),
             )],
         }
+    }
+
+    /// The front deployed on Base, as its deployment's record holds it: the front proxy, its
+    /// listing-door factory and its one implementation at the addresses they have on Ethereum,
+    /// no quote layout (Base's path reads none), and the desk contracts' creation code hash
+    /// `0x0972dba2…71f1`, Base's own: its desk contracts keep each pair's quote in storage, where
+    /// the doors read it at any block.
+    ///
+    /// The implementation is named by its address, which is the same on every chain while its
+    /// code differs by chain. The feed checks each value against the chain as for
+    /// [`Self::ethereum`].
+    pub fn base() -> Self {
+        Self {
+            quote_layout: None,
+            cell_codehash: Some(Bytes::from(
+                b256!("0972dba2b21d750e0679e53404b218ee08e291b24b79194a666701306c1371f1")
+                    .0
+                    .to_vec(),
+            )),
+            ..Self::ethereum()
+        }
+    }
+
+    /// The front as it is to be deployed on BNB Chain, from its rehearsal on a fork of the chain:
+    /// the front proxy, its listing-door factory and its one implementation at the addresses they
+    /// have on Ethereum, the quote layout [`QUOTE_LAYOUT_BUILDER`], and Ethereum's desk contract
+    /// creation code hash: as there, each maker's quote reaches a block in an update ahead of the
+    /// fills that read it.
+    ///
+    /// None of these has code on BNB Chain yet. The feed checks each against the chain as for
+    /// [`Self::ethereum`], so until the deployment lands, and wherever it differs from its
+    /// rehearsal, a feed built from this ends at its first poll.
+    pub fn bnb() -> Self {
+        Self::ethereum()
     }
 }
 

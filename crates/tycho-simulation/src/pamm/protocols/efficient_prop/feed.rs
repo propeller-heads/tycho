@@ -11,7 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{address, Address, B256, U256};
 use reqwest::Url;
 use tracing::debug;
 use tycho_common::{models::Chain, simulation::protocol_sim::ProtocolSim as _, Bytes};
@@ -29,10 +29,11 @@ use crate::{
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
         telemetry::{self, PollOutcome},
-        EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BID_VALID_UNTIL_MS_ATTRIBUTE,
-        ETHEREUM_PRICE_SOURCES, EXPECTED_GAS_ATTRIBUTE, FALLBACK_PROTOCOL_SYSTEM,
-        GAS_LIMIT_ADDITION_ATTRIBUTE, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
-        QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
+        EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BASE_PRICE_SOURCES,
+        BID_VALID_UNTIL_MS_ATTRIBUTE, ETHEREUM_PRICE_SOURCES, EXPECTED_GAS_ATTRIBUTE,
+        FALLBACK_PROTOCOL_SYSTEM, GAS_LIMIT_ADDITION_ATTRIBUTE, PAMM_ADDRESS_ATTRIBUTE,
+        PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE,
+        VALID_FROM_BLOCK_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -55,6 +56,10 @@ const MAX_LISTING: u32 = (1 << 24) - 2;
 /// The sizes each side is sampled at by default: the most it fills and eleven halvings of it,
 /// down to 1/2048 of it.
 const DEFAULT_RUNGS: u32 = 12;
+
+/// USD1 on BNB Chain, the quote token of the first pool listed there, outside the chain's curated
+/// stablecoins: [`EfficientPropFeedBuilder::bnb`] values books in it as well.
+const BNB_USD1: Address = address!("8d0D000Ee44948FC98c9B98A4FA4921476f08B0d");
 
 /// How long a route priced from a book may take to land after the book stops being served, by
 /// default on Base: ten of its 200 ms blocks.
@@ -128,6 +133,33 @@ impl EfficientPropFeedBuilder {
     pub fn ethereum(book_config: BookFeedConfig, rpc_url: String) -> Self {
         Self::new(book_config, rpc_url, EfficientPropDeployment::ethereum())
             .approved_price_sources(ETHEREUM_PRICE_SOURCES)
+    }
+
+    /// A feed of the front deployed on Base ([`EfficientPropDeployment::base`]), with the price
+    /// source of its deployment approved ([`BASE_PRICE_SOURCES`]): `book_config` is Base's and
+    /// `rpc_url` a Base node. Base reads no state URL. What is left to set is whose listings to
+    /// serve ([`Self::with_approved_desks`]) and what each one's fills cost
+    /// ([`Self::credit_listing`]): no fill of the deployed build was measured on Base, so a
+    /// listing whose gas is not named is not served there.
+    pub fn base(book_config: BookFeedConfig, rpc_url: String) -> Self {
+        Self::new(book_config, rpc_url, EfficientPropDeployment::base())
+            .approved_price_sources(BASE_PRICE_SOURCES)
+    }
+
+    /// A feed of the front as it is to be deployed on BNB Chain ([`EfficientPropDeployment::bnb`]),
+    /// valuing books in USD1 beside the chain's curated stablecoins: `book_config` is BNB Chain's
+    /// and `rpc_url` a BNB Chain node. What is left to set is where the next block's state comes
+    /// from ([`Self::state_urls`], required), whose listings to serve
+    /// ([`Self::with_approved_desks`]), what each one's fills cost ([`Self::credit_listing`], as
+    /// on Base), and which price sources to approve ([`Self::approved_price_sources`]): none is
+    /// approved here, since the front is not deployed there yet and anyone may register a source,
+    /// so an id names a price contract only once the deployment's record shows it.
+    pub fn bnb(book_config: BookFeedConfig, rpc_url: String) -> Self {
+        let mut builder = Self::new(book_config, rpc_url, EfficientPropDeployment::bnb());
+        builder
+            .usd_quote_tokens
+            .insert(Bytes::from(BNB_USD1.0.to_vec()));
+        builder
     }
 
     pub fn new(
@@ -326,12 +358,11 @@ impl EfficientPropFeedBuilder {
     /// `titan_getPammStateOverrides`, such as the protocol api's `https://<api host>/v1/1/state`
     /// and a builder's data hosts. On BNB Chain a map names its block (`blockNumber`) and no
     /// slot; no URL serving chain 56 is known yet, and until one answers the feed serves nothing
-    /// there. Every poll
-    /// asks each and keeps only the maps for the block after the latest one. Each listing is
-    /// quoted from one answer, the first URL's in this order that writes its quote's stamp slot
-    /// with a stamp that block fills, and only when that answer also writes the price contract it
-    /// reads. A URL may carry a key, in its query or its userinfo; it is never logged, nor is any
-    /// part of it.
+    /// there. Every poll asks each and keeps only the maps for the block after the latest one. Each
+    /// listing is quoted from one answer, the first URL's in this order that writes its quote's
+    /// stamp slot with a stamp that block fills, and only when that answer also writes the price
+    /// contract it reads. A URL may carry a key, in its query or its userinfo; it is never logged,
+    /// nor is any part of it.
     pub fn state_urls(mut self, state_urls: impl IntoIterator<Item = String>) -> Self {
         self.state_urls = state_urls.into_iter().collect();
         self
@@ -427,13 +458,14 @@ impl EfficientPropFeedBuilder {
 
     /// The feed of the chain's own path.
     ///
-    /// Fails for a chain other than Base and Ethereum, for Ethereum without a state URL or Base
-    /// with one, for an RPC URL or a state URL that is not one, for a front, factory
-    /// or implementation that is not an address, for a desk contract code hash missing or not 32
-    /// bytes, for an empty allow-list, for a feed config that never withdraws a snapshot, for a
-    /// number of sizes outside 1 to 64, for the fallback router off Ethereum, and for a credit
-    /// listing of an id the front cannot hand out, or named twice. The node's chain is checked on
-    /// every poll, which fails fatally when the node serves another one.
+    /// Fails for a chain other than Base, Ethereum and BNB Chain, for Ethereum or BNB Chain without
+    /// a state URL or Base with one, for a quote layout other than [`QUOTE_LAYOUT_BUILDER`] on
+    /// Ethereum and BNB Chain or any on Base, for an RPC URL or a state URL that is not one, for a
+    /// front, factory or implementation that is not an address, for a desk contract code hash
+    /// missing or not 32 bytes, for an empty allow-list, for a feed config that never withdraws a
+    /// snapshot, for a number of sizes outside 1 to 64, for the fallback router off Ethereum, and
+    /// for a credit listing of an id the front cannot hand out, or named twice. The node's chain is
+    /// checked on every poll, which fails fatally when the node serves another one.
     pub fn build(self) -> Result<EfficientPropFeed, FeedError> {
         self.build_path()
     }
@@ -9206,6 +9238,146 @@ mod tests {
                     matches!(&error, FeedError::InvalidInput(message) if message.contains(reason)),
                     "{error}"
                 );
+            }
+        }
+    }
+
+    /// The presets of the three chains, held to their deployments' records.
+    mod presets {
+        use super::*;
+        use crate::pamm::protocols::efficient_prop::slots::SLOT_RULE;
+
+        /// Each preset's desk contract code hash places desk 1's contract under the preset's front
+        /// where its deployment's record has it (its `desk1`; on BNB Chain the rehearsal's): a
+        /// hash other than the deployed desk code's places every desk where none is approved.
+        #[rstest]
+        #[case::ethereum(
+            EfficientPropDeployment::ethereum(),
+            address!("4f8dd270acE370dE2f6Ac5EBf3230cBE099a0753")
+        )]
+        #[case::base(
+            EfficientPropDeployment::base(),
+            address!("2b347C8e89520aF26d30e6932f6273B699Ae746A")
+        )]
+        #[case::bnb(
+            EfficientPropDeployment::bnb(),
+            address!("4f8dd270acE370dE2f6Ac5EBf3230cBE099a0753")
+        )]
+        fn each_preset_places_desk_one_where_its_deployment_opened_it(
+            #[case] deployment: EfficientPropDeployment,
+            #[case] desk_one: Address,
+        ) {
+            let front = Address::from_slice(&deployment.front);
+            let cell_codehash = B256::from_slice(
+                deployment
+                    .cell_codehash
+                    .as_ref()
+                    .unwrap(),
+            );
+
+            assert_eq!(SLOT_RULE.account(front, cell_codehash, 1), desk_one);
+        }
+
+        /// Base's and BNB Chain's records name the front, its listing-door factory and its
+        /// implementation at Ethereum's addresses; Base reads no quote contract and BNB Chain's
+        /// is Ethereum's layout.
+        #[test]
+        fn the_base_and_bnb_presets_are_their_records() {
+            let ethereum = EfficientPropDeployment::ethereum();
+            for deployment in [EfficientPropDeployment::base(), EfficientPropDeployment::bnb()] {
+                assert_eq!(
+                    deployment.front,
+                    bytes(address!("0000000000403aeB66691063CC2fD42E71d6AcD6"))
+                );
+                assert_eq!(
+                    deployment.factory,
+                    bytes(address!("39eD9993449C96503f6a629cCD2BB5F132D7cc93"))
+                );
+                assert_eq!(
+                    deployment.implementations,
+                    vec![bytes(address!("48C6efab497EeC8501483Ceb23B6623f626d8371"))]
+                );
+            }
+            assert_eq!(EfficientPropDeployment::base().quote_layout, None);
+            assert_eq!(EfficientPropDeployment::bnb(), ethereum);
+        }
+
+        /// A feed from the Base preset builds from a Base node alone, approving the one price
+        /// source of Base's deployment, and refuses a state URL.
+        #[test]
+        fn a_feed_from_the_base_preset_needs_no_state_url() {
+            let builder = || EfficientPropFeedBuilder::base(book_config(), "http://node".into());
+
+            assert_eq!(builder().price_sources, BTreeSet::from(BASE_PRICE_SOURCES));
+            assert_eq!(builder().price_sources, BTreeSet::from([1]));
+            let feed = builder().build().unwrap();
+            assert_eq!(feed.source.assembler.landing_ms, 2_000);
+            let error = builder()
+                .state_urls(["http://state".to_string()])
+                .build()
+                .unwrap_err();
+            assert!(
+                matches!(&error, FeedError::InvalidInput(message) if message.contains("state URL")),
+                "{error}"
+            );
+        }
+
+        /// A feed from the BNB Chain preset needs a state URL, approves no price source until the
+        /// deployment's record names one, and values books in USD1 beside the chain's curated
+        /// stablecoins.
+        #[test]
+        fn a_feed_from_the_bnb_preset_needs_a_state_url_and_values_usd1() {
+            let config = BookFeedConfig { chain: Chain::Bsc, ..book_config() };
+            let builder = || EfficientPropFeedBuilder::bnb(config.clone(), "http://node".into());
+
+            assert!(builder().price_sources.is_empty());
+            let mut usd = usd_stablecoins_for_chain(Chain::Bsc).unwrap();
+            assert!(usd.insert(bytes(BNB_USD1)));
+            assert_eq!(builder().usd_quote_tokens, usd);
+            let error = builder().build().unwrap_err();
+            assert!(
+                matches!(&error, FeedError::InvalidInput(message) if message.contains("state URL")),
+                "{error}"
+            );
+            let feed = builder()
+                .state_urls(["http://state".to_string()])
+                .build()
+                .unwrap();
+            assert_eq!(feed.source.assembler.landing_ms, 100);
+        }
+
+        /// Polls Base through the preset with desk 1 approved and prints what it serves. Each
+        /// poll checks the preset against the chain (the factory's `FRONT`, the front's
+        /// `CELL_CODEHASH` and the implementation it runs), and fails where any differs. Set
+        /// `EFFICIENT_PROP_BASE_RPC` to a Base node.
+        #[tokio::test]
+        #[ignore = "reads Base mainnet; set EFFICIENT_PROP_BASE_RPC"]
+        async fn live_poll_of_the_base_preset() {
+            let Ok(rpc) = std::env::var("EFFICIENT_PROP_BASE_RPC") else {
+                println!("skipped: EFFICIENT_PROP_BASE_RPC unset");
+                return;
+            };
+            let deployment = EfficientPropDeployment::base();
+            let desk_one = SLOT_RULE.account(
+                Address::from_slice(&deployment.front),
+                B256::from_slice(
+                    deployment
+                        .cell_codehash
+                        .as_ref()
+                        .unwrap(),
+                ),
+                1,
+            );
+            let source = EfficientPropFeedBuilder::base(book_config(), rpc)
+                .with_approved_desks([bytes(desk_one)])
+                .build()
+                .unwrap()
+                .source;
+
+            for _ in 0..4 {
+                let snapshot = source.fetch().await.unwrap();
+                println!("{} books served", snapshot.books.len());
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
         }
     }
