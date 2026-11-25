@@ -1856,13 +1856,7 @@ pub mod db_fixtures {
                 .expect("inserting the account balance failed");
             return;
         };
-        sql_query(
-            "SELECT partman.create_partition_time('tycho.account_balance_history', ARRAY[$1])",
-        )
-        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
-        .execute(conn)
-        .await
-        .expect("creating the history partition failed");
+        create_history_day(conn, "account_balance_history", valid_to).await;
         diesel::insert_into(instance::schema::tycho::account_balance_history::table)
             .values(instance::orm::AccountBalanceHistory {
                 instance_id,
@@ -1907,11 +1901,7 @@ pub mod db_fixtures {
                 .expect("inserting the contract code failed");
             return;
         };
-        sql_query("SELECT partman.create_partition_time('tycho.contract_code_history', ARRAY[$1])")
-            .bind::<diesel::sql_types::Timestamp, _>(valid_to)
-            .execute(conn)
-            .await
-            .expect("creating the history partition failed");
+        create_history_day(conn, "contract_code_history", valid_to).await;
         diesel::insert_into(instance::schema::tycho::contract_code_history::table)
             .values(instance::orm::ContractCodeHistory {
                 instance_id,
@@ -1958,13 +1948,7 @@ pub mod db_fixtures {
                 .expect("inserting the contract slot failed");
             return;
         };
-        sql_query(
-            "SELECT partman.create_partition_time('tycho.contract_storage_history', ARRAY[$1])",
-        )
-        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
-        .execute(conn)
-        .await
-        .expect("creating the history partition failed");
+        create_history_day(conn, "contract_storage_history", valid_to).await;
         diesel::insert_into(instance::schema::tycho::contract_storage_history::table)
             .values(instance::orm::ContractStorageHistory {
                 instance_id,
