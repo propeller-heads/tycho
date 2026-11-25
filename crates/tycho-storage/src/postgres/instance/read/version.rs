@@ -255,11 +255,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::no_version(Some(day(5)), None, None, Ok(ReadAt::Current(None)))]
-    #[case::latest(Some(day(5)), None, Some(latest()), Ok(ReadAt::Current(None)))]
-    #[case::at_head(Some(day(5)), None, Some(at(day(5))), Ok(ReadAt::Current(Some(day(5)))))]
-    #[case::after_head(Some(day(5)), None, Some(at(day(6))), Ok(ReadAt::Current(Some(day(6)))))]
-    #[case::without_head(None, None, Some(at(day(1))), Ok(ReadAt::Current(Some(day(1)))))]
+    #[case::no_version(Some(day(5)), None, None, Ok(ReadAt::Current))]
+    #[case::latest(Some(day(5)), None, Some(latest()), Ok(ReadAt::Current))]
+    #[case::at_head(Some(day(5)), None, Some(at(day(5))), Ok(ReadAt::Current))]
+    #[case::after_head(Some(day(5)), None, Some(at(day(6))), Ok(ReadAt::Current))]
+    #[case::without_head(None, None, Some(at(day(1))), Ok(ReadAt::Current))]
     #[case::before_head(Some(day(5)), None, Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
     #[case::at_horizon(Some(day(5)), None, Some(at(day(2))), Ok(ReadAt::Past { ts: day(2), head: day(5) }))]
     #[case::at_base(Some(day(5)), Some(day(3)), Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
@@ -290,7 +290,7 @@ mod tests {
         let map = unique_by_key(
             "protocol_state",
             InstanceId(7),
-            ReadAt::Current(None),
+            ReadAt::Current,
             [((1, "x"), "a"), ((1, "y"), "b"), ((2, "x"), "c")],
         )
         .unwrap();
@@ -305,8 +305,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::latest(ReadAt::Current(None), "the latest version")]
-    #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
+    #[case::current(ReadAt::Current, "the head")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
     fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
         let result = unique_by_key(
