@@ -6,14 +6,70 @@ use std::collections::HashMap;
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::{storage::StorageError, Bytes};
+use tycho_common::{models::contract::Account, storage::StorageError, Bytes};
 
 use crate::postgres::{
-    instance::{gateway::PostgresGatewayNew, schema::tycho::account, InstanceId},
+    instance::{
+        gateway::PostgresGatewayNew, origins::BatchOrigins, orm::NewAccount,
+        schema::tycho::account, InstanceId,
+    },
     storage_error_from_diesel,
 };
 
 impl PostgresGatewayNew {
+    /// Stores the accounts that the instance does not store yet. A stored account keeps its row:
+    /// a later creation of the same address changes nothing. Code, storage and balances of a new
+    /// account are versions, written by [`Self::update_contracts`].
+    ///
+    /// Each account takes its creation block, timestamp and transaction from `origins`. `NotFound`
+    /// for a creation transaction that is not in the batch, and `Unexpected` for an account with
+    /// no creation transaction.
+    pub(crate) async fn insert_contracts(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        accounts: &[Account],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        let rows = accounts
+            .iter()
+            .map(|new| {
+                let creation_tx = new
+                    .creation_tx
+                    .as_ref()
+                    .ok_or_else(|| {
+                        StorageError::Unexpected(format!(
+                            "Account {}: an account needs the transaction that created it",
+                            new.address
+                        ))
+                    })?;
+                let origin = origins.change(creation_tx)?;
+                Ok(NewAccount {
+                    instance_id: instance,
+                    address: new.address.clone(),
+                    title: new.title.clone(),
+                    created_at: Some(origin.valid_from),
+                    creation_block: Some(origin.block_number),
+                    creation_tx_hash: Some(creation_tx.clone()),
+                    deleted_at: None,
+                    deletion_tx_hash: None,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        for chunk in rows.chunks(NewAccount::MAX_BATCH_SIZE) {
+            diesel::insert_into(account::table)
+                .values(chunk)
+                .on_conflict((account::instance_id, account::address))
+                .do_nothing()
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(err, "Account", &instance.to_string(), None)
+                })?;
+        }
+        Ok(())
+    }
+
     /// Returns the id of each account of the instance, by address. Deleted accounts are found too.
     ///
     /// `NotFound` for the first address that has no account in the instance.

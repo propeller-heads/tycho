@@ -370,6 +370,15 @@ pub struct NewAccount {
     pub deletion_tx_hash: Option<Bytes>,
 }
 
+impl NewAccount {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::protocol_component_holds_contract)]
 #[diesel(primary_key(instance_id, protocol_component_id, account_id))]
