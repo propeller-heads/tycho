@@ -217,10 +217,11 @@ mod tests {
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
+        keccak256,
         models::{
             blockchain::{Block, Transaction},
-            contract::Account as DomainAccount,
-            Chain,
+            contract::{Account as DomainAccount, AccountDelta},
+            Chain, ChangeType,
         },
         storage::StorageError,
         Bytes,
@@ -230,8 +231,11 @@ mod tests {
         cache::WriteOp,
         db_fixtures,
         instance::{
-            gateway::PostgresGatewayNew, origins::BatchOrigins, orm::Account,
-            schema::tycho::account, InstanceId,
+            gateway::PostgresGatewayNew,
+            origins::BatchOrigins,
+            orm::{Account, AccountBalance, ContractCode, ContractStorage},
+            schema::tycho::{account, account_balance, contract_code, contract_storage},
+            InstanceId,
         },
         testing::instance_test_connection,
     };
@@ -462,5 +466,157 @@ mod tests {
         assert!(stored(&mut conn, instance)
             .await
             .is_empty());
+    }
+
+    /// Address of the native token of Ethereum.
+    fn eth() -> Bytes {
+        Bytes::from([0u8; 20])
+    }
+
+    async fn insert_eth(conn: &mut AsyncPgConnection) {
+        db_fixtures::insert_token(conn, &hex::encode(eth()), "ETH", 18, Some(100)).await;
+    }
+
+    fn delta(
+        id: u8,
+        slots: &[(&str, Option<&str>)],
+        balance: Option<u64>,
+        code: Option<&str>,
+        change: ChangeType,
+    ) -> AccountDelta {
+        AccountDelta::new(
+            Chain::Ethereum,
+            address(id),
+            slots
+                .iter()
+                .map(|(slot, value)| (Bytes::from(*slot), value.map(Bytes::from)))
+                .collect(),
+            balance.map(Bytes::from),
+            code.map(Bytes::from),
+            change,
+        )
+    }
+
+    fn tx(hash: u8) -> Bytes {
+        Bytes::from(vec![hash])
+    }
+
+    #[tokio::test]
+    async fn test_update_contracts_writes_code_slots_and_native_balance() {
+        let (mut conn, gateway, instance) = setup().await;
+        insert_eth(&mut conn).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let deltas = [(
+            tx(0xb2),
+            delta(
+                1,
+                &[("0x01", Some("0x0a")), ("0x02", None)],
+                Some(7),
+                Some("0x6080"),
+                ChangeType::Update,
+            ),
+        )];
+
+        gateway
+            .update_contracts(instance, &origins(), &deltas, &mut conn)
+            .await
+            .unwrap();
+
+        let code: Vec<ContractCode> = contract_code::table
+            .filter(contract_code::instance_id.eq(instance))
+            .select(ContractCode::as_select())
+            .load(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(code.len(), 1);
+        assert_eq!(
+            (code[0].account_id, &code[0].code, &code[0].hash, &code[0].modify_tx_hash),
+            (id, &Bytes::from("0x6080"), &Bytes::from(keccak256(Bytes::from("0x6080"))), &tx(0xb2))
+        );
+        assert_eq!((code[0].valid_from, code[0].tx_index), (ts(11), 2));
+        let slots: Vec<(Bytes, Option<Bytes>)> = contract_storage::table
+            .filter(contract_storage::instance_id.eq(instance))
+            .filter(contract_storage::account_id.eq(id))
+            .order_by(contract_storage::slot)
+            .select(ContractStorage::as_select())
+            .load(&mut conn)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.slot, row.value))
+            .collect();
+        assert_eq!(
+            slots,
+            vec![(Bytes::from("0x01"), Some(Bytes::from("0x0a"))), (Bytes::from("0x02"), None)]
+        );
+        let balances: Vec<AccountBalance> = account_balance::table
+            .filter(account_balance::instance_id.eq(instance))
+            .select(AccountBalance::as_select())
+            .load(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(balances.len(), 1);
+        assert_eq!(
+            (balances[0].account_id, &balances[0].token, &balances[0].balance),
+            (id, &eth(), &Bytes::from(7u64))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_contracts_fails_without_the_native_token() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let deltas = [(tx(0xb2), delta(1, &[], Some(7), None, ChangeType::Update))];
+
+        let result = gateway
+            .update_contracts(instance, &origins(), &deltas, &mut conn)
+            .await;
+
+        assert_eq!(result, Err(StorageError::NotFound("Token".to_string(), eth().to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_update_contracts_fails_for_an_account_not_in_the_instance() {
+        let (mut conn, gateway, instance) = setup().await;
+        let deltas =
+            [(tx(0xb2), delta(1, &[("0x01", Some("0x0a"))], None, None, ChangeType::Update))];
+
+        let result = gateway
+            .update_contracts(instance, &origins(), &deltas, &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Account".to_string(), address(1).to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_contracts_fails_for_a_deletion() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let deltas = [(tx(0xb2), delta(1, &[], None, None, ChangeType::Deletion))];
+
+        let result = gateway
+            .update_contracts(instance, &origins(), &deltas, &mut conn)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_update_contracts_fails_for_two_deltas_of_one_account_in_one_transaction() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let deltas = [
+            (tx(0xb2), delta(1, &[("0x01", Some("0x0a"))], None, None, ChangeType::Update)),
+            (tx(0xb2), delta(1, &[("0x01", Some("0x0b"))], None, None, ChangeType::Update)),
+        ];
+
+        let result = gateway
+            .update_contracts(instance, &origins(), &deltas, &mut conn)
+            .await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
     }
 }
