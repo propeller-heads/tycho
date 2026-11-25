@@ -1696,6 +1696,16 @@ pub mod db_fixtures {
             .expect("inserting the component balance failed");
     }
 
+    /// Creates the day of `day` in the history table `table` of the `tycho` schema. Binds `day` as
+    /// UTC, so the day does not depend on the session TimeZone.
+    pub async fn create_history_day(conn: &mut AsyncPgConnection, table: &str, day: NaiveDateTime) {
+        sql_query(format!("SELECT partman.create_partition_time('tycho.{table}', ARRAY[$1])"))
+            .bind::<diesel::sql_types::Timestamptz, _>(day)
+            .execute(conn)
+            .await
+            .expect("creating the history day failed");
+    }
+
     /// Inserts a version of the balance of `token` in a component of the instance, with balance
     /// float 1.0, previous value `0x00` and transaction index 0. `valid_to` `None`: the current
     /// row. `Some`: a history row, after the creation of the history partition of that day.
@@ -1725,13 +1735,7 @@ pub mod db_fixtures {
                 .expect("inserting the component balance failed");
             return;
         };
-        sql_query(
-            "SELECT partman.create_partition_time('tycho.component_balance_history', ARRAY[$1])",
-        )
-        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
-        .execute(conn)
-        .await
-        .expect("creating the history partition failed");
+        create_history_day(conn, "component_balance_history", valid_to).await;
         diesel::insert_into(instance::schema::tycho::component_balance_history::table)
             .values(instance::orm::NewComponentBalanceHistory {
                 instance_id,
@@ -1808,13 +1812,7 @@ pub mod db_fixtures {
                 .expect("inserting the protocol state failed");
             return;
         };
-        sql_query(
-            "SELECT partman.create_partition_time('tycho.protocol_state_history', ARRAY[$1])",
-        )
-        .bind::<diesel::sql_types::Timestamp, _>(valid_to)
-        .execute(conn)
-        .await
-        .expect("creating the history partition failed");
+        create_history_day(conn, "protocol_state_history", valid_to).await;
         diesel::insert_into(instance::schema::tycho::protocol_state_history::table)
             .values(instance::orm::NewProtocolStateHistory {
                 instance_id,
