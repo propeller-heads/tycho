@@ -454,6 +454,27 @@ mod tests {
         assert_eq!(archived, vec![(value(1), 0), (value(2), 2)]);
     }
 
+    #[tokio::test]
+    async fn test_version_without_history_day_fails() {
+        let mut setup = setup().await;
+        let far_ahead = minutes_ago(0) + Duration::days(60);
+
+        let change = update(&setup, 1, 2, far_ahead, 0);
+
+        let result = write(&mut setup, vec![change]).await;
+
+        let day = far_ahead.date().to_string();
+        let instance = format!("instance {}:", setup.instance);
+        assert!(
+            matches!(
+                &result,
+                Err(StorageError::Unexpected(msg))
+                    if msg.contains("no partition") && msg.contains(&instance) && msg.contains(&day)
+            ),
+            "{result:?}"
+        );
+    }
+
     /// A batch of block 10 at `ts`, with the transactions `0xa1` at index 1 and `0xa3` at index 3.
     fn origins(ts: NaiveDateTime) -> BatchOrigins {
         let block = Block::new(10, Chain::Ethereum, Bytes::from("0x0a"), Bytes::default(), ts);
