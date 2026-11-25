@@ -63,7 +63,7 @@ use crate::{
     pamm::protocols::efficient_prop::{
         desks::ApprovedDesks,
         ladder::FillPath,
-        overrides::{NextBlock, NextBlockReader, Wanted, SLOT_SECS},
+        overrides::{Cadence, NextBlock, NextBlockReader, Wanted, SLOT_SECS},
         slots::{HeadWords, ListingSlots, SLOT_RULE},
         state::{CreditGas, FillReads, PairPlace},
         telemetry::{self, NotCovered, NotKept, PollOutcome},
@@ -128,12 +128,20 @@ const CLOCK_SEAL: u64 = 0;
 /// The front's clock mode that counts milliseconds from the block number (`PropAMMClock.BLOCKS`).
 const CLOCK_BLOCKS: u64 = 2;
 
+/// The front's clock mode that reads the millisecond timestamp precompile, BNB Chain's BEP-706
+/// (`PropAMMClock.PRECOMPILE`), and the start of the block's second where it answers nothing.
+const CLOCK_PRECOMPILE: u64 = 3;
+
 /// The BaseTime predeploy, whose `timestampMs()` answers the block's milliseconds: what the
 /// front's clock reads in its modes 1 and 2 where it does not count the block
-/// (`PropAMMClock.BASE_TIME`). Mode 3, the millisecond timestamp precompile of other chains, is
-/// one a Base front refuses at its construction: a read that finds it fails (see
-/// [`DoorsReader::read_listings`]).
+/// (`PropAMMClock.BASE_TIME`). A Base front refuses mode 3 at its construction.
 const BASE_TIME: Address = address!("4200000000000000000000000000000000000030");
+
+/// The millisecond timestamp precompile of BNB Chain's BEP-706, which a front in mode 3 reads:
+/// before the precompile exists the address answers nothing, and the front reads the start of
+/// the block's second, as in mode 0. A BNB front is served only while it answers nothing (see
+/// [`DoorsReader::read_listings`]).
+const MS_PRECOMPILE: Address = address!("0000000000000000000000000000000000000070");
 
 /// Calls per `aggregate3`. A door's `quote` costs about 70k to 110k gas, so a full call stays
 /// near 5M, well inside the gas any node grants an `eth_call`. A credit listing's routed size
@@ -599,7 +607,11 @@ impl FrontClock {
 
     /// The contract the front's clock reads milliseconds from, where its mode reads one.
     pub(super) fn source(&self) -> Option<Address> {
-        (self.mode != CLOCK_SEAL).then_some(BASE_TIME)
+        match self.mode {
+            CLOCK_SEAL => None,
+            CLOCK_PRECOMPILE => Some(MS_PRECOMPILE),
+            _ => Some(BASE_TIME),
+        }
     }
 
     /// Milliseconds counted from the anchor at block `number`, in the block-count mode.
@@ -846,15 +858,44 @@ struct BatchAnswers {
     words: Vec<Result<U256, FeedError>>,
     /// The hash of the batch's block, where it was asked and the node answered that block.
     head: Option<B256>,
+    /// That block's milliseconds, where its header names them ([`Header::ms`]).
+    head_ms: Option<u64>,
     /// The front's implementation at the batch's block, where it was asked.
     implementation: Option<Address>,
 }
 
-/// A block as `eth_getBlockByNumber` answers it: the two fields read.
+/// A block as `eth_getBlockByNumber` answers it: the fields read.
 #[derive(Debug, Deserialize)]
 struct Header {
     hash: B256,
     number: U64,
+    #[serde(default)]
+    timestamp: Option<U64>,
+    /// BNB Chain's milliseconds of the block (BEP-520), where the node names them.
+    #[serde(default, rename = "milliTimestamp")]
+    milli_timestamp: Option<U64>,
+    #[serde(default, rename = "mixHash")]
+    mix_hash: Option<B256>,
+}
+
+impl Header {
+    /// The block's time in milliseconds on BNB Chain: its `milliTimestamp` where the node names
+    /// it within the block's second, else the milliseconds BEP-520 keeps in the low eight bytes
+    /// of its `mixHash` where they are under a second. `None` where neither is.
+    fn ms(&self) -> Option<u64> {
+        let seconds = self.timestamp?.to::<u64>();
+        let base = seconds.checked_mul(1000)?;
+        if let Some(ms) = self
+            .milli_timestamp
+            .map(|ms| ms.to::<u64>())
+            .filter(|ms| ms / 1000 == seconds)
+        {
+            return Some(ms);
+        }
+        let low: [u8; 8] = self.mix_hash?.0[24..].try_into().ok()?;
+        let sub = u64::from_be_bytes(low);
+        (sub < 1000).then(|| base + sub)
+    }
 }
 
 /// One listing a next-block read took: what the reads before its door's answered of it.
@@ -1004,7 +1045,71 @@ struct NextTaken {
     state: serde_json::Value,
     listings: Vec<TakenListing>,
     head: Option<B256>,
+    /// The head's milliseconds, where its header names them (BNB Chain).
+    head_ms: Option<u64>,
     implementation: Option<Address>,
+}
+
+/// The blocks a next-block read samples each side at, and how long the sides it finds live.
+#[derive(Debug, Clone)]
+struct NextMoments {
+    /// The next block at each time it may carry: its slot's on Ethereum; on BNB Chain the
+    /// head's second and the one after, since a block 450 ms on may fall in either.
+    next: Vec<At>,
+    /// The block after it at each time it may carry, asked of the listings that carry.
+    after: Vec<At>,
+    /// One millisecond past the end of a side's life through the next block alone, and through
+    /// the block after too: on Ethereum each block's own time, on BNB Chain the head's
+    /// milliseconds and one and two blocks' spacing.
+    next_until_ms: u64,
+    after_until_ms: u64,
+}
+
+impl NextMoments {
+    /// The moments of the next block `number` after a head of milliseconds `head_ms` (its
+    /// second's start where its header names none), the next block's first time being `time`,
+    /// on a front whose clock at the head is `head`.
+    fn new(cadence: Cadence, head: &FrontClock, number: u64, time: u64, head_ms: u64) -> Self {
+        let at = |number: u64, time: u64| head.at_block(number, time).read_at();
+        match cadence {
+            Cadence::Slots => {
+                let target = at(number, time);
+                let after_time = time.saturating_add(SLOT_SECS);
+                let after = At {
+                    number: number.saturating_add(1),
+                    time: after_time,
+                    ms: after_time.saturating_mul(1000),
+                    exact: false,
+                    base_time: None,
+                };
+                Self {
+                    next_until_ms: target.ms.saturating_add(1),
+                    after_until_ms: after.ms.saturating_add(1),
+                    next: vec![target],
+                    after: vec![after],
+                }
+            }
+            Cadence::Blocks { block_ms } => {
+                let seconds = [time, time.saturating_add(1)];
+                Self {
+                    next: seconds
+                        .iter()
+                        .map(|&second| at(number, second))
+                        .collect(),
+                    after: seconds
+                        .iter()
+                        .map(|&second| at(number.saturating_add(1), second))
+                        .collect(),
+                    next_until_ms: head_ms
+                        .saturating_add(block_ms)
+                        .saturating_add(1),
+                    after_until_ms: head_ms
+                        .saturating_add(2 * block_ms)
+                        .saturating_add(1),
+                }
+            }
+        }
+    }
 }
 
 /// The node's JSON-RPC transport over HTTP: alloy's own, less the URL it records on every
@@ -1320,6 +1425,14 @@ impl DoorsReader {
     /// poll, by number, and a read by hash that fails is asked again by number on that poll,
     /// unless its failure is fatal ([`HashForm`]). Each read that is not kept is counted by its
     /// reason ([`NotKept`]).
+    ///
+    /// On BNB Chain ([`Cadence::Blocks`]) a map names its block alone, the next block falls in the
+    /// head's second or the one after, and the block after it likewise: each is sampled at both,
+    /// a size served only where both fill it by one path, at the lesser output. A side lives
+    /// until the head's milliseconds (its header's `milliTimestamp`, or the start of its second
+    /// where the header names none) and one block, 450 ms, or two where it carries. The front's
+    /// clock mode 3 reads the block's second there while the millisecond precompile answers
+    /// nothing, and is served as mode 0 is.
     async fn read_next_block(
         &self,
         next_block: &NextBlockReader,
@@ -1333,7 +1446,7 @@ impl DoorsReader {
         let started = hold.from_ms / 1000;
         if started >
             head.timestamp
-                .saturating_add(2 * SLOT_SECS)
+                .saturating_add(next_block.cadence.stall_secs())
                 .saturating_add(hold.max_lag_secs)
         {
             return Err(lagging(started, head.number, head.timestamp));
@@ -1351,7 +1464,8 @@ impl DoorsReader {
             answered_at_block: false,
             outcome: PollOutcome::NoStateMap,
         };
-        let Some(next) = maps.for_block_after(head.number, head.timestamp) else {
+        let Some(next) = maps.for_block_after_in(head.number, head.timestamp, next_block.cadence)
+        else {
             debug!(
                 front = %self.front,
                 latest = head.number,
@@ -1388,9 +1502,16 @@ impl DoorsReader {
                 Some((listing, probes?))
             })
             .collect();
-        let NextTaken { served, state, listings, head: taken_at, implementation } = self
+        let NextTaken { served, state, listings, head: taken_at, head_ms, implementation } = self
             .take_next_block(served, block, &next)
             .await?;
+        let moments = NextMoments::new(
+            next_block.cadence,
+            &head,
+            next.number,
+            next.time,
+            head_ms.unwrap_or_else(|| head.timestamp.saturating_mul(1000)),
+        );
         let asked_on = taken_at
             .zip(implementation)
             .map(|(hash, implementation)| SampledOn {
@@ -1447,7 +1568,7 @@ impl DoorsReader {
                             .refused
                             .store(false, Ordering::Relaxed);
                         match self
-                            .ask_doors(&served, by_hash, &clock, &state)
+                            .ask_doors(&served, by_hash, &clock, &moments, &state)
                             .await
                         {
                             Ok(asked) => Some(asked),
@@ -1486,7 +1607,7 @@ impl DoorsReader {
                     // block of that number, so nothing of it is kept.
                     None => {
                         let (doors, _) = self
-                            .ask_doors(&served, block, &clock, &state)
+                            .ask_doors(&served, block, &clock, &moments, &state)
                             .await?;
                         telemetry::record_read_not_kept(
                             by_number.unwrap_or(NotKept::HashReadFailed),
@@ -1539,13 +1660,14 @@ impl DoorsReader {
         served: &[(Listing, (U256, U256))],
         block: BlockId,
         clock: &FrontClock,
+        moments: &NextMoments,
         state: &serde_json::Value,
     ) -> Result<(Vec<DoorRead>, Answered), FeedError> {
         let (open, opened) = self
             .open_doors(served, block, Some((clock, state)))
             .await?;
         let (doors, sampled) = self
-            .sample_next_block(&open, clock, block, state)
+            .sample_next_block(&open, clock, moments, block, state)
             .await?;
         Ok((doors, opened.and(sampled)))
     }
@@ -1629,7 +1751,7 @@ impl DoorsReader {
         );
         // With them the front's implementation and the head's hash: what a read that asks no
         // door is checked on and matched by (see [`SampledOn`]).
-        let BatchAnswers { groups, mut words, head: taken_at, implementation } = self
+        let BatchAnswers { groups, mut words, head: taken_at, head_ms, implementation } = self
             .batch(
                 block,
                 vec![Group { calls, at: None }],
@@ -1749,7 +1871,14 @@ impl DoorsReader {
                 None
             })
             .collect();
-        Ok(NextTaken { served, state: taken.state, listings: read, head: taken_at, implementation })
+        Ok(NextTaken {
+            served,
+            state: taken.state,
+            listings: read,
+            head: taken_at,
+            head_ms,
+            implementation,
+        })
     }
 
     /// The first request: the block, the front's implementation and clock, and every reserved
@@ -1766,8 +1895,8 @@ impl DoorsReader {
             call(self.factory, DOOR_CODEHASHCall {}.abi_encode()),
             call(self.front, clockCall {}.abi_encode()),
         ];
-        // The front's own desk contract code hash, where one is configured: a configuration that
-        // differs from the front's places no maker's quote, so nothing may be listed.
+        // The front's own desk contract code hash: a configuration that differs from the front's
+        // places no maker's desk contract, so nothing may be listed.
         if self.cell_codehash.is_some() {
             calls.push(call(self.front, CELL_CODEHASHCall {}.abi_encode()));
         }
@@ -1775,6 +1904,11 @@ impl DoorsReader {
         // block's second, and the predeploy's address holds no code there.
         if self.next_block.is_none() {
             calls.push(call(BASE_TIME, timestampMsCall {}.abi_encode()));
+        }
+        // BNB Chain's millisecond precompile, which its fronts' clock mode 3 reads: served only
+        // while it answers nothing.
+        if self.chain == Chain::Bsc {
+            calls.push(call(MS_PRECOMPILE, Vec::new()));
         }
         let head_calls = calls.len();
         for id in 1..=scan_to {
@@ -1790,12 +1924,20 @@ impl DoorsReader {
         else {
             return Err(FeedError::Parsing("multicall answered too few calls".into()));
         };
-        let (front_cell_codehash, base_time) = match (self.cell_codehash, rest) {
-            (Some(_), [cell, base_time @ ..]) => (Some(cell), base_time),
+        let (front_cell_codehash, rest) = match (self.cell_codehash, rest) {
+            (Some(_), [cell, rest @ ..]) => (Some(cell), rest),
             (None, rest) => (None, rest),
             (Some(_), []) => {
                 return Err(FeedError::Parsing("multicall answered too few calls".into()))
             }
+        };
+        let (base_time, precompile) = if self.chain == Chain::Bsc {
+            let [precompile] = rest else {
+                return Err(FeedError::Parsing("multicall answered too few calls".into()));
+            };
+            (&[][..], Some(precompile))
+        } else {
+            (rest, None)
         };
         let served = to_u64(setting::<getChainIdCall>(chain_id, "chain id")?, "chain id")?;
         if served != self.chain.id() {
@@ -1843,14 +1985,22 @@ impl DoorsReader {
             }
         }
         let timing = setting::<clockCall>(clock, "front's clock")?;
-        if self.next_block.is_some() && timing.clockMode != U256::from(CLOCK_SEAL) {
+        // On BNB Chain mode 3 reads the block's second while the precompile answers nothing, as
+        // mode 0 does: the next block is sampled at its second. Once it answers, the front reads
+        // the block's milliseconds, which no block override sets, and nothing is served.
+        let reads_seal = timing.clockMode == U256::from(CLOCK_SEAL) ||
+            (timing.clockMode == U256::from(CLOCK_PRECOMPILE) &&
+                precompile
+                    .is_some_and(|answer| answer.success && answer.returnData.is_empty()));
+        if self.next_block.is_some() && !reads_seal {
             return Err(FeedError::Fatal(format!(
-                "Efficient PropAMM: the front's clock mode {} is not the block's second, the one a \
-                 front on Ethereum runs",
+                "Efficient PropAMM: the front's clock mode {} does not read the block's second, \
+                 the one a front on Ethereum runs and a front on BNB Chain reads until its \
+                 millisecond precompile answers",
                 timing.clockMode
             )));
         }
-        if timing.clockMode > U256::from(CLOCK_BLOCKS) {
+        if self.next_block.is_none() && timing.clockMode > U256::from(CLOCK_BLOCKS) {
             return Err(FeedError::Fatal(format!(
                 "Efficient PropAMM: the front's clock mode {} is not one a Base front runs",
                 timing.clockMode
@@ -1877,8 +2027,8 @@ impl DoorsReader {
             }
             highest = id;
             // Anyone can reserve a listing and post quotes to it, so a listing is served only
-            // where its maker's desk contract is approved. Base's path, whose makers have no desk
-            // contract, is not served at all.
+            // where its maker's desk contract is approved, on every chain: the builder takes no
+            // feed without the desk contracts' code hash.
             if let Some(cell_codehash) = self.cell_codehash {
                 let desk = SLOT_RULE.account(self.front, cell_codehash, view.desk);
                 if view.desk == 0 || !approved_desks.contains(&desk) {
@@ -1889,12 +2039,12 @@ impl DoorsReader {
             }
             // A credit listing fills an input past its pool's custody whole through the pool's own
             // preview, which may pay less than a smaller input and costs other gas: its output may
-            // step where the route takes over. It is served only on a chain whose builders land
-            // makers' updates, each size then sampled in the blocks it can fill in, in a credit
-            // mode the front knows, and only where the caller configured its gas.
+            // step where the route takes over. It is served in a credit mode the front knows, and
+            // only where the caller configured its gas, each size then tagged by the path the
+            // front's own plan gives it at every moment sampled.
             let credit = match view.creditMode {
                 0 => None,
-                mode @ 1..=MAX_CREDIT_MODE if self.next_block.is_some() => {
+                mode @ 1..=MAX_CREDIT_MODE => {
                     let Some(gas) = self.credit.get(&id) else {
                         debug!(
                             listing = id,
@@ -1908,7 +2058,7 @@ impl DoorsReader {
                 }
                 // A mode above the front's three, which the deployed front's two bits cannot
                 // hold and `doorView`'s byte can: left out and counted, so a front naming one
-                // shows in the count. On a chain with no next block read, any credit mode.
+                // shows in the count.
                 mode => {
                     debug!(listing = id, credit_mode = mode, "skipping credit listing");
                     left_out(NotCovered::CreditMode);
@@ -2271,6 +2421,14 @@ impl DoorsReader {
     /// within the side's life), the fourth request is not made and the side lives to the read
     /// alone, which the assembler leaves out.
     ///
+    /// On a credit listing each size is also asked of the front's `quoteFrom` with `PLAN_ONLY`
+    /// beside the door's quote in every group that asks it, and tagged by [`classify`] at each:
+    /// a size whose path differs between two moments, or whose plan disagrees with the door at
+    /// any, is no sample. Its sides that may route are first asked how far they reach at the
+    /// read's block ([`Self::reaches`]), and are run custody sizes then routed sizes
+    /// ([`stepped`]), its custody sizes alone where another door here shares what its route
+    /// owes ([`custody_run`]). Every door's pool is asked its two balances at the block.
+    ///
     /// A node that refuses the override or runs it at another moment on the front's clock (caught
     /// by the reads of the clock under it, see [`DoorsReader::batch`]) leaves a side its samples
     /// at the read only where its levels cannot age within the life: no drift and no widening, or
@@ -2290,6 +2448,12 @@ impl DoorsReader {
         }
         // The life ends before `until_ms`: its last block is the last before it.
         let until = clock.at_or_before(until_ms.saturating_sub(1));
+        // A credit listing's route fills sizes its door's most-fillable read does not report:
+        // each side that may route is first asked how far it reaches, at the read's block.
+        let block = BlockId::number(clock.number);
+        let reaches = self
+            .reaches(doors, None, clock, block, None)
+            .await?;
         // The holds of the guarded sources' lanes already answered, and the lanes to ask this
         // read, whose hold is taken as the longest a lane keeps until they answer.
         let holds_ms = self
@@ -2306,9 +2470,9 @@ impl DoorsReader {
             .collect();
         // Per door and side: the sizes, its calls, and the block before its premium ends.
         let mut sides = Vec::with_capacity(doors.len() * 2);
-        for door in doors {
+        for (door, reach) in doors.iter().zip(&reaches) {
             for (bid, side) in [(true, &door.bid), (false, &door.ask)] {
-                let (sizes, calls) = self.side_quotes(door, bid);
+                let (sizes, calls) = self.side_quotes(door, bid, reach[usize::from(!bid)]);
                 // Where the side's premium window closes after the read and within the life: the
                 // last block before it, where the premium last holds the levels back, and the
                 // first at or after it, where they pay the most, past an output bound the door
@@ -2359,7 +2523,8 @@ impl DoorsReader {
             .iter()
             .flat_map(|(_, calls, _, _)| calls.iter().cloned())
             .collect();
-        // The lanes not yet answered are asked their hold at the block, after every quote.
+        // The lanes not yet answered are asked their hold at the block, after every quote, and
+        // after them what each door's pool holds of its two tokens.
         let quotes = all.len();
         let at_block_calls = all
             .iter()
@@ -2369,6 +2534,10 @@ impl DoorsReader {
                     .iter()
                     .map(|&lane| call(lane, HOLD_MSCall {}.abi_encode())),
             )
+            .chain(doors.iter().flat_map(|door| {
+                [door.base, door.quote]
+                    .map(|token| call(token, balanceOfCall { account: door.pool }.abi_encode()))
+            }))
             .collect();
         let mut groups =
             vec![Group { calls: at_block_calls, at: None }, Group { calls: all, at: Some(until) }];
@@ -2395,13 +2564,18 @@ impl DoorsReader {
         // places in each, one where it has one size.
         let mut probed = vec![None; sides.len()];
         let mut probes = Vec::new();
-        for (s, (_, calls, _, _)) in sides.iter().enumerate() {
-            if let (true, Some(smallest), Some(largest)) =
-                (doors[s / 2].prints, calls.first(), calls.last())
-            {
+        for (s, (sizes, calls, _, _)) in sides.iter().enumerate() {
+            if let (true, Some(smallest), Some(largest)) = (
+                doors[s / 2].prints,
+                calls.first(),
+                sizes
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|last| calls.get(last)),
+            ) {
                 let small = probes.len();
                 probes.push(smallest.clone());
-                if calls.len() > 1 {
+                if sizes.len() > 1 {
                     probes.push(largest.clone());
                 }
                 probed[s] = Some((small, probes.len() - 1));
@@ -2412,7 +2586,7 @@ impl DoorsReader {
             groups.push(Group { calls: probes.clone(), at: Some(*at) });
         }
         let BatchAnswers { groups: answers, .. } = self
-            .batch(BlockId::number(clock.number), groups, &[], Also::Nothing, Some(clock), None)
+            .batch(block, groups, &[], Also::Nothing, Some(clock), None)
             .await?;
         let mut answers = answers.into_iter();
         let at_block = answers
@@ -2421,7 +2595,7 @@ impl DoorsReader {
             .unwrap_or_default();
         for (lane, answer) in lanes.iter().zip(
             at_block
-                .get(quotes..)
+                .get(quotes..quotes + lanes.len())
                 .unwrap_or_default(),
         ) {
             match decode::<HOLD_MSCall>(answer, "price lane's HOLD_MS") {
@@ -2451,12 +2625,22 @@ impl DoorsReader {
                  clock; samples hold only on listings that cannot age"
             );
         }
-        // Each side's answers in each group, by position.
+        // Whether each door's pool holds none of its base and none of its quote, at the block.
+        let mut held = at_block
+            .get(quotes + lanes.len()..)
+            .unwrap_or_default()
+            .iter()
+            .map(|answer| {
+                decode::<balanceOfCall>(answer, "token's balanceOf")
+                    .is_ok_and(|held| held.is_zero())
+            });
+        // Each side's answers in each group, by position: its quotes, then on a credit listing
+        // its plans.
         let mut offsets = Vec::with_capacity(sides.len());
         let mut offset = 0;
-        for (sizes, _, _, _) in &sides {
+        for (_, calls, _, _) in &sides {
             offsets.push(offset);
-            offset += sizes.len();
+            offset += calls.len();
         }
         // Per side, its place in each premium edge's group it is asked in, and that edge's block.
         let mut edge_offsets = vec![Vec::new(); sides.len()];
@@ -2464,7 +2648,7 @@ impl DoorsReader {
             let mut offset = 0;
             for &i in members {
                 edge_offsets[i].push((*group - 2, offset, *at));
-                offset += sides[i].0.len();
+                offset += sides[i].1.len();
             }
         }
         // On a side that reads a print: at each second's ask and at the life's end, whether the
@@ -2565,15 +2749,21 @@ impl DoorsReader {
             let mut offset = 0;
             for &i in members {
                 refine_offsets[i].push((*group, offset, *at));
-                offset += sides[i].0.len();
+                offset += sides[i].1.len();
             }
         }
         let until_age_ms = clock.age_ms(&until);
         let mut reads = Vec::with_capacity(doors.len());
         for (d, door) in doors.iter().enumerate() {
-            let take = |s: usize, view: &SideView| -> (Samples, bool, u64) {
-                let (sizes, _, _, premium_ends) = &sides[s];
+            let take = |s: usize, view: &SideView| -> (Samples, Option<U256>, bool, u64) {
+                let (sizes, calls, _, premium_ends) = &sides[s];
                 let size_count = sizes.len();
+                let call_count = calls.len();
+                // One group's answers for the side, each size with the path its fill takes.
+                let classified = |answers: &[Call3Result]| {
+                    let (quotes, plans) = answers.split_at(size_count.min(answers.len()));
+                    classify(sizes, quotes, door.credit.map(|_| plans))
+                };
                 // Where its print lapses within the book's life, the side's own life ends at the
                 // last block the fourth request found its print living, run without a gap from
                 // the last ask it lived through: the read's block where none.
@@ -2586,8 +2776,8 @@ impl DoorsReader {
                             let Some(answers) = at_refine[group].as_deref() else {
                                 break;
                             };
-                            let side = &answers[offset..offset + size_count];
-                            if !side
+                            let side = &answers[offset..offset + call_count];
+                            if !side[..size_count]
                                 .iter()
                                 .any(|answer| quoted(answer).is_some())
                             {
@@ -2607,7 +2797,7 @@ impl DoorsReader {
                     let end = lives_to.is_none().then(|| {
                         at_end
                             .as_deref()
-                            .map(|answers| &answers[offsets[s]..offsets[s] + size_count])
+                            .map(|answers| &answers[offsets[s]..offsets[s] + call_count])
                     });
                     let edges = edge_offsets[s]
                         .iter()
@@ -2615,7 +2805,7 @@ impl DoorsReader {
                         .map(|&(group, offset, _)| {
                             at_edges[group]
                                 .as_deref()
-                                .map(|answers| &answers[offset..offset + size_count])
+                                .map(|answers| &answers[offset..offset + call_count])
                         });
                     end.into_iter()
                         .chain(edges)
@@ -2623,21 +2813,30 @@ impl DoorsReader {
                         .collect()
                 };
                 let known = later.iter().all(Option::is_some);
-                let samples = sizes
+                let first = classified(&at_block[offsets[s]..offsets[s] + call_count]);
+                // Each size's least output over the moments asked, where every one of them fills
+                // it by the same path: a size whose path differs between two moments bounds
+                // neither its gas nor its output over the life.
+                let later: Vec<_> = later
+                    .iter()
+                    .flatten()
+                    .map(|answers| classified(answers))
+                    .collect();
+                let samples: Vec<_> = first
                     .iter()
                     .enumerate()
-                    .map(|(k, &amount)| {
-                        let least = quoted(&at_block[offsets[s] + k]).and_then(|first| {
+                    .map(|(k, &(amount, here))| {
+                        let least = here.and_then(|first| {
                             later
                                 .iter()
-                                .flatten()
-                                .try_fold(first, |least, answers| {
-                                    Some(least.min(quoted(&answers[k])?))
+                                .try_fold(first, |(least, path), there| {
+                                    let (output, later_path) = there.get(k)?.1?;
+                                    (later_path == path).then_some((least.min(output), path))
                                 })
                         });
                         (amount, least)
                     })
-                    .collect::<Samples>();
+                    .collect();
                 // A premium window closing within the life raises what the side pays there, past
                 // an output bound the door then refuses: only the samples around it show that.
                 let cannot_age = ((view.drift == 0 && door.aging.widen == 0) ||
@@ -2674,15 +2873,7 @@ impl DoorsReader {
                         "side's print lapses within the book's life: served only until then"
                     );
                 }
-                let mut samples: Samples = if known {
-                    samples
-                } else {
-                    sizes
-                        .iter()
-                        .enumerate()
-                        .map(|(k, &amount)| (amount, quoted(&at_block[offsets[s] + k])))
-                        .collect()
-                };
+                let (mut samples, route_from) = stepped(if known { samples } else { first });
                 // A size the door refuses at any ask within the side's life is not quoted.
                 for &(small, large) in side_asks.iter().flatten() {
                     let last = samples.len() - 1;
@@ -2695,10 +2886,16 @@ impl DoorsReader {
                 }
                 let holds = if door.prints { known && print_holds } else { known || cannot_age };
                 let side_until_ms = lives_to.map_or(until_ms, |at| at.ms.saturating_add(1));
-                (samples, holds, side_until_ms)
+                (samples, route_from, holds, side_until_ms)
             };
-            let (bid, bid_holds, bid_until_ms) = take(2 * d, &door.bid.view);
-            let (ask, ask_holds, ask_until_ms) = take(2 * d + 1, &door.ask.view);
+            let pool_lacks = (held.next().unwrap_or(false), held.next().unwrap_or(false));
+            let (bid, bid_route_from, bid_holds, bid_until_ms) = take(2 * d, &door.bid.view);
+            let (ask, ask_route_from, ask_holds, ask_until_ms) = take(2 * d + 1, &door.ask.view);
+            // A credit listing sharing its pool with a door its route could move is served its
+            // custody sizes alone, as on a chain whose builders land makers' updates.
+            let custody_only = door.credit.is_some() && shares_what_its_route_owes(door, doors);
+            let (bid, bid_route_from) = custody_run(bid, bid_route_from, custody_only);
+            let (ask, ask_route_from) = custody_run(ask, ask_route_from, custody_only);
             reads.push(DoorRead {
                 listing: door.listing,
                 door: door.door,
@@ -2715,9 +2912,11 @@ impl DoorsReader {
                 tip_cap_wei: door.tip_cap_wei,
                 reads: door.fill_reads(),
                 pair: door.pair,
-                credit: None,
+                credit: door
+                    .credit
+                    .map(|gas| CreditRead { gas, bid_route_from, ask_route_from }),
                 named_gas: door.named_gas,
-                pool_lacks: (false, false),
+                pool_lacks,
             });
         }
         Ok(reads)
@@ -2747,25 +2946,22 @@ impl DoorsReader {
         &self,
         doors: &[OpenDoor],
         clock: &FrontClock,
+        moments: &NextMoments,
         block: BlockId,
         state: &serde_json::Value,
     ) -> Result<(Vec<DoorRead>, Answered), FeedError> {
         if doors.is_empty() {
             return Ok((Vec::new(), Answered::Whole));
         }
-        let target = clock.read_at();
-        let after_time = target.time.saturating_add(SLOT_SECS);
-        let after = At {
-            number: target.number.saturating_add(1),
-            time: after_time,
-            ms: after_time.saturating_mul(1000),
-            exact: false,
-            base_time: None,
-        };
+        let target = moments
+            .next
+            .first()
+            .copied()
+            .unwrap_or_else(|| clock.read_at());
         // A credit listing's route fills sizes its door's most-fillable read does not report:
         // each side that may route is first asked how far it reaches.
         let reaches = self
-            .reaches(doors, target, clock, block, state)
+            .reaches(doors, Some(target), clock, block, Some(state))
             .await?;
         // Per side: its sizes, and its door's quote at each, then on a credit listing the
         // front's plan at each.
@@ -2799,20 +2995,39 @@ impl DoorsReader {
             .filter(|(s, _)| doors[s / 2].carries)
             .flat_map(|(_, (_, calls))| calls.iter().cloned())
             .collect();
-        let mut groups = vec![Group { calls: all, at: Some(target) }];
+        // Every side at each time the next block may carry, then the carrying sides at each
+        // time the block after may.
+        let mut groups: Vec<_> = moments
+            .next
+            .iter()
+            .map(|&at| Group { calls: all.clone(), at: Some(at) })
+            .collect();
         let carries = !carried.is_empty();
         if carries {
-            groups.push(Group { calls: carried, at: Some(after) });
+            groups.extend(
+                moments
+                    .after
+                    .iter()
+                    .map(|&at| Group { calls: carried.clone(), at: Some(at) }),
+            );
         }
         let BatchAnswers { groups: answers, .. } = self
             .batch(block, groups, &[], Also::Nothing, Some(clock), Some(state))
             .await?;
         let mut answers = answers.into_iter();
-        let at_target = answers
-            .next()
-            .flatten()
+        let at_next: Vec<Vec<Call3Result>> = answers
+            .by_ref()
+            .take(moments.next.len())
+            .map(|answers| answers.ok_or_else(refused_next_block))
+            .collect::<Result<_, _>>()?;
+        let at_target = at_next
+            .first()
+            .cloned()
             .ok_or_else(refused_next_block)?;
-        let at_after = answers.next().flatten();
+        // The block after's answers at each of its times, `None` where any is unknown.
+        let at_after: Option<Vec<Vec<Call3Result>>> = carries
+            .then(|| answers.collect::<Option<Vec<_>>>())
+            .flatten();
         let answered =
             if carries && at_after.is_none() { Answered::InPart } else { Answered::Whole };
         let (mut offset, mut after_offset) = (0, 0);
@@ -2825,26 +3040,53 @@ impl DoorsReader {
                 let (quotes, plans) = answers.split_at(sizes.len().min(answers.len()));
                 classify(sizes, quotes, door.credit.map(|_| plans))
             };
+            // The next block at each of its times: a size every one fills by the same path, at
+            // the least of their outputs, since the block lands at one of them.
             let mut samples = classified(&at_target[offset..offset + count]);
+            for answers in at_next.iter().skip(1) {
+                for ((_, here), (_, there)) in samples
+                    .iter_mut()
+                    .zip(classified(&answers[offset..offset + count]))
+                {
+                    *here = match (*here, there) {
+                        (Some((here, path)), Some((there, later))) if path == later => {
+                            Some((here.min(there), path))
+                        }
+                        _ => None,
+                    };
+                }
+            }
             offset += count;
-            let mut until_ms = target.ms.saturating_add(1);
+            let mut until_ms = moments.next_until_ms;
             if door.carries {
-                let there = at_after
-                    .as_deref()
-                    .map(|answers| &answers[after_offset..after_offset + count]);
+                let there: Option<Vec<_>> = at_after.as_deref().map(|answers| {
+                    answers
+                        .iter()
+                        .map(|answers| classified(&answers[after_offset..after_offset + count]))
+                        .collect()
+                });
                 after_offset += count;
                 let later: Option<Vec<_>> = there.and_then(|there| {
                     samples
                         .iter()
-                        .zip(classified(there))
-                        .map(|((_, here), (_, there))| match (here, there) {
-                            (None, _) => Some(None),
-                            // A size whose path differs between the two blocks bounds neither
-                            // its gas nor its output over the side's life.
-                            (Some((here, path)), Some((there, later))) => {
-                                Some((*path == later).then(|| (*here.min(&there), later)))
+                        .enumerate()
+                        .map(|(k, (_, here))| match here {
+                            None => Some(None),
+                            Some((here, path)) => {
+                                there
+                                    .iter()
+                                    .try_fold(Some(*here), |least, there| {
+                                        // A size whose path differs between the two blocks
+                                        // bounds neither its gas nor its output over the side's
+                                        // life; one the block after refuses ends the carry.
+                                        there[k].1.map(|(there, later)| {
+                                            least
+                                                .filter(|_| *path == later)
+                                                .map(|least| least.min(there))
+                                        })
+                                    })
+                                    .map(|least| least.map(|least| (least, *path)))
                             }
-                            (Some(_), None) => None,
                         })
                         .collect()
                 });
@@ -2852,7 +3094,7 @@ impl DoorsReader {
                     for ((_, sample), least) in samples.iter_mut().zip(later) {
                         *sample = least;
                     }
-                    until_ms = after.ms.saturating_add(1);
+                    until_ms = moments.after_until_ms;
                 }
             }
             let (samples, route_from) = stepped(samples);
@@ -2939,11 +3181,15 @@ impl DoorsReader {
             .collect()
     }
 
-    /// One side of `door`, the bid where `bid`: the sizes it is sampled at, in increasing size, and
-    /// the door's `quote` call at each.
-    fn side_quotes(&self, door: &OpenDoor, bid: bool) -> (Vec<U256>, Vec<Call3>) {
-        let sizes = self.side_sizes(door, bid, Reach::default());
-        let calls = quote_calls(door, bid, &sizes);
+    /// One side of `door`, the bid where `bid`, reaching `reach`: the sizes it is sampled at, in
+    /// increasing size, and the door's `quote` call at each, then on a credit listing the front's
+    /// plan at each ([`Self::plan_quotes`]).
+    fn side_quotes(&self, door: &OpenDoor, bid: bool, reach: Reach) -> (Vec<U256>, Vec<Call3>) {
+        let sizes = self.side_sizes(door, bid, reach);
+        let mut calls = quote_calls(door, bid, &sizes);
+        if door.credit.is_some() {
+            calls.extend(self.plan_quotes(door, bid, &sizes));
+        }
         (sizes, calls)
     }
 
@@ -3000,7 +3246,8 @@ impl DoorsReader {
     }
 
     /// How far each side of each of `doors` reaches, the bid then the ask, at the next block
-    /// `target` under `state`: zero for every side but a credit listing's that may route (one
+    /// `target` under `state`, or at `block` itself where neither is given (a chain whose words
+    /// stand in storage): zero for every side but a credit listing's that may route (one
     /// named with its gas, on a pool none of whose other doors here its route could move, see
     /// [`shares_what_its_route_owes`]).
     ///
@@ -3013,10 +3260,10 @@ impl DoorsReader {
     async fn reaches(
         &self,
         doors: &[OpenDoor],
-        target: At,
+        target: Option<At>,
         clock: &FrontClock,
         block: BlockId,
-        state: &serde_json::Value,
+        state: Option<&serde_json::Value>,
     ) -> Result<Vec<[Reach; 2]>, FeedError> {
         let mut reaches = vec![[Reach::default(); 2]; doors.len()];
         let asked: Vec<_> = doors
@@ -3038,14 +3285,7 @@ impl DoorsReader {
             .flat_map(|(d, bid, probes)| quote_calls(&doors[*d], *bid, probes))
             .collect();
         let BatchAnswers { groups, .. } = self
-            .batch(
-                block,
-                vec![Group { calls, at: Some(target) }],
-                &[],
-                Also::Nothing,
-                Some(clock),
-                Some(state),
-            )
+            .batch(block, vec![Group { calls, at: target }], &[], Also::Nothing, Some(clock), state)
             .await?;
         let answers = groups
             .into_iter()
@@ -3134,6 +3374,7 @@ impl DoorsReader {
                     .collect(),
                 words: Vec::new(),
                 head: None,
+                head_ms: None,
                 implementation: None,
             });
         }
@@ -3234,17 +3475,20 @@ impl DoorsReader {
             }
             None => None,
         };
-        let head = match head {
+        let header = match head {
             // The header names the batch's block only where it is that block's: no error of this
             // one read fails the batch.
             Some((number, header)) => header
                 .await
                 .ok()
                 .flatten()
-                .filter(|header| header.number == U64::from(number))
-                .map(|header| header.hash),
+                .filter(|header| header.number == U64::from(number)),
             None => None,
         };
+        let head = header
+            .as_ref()
+            .map(|header| header.hash);
+        let head_ms = header.as_ref().and_then(Header::ms);
         let mut answers = Vec::with_capacity(sent.len());
         for (at, checks, waiters) in sent {
             let mut group = Vec::new();
@@ -3290,7 +3534,7 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("listing record", e)),
             );
         }
-        Ok(BatchAnswers { groups: answers, words: read, head, implementation })
+        Ok(BatchAnswers { groups: answers, words: read, head, head_ms, implementation })
     }
 
     /// The calls that open each `aggregate3` run under a block override, from which the front's

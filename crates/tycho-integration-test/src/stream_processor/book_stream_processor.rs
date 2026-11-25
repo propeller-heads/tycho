@@ -69,19 +69,19 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
-    /// Efficient PropAMM listing doors, on Ethereum; the feed refuses to build on Base for now.
-    /// Reads every door's quotes over
-    /// `--rpc-url`; the front, the listing-door factory, the desk contract code hash (Ethereum
-    /// only) and the front implementations it was checked against come from
+    /// Efficient PropAMM listing doors, on Ethereum, Base and BSC. Reads every door's quotes over
+    /// `--rpc-url`; the front, the listing-door factory, the desk contract code hash and the front
+    /// implementations it was checked against come from
     /// `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY`, `EFFICIENT_PROP_CELL_CODEHASH` and
     /// `EFFICIENT_PROP_IMPLEMENTATIONS` (comma-separated), the price sources a listing reading a
     /// print may be served on from `EFFICIENT_PROP_PRICE_SOURCES` (comma-separated ids, none when
     /// unset), the makers' desk contracts whose listings are served from
     /// `EFFICIENT_PROP_APPROVED_DESKS` (comma-separated, none when unset: nothing is served) and
-    /// `EFFICIENT_PROP_APPROVED_DESKS_URL` (a list that rules while fresh), and on Ethereum the
-    /// URLs of the next block's state map from `EFFICIENT_PROP_STATE_URLS` (comma-separated,
-    /// required there) and the listings served with gas named for them from
-    /// `EFFICIENT_PROP_CREDIT_LISTINGS` (none when unset).
+    /// `EFFICIENT_PROP_APPROVED_DESKS_URL` (a list that rules while fresh), on Ethereum and BSC
+    /// the URLs of the next block's state map from `EFFICIENT_PROP_STATE_URLS` (comma-separated,
+    /// required there), and the listings served with gas named for them from
+    /// `EFFICIENT_PROP_CREDIT_LISTINGS` (none when unset; on Base and BSC every listing served
+    /// needs one).
     EfficientProp,
     /// Efficient pools, on Base, Ethereum and BSC. Reads its books from the chain over
     /// `--rpc-url` and needs no credentials, but serves only what the `FLAMM_*` variables name.
@@ -681,9 +681,10 @@ fn add_pamm_feeds(
 
 /// The Efficient PropAMM quote layout, front, listing-door factory, desk contract code hash and
 /// front implementations, from `EFFICIENT_PROP_QUOTE_LAYOUT` and `EFFICIENT_PROP_CELL_CODEHASH`
-/// (none when unset: the feed requires both on Ethereum, where the quote contract is read, and
-/// refuses both on Base), `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY` and
-/// `EFFICIENT_PROP_IMPLEMENTATIONS` (comma-separated). `secret` looks up an environment variable.
+/// (none when unset: the feed requires the layout on Ethereum and BSC, where the quote contract
+/// is read, and refuses it on Base, and requires the code hash on every chain),
+/// `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY` and `EFFICIENT_PROP_IMPLEMENTATIONS`
+/// (comma-separated). `secret` looks up an environment variable.
 /// The doors' code hash is not configured: the feed reads it from the factory.
 fn efficient_prop_deployment(
     secret: impl Fn(&str) -> Option<String>,
@@ -1104,16 +1105,16 @@ mod tests {
             .collect())
     }
 
-    /// The listing doors are not served on Base yet: with a whole deployment in the environment
-    /// the feed refuses to build there, which fails the run and says why.
+    /// On Base the listing doors build from a whole deployment in the environment, its desk
+    /// contract code hash among it, with no state URL and no quote layout.
     #[tokio::test]
-    async fn the_listing_doors_fail_the_run_on_base_until_it_is_served() {
-        let message = efficient_prop_added(efficient_prop_env)
-            .unwrap_err()
-            .to_string();
+    async fn the_listing_doors_are_added_on_base() {
+        let env = |name: &str| match name {
+            "EFFICIENT_PROP_CELL_CODEHASH" => Some(format!("0x{}", "cc".repeat(32))),
+            name => efficient_prop_env(name),
+        };
 
-        assert!(message.contains("--pamm"), "{message}");
-        assert!(message.contains("not served on Base yet"), "{message}");
+        assert_eq!(efficient_prop_added(env).unwrap(), [efficient_prop::PROTOCOL_SYSTEM]);
     }
 
     #[rstest::rstest]
@@ -1122,7 +1123,7 @@ mod tests {
     #[case::a_quote_layout_on_base(
         "EFFICIENT_PROP_QUOTE_LAYOUT",
         Some("builder"),
-        "not served on Base yet"
+        "is set on Base"
     )]
     #[case::a_cell_code_hash_that_is_no_hash(
         "EFFICIENT_PROP_CELL_CODEHASH",
@@ -1171,10 +1172,9 @@ mod tests {
         assert!(message.contains(reason), "{message}");
     }
 
-    /// On Ethereum the listing doors serve the credit listings `EFFICIENT_PROP_CREDIT_LISTINGS`
+    /// On every chain the listing doors serve the credit listings `EFFICIENT_PROP_CREDIT_LISTINGS`
     /// names with their gas; an entry that is not `listing=four figures`, or five with a dearest
-    /// fill before refunds that is at least the dearest of the four and 19,900, fails the run,
-    /// and so does any on Base.
+    /// fill before refunds that is at least the dearest of the four and 19,900, fails the run.
     #[rstest::rstest]
     #[case::one_listing(Chain::Ethereum, "1=137909:133427:925544:1035811", None)]
     #[case::its_dearest_fill_named(Chain::Ethereum, "1=137909:133427:925544:1035811:1134823", None)]
@@ -1192,7 +1192,8 @@ mod tests {
     #[case::three_figures(Chain::Ethereum, "1=137909:133427:925544", Some("not four gas figures"))]
     #[case::a_listing_that_is_no_id(Chain::Ethereum, "one=1:2:3:4", Some("not a listing id"))]
     #[case::named_twice(Chain::Ethereum, "1=1:2:3:4,1=1:2:3:4", Some("named twice"))]
-    #[case::on_base(Chain::Base, "1=137909:133427:925544:1035811", Some("not served on Base yet"))]
+    #[case::on_base(Chain::Base, "1=137909:133427:925544:1035811", None)]
+    #[case::on_bsc(Chain::Bsc, "1=137909:133427:925544:1035811", None)]
     #[tokio::test]
     async fn the_listing_doors_read_their_credit_listings_from_the_environment(
         #[case] chain: Chain,
@@ -1201,13 +1202,11 @@ mod tests {
     ) {
         let env = |name: &str| match name {
             "EFFICIENT_PROP_CREDIT_LISTINGS" => Some(credit.to_string()),
-            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+            "EFFICIENT_PROP_STATE_URLS" if chain != Chain::Base => {
                 Some("http://127.0.0.1:29222/v1/1/state".into())
             }
-            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
-                Some(format!("0x{}", "cc".repeat(32)))
-            }
-            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
+            "EFFICIENT_PROP_CELL_CODEHASH" => Some(format!("0x{}", "cc".repeat(32))),
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain != Chain::Base => Some("builder".into()),
             name => efficient_prop_env(name),
         };
 
@@ -1222,7 +1221,7 @@ mod tests {
         }
     }
 
-    /// On Ethereum the listing doors read the next block's state map from the URLs
+    /// On Ethereum and BSC the listing doors read the next block's state map from the URLs
     /// `EFFICIENT_PROP_STATE_URLS` names, and fail the run without them; on Base a state URL
     /// fails it.
     #[rstest::rstest]
@@ -1232,10 +1231,12 @@ mod tests {
         None
     )]
     #[case::ethereum_without(Chain::Ethereum, None, Some("state URL"))]
+    #[case::bsc_with_one(Chain::Bsc, Some("http://127.0.0.1:29222/v1/56/state"), None)]
+    #[case::bsc_without(Chain::Bsc, None, Some("state URL"))]
     #[case::base_with_one(
         Chain::Base,
         Some("http://127.0.0.1:29222/v1/1/state"),
-        Some("not served on Base yet")
+        Some("read on Ethereum and BNB Chain only")
     )]
     #[tokio::test]
     async fn the_listing_doors_read_their_state_urls_from_the_environment(
@@ -1245,10 +1246,8 @@ mod tests {
     ) {
         let env = |name: &str| match name {
             "EFFICIENT_PROP_STATE_URLS" => state_urls.map(str::to_string),
-            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
-                Some(format!("0x{}", "cc".repeat(32)))
-            }
-            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
+            "EFFICIENT_PROP_CELL_CODEHASH" => Some(format!("0x{}", "cc".repeat(32))),
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain != Chain::Base => Some("builder".into()),
             name => efficient_prop_env(name),
         };
 
@@ -1264,18 +1263,17 @@ mod tests {
         }
     }
 
-    /// The desk contract code hash, `EFFICIENT_PROP_CELL_CODEHASH`, is required on Ethereum, where
-    /// a maker's quote is placed by it, must be 32 bytes, and fails the run on Base. No door code
-    /// hash is read from the environment: the feed reads it from the factory.
+    /// The desk contract code hash, `EFFICIENT_PROP_CELL_CODEHASH`, is required on every chain,
+    /// where it places each maker's desk contract, and must be 32 bytes. No door code hash is read
+    /// from the environment: the feed reads it from the factory.
     #[rstest::rstest]
     #[case::ethereum_with_it(Chain::Ethereum, Some(format!("0x{}", "cc".repeat(32))), None)]
     #[case::ethereum_without(Chain::Ethereum, None, Some("desk contract code hash"))]
     #[case::ethereum_not_32_bytes(Chain::Ethereum, Some("0x1234".to_string()), Some("32 bytes"))]
-    #[case::base_with_it(
-        Chain::Base,
-        Some(format!("0x{}", "cc".repeat(32))),
-        Some("not served on Base yet")
-    )]
+    #[case::base_with_it(Chain::Base, Some(format!("0x{}", "cc".repeat(32))), None)]
+    #[case::base_without(Chain::Base, None, Some("desk contract code hash"))]
+    #[case::bsc_with_it(Chain::Bsc, Some(format!("0x{}", "cc".repeat(32))), None)]
+    #[case::bsc_without(Chain::Bsc, None, Some("desk contract code hash"))]
     #[tokio::test]
     async fn the_listing_doors_read_their_desk_code_hash_from_the_environment(
         #[case] chain: Chain,
@@ -1284,8 +1282,8 @@ mod tests {
     ) {
         let env = |name: &str| match name {
             "EFFICIENT_PROP_CELL_CODEHASH" => cell_codehash.clone(),
-            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain == Chain::Ethereum => Some("builder".into()),
-            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+            "EFFICIENT_PROP_QUOTE_LAYOUT" if chain != Chain::Base => Some("builder".into()),
+            "EFFICIENT_PROP_STATE_URLS" if chain != Chain::Base => {
                 Some("http://127.0.0.1:29222/v1/1/state".to_string())
             }
             name => efficient_prop_env(name),
@@ -1303,8 +1301,8 @@ mod tests {
         }
     }
 
-    /// The quote layout, `EFFICIENT_PROP_QUOTE_LAYOUT`, is read on Ethereum only, where it must be
-    /// `builder`; on Base, which reads no quote contract, it fails the run.
+    /// The quote layout, `EFFICIENT_PROP_QUOTE_LAYOUT`, is read on Ethereum and BSC, where it must
+    /// be `builder`; on Base, which reads no quote contract, it fails the run.
     #[rstest::rstest]
     #[case::ethereum_builder(Chain::Ethereum, Some("builder"), None)]
     #[case::ethereum_without(Chain::Ethereum, None, Some("is not one this integration reads"))]
@@ -1313,19 +1311,20 @@ mod tests {
         Some("storage"),
         Some("is not one this integration reads")
     )]
-    #[case::base_builder(Chain::Base, Some("builder"), Some("not served on Base yet"))]
+    #[case::bsc_builder(Chain::Bsc, Some("builder"), None)]
+    #[case::bsc_without(Chain::Bsc, None, Some("is not one this integration reads"))]
+    #[case::base_builder(Chain::Base, Some("builder"), Some("is set on Base"))]
+    #[case::base_without(Chain::Base, None, None)]
     #[tokio::test]
-    async fn the_listing_doors_read_their_quote_layout_on_ethereum_only(
+    async fn the_listing_doors_read_their_quote_layout_off_base(
         #[case] chain: Chain,
         #[case] layout: Option<&str>,
         #[case] refused: Option<&str>,
     ) {
         let env = |name: &str| match name {
             "EFFICIENT_PROP_QUOTE_LAYOUT" => layout.map(str::to_string),
-            "EFFICIENT_PROP_CELL_CODEHASH" if chain == Chain::Ethereum => {
-                Some(format!("0x{}", "cc".repeat(32)))
-            }
-            "EFFICIENT_PROP_STATE_URLS" if chain == Chain::Ethereum => {
+            "EFFICIENT_PROP_CELL_CODEHASH" => Some(format!("0x{}", "cc".repeat(32))),
+            "EFFICIENT_PROP_STATE_URLS" if chain != Chain::Base => {
                 Some("http://127.0.0.1:29222/v1/1/state".to_string())
             }
             name => efficient_prop_env(name),

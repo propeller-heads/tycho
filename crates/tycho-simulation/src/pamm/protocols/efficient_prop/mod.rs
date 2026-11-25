@@ -3,10 +3,12 @@
 //! front. What follows describes Base; Ethereum reads the doors another way (see
 //! [On Ethereum](#on-ethereum)).
 //!
-//! Base is not served yet: [`EfficientPropFeedBuilder::build`] refuses it. Base's gas figures and
-//! its recording were taken on an earlier test deployment that is no longer live, and no feed
-//! should quote that one. Base's path below is whole and runs in this module's offline tests; it
-//! is served once the figures are measured on the deployment Base runs.
+//! On Base, as on Ethereum, a listing is served only where its maker's desk contract is approved
+//! ([`EfficientPropFeedBuilder::with_approved_desks`]) and its gas is named
+//! ([`EfficientPropFeedBuilder::credit_listing`]): no fill of the deployed build has been measured
+//! on Base, so this crate charges no figure of its own there. No listing exists on Base yet; the
+//! path below runs in this module's offline tests, and its first request against the deployed
+//! front in an ignored test.
 //!
 //! The front prices every listing on chain from what its operator last posted, so the
 //! feed does not model the front: it reads each door's own `quote` over JSON-RPC every poll, at
@@ -112,11 +114,18 @@
 //! the tokens the caller's book configuration names, whatever their code. Name only tokens whose
 //! code cannot change and moves exactly the amounts asked.
 //!
-//! A listing with a credit mode is not served on Base, nor on Ethereum unless the caller names it
-//! with its gas ([`EfficientPropFeedBuilder::credit_listing`]): past its pool's custody an input
-//! fills whole through the pool's credit route at the pool's own preview, which may pay less than a
-//! smaller input, so a chord across that step could quote more than the door fills, and a fill
-//! there costs its pool's own gas. How a named one is served is under [On Ethereum](#on-ethereum).
+//! A listing with a credit mode is served only where the caller names it with its gas
+//! ([`EfficientPropFeedBuilder::credit_listing`]): past its pool's custody an input fills whole
+//! through the pool's credit route at the pool's own preview, which may pay less than a smaller
+//! input, so a chord across that step could quote more than the door fills, and a fill there costs
+//! its pool's own gas. Each size of a named one is asked of the front's own plan (`quoteFrom` with
+//! `PLAN_ONLY`) beside the door's quote, in the same call at every moment sampled, which tags it
+//! custody or route; a size whose path differs between two moments of its life is not quoted, and
+//! the state quotes nothing between the largest custody size and the least routed one, each
+//! charged its own path's gas. On Base a routed size's output is the pool's preview of the
+//! front's own planned price, which ages with the word as a custody fill's does; the route adds
+//! refusals (a pause, a debt cap, a rate ceiling the lender's accrual nears), which the later
+//! moments show where the clock alone brings them. More is under [On Ethereum](#on-ethereum).
 //!
 //! A SESSION listing with a closed phase is not served: one whose session word (record word 13 of
 //! the front's storage, read with its settings at the read's block) holds a nonzero `closedAfter`,

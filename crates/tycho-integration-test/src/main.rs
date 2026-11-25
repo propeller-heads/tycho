@@ -119,16 +119,16 @@ struct Cli {
 
     /// pAMM book feeds to run, comma-separated (e.g. metric,baibai,flamm). Replaces the default
     /// list (metric). BaiBai runs on Base only and reads its books over --rpc-url. efficient-prop
-    /// (the Efficient PropAMM listing doors) runs on Ethereum (its feed refuses to build on Base
-    /// until Base's gas figures are measured on the deployment it runs), reads its books over
-    /// --rpc-url, and takes its front, factory, desk contract code hash (Ethereum only) and front
-    /// implementations from EFFICIENT_PROP_FRONT, EFFICIENT_PROP_FACTORY,
-    /// EFFICIENT_PROP_CELL_CODEHASH and EFFICIENT_PROP_IMPLEMENTATIONS, on Ethereum the layout of
-    /// its quote contract from EFFICIENT_PROP_QUOTE_LAYOUT (`builder`, the only one read; refused
-    /// on Base), the price sources it serves listings reading a print on from
-    /// EFFICIENT_PROP_PRICE_SOURCES (none when unset), and on Ethereum the URLs of the next
-    /// block's state map from EFFICIENT_PROP_STATE_URLS (required there) and the credit listings
-    /// it serves, each with its gas, from EFFICIENT_PROP_CREDIT_LISTINGS (none when unset).
+    /// (the Efficient PropAMM listing doors) runs on Ethereum, Base and BSC, reads its books over
+    /// --rpc-url, and takes its front, factory, desk contract code hash and front implementations
+    /// from EFFICIENT_PROP_FRONT, EFFICIENT_PROP_FACTORY, EFFICIENT_PROP_CELL_CODEHASH and
+    /// EFFICIENT_PROP_IMPLEMENTATIONS, on Ethereum and BSC the layout of its quote contract from
+    /// EFFICIENT_PROP_QUOTE_LAYOUT (`builder`, the only one read; refused on Base), the price
+    /// sources it serves listings reading a print on from EFFICIENT_PROP_PRICE_SOURCES (none when
+    /// unset), on Ethereum and BSC the URLs of the next block's state map from
+    /// EFFICIENT_PROP_STATE_URLS (required there), and the listings it serves with gas named for
+    /// them from EFFICIENT_PROP_CREDIT_LISTINGS (none when unset; on Base and BSC every listing
+    /// served needs one).
     /// Efficient pools (flamm, the pools' own curves) run on Base, Ethereum and BSC, read their
     /// books over --rpc-url and serve what the FLAMM_* variables name. A listed venue missing
     /// its credentials, or whose feed fails to build, fails the run; a default venue is skipped

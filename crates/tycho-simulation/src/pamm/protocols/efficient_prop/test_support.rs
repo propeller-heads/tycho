@@ -32,7 +32,7 @@ use tycho_common::{
 };
 
 use crate::{
-    book::{sim::SwapDirection, BookFeedConfig},
+    book::BookFeedConfig,
     pamm::protocols::efficient_prop::{
         ladder::Ladder,
         overrides::{BEACON_GENESIS, SLOT_SECS, STATE_METHOD},
@@ -41,9 +41,7 @@ use crate::{
             quoteFillableCall, quoteFromCall, BASECall, CELL_CODEHASHCall, DOOR_CODEHASHCall,
             DoorView, FRONTCall, LISTINGCall, Timing, IMPLEMENTATION_SLOT,
         },
-        state::{
-            swap_gas, CreditGas, DirectionGas, EfficientPropState, FillReads, GasChain, PairPlace,
-        },
+        state::{CreditGas, DirectionGas, EfficientPropState, FillReads, GasChain, PairPlace},
         EfficientPropDeployment,
     },
     snapshot_feed::http::test_support::{spawn_http_server, MockHttpServer, MockRequest},
@@ -56,6 +54,12 @@ pub(super) const IMPLEMENTATION: Address = Address::repeat_byte(0x1a);
 pub(super) const DOOR_CODEHASH: B256 = B256::repeat_byte(0xdc);
 /// The creation code hash of the fake front's desk contracts.
 pub(super) const CELL_CODEHASH: B256 = B256::repeat_byte(0xcc);
+
+/// How far into its second the fake BNB Chain node's latest block was made, ms.
+pub(super) const BNB_HEAD_SUB_MS: u64 = 300;
+
+/// BNB Chain's millisecond precompile (BEP-706).
+const MS_PRECOMPILE: Address = address!("0000000000000000000000000000000000000070");
 
 /// Pair `i`'s quote word is at this plus `i` in a desk contract.
 pub(super) const QUOTE_BASE: u64 = 0x100;
@@ -200,7 +204,7 @@ pub(super) fn deployment() -> EfficientPropDeployment {
         quote_layout: None,
         front: bytes(FRONT),
         factory: bytes(FACTORY),
-        cell_codehash: None,
+        cell_codehash: Some(Bytes::from(CELL_CODEHASH.to_vec())),
         implementations: vec![bytes(IMPLEMENTATION)],
     }
 }
@@ -209,7 +213,6 @@ pub(super) fn deployment() -> EfficientPropDeployment {
 pub(super) fn ethereum_deployment() -> EfficientPropDeployment {
     EfficientPropDeployment {
         quote_layout: Some(super::QUOTE_LAYOUT_BUILDER.to_string()),
-        cell_codehash: Some(Bytes::from(CELL_CODEHASH.to_vec())),
         ..deployment()
     }
 }
@@ -258,24 +261,14 @@ pub(super) fn direction_gas(sell_base: u64, buy_base: u64) -> DirectionGas {
     }
 }
 
-/// The gas the tests name for a fake listing on Ethereum in no credit mode, whose pair of test
-/// tokens no figure was measured for: 95,825 selling base and 96,239 buying it.
+/// The gas the tests name for a fake listing in no credit mode, on Base, where no figure was
+/// measured, and on Ethereum, whose pair of test tokens no figure was measured for: 95,825
+/// selling base and 96,239 buying it.
 pub(super) fn named_gas() -> CreditGas {
     CreditGas {
         custody: direction_gas(95_825, 96_239),
         route: direction_gas(95_825, 96_239),
         most_before_refunds: None,
-    }
-}
-
-/// Base's figure for a swap in `direction` into a listing of the class `reads` at `pair`.
-pub(super) fn base_gas(direction: SwapDirection, reads: FillReads, pair: PairPlace) -> u64 {
-    let (sell_gas, buy_gas) =
-        swap_gas(GasChain::Base, reads, pair, &Bytes::new(), &Bytes::new()).unwrap();
-    if direction == SwapDirection::BaseToQuote {
-        sell_gas
-    } else {
-        buy_gas
     }
 }
 
@@ -969,6 +962,11 @@ pub(super) struct FakeNode {
     pub desk_word_spare: U256,
     /// The hash the node names its latest block by; `None` for a node that names no block.
     pub head_hash: Option<B256>,
+    /// The latest block's milliseconds its header names (`milliTimestamp`, BNB Chain's), where
+    /// it names them.
+    pub head_ms: Option<u64>,
+    /// What BNB Chain's millisecond precompile at `0x70` answers, ms; `None` for no code.
+    pub ms_precompile: Option<u64>,
     /// What the node does with a request naming its block by that hash.
     pub hash_pins: HashPins,
     /// The front's implementation as a request naming its block by that hash reads it, where
@@ -1200,6 +1198,8 @@ impl FakeNode {
             desk_heads: BTreeMap::new(),
             desk_word_spare: U256::ZERO,
             head_hash: Some(HEAD_HASH),
+            head_ms: None,
+            ms_precompile: None,
             hash_pins: HashPins::Taken,
             implementation_by_hash: None,
             door_quotes: Arc::default(),
@@ -1220,6 +1220,20 @@ impl FakeNode {
             clock: FakeClock::ethereum(),
             lands_in_block: true,
             ..Self::new(listings)
+        }
+    }
+
+    /// A node of BNB Chain: as [`Self::ethereum`], its latest block [`ETHEREUM_BLOCK`] made at
+    /// [`ETHEREUM_NEXT_TIME`] and [`BNB_HEAD_SUB_MS`] (named in its header), a block every
+    /// 450 ms, and the front in clock mode 3 with no code at the millisecond precompile, so it
+    /// reads each block's second.
+    pub(super) fn bnb(listings: Vec<FakeListing>) -> Self {
+        Self {
+            timestamp: ETHEREUM_NEXT_TIME,
+            chain_id: Chain::Bsc.id(),
+            clock: FakeClock { mode: 3, ..FakeClock::ethereum() },
+            head_ms: Some(ETHEREUM_NEXT_TIME * 1000 + BNB_HEAD_SUB_MS),
+            ..Self::ethereum(listings)
         }
     }
 
@@ -1300,9 +1314,17 @@ impl FakeNode {
                 // The block the listings were read at, named by its hash where the node names it.
                 assert_eq!(request["params"][0], self.pinned(), "the header of the pinned block");
                 assert_eq!(request["params"][1], false, "a header without its transactions");
-                let header = self
-                    .head_hash
-                    .map(|hash| serde_json::json!({ "hash": hash, "number": self.pinned() }));
+                let header = self.head_hash.map(|hash| {
+                    let mut header = serde_json::json!({
+                        "hash": hash,
+                        "number": self.pinned(),
+                        "timestamp": format!("{:#x}", self.timestamp),
+                    });
+                    if let Some(ms) = self.head_ms {
+                        header["milliTimestamp"] = serde_json::json!(format!("{ms:#x}"));
+                    }
+                    header
+                });
                 serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": header })
             }
             method => panic!("the fake node does not serve {method:?}"),
@@ -1520,7 +1542,8 @@ impl FakeNode {
                 assert!(call.allowFailure, "every call may fail");
                 assert!(
                     !latest ||
-                        [MULTICALL3_ADDRESS, FRONT, FACTORY, BASE_TIME].contains(&call.target),
+                        [MULTICALL3_ADDRESS, FRONT, FACTORY, BASE_TIME, MS_PRECOMPILE]
+                            .contains(&call.target),
                     "{} read at the latest block",
                     call.target
                 );
@@ -1613,6 +1636,13 @@ impl FakeNode {
         at: (u64, u64, Option<u64>),
         landings: &Landings,
     ) -> Option<Vec<u8>> {
+        if target == MS_PRECOMPILE {
+            return Some(
+                self.ms_precompile
+                    .map(|ms| U256::from(ms).abi_encode())
+                    .unwrap_or_default(),
+            );
+        }
         let selector = <[u8; 4]>::try_from(&data[..4]).unwrap();
         if target == MULTICALL3_ADDRESS {
             return Some(match selector {

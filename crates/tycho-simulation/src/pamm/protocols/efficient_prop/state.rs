@@ -22,76 +22,6 @@ use crate::{
     pamm::protocols::efficient_prop::ladder::{FillPath, Ladder, Refusal},
 };
 
-/// Gas of the router's delegatecall of `PropAMMExecutor.swap` into a listing door, selling base,
-/// on a listing reading only its operator's word (fence kind WORD or NONE) of its pool's hook pair
-/// (the pool's first listing, its base the pool's token 0 and its quote token 1): the door's
-/// `swap`, the front's named fill behind it with its pull of the input from the door, and the
-/// pool's payout to the receiver. The router's own transfer of the input to the door, and any
-/// transfer of the output after the swap, are charged by tycho-execution's gas estimator.
-///
-/// Every figure here was measured the same way, with real transactions on a Base fork holding an
-/// earlier test deployment that is no longer live, through Base's `PropAMMExecutor`:
-/// - on the front's counted clock, as live Base runs it: blocks 200 ms apart on the count's grid,
-///   so a fill never calls the BaseTime predeploy;
-/// - the first fill of the side in its block;
-/// - the receiver already holding the output token;
-/// - the call's gas before refunds: the refund for the storage the fill clears (19,900) comes back
-///   at the transaction's end and is not taken off;
-/// - with the tokens' own transfer cost as measured on WETH, USDC and cbBTC, Base's deployed code.
-///
-/// Each constant is the least first fill measured: 118,157 selling WETH for USDC here and 121,988
-/// buying it. A second fill of the side in the same block costs about 60 less. Not charged: about
-/// 660 for each depth rung a fill walks past its first, and about 17,100 when the receiver holds
-/// none of the output token. A pair of tokens cheaper or dearer to move than these spends that much
-/// less or more.
-pub(super) const SELL_BASE_SWAP_GAS: u64 = 118_157;
-
-/// Gas of the same call buying base: see [`SELL_BASE_SWAP_GAS`].
-pub(super) const BUY_BASE_SWAP_GAS: u64 = 121_988;
-
-/// Gas of the same call selling base into a listing reading only its word whose pair is past its
-/// pool's hook pair: any listing but the pool's first, which the pool settles by another route
-/// than the hook pair's.
-///
-/// Measured as [`SELL_BASE_SWAP_GAS`], on a cbBTC/USDC listing of a pool holding WETH, USDC and
-/// cbBTC as its tokens 0, 1 and 2, cbBTC the base: 151,734 selling cbBTC for USDC and 150,865
-/// buying it.
-pub(super) const SELL_BASE_PAST_HOOK_PAIR_SWAP_GAS: u64 = 151_734;
-
-/// Gas of the same call buying base: see [`SELL_BASE_PAST_HOOK_PAIR_SWAP_GAS`].
-pub(super) const BUY_BASE_PAST_HOOK_PAIR_SWAP_GAS: u64 = 150_865;
-
-/// Gas of the same call selling base into a listing of its pool's hook pair whose fill reads a
-/// price source: a PRINT or SESSION listing, which reads its print in the fill, and a listing of
-/// an asset-module pair.
-///
-/// Measured as [`SELL_BASE_SWAP_GAS`], on a PRINT WETH/USDC listing of its pool's hook pair bound
-/// to the protocol's own stored price lane through a source that is not guarded, its print posted
-/// in the block before the fill: 130,482 selling WETH and 134,794 buying it. The fill reads the
-/// lane's print and its time on top of a WORD listing's fill: 12,325 selling base and 12,806
-/// buying it more than [`SELL_BASE_SWAP_GAS`] and [`BUY_BASE_SWAP_GAS`]. A source other than that
-/// lane spends what its own code spends. A listing of an asset-module pair, whose fill asks its
-/// module for a verdict as well, was not measured: it is charged these figures, or the sum in
-/// [`swap_gas`] past the hook pair.
-pub(super) const SELL_BASE_PRINT_SWAP_GAS: u64 = 130_482;
-
-/// Gas of the same call buying base: see [`SELL_BASE_PRINT_SWAP_GAS`].
-pub(super) const BUY_BASE_PRINT_SWAP_GAS: u64 = 134_794;
-
-/// Gas of the same call selling base into a listing of its pool's hook pair reading a print from a
-/// guarded source, which asks its lane for the fill's side's worst price over the prints the lane
-/// still holds.
-///
-/// Measured as [`SELL_BASE_SWAP_GAS`], on a PRINT WETH/USDC listing of its pool's hook pair bound
-/// to a guarded source on Base's hold lane, with no print held at the fill: 136,461 selling WETH
-/// and 140,520 buying it, 18,304 and 18,532 more than [`SELL_BASE_SWAP_GAS`] and
-/// [`BUY_BASE_SWAP_GAS`]. A fill while the lane holds a replaced print reads its words too, about
-/// 4,800 to 5,500 more; that is not charged. Past the hook pair, see [`swap_gas`].
-pub(super) const SELL_BASE_GUARDED_SWAP_GAS: u64 = 136_461;
-
-/// Gas of the same call buying base: see [`SELL_BASE_GUARDED_SWAP_GAS`].
-pub(super) const BUY_BASE_GUARDED_SWAP_GAS: u64 = 140_520;
-
 /// What a listing's fill reads besides its operator's word, which the gas charged follows (see
 /// [`swap_gas`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,14 +35,17 @@ pub(super) enum FillReads {
     GuardedSource,
 }
 
-/// The chain whose fills a state's gas figures come from: a fill on Base reads its word from the
-/// maker's stored push, one on Ethereum consumes the word its maker's update landed in the block,
-/// so each chain has its own measurements.
+/// The chain a state's fills land on, whose measured figures ([`swap_gas`]) it may be charged:
+/// Ethereum's alone were measured on the deployed build. A fill on Base reads its word from the
+/// maker's stored push, one on Ethereum or BNB Chain consumes the word its maker's update landed
+/// in the block, and each chain's tokens and pools cost their own, so no chain's figure stands
+/// for another's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum GasChain {
     Base,
     Ethereum,
+    Bnb,
 }
 
 /// Where a listing's pair sits in its pool, which the gas charged follows (see [`swap_gas`]): the
@@ -149,8 +82,9 @@ impl PairPlace {
 /// selling base, on a listing of its pool's hook pair whose fill reads a price source that is not
 /// guarded (a PRINT listing bound to its pair's own price contract): the door's `swap`, the front's
 /// fill behind it, which consumes the quote its maker's update landed earlier in the same block and
-/// reads the pair's print, and the pool's payout to the receiver. As on Base, the router's own
-/// transfer of the input to the door is charged by tycho-execution's gas estimator.
+/// reads the pair's print, and the pool's payout to the receiver. The router's own transfer of
+/// the input to the door, and any transfer of the output after the swap, are charged by
+/// tycho-execution's gas estimator.
 ///
 /// Every Ethereum figure here was measured the same way, with real transactions on a fork of
 /// Ethereum holding the deployed build (front `0x0000…AcD6`), through Ethereum's
@@ -253,33 +187,16 @@ const ETHEREUM_MEASURED: [MeasuredPair; 4] = [
     },
 ];
 
-/// One class's gas on Base, each `(selling base, buying base)`: on the hook pair and past it.
-struct PlaceGas {
-    hook: (u64, u64),
-    past: (u64, u64),
-}
-
-/// `base + (to - from)`, each direction: a figure moved by another's difference between two
-/// classes. A sum, not a measurement.
-const fn moved(base: (u64, u64), from: (u64, u64), to: (u64, u64)) -> (u64, u64) {
-    (base.0 + to.0 - from.0, base.1 + to.1 - from.1)
-}
-
-const BASE_WORD: (u64, u64) = (SELL_BASE_SWAP_GAS, BUY_BASE_SWAP_GAS);
-const BASE_WORD_PAST: (u64, u64) =
-    (SELL_BASE_PAST_HOOK_PAIR_SWAP_GAS, BUY_BASE_PAST_HOOK_PAIR_SWAP_GAS);
-const BASE_PRINT: (u64, u64) = (SELL_BASE_PRINT_SWAP_GAS, BUY_BASE_PRINT_SWAP_GAS);
-const BASE_GUARDED: (u64, u64) = (SELL_BASE_GUARDED_SWAP_GAS, BUY_BASE_GUARDED_SWAP_GAS);
-
 /// The figures a listing whose fill reads `reads`, whose pair of `base` and `quote` sits at `pair`
 /// in its pool, is charged on `chain` where no gas is named for it: `(selling base, buying base)`.
 ///
 /// On Ethereum, its own pair's measured figures ([`ETHEREUM_MEASURED`]), and none for any other
-/// listing. On Base, whose path is not served, its class's: the word, print and guarded figures of
-/// the hook pair and the word figure past it were measured, and past the hook pair a listing
-/// reading a source is charged the past figure and its source's difference on the hook pair
-/// (164,059 and 163,671 for a source that is not guarded, 170,038 and 169,397 for a guarded one),
-/// whichever tokens the pair holds.
+/// listing. On Base and BNB Chain, none: no fill of the deployed build has been measured there,
+/// so a listing there is served only where its caller names its gas
+/// ([`EfficientPropFeedBuilder::credit_listing`]).
+///
+/// [`EfficientPropFeedBuilder::credit_listing`]:
+/// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::credit_listing
 pub(super) fn swap_gas(
     chain: GasChain,
     reads: FillReads,
@@ -288,20 +205,6 @@ pub(super) fn swap_gas(
     quote: &Bytes,
 ) -> Option<(u64, u64)> {
     match chain {
-        GasChain::Base => {
-            let class = match reads {
-                FillReads::Word => PlaceGas { hook: BASE_WORD, past: BASE_WORD_PAST },
-                FillReads::Source => PlaceGas {
-                    hook: BASE_PRINT,
-                    past: moved(BASE_WORD_PAST, BASE_WORD, BASE_PRINT),
-                },
-                FillReads::GuardedSource => PlaceGas {
-                    hook: BASE_GUARDED,
-                    past: moved(BASE_WORD_PAST, BASE_WORD, BASE_GUARDED),
-                },
-            };
-            Some(if pair == PairPlace::HookPair { class.hook } else { class.past })
-        }
         GasChain::Ethereum if reads == FillReads::Source => ETHEREUM_MEASURED
             .iter()
             .find(|measured| {
@@ -310,7 +213,7 @@ pub(super) fn swap_gas(
                     quote.as_ref() == measured.quote.as_slice()
             })
             .map(|measured| measured.gas),
-        GasChain::Ethereum => None,
+        GasChain::Ethereum | GasChain::Base | GasChain::Bnb => None,
     }
 }
 
@@ -341,7 +244,9 @@ impl DirectionGas {
 /// pool holding none of it, the balance is written from zero and cleared again, and the refund
 /// gives all but about 1,900 back (a routed sale of the first pool's wstETH/WETH listing: 17,028
 /// more before refunds, 15,100 more refunded); a routed buy whose input stays in such a pool
-/// spends about 17,100 to 18,500 more than it is charged.
+/// spends about 17,100 to 18,500 more than it is charged. The write and the clear are priced by
+/// the storage rules Base and BNB Chain share with Ethereum (EIP-2929 and EIP-3529), so it is
+/// added on every chain.
 pub(super) const FIRST_BALANCE_WRITE_GAS: u64 = 16_964;
 
 /// What the largest size a side's custody fills may earn back beyond its class's refund: where
@@ -351,6 +256,7 @@ pub(super) const FIRST_BALANCE_WRITE_GAS: u64 = 16_964;
 /// sale taking its last USDC). The state takes the larger off the charge of each side's largest
 /// custody size alone, whether or not that fill empties the pool, so that no charge is over what
 /// such a fill costs its transaction; a size under it leaves a balance and earns nothing more.
+/// Taken off on every chain, as [`FIRST_BALANCE_WRITE_GAS`] is added.
 pub(super) const LAST_CUSTODY_FILL_REFUND: u64 = 9_600;
 
 /// What a swap of a component settling through Tycho's fallback router is charged, whichever its
@@ -392,8 +298,7 @@ pub(super) const CUSTODY_FILL_REFUND: u64 = 19_900;
 /// its book (`expected_gas`, `gas_limit_addition`). A charge is a floor: never above what the
 /// fill costs its transaction, so on the fallback path it is the cheaper branch's. These two say
 /// what to rank and to size by, and each is left out where no figure measured on the listing
-/// states it: a figure is neither under nor over what was measured. Ethereum's alone: Base's
-/// path is not served.
+/// states it: a figure is neither under nor over what was measured, on any chain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct GasOutlook {
     /// What a fill the pool's custody pays is measured to cost its transaction, in the charge's
@@ -423,10 +328,10 @@ const fn with_headroom(gas: u64) -> u64 {
 
 /// The gas a credit listing's fills are charged, measured on that listing's own pool: one figure
 /// for a fill its pool's custody fills, and one for a fill through the pool's credit route, each
-/// direction. Measure each with real transactions through Ethereum's `PropAMMExecutor`, as the
-/// other Ethereum figures were (the call's gas less the refund its transaction earns as a
-/// single fill, read from a trace of that transaction): a custody fill of each side, and a
-/// routed one of each side, each on a pool holding some of both tokens
+/// direction. Measure each with real transactions through the chain's `PropAMMExecutor`, as the
+/// Ethereum figures were (the call's gas less the refund its transaction earns as a single fill,
+/// read from a trace of that transaction), on the chain the listing is served on: a custody fill of
+/// each side, and a routed one of each side, each on a pool holding some of both tokens
 /// ([`FIRST_BALANCE_WRITE_GAS`] is added to a custody fill where it holds none of the input).
 /// On the first Ethereum pool's wstETH/WETH listing (credit mode 2, Morpho Blue, measured 24 Nov
 /// on a fork of the deployed contracts): custody 117,990 selling wstETH and 113,508 buying it
@@ -765,9 +670,8 @@ impl EfficientPropState {
             }));
         };
         // The largest size custody fills may take the pool's whole balance of the output, which
-        // clears it and earns the transaction more back (Ethereum's figures are net of refunds).
-        let cleared = if self.gas_chain == GasChain::Ethereum &&
-            path == FillPath::Custody &&
+        // clears it and earns the transaction more back (every figure is net of refunds).
+        let cleared = if path == FillPath::Custody &&
             self.side(direction)
                 .is_custody_most(amount)
         {
@@ -810,11 +714,8 @@ impl EfficientPropState {
     /// ([`GasOutlook`]), on a listing with a credit mode where `credit_mode`, whether or not
     /// this book serves a routed size: the front sends a size sampled inside custody through the
     /// pool's credit route too, where another fill takes the pool's balance first. Neither
-    /// figure on Base, nor for a listing with no figure of its own.
+    /// figure for a listing with no figure of its own.
     pub(super) fn gas_outlook(&self, credit_mode: bool) -> GasOutlook {
-        if self.gas_chain != GasChain::Ethereum {
-            return GasOutlook::default();
-        }
         let Some(custody) = [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase]
             .into_iter()
             .filter_map(|direction| self.door_fill_gas(direction, FillPath::Custody))
@@ -1022,11 +923,18 @@ mod tests {
 
     use super::*;
     use crate::pamm::protocols::efficient_prop::test_support::{
-        credit_gas, direction_gas, token, usdc, weth, weth_usdc_credit_state, weth_usdc_state,
+        credit_gas, direction_gas, named_gas, token, usdc, weth, weth_usdc_credit_state,
+        weth_usdc_state,
     };
 
     fn amount(value: u64) -> BigUint {
         BigUint::from(value)
+    }
+
+    /// [`weth_usdc_state`] with [`named_gas`] named for its listing, as on Base every served
+    /// listing is.
+    fn named_state() -> EfficientPropState {
+        EfficientPropState { credit: Some(named_gas()), ..weth_usdc_state() }
     }
 
     /// The WETH/USDC fixture sells 0.5 WETH for 1,499 USDC and 1 WETH for 2,990 USDC.
@@ -1039,110 +947,70 @@ mod tests {
         #[case] amount_in: u64,
         #[case] expected: u64,
     ) {
-        let state = weth_usdc_state();
+        let state = named_state();
 
         let result = state
             .get_amount_out(amount(amount_in), &weth(), &usdc())
             .unwrap();
 
         assert_eq!(result.amount, amount(expected));
-        assert_eq!(result.gas, amount(SELL_BASE_SWAP_GAS));
+        let named = named_gas().custody.sell_base.get();
+        let cleared =
+            if amount_in == 1_000_000_000_000_000_000 { LAST_CUSTODY_FILL_REFUND } else { 0 };
+        assert_eq!(result.gas, amount(named - cleared));
     }
 
     #[test]
     fn buying_base_quotes_the_ask() {
-        let state = weth_usdc_state();
+        let state = named_state();
 
         let result = state
             .get_amount_out(amount(3_010_000_000), &usdc(), &weth())
             .unwrap();
 
         assert_eq!(result.amount, amount(1_000_000_000_000_000_000));
-        assert_eq!(result.gas, amount(BUY_BASE_SWAP_GAS));
+        assert_eq!(
+            result.gas,
+            amount(named_gas().custody.buy_base.get() - LAST_CUSTODY_FILL_REFUND)
+        );
     }
 
-    /// A listing whose fill reads a price source is charged the figures measured on one reading a
-    /// print, on both sides and on the most a side fills.
-    #[test]
-    fn a_state_reading_a_source_charges_the_print_gas() {
-        let mut state = weth_usdc_state();
-        state.reads = FillReads::Source;
-
-        let sell = state
-            .get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc())
-            .unwrap();
-        let buy = state
-            .get_amount_out(amount(3_010_000_000), &usdc(), &weth())
-            .unwrap();
-        let most = state
-            .get_amount_out(amount(2_000_000_000_000_000_000), &weth(), &usdc())
-            .unwrap_err();
-
-        assert_eq!(sell.gas, amount(SELL_BASE_PRINT_SWAP_GAS));
-        assert_eq!(buy.gas, amount(BUY_BASE_PRINT_SWAP_GAS));
-        let SimulationError::InvalidInput(_, Some(partial)) = most else {
-            panic!("expected the most the listing fills, got {most:?}");
-        };
-        assert_eq!(partial.gas, amount(SELL_BASE_PRINT_SWAP_GAS));
-    }
-
-    /// The gas charged by class, each direction: a listing reading only its word on its pool's
-    /// hook pair, the same past the hook pair, a listing reading a source on the hook pair, and
-    /// one past it, charged the past figure and the print's difference on the hook pair, a sum;
-    /// a listing reading a guarded source on the hook pair, and one past it, a sum too.
+    /// On Base no fill of the deployed build was measured: a state is charged the gas named for
+    /// its listing whatever its fill reads and wherever its pair sits, and with none named it has
+    /// no figure, refuses every swap, and is left out by the feed.
     #[rstest]
-    #[case::word_on_the_hook_pair(FillReads::Word, PairPlace::HookPair, 118_157, 121_988)]
-    #[case::word_past_the_hook_pair(FillReads::Word, PairPlace::PastWithAsset, 151_734, 150_865)]
-    #[case::word_past_it_without_the_asset(
-        FillReads::Word,
-        PairPlace::PastWithoutAsset,
-        151_734,
-        150_865
-    )]
-    #[case::print_on_the_hook_pair(FillReads::Source, PairPlace::HookPair, 130_482, 134_794)]
-    #[case::print_past_the_hook_pair(FillReads::Source, PairPlace::PastWithAsset, 164_059, 163_671)]
-    #[case::print_past_it_without_the_asset(
-        FillReads::Source,
-        PairPlace::PastWithoutAsset,
-        164_059,
-        163_671
-    )]
-    #[case::guarded_on_the_hook_pair(
-        FillReads::GuardedSource,
-        PairPlace::HookPair,
-        136_461,
-        140_520
-    )]
-    #[case::guarded_past_the_hook_pair(
-        FillReads::GuardedSource,
-        PairPlace::PastWithAsset,
-        170_038,
-        169_397
-    )]
-    #[case::print_past_the_hook_pair_with_the_asset_as_quote(
-        FillReads::Source,
-        PairPlace::PastWithAssetAsQuote,
-        164_059,
-        163_671
-    )]
-    fn the_gas_charged_is_its_class(
-        #[case] reads: FillReads,
-        #[case] pair: PairPlace,
-        #[case] sell: u64,
-        #[case] buy: u64,
+    fn on_base_only_named_gas_is_charged(
+        #[values(FillReads::Word, FillReads::Source, FillReads::GuardedSource)] reads: FillReads,
+        #[values(
+            PairPlace::HookPair,
+            PairPlace::PastWithAsset,
+            PairPlace::PastWithoutAsset,
+            PairPlace::PastWithAssetAsQuote
+        )]
+        pair: PairPlace,
+        #[values(true, false)] named: bool,
     ) {
-        let mut state = weth_usdc_state();
+        let mut state = named_state();
         state.reads = reads;
         state.pair = pair;
+        if !named {
+            state.credit = None;
+        }
 
-        let selling = state
-            .get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc())
-            .unwrap();
-        let buying = state
-            .get_amount_out(amount(3_010_000_000), &usdc(), &weth())
-            .unwrap();
+        let selling = state.get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc());
+        let buying = state.get_amount_out(amount(1_505_000_000), &usdc(), &weth());
 
-        assert_eq!((selling.gas, buying.gas), (amount(sell), amount(buy)));
+        assert_eq!(state.gas_chain, GasChain::Base);
+        assert_eq!(state.has_gas(), named);
+        if named {
+            assert_eq!(
+                (selling.unwrap().gas, buying.unwrap().gas),
+                (amount(95_825), amount(96_239))
+            );
+        } else {
+            assert!(matches!(selling, Err(SimulationError::FatalError(_))), "{selling:?}");
+            assert!(matches!(buying, Err(SimulationError::FatalError(_))), "{buying:?}");
+        }
     }
 
     /// On Ethereum a listing is charged the figures measured on its own pair, with the same base,
@@ -1534,7 +1402,7 @@ mod tests {
     fn a_side_past_its_deadline_quotes_nothing() {
         let past = Deadline { at: Instant::now(), unix_ms: 1 };
         let later = Deadline::at_unix_ms(61_000, 1_000);
-        let state = weth_usdc_state().with_deadlines(Some(past), Some(later));
+        let state = named_state().with_deadlines(Some(past), Some(later));
 
         let sell = state.get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc());
         let buy = state.get_amount_out(amount(3_010_000_000), &usdc(), &weth());
@@ -1555,7 +1423,7 @@ mod tests {
     /// The door refuses a size it cannot fill whole: the state hands back the most it fills.
     #[test]
     fn a_size_past_the_largest_is_refused_with_the_most_the_listing_fills() {
-        let state = weth_usdc_state();
+        let state = named_state();
 
         let error = state
             .get_amount_out(amount(2_000_000_000_000_000_000), &weth(), &usdc())
@@ -1593,7 +1461,7 @@ mod tests {
     /// nothing either way.
     #[test]
     fn the_state_after_a_swap_quotes_nothing() {
-        let state = weth_usdc_state();
+        let state = named_state();
 
         let result = state
             .get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc())
@@ -1788,19 +1656,21 @@ mod tests {
     }
 
     /// A state with a routed side and no credit gas, which no feed makes, refuses the routed
-    /// fill rather than charge it a custody fill's gas; on Base, whose classes have figures, its
+    /// fill rather than charge it a custody fill's gas; on a pair measured on Ethereum its
     /// custody fills still quote.
     #[test]
     fn a_routed_side_without_credit_gas_is_refused() {
         let mut state = weth_usdc_credit_state();
         state.credit = None;
-        state.gas_chain = GasChain::Base;
+        (state.base_token, state.quote_token) = (token(ETHEREUM_WSTETH), token(ETHEREUM_WETH));
+        state.reads = FillReads::Source;
+        let (base, quote) = (state.base_token.clone(), state.quote_token.clone());
 
-        let routed = state.get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc());
-        let custody = state.get_amount_out(amount(50_000_000_000_000_000), &weth(), &usdc());
+        let routed = state.get_amount_out(amount(500_000_000_000_000_000), &base, &quote);
+        let custody = state.get_amount_out(amount(50_000_000_000_000_000), &base, &quote);
 
         assert!(matches!(routed, Err(SimulationError::FatalError(_))), "{routed:?}");
-        assert_eq!(custody.unwrap().gas, amount(SELL_BASE_SWAP_GAS));
+        assert_eq!(custody.unwrap().gas, amount(ETHEREUM_SELL_BASE_PRINT_SWAP_GAS));
     }
 
     /// A credit state round-trips with its route marks and its gas; a state of any other listing

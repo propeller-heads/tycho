@@ -39,6 +39,33 @@ pub(super) const BEACON_GENESIS: u64 = 1_606_824_023;
 /// Seconds per beacon slot.
 pub(super) const SLOT_SECS: u64 = 12;
 
+/// How a chain whose builders land makers' updates spaces its blocks, which tells the reader
+/// which map is for the block after the node's latest and when that block lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Cadence {
+    /// Ethereum's beacon slots: a block every 12 s at most, its time named by the map's `slot`.
+    Slots,
+    /// A block every `block_ms` milliseconds, its timestamp in whole seconds and its milliseconds
+    /// in its header (BNB Chain's BEP-520): a map names its block alone, and the next block
+    /// falls in the head's second or the one after.
+    Blocks { block_ms: u64 },
+}
+
+impl Cadence {
+    /// BNB Chain's: a block every 450 ms.
+    pub(super) const BNB: Self = Self::Blocks { block_ms: 450 };
+
+    /// How many whole seconds past its block's time a node's latest block may be when the node
+    /// has stalled: two slots on Ethereum (with one missed its latest block is at most that old),
+    /// and on a chain making several blocks a second, the second its next two blocks reach.
+    pub(super) fn stall_secs(self) -> u64 {
+        match self {
+            Self::Slots => 2 * SLOT_SECS,
+            Self::Blocks { block_ms } => (2 * block_ms).div_ceil(1000),
+        }
+    }
+}
+
 /// The largest `/state` answer read, bytes.
 pub(super) const MAX_STATE_BODY: usize = 4 * 1024 * 1024;
 
@@ -185,7 +212,7 @@ type Accounts = BTreeMap<Address, AccountOverride>;
 #[derive(Debug, Clone)]
 pub(super) struct Map {
     number: u64,
-    /// Unix seconds: the slot's start.
+    /// Unix seconds: the slot's start; zero on [`Cadence::Blocks`], whose map names no time.
     time: u64,
     accounts: Accounts,
     /// Whether any entry of the answer could not be read whole: it covers no listing.
@@ -204,13 +231,29 @@ impl StateMaps {
     /// not seen. Nor is a map for that block at a later slot, whether a slot was missed or the map
     /// runs ahead of the wall clock: its doors would be sampled at a time the block does not land
     /// at. That poll serves nothing, and the next is read as usual.
+    #[cfg(test)]
     pub(super) fn for_block_after(self, head: u64, head_time: u64) -> Option<NextBlock> {
+        self.for_block_after_in(head, head_time, Cadence::Slots)
+    }
+
+    /// The same at `cadence`. On [`Cadence::Blocks`] a map names no time: the maps for the block
+    /// after `head` are taken, and that block's time is the head's second, `head_time`, the first
+    /// it may fall in (the reader samples it at the next second as well).
+    pub(super) fn for_block_after_in(
+        self,
+        head: u64,
+        head_time: u64,
+        cadence: Cadence,
+    ) -> Option<NextBlock> {
         let number = head.checked_add(1)?;
-        let time = head_time.checked_add(SLOT_SECS)?;
+        let time = match cadence {
+            Cadence::Slots => head_time.checked_add(SLOT_SECS)?,
+            Cadence::Blocks { .. } => head_time,
+        };
         let (answers, malformed): (Vec<Accounts>, Vec<bool>) = self
             .0
             .into_iter()
-            .filter(|map| map.number == number && map.time == time)
+            .filter(|map| map.number == number && (cadence != Cadence::Slots || map.time == time))
             .map(|map| (map.accounts, map.malformed))
             .unzip();
         (!answers.is_empty()).then_some(NextBlock { number, time, answers, malformed })
@@ -222,7 +265,8 @@ impl StateMaps {
 #[derive(Debug, Clone)]
 pub(super) struct NextBlock {
     pub(super) number: u64,
-    /// Unix seconds: the slot's start.
+    /// Unix seconds: the slot's start, or on [`Cadence::Blocks`] the head's second, the first
+    /// the block may fall in.
     pub(super) time: u64,
     answers: Vec<Accounts>,
     /// Per answer, whether it has an entry that could not be read whole: it covers no listing.
@@ -531,17 +575,29 @@ pub(super) struct NextBlockReader {
     client: Client,
     #[debug(skip)]
     urls: Vec<Url>,
+    /// How the chain spaces its blocks.
+    pub(super) cadence: Cadence,
 }
 
 impl NextBlockReader {
     /// A reader of `urls`, each request given `timeout`, which the feed sets under its poll's own
     /// so that one URL that hangs does not fail the poll.
+    #[cfg(test)]
     pub(super) fn new(urls: Vec<Url>, timeout: Duration) -> Result<Self, FeedError> {
+        Self::new_in(urls, timeout, Cadence::Slots)
+    }
+
+    /// The same on a chain spacing its blocks at `cadence`.
+    pub(super) fn new_in(
+        urls: Vec<Url>,
+        timeout: Duration,
+        cadence: Cadence,
+    ) -> Result<Self, FeedError> {
         let client = Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|e| FeedError::InvalidInput(format!("Efficient PropAMM state client: {e}")))?;
-        Ok(Self { client, urls })
+        Ok(Self { client, urls, cadence })
     }
 
     /// Asks every URL for its map at once, and keeps each map in the configured order of its URL.
@@ -629,7 +685,7 @@ impl NextBlockReader {
         let result = answer.result.ok_or_else(|| {
             FeedError::Parsing("Efficient PropAMM state map: no result".to_string())
         })?;
-        parse_map(result)
+        parse_map_in(result, self.cadence)
     }
 }
 
@@ -646,25 +702,36 @@ impl NextBlockReader {
 /// JSON keys collapse in the JSON parse itself, the later value kept. An entry that cannot be read
 /// whole is left out, and the answer is marked malformed: it covers no listing for its block (a
 /// later clean answer still can), whatever the entry was meant to write.
-fn parse_map(mut result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
+#[cfg(test)]
+fn parse_map(result: BTreeMap<String, Value>) -> Result<Map, FeedError> {
+    parse_map_in(result, Cadence::Slots)
+}
+
+/// [`parse_map`] at `cadence`: on [`Cadence::Blocks`] no `slot` is read (one given is passed
+/// over), the map's block's time coming from the head it follows
+/// ([`StateMaps::for_block_after_in`]).
+fn parse_map_in(mut result: BTreeMap<String, Value>, cadence: Cadence) -> Result<Map, FeedError> {
     let number = result
         .remove("blockNumber")
         .and_then(|number| serde_json::from_value::<U64>(number).ok())
         .ok_or_else(|| {
             FeedError::Parsing("Efficient PropAMM state map: no hex blockNumber".to_string())
         })?;
-    let time = result
-        .remove("slot")
-        .and_then(|slot| slot.as_u64())
-        .and_then(|slot| {
-            slot.checked_mul(SLOT_SECS)?
-                .checked_add(BEACON_GENESIS)
-        })
-        .ok_or_else(|| {
-            FeedError::Parsing(
-                "Efficient PropAMM state map: no slot on the beacon grid".to_string(),
-            )
-        })?;
+    let slot = result.remove("slot");
+    let time = match cadence {
+        Cadence::Slots => slot
+            .and_then(|slot| slot.as_u64())
+            .and_then(|slot| {
+                slot.checked_mul(SLOT_SECS)?
+                    .checked_add(BEACON_GENESIS)
+            })
+            .ok_or_else(|| {
+                FeedError::Parsing(
+                    "Efficient PropAMM state map: no slot on the beacon grid".to_string(),
+                )
+            })?,
+        Cadence::Blocks { .. } => 0,
+    };
     let mut accounts = Accounts::new();
     let mut dropped: Vec<(String, String)> = Vec::new();
     // Whether any entry could not be read whole: the answer then covers no listing.
