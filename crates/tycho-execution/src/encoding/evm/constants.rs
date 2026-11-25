@@ -179,6 +179,9 @@ pub const BAIBAI_BASE_ATTRIBUTE: &str = "base";
 /// Static attribute of a BaiBai component naming the pair's quote token.
 pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
 
+/// Protocol system of ElFomoFi components.
+pub const ELFOMOFI_PROTOCOL_SYSTEM: &str = "pamm:elfomofi";
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 

@@ -61,6 +61,7 @@ const deploy_protocols = {
         "lunarbase",
         "biconomy",
         "baibai",
+        "pamm:elfomofi",
         "rfq:metric",
         "rfq:native",
         "fallback",
@@ -111,6 +112,7 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:native",
         "lunarbase",
+        "pamm:elfomofi",
         "subsidy",
     ],
     "plasma": [
@@ -131,6 +133,7 @@ const deploy_protocols = {
         "rfq:native",
         "fallback:rfq:metric",
         "fallback:rfq:native",
+        "pamm:elfomofi",
     ],
     "arc": [
         "aero_basic",

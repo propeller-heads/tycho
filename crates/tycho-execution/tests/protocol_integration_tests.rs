@@ -9,6 +9,7 @@ use tycho_common::{
 };
 use tycho_execution::encoding::{
     evm::{
+        swap_encoder::ElfomofiFloor,
         testing_utils::MockRFQState,
         utils::{biguint_to_u256, write_calldata_to_file},
     },
@@ -4519,6 +4520,57 @@ fn test_sequential_encoding_strategy_sky() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_sequential_encoding_strategy_sky", hex_calldata.as_str());
+}
+
+/// Sells 0.1 WETH for USDC on ElFomoFi's Base book. The swap carries no state, as a serialized
+/// one would not, so its floor comes from `min_amount_out`: 166 USDC, under the 167.29 the book
+/// quotes at the Foundry test's fork block.
+#[test]
+fn test_single_encoding_strategy_elfomofi() {
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let amount_in = BigUint::from(100_000_000_000_000_000u64);
+    let floor = ElfomofiFloor::MinAmountOut("166000000".to_string());
+    let swap = Swap::new(
+        ProtocolComponent {
+            protocol_system: "pamm:elfomofi".into(),
+            chain: Chain::Base,
+            tokens: vec![weth.clone(), usdc.clone()],
+            ..Default::default()
+        },
+        default_token(weth.clone()),
+        default_token(usdc.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(amount_in.clone())
+    .with_user_data(Bytes::from(serde_json::to_vec(&floor).unwrap()));
+    let solution = Solution::new(
+        bob_address(),
+        bob_address(),
+        weth,
+        usdc,
+        amount_in,
+        BigUint::from(1u8),
+        BigUint::from(1u8),
+        vec![swap],
+    );
+    let encoded = get_tycho_router_encoder(Chain::Base)
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()
+        .remove(0);
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        &encoded,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file("test_single_encoding_strategy_elfomofi", &encode(calldata));
 }
 
 /// Writes the calldata of a single BaiBai swap on the WETH pair under `name`.

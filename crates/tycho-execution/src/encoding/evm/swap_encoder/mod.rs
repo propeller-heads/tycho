@@ -9,6 +9,8 @@ mod bopamm;
 mod curve;
 mod ekubo;
 mod ekubo_v3;
+mod elfomofi;
+pub use elfomofi::{ElfomofiFloor, ELFOMOFI_CHAINS};
 mod erc_4626;
 mod etherfi;
 mod euclid;
