@@ -12,7 +12,8 @@ use crate::postgres::{
 
 impl PostgresGatewayNew {
     /// Returns the id of each component of the instance, by external id. Deleted components are
-    /// found too.
+    /// found too, so a batch still writes the balances of a deleted component, as the writes did
+    /// before the instance tables. Do not filter on `deleted_at`.
     ///
     /// `NotFound` for the first external id that has no component in the instance.
     pub(crate) async fn component_ids(
