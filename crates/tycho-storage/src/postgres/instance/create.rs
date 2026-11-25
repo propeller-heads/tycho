@@ -108,3 +108,107 @@ async fn create(
         })?;
     Ok(instance)
 }
+
+#[cfg(test)]
+mod tests {
+    use diesel::{prelude::*, sql_query, sql_types::Text};
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use tycho_common::storage::StorageError;
+
+    use super::ensure_instance;
+    use crate::postgres::{
+        db_fixtures,
+        instance::{orm::InstanceStatus, schema::tycho::protocol_instance},
+        schema,
+        testing::instance_test_connection,
+    };
+
+    #[derive(QueryableByName)]
+    struct Leaf {
+        #[diesel(sql_type = Text)]
+        tablename: String,
+    }
+
+    /// A test connection with the protocol system `vm:curve` stored.
+    async fn setup() -> AsyncPgConnection {
+        let mut conn = instance_test_connection().await;
+        db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
+        conn
+    }
+
+    #[tokio::test]
+    async fn test_ensure_instance_creates_an_active_instance_with_its_partitions() {
+        let mut conn = setup().await;
+
+        let instance = ensure_instance("vm:curve", "0.0.1", &mut conn)
+            .await
+            .unwrap();
+
+        let status: InstanceStatus = protocol_instance::table
+            .find(instance)
+            .select(protocol_instance::status)
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(status, InstanceStatus::Ready);
+        let active: Option<i32> = schema::protocol_system::table
+            .filter(schema::protocol_system::name.eq("vm:curve"))
+            .select(schema::protocol_system::active_instance_id)
+            .get_result(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(active, Some(instance.0));
+        let leaves: Vec<Leaf> = sql_query(format!(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'tycho' \
+             AND tablename = 'account_i{instance}'"
+        ))
+        .load(&mut conn)
+        .await
+        .unwrap();
+        let names: Vec<&str> = leaves
+            .iter()
+            .map(|leaf| leaf.tablename.as_str())
+            .collect();
+        assert_eq!(names, vec![format!("account_i{instance}")]);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_instance_returns_the_stored_instance() {
+        let mut conn = setup().await;
+        let first = ensure_instance("vm:curve", "0.0.1", &mut conn)
+            .await
+            .unwrap();
+
+        let second = ensure_instance("vm:curve", "0.0.1", &mut conn)
+            .await
+            .unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_instance_fails_for_a_dropped_instance() {
+        let mut conn = setup().await;
+        let instance = ensure_instance("vm:curve", "0.0.1", &mut conn)
+            .await
+            .unwrap();
+        diesel::update(protocol_instance::table.find(instance))
+            .set(protocol_instance::status.eq(InstanceStatus::Dropped))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+
+        let result = ensure_instance("vm:curve", "0.0.1", &mut conn).await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_instance_fails_for_an_unknown_protocol_system() {
+        let mut conn = instance_test_connection().await;
+
+        let result = ensure_instance("vm:unknown", "0.0.1", &mut conn).await;
+
+        assert!(matches!(result, Err(StorageError::NotFound(..))), "{result:?}");
+    }
+}
