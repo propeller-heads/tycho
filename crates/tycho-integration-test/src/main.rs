@@ -118,7 +118,8 @@ struct Cli {
     disable_pamm: bool,
 
     /// pAMM book feeds to run, comma-separated (e.g. metric,baibai). Replaces the default list
-    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url. A listed venue
+    /// (metric). BaiBai runs on Base only and reads its books over --rpc-url; ElFomoFi runs on
+    /// Base, BSC and Robinhood and reads its books over --rpc-url too. A listed venue
     /// missing its credentials, or whose feed fails to build, fails the run; a default venue
     /// is skipped instead. A feed that builds but fails once it runs, for example on a chain
     /// its venue does not serve, ends with a warning like any other feed.
