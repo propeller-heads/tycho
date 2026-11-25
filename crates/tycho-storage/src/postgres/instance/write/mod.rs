@@ -8,6 +8,7 @@ mod balance;
 pub mod block;
 mod component;
 mod contract;
+mod contract_code;
 mod extraction_state;
 mod state;
 mod token;

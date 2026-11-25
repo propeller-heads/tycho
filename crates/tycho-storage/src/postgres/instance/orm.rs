@@ -429,6 +429,15 @@ pub struct NewContractCode {
     pub tx_index: i32,
 }
 
+impl NewContractCode {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 7;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::contract_code_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -443,6 +452,29 @@ pub struct ContractCodeHistory {
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::contract_code_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewContractCodeHistory {
+    pub instance_id: InstanceId,
+    pub account_id: i64,
+    pub code: Bytes,
+    pub hash: Bytes,
+    pub modify_tx_hash: Bytes,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
+}
+
+impl NewContractCodeHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
