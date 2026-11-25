@@ -115,22 +115,48 @@ where
                     e.get_mut().insert(inner, value);
                 }
                 Entry::Occupied(e) => {
-                    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
-                    let version = match read {
-                        ReadAt::Current(None) => "the latest version".to_string(),
-                        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => {
-                            format!("version {ts}")
-                        }
-                    };
-                    return Err(StorageError::Unexpected(format!(
-                        "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
-                        (e.key(), &inner)
-                    )));
+                    return Err(overlap(entity, instance, read, (e.key(), &inner)));
                 }
             }
             Ok(map)
         },
     )
+}
+
+/// Collects `rows` into a map by key. `Unexpected` if two rows have the same key, as for
+/// [`unique_by_key`].
+pub(super) fn unique_by_id<K: Eq + Hash + Debug, V>(
+    entity: &'static str,
+    instance: InstanceId,
+    read: ReadAt,
+    rows: impl IntoIterator<Item = (K, V)>,
+) -> Result<HashMap<K, V>, StorageError> {
+    rows.into_iter()
+        .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
+            Entry::Vacant(e) => {
+                e.insert(value);
+                Ok(map)
+            }
+            Entry::Occupied(e) => Err(overlap(entity, instance, read, e.key())),
+        })
+}
+
+/// The error for two rows of `key` of `entity` valid at the version of `read`. Counts it in
+/// `storage_overlapping_versions{entity}`.
+fn overlap(
+    entity: &'static str,
+    instance: InstanceId,
+    read: ReadAt,
+    key: impl Debug,
+) -> StorageError {
+    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
+    let version = match read {
+        ReadAt::Current(None) => "the latest version".to_string(),
+        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
+    };
+    StorageError::Unexpected(format!(
+        "{entity} of instance {instance} at {version}: two rows of {key:?} are valid"
+    ))
 }
 
 #[cfg(test)]
