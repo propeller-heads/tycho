@@ -903,29 +903,13 @@ mod tests {
         SimulationDB::new(client, runtime, None)
     }
 
-    #[test]
-    fn test_simulate_applies_block_env_overrides() {
+    /// A database at block 1 with `code` at a contract address, which it returns, and an empty
+    /// caller account at the zero address.
+    fn state_with_contract(code: &'static [u8]) -> (PreCachedDB, Address) {
         let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
         let contract =
             Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
-        // Minimal runtime bytecode equivalent to the following Solidity contract:
-        //
-        // // SPDX-License-Identifier: UNLICENSED
-        // pragma solidity ^0.8.26;
-        //
-        // contract BlockNumberTest {
-        //     function test() external view returns (uint256) {
-        //         return block.number;
-        //     }
-        // }
-        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
-            0x43, // NUMBER
-            0x60, 0x00, // PUSH1 0
-            0x52, // MSTORE
-            0x60, 0x20, // PUSH1 32
-            0x60, 0x00, // PUSH1 0
-            0xf3, // RETURN
-        ]));
+        let bytecode = Bytecode::new_raw(Bytes::from_static(code));
         let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
         state
             .init_account(contract, account, None, true)
@@ -936,6 +920,29 @@ mod tests {
         state
             .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
             .expect("block header update succeeds");
+        (state, contract)
+    }
+
+    #[test]
+    fn test_simulate_applies_block_env_overrides() {
+        // Minimal runtime bytecode equivalent to the following Solidity contract:
+        //
+        // // SPDX-License-Identifier: UNLICENSED
+        // pragma solidity ^0.8.26;
+        //
+        // contract BlockNumberTest {
+        //     function test() external view returns (uint256) {
+        //         return block.number;
+        //     }
+        // }
+        let (state, contract) = state_with_contract(&[
+            0x43, // NUMBER
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]);
 
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
@@ -956,27 +963,14 @@ mod tests {
 
     #[test]
     fn test_simulate_applies_native_balance_overrides() {
-        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
-        let contract =
-            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
-        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+        let (state, contract) = state_with_contract(&[
             0x47, // SELFBALANCE
             0x60, 0x00, // PUSH1 0
             0x52, // MSTORE
             0x60, 0x20, // PUSH1 32
             0x60, 0x00, // PUSH1 0
             0xf3, // RETURN
-        ]));
-        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
-        state
-            .init_account(contract, account, None, true)
-            .expect("contract account init succeeds");
-        state
-            .init_account(Address::ZERO, AccountInfo::default(), None, true)
-            .expect("caller account init succeeds");
-        state
-            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
-            .expect("block header update succeeds");
+        ]);
         let expected_balance = U256::from(4_200_000_000_000_000_000u64);
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
@@ -998,10 +992,7 @@ mod tests {
     #[case::without_tracing(false)]
     #[case::with_tracing(true)]
     fn test_simulate_transient_storage(#[case] trace: bool) {
-        let state = PreCachedDB::new().expect("PreCachedDB creation succeeds");
-        let contract =
-            Address::from_str("0x0000000000000000000000000000000000001234").expect("valid address");
-        let bytecode = Bytecode::new_raw(Bytes::from_static(&[
+        let (state, contract) = state_with_contract(&[
             0x60, 0x2a, // PUSH1 42
             0x60, 0x07, // PUSH1 7
             0x5d, // TSTORE: slot 7 = 42
@@ -1009,17 +1000,7 @@ mod tests {
             0x60, 0x09, // PUSH1 9
             0x5d, // TSTORE: slot 9 = 0
             0x00, // STOP
-        ]));
-        let account = AccountInfo::new(U256::ZERO, 0, bytecode.hash_slow(), bytecode);
-        state
-            .init_account(contract, account, None, true)
-            .expect("contract account init succeeds");
-        state
-            .init_account(Address::ZERO, AccountInfo::default(), None, true)
-            .expect("caller account init succeeds");
-        state
-            .update(Vec::new(), Some(BlockHeader { number: 1, timestamp: 2, ..Default::default() }))
-            .expect("block header update succeeds");
+        ]);
         let input = HashMap::from([(U256::from(8), U256::from(3)), (U256::from(9), U256::from(5))]);
         let sim_params = SimulationParameters {
             caller: Address::ZERO,
