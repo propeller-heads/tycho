@@ -266,8 +266,8 @@ async fn load_account_balances(
     read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
-    let native = chain.native_token().address;
-    let skip = (!include_native).then_some(&native);
+    let native = (!include_native).then(|| chain.native_token().address);
+    let skip = native.as_ref();
     let mut rows =
         current_account_balance_rows(instance, accounts, skip, read.current_until(), conn).await?;
     if let ReadAt::Past { ts, head } = read {
