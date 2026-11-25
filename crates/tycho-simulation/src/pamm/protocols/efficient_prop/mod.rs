@@ -105,8 +105,15 @@
 //! fill, and the input is already at the door. A source that tells them apart can fill a real
 //! transaction for less than the book quoted, down to the route's minimum output. So approve a
 //! source only where its code cannot change and its answer comes from its own stored prices and
-//! the clock alone. A guarded source needs approval as any other. For a listing with no source, or
-//! whose every source is approved, a fill pays what the door quotes from the same state. The
+//! the clock alone. A guarded source needs approval as any other. A fill through a source
+//! registered unguarded (its registration's guard bit clear) reads its lane's kept print, the
+//! last valid print anyone posted; a guarded source answers each side the worst print its lane
+//! held over its hold instead (see below). An unguarded source binds no tied listing, so its
+//! print only bounds a fill: it caps each of the maker's signed levels in the pool's favour, may
+//! refuse the fill, and sets the fee the pool pays. A post landing between a poll's read and a
+//! fill can so move the fill from the book's quote, never to better for the taker than the
+//! maker's signed levels. For a listing with no source, or whose every source is approved, a
+//! fill pays what the door quotes from the same state. The
 //! binding (the primary's and the backup's ids, record word 10 of the front's storage) is read with
 //! the listing's settings at every poll's block, so a listing its operator rebinds is judged again
 //! on the next poll.
@@ -153,11 +160,13 @@
 //! same call as the other samples, under block overrides, each size of both sides is also asked
 //! at every block after the read's through the first at or past that, kept at the least, and
 //! dropped where the door refuses it at any of them. The lane's `HOLD_MS` (a public immutable of
-//! its code: 400 ms on Base's hold lane, where the front counts 200 ms blocks) is asked the first
-//! time the listing is read; until the lane answers, 2,000 ms, the longest a lane holds, is
-//! sampled. The lane holds on the clock the front reads, as Base's does. A node that refuses or
-//! ignores the overrides cannot show the hold, so there a guarded listing is not quoted. A listing
-//! reading a print whose live source's copy the node does not answer is left out.
+//! its code: two of the front's clock steps, 400 ms on a lane whose front counts Base's 200 ms
+//! blocks) is asked the first time the listing is read; until the lane answers, 2,000 ms, the
+//! longest a lane holds, is sampled. The lane holds on the clock the front reads, as Base's does. A
+//! node that refuses or ignores the overrides cannot show the hold, so there a guarded listing is
+//! not quoted. A listing reading a print whose live source's copy the node does not answer is left
+//! out. No source approved on Base is guarded: its one, [`BASE_PRICE_SOURCES`], is registered
+//! unguarded, so the front reads its kept print and the reader samples no hold there.
 //!
 //! # A book's life
 //!
@@ -644,8 +653,12 @@
 //! the block after, less the landing allowance (100 ms by default,
 //! [`EfficientPropFeedBuilder::landing_allowance`]): a route must reach 48 Club before it seals
 //! the block. A side is served only where 50 ms of that remain, so a poll serves the next block
-//! alone only where it answers within about 300 ms of the head. A node whose latest block is more
-//! than a second and the lag allowance (4 s) behind the poll's start has stalled.
+//! alone only where it answers within about 300 ms of the head. Such a side is served until 350 ms
+//! after the head, so a solver taking it at its last moment has the landing allowance, about
+//! 100 ms, to reach 48 Club before the block seals; no taker's route was measured against it. A
+//! route that misses its block lands without the maker's update and the door refuses it
+//! (`NoWord`): a bundle costs nothing, a public transaction its gas. A node whose latest block is
+//! more than a second and the lag allowance (4 s) behind the poll's start has stalled.
 //!
 //! Both the 450 ms and the host's clock time a side's life, so both are checked. Each poll reads
 //! the head's parent's header beside the head's, and serves nothing where the head's header names
@@ -660,12 +673,14 @@
 //! polls count under the outcomes `off_cadence` and `clock_behind` of
 //! `efficient_prop_polls_total`.
 //!
-//! Nothing is served on BNB Chain yet. Its deployment's record has not landed
-//! ([`EfficientPropDeployment::bnb`] holds the front as its rehearsal on a fork of the chain
-//! deployed it, and an ignored test reads the front's values from a node), no listing exists
-//! there, no state URL serving chain 56 is known, and tycho-execution runs no `PropAMMExecutor`
-//! there: its pAMM encoder refuses the chain, so no book there could be encoded. The path runs in
-//! this module's offline tests.
+//! Nothing is served on BNB Chain yet. The front runs there ([`EfficientPropDeployment::bnb`],
+//! at the addresses it has on Ethereum, with its listing-door factory, its implementation, whose
+//! code differs from Ethereum's, and its first desk contract; an ignored test reads them from a
+//! node), and its price source 1, the QQQB/USD1 price contract, is registered, though
+//! [`EfficientPropFeedBuilder::bnb`] approves no source. No listing exists there, the deployment's
+//! composed record has not landed, no state URL serving chain 56 is known, and tycho-execution runs
+//! no `PropAMMExecutor` there: its pAMM encoder refuses the chain, so no book there could be
+//! encoded. The path runs in this module's offline tests.
 //!
 //! # What this integration depends on
 //!
@@ -685,8 +700,12 @@
 //! deployed fronts', and [`EfficientPropFeedBuilder::ethereum`] and
 //! [`EfficientPropFeedBuilder::base`] build on them, so a caller sets a node, its approved desks,
 //! on Ethereum a state URL, and on Base each listing's gas. [`EfficientPropDeployment::bnb`] holds
-//! the front as its rehearsal on a fork of BNB Chain deployed it, which
-//! [`EfficientPropFeedBuilder::bnb`] builds on, approving no price source. The feed checks that the
+//! the front deployed on BNB Chain, which [`EfficientPropFeedBuilder::bnb`] builds on, approving
+//! no price source. The implementation has one address on the three chains and other code on
+//! each, so each preset builds for its own chain alone and pins its chain's implementation code
+//! hash ([`EfficientPropFeedBuilder::with_implementation_code_hashes`]): the first poll reads the
+//! code and ends the feed on any other. A feed built with [`EfficientPropFeedBuilder::new`] and
+//! no hash checks the implementation by its address alone. The feed checks that the
 //! factory serves that front and that the front's `CELL_CODEHASH` is the configured one: a mismatch
 //! ends the feed, so nothing is listed that cannot be simulated.
 
@@ -793,8 +812,12 @@ pub const ETHEREUM_PRICE_SOURCES: [u32; 4] = [1, 2, 3, 4];
 
 /// The ids of the front's price sources at its deployment on Base: the USDe/USDC lane
 /// `0xd42d07791f520d86ac827463e40D07101c5f2329`, the price contract of the one pair listed
-/// there, which [`EfficientPropFeedBuilder::base`] approves. It is a guarded lane: the reader
-/// samples its hold (see the module doc, A book's life).
+/// there, which [`EfficientPropFeedBuilder::base`] approves.
+///
+/// Source 1 is registered unguarded: the guard bit of its registration (bit 96 of its config) is
+/// 0, so a fill through it reads the lane's kept print, the lane's 400 ms hold never applies, and
+/// the reader samples none, keying on the same bit the front does. The print only caps the
+/// maker's signed levels in the pool's favour and may refuse a fill (see the module doc).
 pub const BASE_PRICE_SOURCES: [u32; 1] = [1];
 
 /// The runtime code hash of the front's implementation on Ethereum, read from the chain. The
@@ -873,15 +896,14 @@ impl EfficientPropDeployment {
         }
     }
 
-    /// The front as it is to be deployed on BNB Chain, from its rehearsal on a fork of the chain:
-    /// the front proxy, its listing-door factory and its one implementation at the addresses they
+    /// The front deployed on BNB Chain, as its deployment's protocol record holds it: the front
+    /// proxy, its listing-door factory and its one implementation at the addresses they
     /// have on Ethereum, the quote layout [`QUOTE_LAYOUT_BUILDER`], and Ethereum's desk contract
     /// creation code hash: as there, each maker's quote reaches a block in an update ahead of the
     /// fills that read it.
     ///
-    /// The deployment's record has not landed. The feed checks each value against the chain as
-    /// for [`Self::ethereum`], so wherever the deployment differs from its rehearsal, a feed built
-    /// from this ends at its first poll.
+    /// The implementation is named by its address, as for [`Self::base`]. The feed checks each
+    /// value against the chain as for [`Self::ethereum`].
     pub fn bnb() -> Self {
         Self::ethereum()
     }

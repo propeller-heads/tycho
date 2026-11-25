@@ -163,14 +163,14 @@ impl EfficientPropFeedBuilder {
             .preset_for(Chain::Base)
     }
 
-    /// A feed of the front as it is to be deployed on BNB Chain ([`EfficientPropDeployment::bnb`]),
+    /// A feed of the front deployed on BNB Chain ([`EfficientPropDeployment::bnb`]),
     /// valuing books in USD1 beside the chain's curated stablecoins: `book_config` is BNB Chain's
     /// and `rpc_url` a BNB Chain node. What is left to set is where the next block's state comes
     /// from ([`Self::state_urls`], required), whose listings to serve
     /// ([`Self::with_approved_desks`]), what each one's fills cost ([`Self::credit_listing`], as
     /// on Base), and which price sources to approve ([`Self::approved_price_sources`]): none is
-    /// approved here, since the deployment's record has not landed and anyone may register a
-    /// source, so an id names a price contract only once the deployment's record shows it.
+    /// approved here: anyone may register a source, and the deployment's one, id 1, the QQQB/USD1
+    /// price contract, is approved only by the caller that has checked it.
     ///
     /// The preset is BNB Chain's alone, as [`Self::ethereum`] is Ethereum's: it fails to build
     /// for any other chain, and pins the code hash of BNB Chain's implementation.
@@ -9750,7 +9750,7 @@ mod tests {
         };
 
         /// Each preset's desk contract code hash places desk 1's contract under the preset's front
-        /// where its deployment's record has it (its `desk1`; on BNB Chain the rehearsal's): a
+        /// where its deployment's record has it (its `desk1`): a
         /// hash other than the deployed desk code's places every desk where none is approved.
         #[rstest]
         #[case::ethereum(

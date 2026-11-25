@@ -1215,7 +1215,8 @@ pub(super) struct DoorsReader {
     /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::approved_price_sources
     price_sources: BTreeSet<u32>,
     /// The credit listings served, by id, with the gas configured for each: see
-    /// [`EfficientPropFeedBuilder::credit_listing`]. Empty on Base.
+    /// [`EfficientPropFeedBuilder::credit_listing`]. On Base and BNB Chain every listing served
+    /// is one of them.
     ///
     /// [`EfficientPropFeedBuilder::credit_listing`]:
     /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::credit_listing
@@ -2119,7 +2120,8 @@ impl DoorsReader {
         let timestamp =
             to_u64(setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?, "timestamp")?;
         let mut found = Vec::new();
-        // Counted by reason on a chain whose builders land makers' updates, the one served.
+        // Counted by reason only on a chain whose builders land makers' updates (Ethereum, BNB
+        // Chain): Base's listings left out go uncounted.
         let left_out = |reason: NotCovered| {
             if self.next_block.is_some() {
                 telemetry::record_listing_not_covered(reason);

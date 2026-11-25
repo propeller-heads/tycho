@@ -27,6 +27,7 @@ pub(super) const LISTINGS_COVERED: &str = "efficient_prop_listings_covered_total
 /// and could not be used), then `not_opened`. Each is counted where the read finds it, so a poll
 /// that fails later has counted those it found, and a poll that finds no state map for the next
 /// block (see `no_state_map` on [`POLLS`]) counts what its first request rules out and no more.
+/// Base reads its doors at the head and counts none here.
 /// Every reason starts at zero, and `credit_mode` stays there on the deployed front (see
 /// [`NotCovered::CreditMode`]).
 pub(super) const LISTINGS_NOT_COVERED: &str = "efficient_prop_listings_not_covered_total";
