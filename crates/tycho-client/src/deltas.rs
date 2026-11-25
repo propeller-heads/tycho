@@ -757,7 +757,8 @@ impl WsDeltasClient {
     /// Forcefully ends a (client) stream by unsubscribing.
     ///
     /// Is used only if the message can't be processed due to an error that might resolve
-    /// itself by resubscribing.
+    /// itself by resubscribing. Returns once the unsubscribe command is sent: the subscription
+    /// ends when the server confirms it, which the read loop handles after this returns.
     async fn force_unsubscribe(subscription_id: Uuid, inner: &mut Inner) {
         // avoid unsubscribing multiple times
         if let Some(SubscriptionInfo::RequestedUnsubscription(_)) = inner
@@ -767,19 +768,11 @@ impl WsDeltasClient {
             return;
         }
 
-        let (tx, rx) = oneshot::channel();
+        // Nothing waits for the confirmation. This runs inside the read loop, the only place
+        // that can deliver it, so waiting here would only stall the connection.
+        let (tx, _rx) = oneshot::channel();
         if let Err(e) = WsDeltasClient::unsubscribe_inner(inner, subscription_id, tx).await {
             warn!(?e, ?subscription_id, "Failed to send unsubscribe command");
-        } else {
-            // Wait for unsubscribe completion with timeout
-            match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                Ok(_) => {
-                    debug!(?subscription_id, "Unsubscribe completed successfully");
-                }
-                Err(_) => {
-                    warn!(?subscription_id, "Unsubscribe completion timed out");
-                }
-            }
         }
     }
 
