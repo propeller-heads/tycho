@@ -19,7 +19,7 @@ use crate::postgres::{
         orm::{ComponentBalance, NewComponentBalance, NewComponentBalanceHistory},
         schema::tycho::{component_balance, component_balance_history},
         write::{
-            versioning::{VersionedChange, VersionedRow},
+            versioning::{VersionedChange, VersionedRowNew},
             ROWS_PER_INSERT,
         },
         InstanceId,
@@ -101,7 +101,7 @@ fn no_previous_balance() -> Bytes {
 }
 
 #[async_trait]
-impl VersionedRow for NewComponentBalance {
+impl VersionedRowNew for NewComponentBalance {
     const ENTITY: &'static str = "ComponentBalance";
     /// Component id and token address.
     type Key = (i64, Bytes);

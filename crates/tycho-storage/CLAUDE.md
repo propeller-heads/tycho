@@ -56,7 +56,7 @@ postgres/
     │   ├── extraction_state.rs — cursor and last block of each instance
     │   ├── state.rs    — protocol state rows: their key, history row and table writes for versioning
     │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins
-    │   └── versioning.rs — VersionedRow + write_versions(): latest version in the current table, replaced versions in history
+    │   └── versioning.rs — VersionedRowNew (renamed to VersionedRow at cut-over) + write_versions(): latest version in the current table, replaced versions in history
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
     └── tests.rs        — schema behaviour: leaves, FKs, partition routing, history days
@@ -88,10 +88,11 @@ instances. No table has a DEFAULT partition.
   any other op fails the whole batch with `StorageError::Unsupported`. At cut-over, the old
   gateway is deleted and `PostgresGatewayNew` is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
-  `instance::write::versioning::VersionedRow` (protocol state and component balances so far). It
-  applies the changes in the order they start: each replaced version goes to `*_history`, ended at
-  the start of the next one, unless it ends at or before the retention horizon. A change that does
-  not start after the version it replaces fails the batch; the old versioning skips it.
+  `instance::write::versioning::VersionedRowNew` (protocol state and component balances so far).
+  The module doc of `write/versioning.rs` has the rules. A change that does not start after the
+  version it replaces fails the batch. The old versioning (`postgres/versioning.rs`) compares a change only
+  with the stored row. It skips a change that is not after that row. It does not compare the
+  changes of one key inside a batch, so it applies two changes with the same start.
 
 ## Architecture
 

@@ -13,16 +13,16 @@ use tycho_common::storage::StorageError;
 
 use crate::postgres::{
     instance::{
-        orm::{NewProtocolState, NewProtocolStateHistory, ProtocolState},
+        orm::{NewProtocolState, NewProtocolStateHistory},
         schema::tycho::{protocol_state, protocol_state_history},
-        write::{versioning::VersionedRow, ROWS_PER_INSERT},
+        write::versioning::VersionedRowNew,
         InstanceId,
     },
     storage_error_from_diesel,
 };
 
 #[async_trait]
-impl VersionedRow for NewProtocolState {
+impl VersionedRowNew for NewProtocolState {
     const ENTITY: &'static str = "ProtocolState";
     /// Component id and attribute name.
     type Key = (i64, String);
@@ -63,7 +63,7 @@ impl VersionedRow for NewProtocolState {
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Self>, StorageError> {
         let (component_ids, names): (Vec<i64>, Vec<String>) = keys.iter().cloned().unzip();
-        let rows: Vec<ProtocolState> = sql_query(
+        sql_query(
             "SELECT ps.* FROM tycho.protocol_state ps \
              JOIN unnest($2::int8[], $3::text[]) AS k(component_id, attribute_name) \
              ON ps.protocol_component_id = k.component_id \
@@ -75,26 +75,16 @@ impl VersionedRow for NewProtocolState {
         .bind::<Array<Text>, _>(names)
         .load(conn)
         .await
-        .map_err(|err| storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| NewProtocolState {
-                instance_id: row.instance_id,
-                protocol_component_id: row.protocol_component_id,
-                attribute_name: row.attribute_name,
-                attribute_value: row.attribute_value,
-                previous_value: row.previous_value,
-                valid_from: row.valid_from,
-                tx_index: row.tx_index,
-            })
-            .collect())
+        .map_err(|err| {
+            storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None).into()
+        })
     }
 
     async fn upsert_current(
         rows: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(Self::MAX_BATCH_SIZE) {
             diesel::insert_into(protocol_state::table)
                 .values(chunk)
                 .on_conflict((
@@ -143,12 +133,25 @@ impl VersionedRow for NewProtocolState {
         rows: &[NewProtocolStateHistory],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(NewProtocolStateHistory::MAX_BATCH_SIZE) {
             diesel::insert_into(protocol_state_history::table)
                 .values(chunk)
                 .execute(conn)
                 .await
-                .map_err(|err| storage_error_from_diesel(err, Self::ENTITY, "history", None))?;
+                .map_err(|err| {
+                    // The detail names the failing row, for example the `valid_to` that has no
+                    // history day.
+                    let detail = if let diesel::result::Error::DatabaseError(_, info) = &err {
+                        info.details().unwrap_or_default()
+                    } else {
+                        ""
+                    };
+                    StorageError::Unexpected(format!(
+                        "{} history of instance {}: {err} {detail}",
+                        Self::ENTITY,
+                        chunk[0].instance_id
+                    ))
+                })?;
         }
         Ok(())
     }
@@ -156,14 +159,16 @@ impl VersionedRow for NewProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, NaiveDate, Timelike, Utc};
+    use chrono::{Duration, Timelike, Utc};
     use tycho_common::Bytes;
 
     use super::*;
     use crate::postgres::{
         db_fixtures,
         instance::{
-            gateway::PostgresGatewayNew, origins::ChangeOrigin, orm::ProtocolStateHistory,
+            gateway::PostgresGatewayNew,
+            origins::ChangeOrigin,
+            orm::{ProtocolState, ProtocolStateHistory},
             write::versioning::VersionedChange,
         },
         testing::instance_test_connection,
@@ -176,8 +181,8 @@ mod tests {
         component: i64,
     }
 
-    /// An instance with one component, whose `reserve` attribute is 1 since 2020-01-01 at
-    /// transaction index 0.
+    /// An instance with one component, whose `reserve` attribute is 1 since
+    /// [`db_fixtures::INSTANCE_STATE_VALID_FROM`] at transaction index 0.
     async fn setup() -> Setup {
         let mut conn = instance_test_connection().await;
         let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
@@ -192,12 +197,6 @@ mod tests {
 
     fn value(value: u64) -> Bytes {
         Bytes::from(value)
-    }
-
-    fn stored_since() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date")
     }
 
     /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
@@ -259,6 +258,7 @@ mod tests {
     async fn history(setup: &mut Setup) -> Vec<ProtocolStateHistory> {
         protocol_state_history::table
             .filter(protocol_state_history::instance_id.eq(setup.instance))
+            .order_by((protocol_state_history::valid_from, protocol_state_history::tx_index))
             .select(ProtocolStateHistory::as_select())
             .load(&mut setup.conn)
             .await
@@ -312,7 +312,34 @@ mod tests {
         assert_eq!(archived.attribute_value, value(1));
         assert_eq!(
             (archived.valid_from, archived.valid_to, archived.tx_index),
-            (stored_since(), at.valid_from, 0)
+            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_two_updates_in_one_batch_link_the_history() {
+        let mut setup = setup().await;
+        let first = origin(minutes_ago(2), 0);
+        let second = origin(minutes_ago(1), 0);
+
+        let changes =
+            vec![update(&setup, "reserve", 2, first), update(&setup, "reserve", 3, second)];
+
+        write(&mut setup, changes)
+            .await
+            .unwrap();
+
+        let current = current(&mut setup).await;
+        assert_eq!(
+            (&current[0].attribute_value, &current[0].previous_value),
+            (&value(3), &Some(value(2)))
+        );
+        let history = history(&mut setup).await;
+        assert_eq!(history.len(), 2);
+        assert_eq!((&history[0].attribute_value, &history[0].previous_value), (&value(1), &None));
+        assert_eq!(
+            (&history[1].attribute_value, &history[1].previous_value),
+            (&value(2), &Some(value(1)))
         );
     }
 
@@ -330,13 +357,114 @@ mod tests {
         assert!(current(&mut setup).await.is_empty());
         let history = history(&mut setup).await;
         assert_eq!(history.len(), 1);
-        assert_eq!((history[0].valid_from, history[0].valid_to), (stored_since(), at.valid_from));
+        assert_eq!(
+            (history[0].valid_from, history[0].valid_to),
+            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_changes_only_its_keys_of_its_instance() {
+        let mut setup = setup().await;
+        let c1 = setup.component;
+        let c2 =
+            db_fixtures::insert_instance_component(&mut setup.conn, setup.instance, "pool-2", &[])
+                .await;
+        let system =
+            db_fixtures::insert_protocol_system(&mut setup.conn, "uniswap_v4".to_string()).await;
+        let other = db_fixtures::insert_instance(&mut setup.conn, system, "0.0.1").await;
+        // An import keeps the source database's ids, so the other instance holds the same
+        // component ids.
+        for (component, external_id) in [(c1, "pool"), (c2, "pool-2")] {
+            sql_query(
+                "INSERT INTO tycho.protocol_component
+                     (instance_id, id, external_id, protocol_type, created_at, creation_block,
+                      creation_tx_hash)
+                 VALUES ($1, $2, $3, 'pool', '2020-01-01', 1, '\\x01')",
+            )
+            .bind::<Int4, _>(other)
+            .bind::<BigInt, _>(component)
+            .bind::<Text, _>(external_id)
+            .execute(&mut setup.conn)
+            .await
+            .expect("inserting the imported component failed");
+        }
+        db_fixtures::insert_instance_state(&mut setup.conn, setup.instance, c1, "fee", value(30))
+            .await;
+        db_fixtures::insert_instance_state(&mut setup.conn, setup.instance, c2, "fee", value(5))
+            .await;
+        // `price` exists only in the other instance.
+        for (component, name) in [(c1, "reserve"), (c1, "fee"), (c1, "price"), (c2, "fee")] {
+            db_fixtures::insert_instance_state(&mut setup.conn, other, component, name, value(9))
+                .await;
+        }
+        let at = origin(minutes_ago(1), 0);
+
+        let changes = vec![
+            delete(&setup, "reserve", at),
+            VersionedChange::Delete { key: (c2, "fee".to_string()), origin: at },
+            update(&setup, "price", 7, at),
+        ];
+
+        write(&mut setup, changes)
+            .await
+            .unwrap();
+
+        let instances = [setup.instance, other];
+        let current_keys: Vec<(InstanceId, i64, String)> = protocol_state::table
+            .filter(protocol_state::instance_id.eq_any(instances))
+            .order_by((
+                protocol_state::instance_id,
+                protocol_state::protocol_component_id,
+                protocol_state::attribute_name,
+            ))
+            .select((
+                protocol_state::instance_id,
+                protocol_state::protocol_component_id,
+                protocol_state::attribute_name,
+            ))
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the current state failed");
+        let archived_keys: Vec<(InstanceId, i64, String)> = protocol_state_history::table
+            .filter(protocol_state_history::instance_id.eq_any(instances))
+            .order_by((
+                protocol_state_history::instance_id,
+                protocol_state_history::protocol_component_id,
+                protocol_state_history::attribute_name,
+            ))
+            .select((
+                protocol_state_history::instance_id,
+                protocol_state_history::protocol_component_id,
+                protocol_state_history::attribute_name,
+            ))
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the state history failed");
+        let key = |instance, component, name: &str| (instance, component, name.to_string());
+        assert_eq!(
+            current_keys,
+            vec![
+                key(setup.instance, c1, "fee"),
+                key(setup.instance, c1, "price"),
+                key(other, c1, "fee"),
+                key(other, c1, "price"),
+                key(other, c1, "reserve"),
+                key(other, c2, "fee"),
+            ]
+        );
+        assert_eq!(
+            archived_keys,
+            vec![key(setup.instance, c1, "reserve"), key(setup.instance, c2, "fee")]
+        );
+        let price = &current(&mut setup).await[1];
+        assert_eq!((&price.attribute_name, &price.previous_value), (&"price".to_string(), &None));
     }
 
     #[tokio::test]
     async fn test_change_before_the_stored_version_fails_and_keeps_it() {
         let mut setup = setup().await;
-        let before = origin(stored_since() - Duration::days(1), 0);
+        let before = origin(db_fixtures::INSTANCE_STATE_VALID_FROM - Duration::days(1), 0);
 
         let change = update(&setup, "reserve", 2, before);
 
@@ -372,8 +500,14 @@ mod tests {
 
         let result = write(&mut setup, vec![change]).await;
 
+        let day = far_ahead.valid_from.date().to_string();
+        let instance = format!("instance {}:", setup.instance);
         assert!(
-            matches!(&result, Err(StorageError::Unexpected(msg)) if msg.contains("no partition")),
+            matches!(
+                &result,
+                Err(StorageError::Unexpected(msg))
+                    if msg.contains("no partition") && msg.contains(&instance) && msg.contains(&day)
+            ),
             "{result:?}"
         );
     }

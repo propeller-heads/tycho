@@ -1,14 +1,14 @@
-//! Versions of the versioned entities of an instance: protocol state, component balances, contract
-//! code, contract storage and native balances.
+//! Versions of the rows of an instance's versioned entities.
 //!
-//! The current table of an entity holds one row per key: its latest version. A change that replaces
-//! that row moves the replaced version to the entity's history table, with `valid_to` set to the
-//! start of the change. A deletion moves the row to history and removes it from the current table.
-//! A replaced version that ends at or before the retention horizon is not archived.
+//! The current table of an entity holds one row per key: its latest version. When a change
+//! replaces that row, `write_versions` moves the replaced version to the entity's history table,
+//! with `valid_to` set to the start of the change. When a change deletes a key, `write_versions`
+//! moves its row to history and removes it from the current table. `write_versions` does not
+//! archive a version that ends at or before the retention horizon.
 //!
 //! Each block of an instance starts strictly later than the one before, and a transaction changes
-//! a key at most once. So every change of a key starts after the version it replaces. A change that
-//! doesn't fails the batch: it is never skipped.
+//! a key at most once. So every change of a key must start after the version it replaces. When a
+//! change starts at or before that version, `write_versions` fails the whole batch.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -22,8 +22,11 @@ use tycho_common::storage::StorageError;
 use crate::postgres::instance::{gateway::PostgresGatewayNew, origins::ChangeOrigin, InstanceId};
 
 /// A row of the current table of a versioned entity.
+///
+/// A working name while both versioning traits exist: the cut-over renames it to `VersionedRow`
+/// and deletes the trait on the old tables.
 #[async_trait]
-pub trait VersionedRow: Debug + Send + Sync + Sized {
+pub trait VersionedRowNew: Debug + Send + Sync + Sized {
     /// Name of the entity, for error messages.
     const ENTITY: &'static str;
 
@@ -76,7 +79,7 @@ pub trait VersionedRow: Debug + Send + Sync + Sized {
 
 /// A change to one key of a versioned entity.
 #[derive(Debug)]
-pub enum VersionedChange<R: VersionedRow> {
+pub enum VersionedChange<R: VersionedRowNew> {
     /// A new version of the row's key. It starts at the row's `valid_from` and `tx_index`.
     Update(R),
     /// The end of the latest version of `key`, at `origin`.
@@ -84,11 +87,11 @@ pub enum VersionedChange<R: VersionedRow> {
     Delete { key: R::Key, origin: ChangeOrigin },
 }
 
-impl<R: VersionedRow> VersionedChange<R> {
+impl<R: VersionedRowNew> VersionedChange<R> {
     fn key(&self) -> R::Key {
         match self {
             Self::Update(row) => row.key(),
-            Self::Delete { key, .. } => key.clone(),
+            Self::Delete { key, origin: _ } => key.clone(),
         }
     }
 
@@ -96,14 +99,14 @@ impl<R: VersionedRow> VersionedChange<R> {
     fn version(&self) -> (NaiveDateTime, i32) {
         match self {
             Self::Update(row) => row.version(),
-            Self::Delete { origin, .. } => (origin.valid_from, origin.tx_index),
+            Self::Delete { key: _, origin } => (origin.valid_from, origin.tx_index),
         }
     }
 }
 
 /// The writes that apply the changes of one batch to one versioned entity.
 #[derive(Debug)]
-struct VersionWrites<R: VersionedRow> {
+struct VersionWrites<R: VersionedRowNew> {
     /// The latest version of each changed key that still exists.
     current: Vec<R>,
     /// The changed keys that no longer exist.
@@ -114,10 +117,9 @@ struct VersionWrites<R: VersionedRow> {
 
 /// Chains `changes` after the `stored` current rows of their keys, in the order they start.
 ///
-/// Fails with [`StorageError::Unexpected`] when an updated row is not of `instance` or a change
-/// does not start after the version it replaces, and with [`StorageError::NotFound`] when a
-/// deletion finds no version of its key.
-fn plan_writes<R: VersionedRow>(
+/// Fails on each failure that `write_versions` lists, except a missing history day: only the
+/// history insert finds that one.
+fn plan_writes<R: VersionedRowNew>(
     instance: InstanceId,
     stored: Vec<R>,
     mut changes: Vec<VersionedChange<R>>,
@@ -161,10 +163,14 @@ fn plan_writes<R: VersionedRow>(
                 }
                 Some(row)
             }
-            VersionedChange::Delete { .. } if replaced.is_none() => {
-                return Err(StorageError::NotFound(R::ENTITY.to_owned(), format!("{key:?}")));
+            VersionedChange::Delete { key: _, origin: _ } if replaced.is_none() => {
+                return Err(StorageError::Unexpected(format!(
+                    "{} {key:?}: a deletion at {version:?} finds no version to end in instance \
+                     {instance}",
+                    R::ENTITY
+                )));
             }
-            VersionedChange::Delete { .. } => None,
+            VersionedChange::Delete { key: _, origin: _ } => None,
         };
         if let Some(replaced) = replaced {
             let (valid_from, _) = version;
@@ -189,12 +195,12 @@ fn plan_writes<R: VersionedRow>(
 impl PostgresGatewayNew {
     /// Applies `changes` of `instance` to the current and history tables of the entity `R`.
     ///
-    /// The changes can come in any order: they apply in the order they start. Fails when an
-    /// updated row is not of `instance`, when a change does not start after the version it
-    /// replaces, when a deletion finds no version of its key, and when the history day of a
-    /// replaced version does not exist. On a failure, some rows can already be written; the
-    /// caller rolls back its transaction.
-    pub(crate) async fn write_versions<R: VersionedRow>(
+    /// The changes can come in any order: they apply in the order they start. Fails with
+    /// [`StorageError::Unexpected`] when an updated row is not of `instance`, when a change does
+    /// not start after the version it replaces, when a deletion finds no version of its key, or
+    /// when the history day of a replaced version does not exist. On a failure, this method can
+    /// have written some rows already; the caller rolls back its transaction.
+    pub(crate) async fn write_versions<R: VersionedRowNew>(
         &self,
         instance: InstanceId,
         changes: Vec<VersionedChange<R>>,
@@ -228,6 +234,7 @@ impl PostgresGatewayNew {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use rstest::rstest;
 
     use super::*;
 
@@ -250,7 +257,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl VersionedRow for Row {
+    impl VersionedRowNew for Row {
         const ENTITY: &'static str = "Row";
         type Key = u8;
         type History = HistoryRow;
@@ -409,23 +416,15 @@ mod tests {
         assert_eq!(writes.history, vec![archived(row(2, 10, 1, 0), 3)]);
     }
 
-    #[test]
-    fn test_change_at_the_stored_version_fails() {
-        let result = plan(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)]);
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))));
-    }
-
-    #[test]
-    fn test_change_before_the_stored_version_fails() {
-        let result = plan(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)]);
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))));
-    }
-
-    #[test]
-    fn test_two_changes_of_one_key_in_one_transaction_fail() {
-        let result = plan(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)]);
+    #[rstest]
+    #[case::at_the_stored_version(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)])]
+    #[case::before_the_stored_version(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)])]
+    #[case::two_changes_in_one_transaction(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)])]
+    fn test_change_not_after_the_replaced_version_fails(
+        #[case] stored: Vec<Row>,
+        #[case] changes: Vec<VersionedChange<Row>>,
+    ) {
+        let result = plan(stored, changes);
 
         assert!(matches!(result, Err(StorageError::Unexpected(_))));
     }
@@ -434,7 +433,10 @@ mod tests {
     fn test_deletion_of_a_key_without_version_fails() {
         let result = plan(vec![], vec![delete(1, 2, 0)]);
 
-        assert!(matches!(result, Err(StorageError::NotFound(..))));
+        assert!(matches!(
+            result,
+            Err(StorageError::Unexpected(msg)) if msg.contains("finds no version to end in instance 1")
+        ));
     }
 
     #[test]

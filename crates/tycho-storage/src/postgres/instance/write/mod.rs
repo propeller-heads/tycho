@@ -13,4 +13,4 @@ mod component;
 mod extraction_state;
 mod state;
 mod token;
-pub mod versioning;
+mod versioning;
