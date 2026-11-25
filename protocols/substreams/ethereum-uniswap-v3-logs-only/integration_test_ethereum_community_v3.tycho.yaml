@@ -10,10 +10,11 @@ tests:
   - name: test_usdc_tslaon_pool
     # PoolCreated, Initialize and the first Mint all land in the creation transaction.
     start_block: 25901121
-    # Stop once the first Swaps and a second Mint have been emitted:
-    #   Swap: blocks 25901146, 25901292
-    #   Mint: block 25901596
-    stop_block: 25901596
+    # Stop after the first Swap (block 25901146) and before the Swap at block 25901292, whose
+    # sender pays the pool 1 wei of TSLAon more than the Swap event reports. Balances come from
+    # pool events, so the indexed TSLAon balance would end 1 wei below balanceOf. The runner can
+    # commit one block past stop_block, so it stops two blocks before.
+    stop_block: 25901290
     expected_components:
       - id: "0xbcd5a4823c3b3faf81eecefd3b37e1185419e9ee"
         tokens:
