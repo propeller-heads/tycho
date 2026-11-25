@@ -381,7 +381,7 @@ mod tests {
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
-            orm::ProtocolStateHistory,
+            orm::NewProtocolStateHistory,
             schema::tycho::{
                 extraction_state, protocol_instance, protocol_state, protocol_state_history,
             },
@@ -1123,7 +1123,7 @@ mod tests {
         let c = db_fixtures::insert_instance_component(&mut conn, s.curve, "c", &[b("0x01")]).await;
         state_version(&mut conn, &s, c, "x", "0x01", recent(1), Some(recent(3))).await;
         diesel::insert_into(protocol_state_history::table)
-            .values(ProtocolStateHistory {
+            .values(NewProtocolStateHistory {
                 instance_id: s.curve,
                 protocol_component_id: c,
                 attribute_name: "x".to_string(),
@@ -1132,8 +1132,6 @@ mod tests {
                 valid_from: recent(1),
                 valid_to: recent(3),
                 tx_index: 1,
-                inserted_ts: recent(1),
-                modified_ts: recent(1),
             })
             .execute(&mut conn)
             .await
@@ -1234,7 +1232,7 @@ mod tests {
             .transaction::<_, diesel::result::Error, _>(|conn| {
                 async move {
                     let inserted = diesel::insert_into(protocol_state_history::table)
-                        .values(ProtocolStateHistory {
+                        .values(NewProtocolStateHistory {
                             instance_id: instance,
                             protocol_component_id: component,
                             attribute_name: "x".to_string(),
@@ -1243,8 +1241,6 @@ mod tests {
                             valid_from: recent(1),
                             valid_to: recent(4),
                             tx_index: 0,
-                            inserted_ts: recent(4),
-                            modified_ts: recent(4),
                         })
                         .execute(conn)
                         .await?;
