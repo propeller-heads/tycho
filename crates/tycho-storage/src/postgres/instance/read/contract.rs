@@ -17,7 +17,7 @@ use super::version::check_current;
 use crate::postgres::{
     count_to_i64,
     instance::{
-        active::active_instance_head,
+        active::active_instance_limits,
         gateway::PostgresGatewayNew,
         schema::tycho::{account, account_balance, contract_code, contract_storage},
         InstanceId,
@@ -76,7 +76,7 @@ impl PostgresGatewayNew {
     ) -> Result<WithTotal<Vec<Account>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(active) = active_instance_head(protocol_system, conn).await? else {
+        let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(WithTotal { entity: Vec::new(), total: Some(0) });
         };
         // The latest version is the head: no account was created or deleted after it.
@@ -252,7 +252,7 @@ impl PostgresGatewayNew {
     ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(protocol_system)?;
-        let Some(active) = active_instance_head(protocol_system, conn).await? else {
+        let Some(active) = active_instance_limits(protocol_system, conn).await? else {
             return Ok(HashMap::new());
         };
         check_current(&active, at, conn).await?;

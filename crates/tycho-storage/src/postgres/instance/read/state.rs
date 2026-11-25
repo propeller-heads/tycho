@@ -15,7 +15,7 @@ use tycho_common::{
 use super::version::{resolve_version, unique_by_key, ReadAt};
 use crate::postgres::{
     instance::{
-        active::active_instance_head,
+        active::active_instance_limits,
         gateway::PostgresGatewayNew,
         schema::tycho::{
             component_balance, component_balance_history, protocol_component, protocol_state,
@@ -50,7 +50,7 @@ impl PostgresGatewayNew {
     ) -> Result<HashMap<ComponentId, HashMap<Address, ComponentBalance>>, StorageError> {
         self.get_chain_id(chain)?;
         self.get_protocol_system_id(system)?;
-        let Some(instance) = active_instance_head(system, conn).await? else {
+        let Some(instance) = active_instance_limits(system, conn).await? else {
             return Ok(HashMap::new());
         };
 
@@ -130,7 +130,7 @@ async fn states_of(
     retrieve_balances: bool,
     conn: &mut AsyncPgConnection,
 ) -> Result<WithTotal<Vec<ProtocolComponentState>>, StorageError> {
-    let Some(active) = active_instance_head(system, conn).await? else {
+    let Some(active) = active_instance_limits(system, conn).await? else {
         return Ok(WithTotal { entity: Vec::new(), total: None });
     };
     let read = resolve_version(&active, at, conn).await?;

@@ -27,7 +27,7 @@ use crate::postgres::{
     PostgresError, StorageError,
 };
 
-/// The active instance of a protocol system, with its head, its base block time and the retention
+/// The active instance of a protocol system, with its head, its base block time and the history
 /// horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveInstance {
@@ -37,8 +37,14 @@ pub struct ActiveInstance {
     /// The block timestamp of the base block of an imported or migrated instance. `None` for an
     /// instance synced in place. The instance has no history before it.
     pub base: Option<NaiveDateTime>,
-    /// The oldest version whose history is complete: `now()` minus `partition_retention()`.
-    pub retention_horizon: NaiveDateTime,
+    /// The oldest version whose history is complete: `now()` minus `partition_retention()`. Older
+    /// history days are dropped.
+    ///
+    /// This holds only when the writer archived every version that ends after this point, so when
+    /// its `--retention-horizon` is not later than this point. With a later `--retention-horizon`,
+    /// a past read between the two leaves out every key that changed after the version, with no
+    /// error.
+    pub history_horizon: NaiveDateTime,
 }
 
 /// The active instance of the protocol system `name`.
@@ -61,11 +67,11 @@ pub async fn active_instance(
 }
 
 /// The active instance of the protocol system `name`, with its head, its base block time and the
-/// retention horizon, in one query.
+/// history horizon, in one query.
 ///
 /// `None` if the protocol system has no active instance, or if no protocol system has that name.
 /// Filter with the returned id as a bound value, as for [`active_instance`].
-pub async fn active_instance_head(
+pub async fn active_instance_limits(
     name: &str,
     conn: &mut AsyncPgConnection,
 ) -> Result<Option<ActiveInstance>, StorageError> {
@@ -93,8 +99,8 @@ pub async fn active_instance_head(
         .await
         .optional()
         .map_err(PostgresError::from)?;
-    Ok(row.and_then(|(id, head, base, retention_horizon)| {
-        id.map(|id| ActiveInstance { id, head, base, retention_horizon })
+    Ok(row.and_then(|(id, head, base, history_horizon)| {
+        id.map(|id| ActiveInstance { id, head, base, history_horizon })
     }))
 }
 
@@ -226,13 +232,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_extraction_state() {
+    async fn test_active_instance_limits_has_the_extraction_state() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         db_fixtures::set_instance_head(&mut conn, setup.curve, day(2)).await;
         db_fixtures::set_instance_head(&mut conn, setup.uniswap_v4, day(3)).await;
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap();
 
@@ -240,11 +246,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_without_extraction_state() {
+    async fn test_active_instance_limits_without_extraction_state() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap();
 
@@ -252,14 +258,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_of_an_inactive_or_unknown_protocol() {
+    async fn test_active_instance_limits_of_an_inactive_or_unknown_protocol() {
         let mut conn = instance_test_connection().await;
         setup_protocols(&mut conn).await;
 
-        let inactive = active_instance_head("vm:old", &mut conn)
+        let inactive = active_instance_limits("vm:old", &mut conn)
             .await
             .unwrap();
-        let unknown = active_instance_head("not-a-protocol", &mut conn)
+        let unknown = active_instance_limits("not-a-protocol", &mut conn)
             .await
             .unwrap();
 
@@ -268,7 +274,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_base_block() {
+    async fn test_active_instance_limits_has_the_base_block() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         diesel::update(protocol_instance::table.filter(protocol_instance::id.eq(setup.curve)))
@@ -277,11 +283,11 @@ mod tests {
             .await
             .unwrap();
 
-        let curve = active_instance_head("vm:curve", &mut conn)
+        let curve = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap()
             .unwrap();
-        let uniswap_v4 = active_instance_head("uniswap_v4", &mut conn)
+        let uniswap_v4 = active_instance_limits("uniswap_v4", &mut conn)
             .await
             .unwrap()
             .unwrap();
@@ -291,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_retention_horizon() {
+    async fn test_active_instance_limits_has_the_history_horizon() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         diesel::sql_query("UPDATE partition_retention_config SET retention = '7 days'")
@@ -303,12 +309,12 @@ mod tests {
             .await
             .unwrap();
 
-        let found = active_instance_head("vm:curve", &mut conn)
+        let found = active_instance_limits("vm:curve", &mut conn)
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(found.id, setup.curve);
-        assert_eq!(found.retention_horizon, expected);
+        assert_eq!(found.history_horizon, expected);
     }
 }
