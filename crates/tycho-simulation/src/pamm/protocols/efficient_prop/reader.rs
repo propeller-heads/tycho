@@ -30,6 +30,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use alloy::{
@@ -62,9 +63,10 @@ use crate::{
     pamm::protocols::efficient_prop::{
         desks::ApprovedDesks,
         ladder::FillPath,
-        overrides::{NextBlock, NextBlockReader, NotTaken, Wanted, SLOT_SECS},
+        overrides::{NextBlock, NextBlockReader, Wanted, SLOT_SECS},
         slots::{HeadWords, ListingSlots, SLOT_RULE},
         state::{CreditGas, FillReads, PairPlace},
+        telemetry::{self, NotCovered, PollOutcome},
     },
     snapshot_feed::errors::FeedError,
 };
@@ -327,6 +329,8 @@ pub(super) struct DoorsRead {
     /// nothing: its `block_number` is then the node's latest, which may be behind a block an
     /// earlier poll served, and the read neither fails against that block nor raises it.
     pub answered_at_block: bool,
+    /// How the read ended, as its poll is counted where it publishes.
+    pub outcome: PollOutcome,
 }
 
 /// How long a read's books must hold: from the later of `from_ms` (Unix ms, the wall clock when
@@ -1093,6 +1097,7 @@ impl DoorsReader {
                 .await;
         }
         let (clock, listings, highest_listing) = self.read_listings(scan_to).await?;
+        telemetry::record_answer_age(answer_age(hold.from_ms, clock.timestamp));
         let started = hold.from_ms / 1000;
         if started >
             clock
@@ -1146,6 +1151,7 @@ impl DoorsReader {
                 doors: Vec::new(),
                 block_lives: false,
                 answered_at_block: true,
+                outcome: PollOutcome::Sampled,
             });
         }
         let block = BlockId::number(clock.number);
@@ -1173,6 +1179,7 @@ impl DoorsReader {
             doors,
             block_lives: false,
             answered_at_block: true,
+            outcome: PollOutcome::Sampled,
         })
     }
 
@@ -1218,6 +1225,7 @@ impl DoorsReader {
     ) -> Result<DoorsRead, FeedError> {
         let ((head, listings, highest_listing), maps) =
             tokio::try_join!(self.read_listings(scan_to), next_block.read())?;
+        telemetry::record_answer_age(answer_age(hold.from_ms, head.timestamp));
         let started = hold.from_ms / 1000;
         if started >
             head.timestamp
@@ -1237,6 +1245,7 @@ impl DoorsReader {
             doors: Vec::new(),
             block_lives: true,
             answered_at_block: false,
+            outcome: PollOutcome::NoStateMap,
         };
         let Some(next) = maps.for_block_after(head.number, head.timestamp) else {
             debug!(
@@ -1253,6 +1262,7 @@ impl DoorsReader {
             return Err(lagging(started, next.number, next.time));
         }
         let clock = head.at_block(next.number, next.time);
+        read.outcome = PollOutcome::Sampled;
         read.answered_at_block = true;
         read.block_number = next.number;
         read.timestamp = next.time;
@@ -1305,6 +1315,7 @@ impl DoorsReader {
                 #[cfg(test)]
                 self.reuses
                     .fetch_add(1, Ordering::Relaxed);
+                read.outcome = PollOutcome::Reused;
                 doors
             }
             None => {
@@ -1367,6 +1378,7 @@ impl DoorsReader {
             .filter(|(listing, _)| {
                 if listing.desk == 0 {
                     debug!(listing = listing.id, "skipping listing with no quote contract");
+                    telemetry::record_listing_not_covered(NotCovered::NoQuoteContract);
                 }
                 listing.desk != 0
             })
@@ -1518,51 +1530,20 @@ impl DoorsReader {
             .zip(wanted)
             .filter_map(|((listing, probes), wanted)| {
                 let taken = wanted.map(|(_, read)| (read, results.next()));
-                let skipped = match taken {
+                let reason = match taken {
                     Some((taken, Some(Ok(())))) => {
+                        telemetry::record_listing_covered();
                         read.push(taken);
                         return Some((listing, probes));
                     }
-                    None | Some((_, None)) => "its quote's place or its record is unread",
-                    Some((_, Some(Err(NotTaken::NoEntry)))) => {
-                        "its maker has no update in the next block's state map"
-                    }
-                    Some((_, Some(Err(NotTaken::Stale)))) => {
-                        "its maker's update in the next block's state map stamps a block it does \
-                         not fill in"
-                    }
-                    Some((_, Some(Err(NotTaken::Missing(_))))) => {
-                        "the answer with its update does not write a price contract it reads"
-                    }
-                    Some((_, Some(Err(NotTaken::OtherAnswer(_))))) => {
-                        "slots it reads are taken from another answer"
-                    }
-                    Some((_, Some(Err(NotTaken::Stopped)))) => "its desk is stopped at the head",
-                    Some((_, Some(Err(NotTaken::OtherEpoch)))) => {
-                        "its maker's update in the next block's state map is of another desk epoch \
-                         than the head's"
-                    }
-                    Some((_, Some(Err(NotTaken::Foreign)))) => {
-                        "an answer wrote a slot of its desk contract that is the front's, and no \
-                         answer covered it"
-                    }
-                    Some((_, Some(Err(NotTaken::Malformed)))) => {
-                        "every answer with its maker's update has an entry that could not be read \
-                         whole"
-                    }
-                    Some((_, Some(Err(NotTaken::NotHeld)))) => {
-                        "its maker's word carried from the head block is not the word the head \
-                         holds"
-                    }
-                    Some((_, Some(Err(NotTaken::Conflict)))) => {
-                        "an answer's entries disagree on a slot of its maker's update or of a price \
-                         contract it reads"
-                    }
+                    None | Some((_, None)) => NotCovered::Unread,
+                    Some((_, Some(Err(not_taken)))) => NotCovered::from(not_taken),
                 };
+                telemetry::record_listing_not_covered(reason);
                 debug!(
                     listing = listing.id,
                     desk = listing.desk,
-                    reason = skipped,
+                    reason = reason.why(),
                     "skipping listing"
                 );
                 None
@@ -3146,6 +3127,12 @@ pub(super) fn listing_carries(settings: U256) -> bool {
 
 /// The failure of a read whose node refused or ignored the next block's overrides: on a chain whose
 /// builders land makers' updates, nothing can be quoted without them.
+/// How old the node's answer is at a poll that started at `from_ms` on the wall clock, its latest
+/// block's time `timestamp`: seconds, negative where the block's time is ahead of the clock.
+fn answer_age(from_ms: u64, timestamp: u64) -> f64 {
+    Duration::from_millis(from_ms).as_secs_f64() - Duration::from_secs(timestamp).as_secs_f64()
+}
+
 fn refused_next_block() -> FeedError {
     FeedError::Connection(
         "Efficient PropAMM node refused or ignored the next block's overrides, without which no \

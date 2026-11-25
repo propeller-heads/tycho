@@ -611,6 +611,7 @@ mod overrides;
 mod reader;
 mod slots;
 pub mod state;
+mod telemetry;
 
 pub use feed::{EfficientPropFeed, EfficientPropFeedBuilder};
 pub use state::{CreditGas, DirectionGas, EfficientPropState};

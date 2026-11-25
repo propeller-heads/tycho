@@ -158,6 +158,8 @@ book-feeds = [
     "dep:async-trait",
     "dep:tokio-tungstenite",
     "dep:http",
+    # The listing doors' feed counts its polls and the listings it covers.
+    "dep:metrics",
     "dep:prost",
     "dep:serde_with",
     "dep:tower-service",

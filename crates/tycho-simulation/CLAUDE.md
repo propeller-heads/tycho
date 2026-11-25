@@ -172,8 +172,9 @@ for any protocol indexed by Tycho.
   block's state maps (`titan_getPammStateOverrides`), since a maker's update lands only in a
   builder's block; `slots.rs` is the quote contract's slot rule; `ladder.rs` quotes the samples
   exactly and along floored chords, nothing outside them; `state.rs` holds the gas and each
-  side's deadline; `desks.rs` the approved makers. `mod.rs` documents every rule; what a change
-  must keep:
+  side's deadline; `desks.rs` the approved makers; `telemetry.rs` the feed's metrics (polls by
+  outcome, listings covered or not by reason, the node's answer age). `mod.rs` documents every
+  rule; what a change must keep:
   - a listing is served only where its maker's desk contract is approved (`with_approved_desks`,
     or the list at `with_approved_desks_url` while its last read is fresh; neither: nothing is
     served, and a read that fails brings no desk in), its price sources are in

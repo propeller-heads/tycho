@@ -28,6 +28,7 @@ use crate::{
         overrides::NextBlockReader,
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
+        telemetry::{self, PollOutcome},
         EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BID_VALID_UNTIL_MS_ATTRIBUTE,
         EXPECTED_GAS_ATTRIBUTE, FALLBACK_PROTOCOL_SYSTEM, GAS_LIMIT_ATTRIBUTE,
         PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER,
@@ -401,6 +402,7 @@ impl EfficientPropFeedBuilder {
     /// out, or named twice. The node's chain is checked on every poll, which fails fatally when
     /// the node serves another one.
     pub(super) fn build_path(self) -> Result<EfficientPropFeed, FeedError> {
+        telemetry::init();
         let chain = self.book_config.chain;
         let (gas_chain, default_landing_allowance) = if chain == Chain::Base {
             (GasChain::Base, DEFAULT_LANDING_ALLOWANCE)
@@ -672,6 +674,18 @@ impl HttpSource for EfficientPropBookSource {
     /// the poll's start; a poll that ends too late for its books to be served and land within it
     /// fails.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
+        let polled = self.poll().await;
+        telemetry::record_poll(match &polled {
+            Ok((_, outcome)) => *outcome,
+            Err(_) => PollOutcome::Failed,
+        });
+        polled.map(|(snapshot, _)| snapshot)
+    }
+}
+
+impl EfficientPropBookSource {
+    /// One poll, and how it ended where it publishes: see [`HttpSource::fetch`] of this source.
+    async fn poll(&self) -> Result<(BookSnapshot<ReceivedAt>, PollOutcome), FeedError> {
         let started_ms = (self.clock)();
         let scan_to = self
             .highest_listing
@@ -728,7 +742,7 @@ impl HttpSource for EfficientPropBookSource {
                 read.until_ms
             )));
         }
-        Ok(BookSnapshot::received_now(self.assembler.books(&read, now_ms)))
+        Ok((BookSnapshot::received_now(self.assembler.books(&read, now_ms)), read.outcome))
     }
 }
 
@@ -7646,6 +7660,99 @@ mod tests {
             assert_eq!(polled.door_quotes(), asked, "the poll after the changed one asked a door");
             assert_eq!(polled.reuses(), 2);
             assert_eq!(changed, published(&polled.fresh()).await);
+        }
+
+        /// The feed counts what it does, through the `metrics` facade: each poll by how it ended,
+        /// each listing a poll's state answer covers or does not, by reason, and how old the
+        /// node's answer was. Three polls here: one samples, one finds nothing changed, and one
+        /// finds no state map for the next block (the node has moved on a block); each of the
+        /// first two covers three listings and finds no update for the fourth. Every outcome and
+        /// reason is registered at zero from the build.
+        #[test]
+        fn the_feed_counts_its_polls_its_listings_and_its_answers_age() {
+            use metrics_util::{
+                debugging::{DebugValue, DebuggingRecorder},
+                MetricKind,
+            };
+            use strum::IntoEnumIterator;
+
+            use crate::pamm::protocols::efficient_prop::telemetry::{
+                NotCovered, ANSWER_AGE, LISTINGS_COVERED, LISTINGS_NOT_COVERED, POLLS,
+            };
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            // `with_local_recorder` takes a sync closure, so the polls run on a runtime inside it.
+            metrics::with_local_recorder(&recorder, || {
+                runtime.block_on(async {
+                    let (listings, map) = reuse_fixture();
+                    let polled = Polled::new(FakeNode::ethereum(listings), map).await;
+                    published(&polled.source).await;
+                    published(&polled.source).await;
+                    {
+                        let mut node = polled.node.lock().unwrap();
+                        node.block += 1;
+                        node.timestamp += SLOT_SECS;
+                    }
+                    assert!(published(&polled.source)
+                        .await
+                        .is_empty());
+                });
+            });
+
+            let recorded: HashMap<_, _> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .map(|(key, _, _, value)| {
+                    let labels: Vec<_> = key
+                        .key()
+                        .labels()
+                        .map(|label| (label.key().to_string(), label.value().to_string()))
+                        .collect();
+                    ((key.kind(), key.key().name().to_string(), labels), value)
+                })
+                .collect();
+            let counter = |name: &str, label: Option<(&str, &str)>| {
+                let labels = label
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .into_iter()
+                    .collect();
+                match recorded.get(&(MetricKind::Counter, name.to_string(), labels)) {
+                    Some(DebugValue::Counter(count)) => *count,
+                    other => panic!("{name} {label:?} is not a counter recorded: {other:?}"),
+                }
+            };
+            for (outcome, polls) in
+                [("sampled", 1), ("reused", 1), ("no_state_map", 1), ("failed", 0)]
+            {
+                assert_eq!(counter(POLLS, Some(("outcome", outcome))), polls, "{outcome}");
+            }
+            assert_eq!(counter(LISTINGS_COVERED, None), 6);
+            for reason in NotCovered::iter() {
+                let not_covered = if reason == NotCovered::NoEntry { 2 } else { 0 };
+                let reason = <&'static str>::from(reason);
+                assert_eq!(
+                    counter(LISTINGS_NOT_COVERED, Some(("reason", reason))),
+                    not_covered,
+                    "{reason}"
+                );
+            }
+            // The wall clock stands six seconds before the next block: six after the node's
+            // latest on the first two polls, and six before it once the node has moved on.
+            let ages = &recorded[&(MetricKind::Histogram, ANSWER_AGE.to_string(), Vec::new())];
+            let DebugValue::Histogram(ages) = ages else {
+                panic!("{ANSWER_AGE} is not a histogram: {ages:?}");
+            };
+            let ages: Vec<f64> = ages
+                .iter()
+                .map(|age| age.into_inner())
+                .collect();
+            assert_eq!(ages, [6.0, 6.0, -6.0]);
         }
 
         /// SplitMix64: the seeded chance of
