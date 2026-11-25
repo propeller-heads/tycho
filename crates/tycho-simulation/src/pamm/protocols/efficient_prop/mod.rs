@@ -1,14 +1,16 @@
-//! Efficient PropAMM listings on Base and Ethereum, each reached through its own listing door: one
-//! `IPropAMM` contract per listing, which forwards to the listing's named fill on the PropAMM
-//! front. What follows describes Base; Ethereum reads the doors another way (see
-//! [On Ethereum](#on-ethereum)).
+//! Efficient PropAMM listings on Base, Ethereum and BNB Chain, each reached through its own
+//! listing door: one `IPropAMM` contract per listing, which forwards to the listing's named fill on
+//! the PropAMM front. What follows describes Base; Ethereum reads the doors another way (see
+//! [On Ethereum](#on-ethereum)), and BNB Chain as Ethereum does (see
+//! [On BNB Chain](#on-bnb-chain)).
 //!
 //! On Base, as on Ethereum, a listing is served only where its maker's desk contract is approved
-//! ([`EfficientPropFeedBuilder::with_approved_desks`]) and its gas is named
-//! ([`EfficientPropFeedBuilder::credit_listing`]): no fill of the deployed build has been measured
-//! on Base, so this crate charges no figure of its own there. No listing exists on Base yet; the
-//! path below runs in this module's offline tests, and its first request against the deployed
-//! front in an ignored test.
+//! ([`EfficientPropFeedBuilder::with_approved_desks`]), and on Base only where its gas is named
+//! too ([`EfficientPropFeedBuilder::credit_listing`]): no fill of the deployed build has been
+//! measured on Base, so this crate charges no figure of its own there. The front is deployed on
+//! Base ([`EfficientPropDeployment::base`]) but no listing exists there yet: the path below runs in
+//! this module's offline tests, and against the deployed front in ignored tests, which find it as
+//! the preset holds it and serve no book.
 //!
 //! The front prices every listing on chain from what its operator last posted, so the
 //! feed does not model the front: it reads each door's own `quote` over JSON-RPC every poll, at
@@ -162,7 +164,8 @@
 //! A poll's books are published when its fetch ends, at most the request timeout after it starts;
 //! a published snapshot is served until the next poll replaces it or until it is withdrawn, at
 //! most the snapshot's age limit; and a route priced from it then needs time to land, the landing
-//! allowance ([`EfficientPropFeedBuilder::landing_allowance`], two seconds by default). A book's
+//! allowance ([`EfficientPropFeedBuilder::landing_allowance`], two seconds by default on Base). A
+//! book's
 //! life is all of that, from the later of the wall clock at the poll's start and the read block's
 //! time on the front's clock (on Base the block's own milliseconds): eight seconds by default. A
 //! listing fills while its operator's standing word and the side's depth stand: the word for its
@@ -205,8 +208,8 @@
 //! life keeps the book's.
 //!
 //! A component names what its quotes hold for in static attributes, big-endian integers: on
-//! Ethereum [`VALID_FROM_BLOCK_ATTRIBUTE`], the block the book was read for and the first its
-//! quotes fill in, and on either chain [`BID_VALID_UNTIL_MS_ATTRIBUTE`] and
+//! Ethereum and BNB Chain [`VALID_FROM_BLOCK_ATTRIBUTE`], the block the book was read for and the
+//! first its quotes fill in, and on every chain [`BID_VALID_UNTIL_MS_ATTRIBUTE`] and
 //! [`ASK_VALID_UNTIL_MS_ATTRIBUTE`], the Unix millisecond from which the state refuses that
 //! side, where the side has such an end.
 //!
@@ -227,22 +230,12 @@
 //!
 //! # Gas
 //!
-//! The gas charged for a swap is one of six classes on Base, each per direction (see [`state`]): a
-//! listing reading only its operator's word of its pool's hook pair (the pool's first listing, its
-//! base the pool's token 0 and its quote token 1), the same past the hook pair (any further listing
-//! of the pool, which the pool settles by another route, about 29,000 to 33,600 more), a listing of
-//! the hook pair whose fill reads a source that is not guarded (a PRINT or SESSION listing; about
-//! 12,300 to 12,800 more), one reading a print from a
-//! guarded source (about 18,300 to 18,500 more), and each of the last two past the hook pair,
-//! charged the sum of the two differences, which was not measured. Each figure is the least first
-//! fill measured, with real transactions on a Base fork run on the front's counted clock, as live
-//! Base runs it, with the receiver holding the output token, before refunds, and with the tokens'
-//! own transfer cost as measured on WETH, USDC and cbBTC: a listing of tokens cheaper or dearer to
-//! move spends that much less or more. The print figures were measured on a listing bound to the
-//! protocol's stored price lane, the guarded ones on a guarded source on Base's hold lane with no
-//! print held at the fill (a fill while the lane holds a replaced print spends about 4,800 to 5,500
-//! more, not charged); a source other than those spends what its own code spends. A listing of an
-//! asset-module pair is charged no class figure: see Stock listings below.
+//! No fill of the deployed build was measured on Base or BNB Chain, so this crate charges no
+//! figure of its own there: a listing is served only where
+//! [`EfficientPropFeedBuilder::credit_listing`] names its gas ([`CreditGas`]: its custody pair, and
+//! its route pair where it has a credit mode), measured with real transactions on its pool, and
+//! its fills are charged those figures, with the balance rules below. A listing whose gas is not
+//! named is left out.
 //!
 //! On Ethereum no class figure is charged: a token's own transfer moves a fill's gas by thousands,
 //! so a figure holds only for the pair it was measured on. A listing in no credit mode is charged
@@ -253,17 +246,16 @@
 //! 131,620 and 126,449), and USDT/USDC past it with neither token the asset (134,412 and
 //! 138,945). Any other listing, one reading only its word among them, is served only where
 //! [`EfficientPropFeedBuilder::credit_listing`] names it with gas measured on it, and is left out
-//! otherwise. Each fill was sent right behind its block's
-//! It was measured with the asset as the base only. Each fill was sent right behind its block's
-//! relay entries, the only fill of its side there, through Ethereum's `PropAMMExecutor`, with
-//! wstETH, USDC and USDT, from a pool whose custody holds the output; each figure is the least
-//! first fill seen at its place across every run on that state, less the refund the fill earns as
-//! the only fill of its transaction (19,900 on every custody fill traced: the router's transfer
-//! writes the door's balance of the input from zero and the fill clears it), so that a charge is
-//! what the taker's transaction pays for the fill and never more. Same-size first fills vary by up
-//! to about 500 gas from run to run, and other sizes cost up to about 1,100 more, so a fill may
-//! spend up to about that much more than it is charged, and a later run may come in under its
-//! charge. A listing
+//! otherwise. The figures were measured with the asset as the base only. Each fill was sent right
+//! behind its block's relay entries, the only fill of its side there, through Ethereum's
+//! `PropAMMExecutor`, with wstETH, USDC and USDT, from a pool whose custody holds the output; each
+//! figure is the least first fill seen at its place across every run on that state, less the refund
+//! the fill earns as the only fill of its transaction (19,900 on every custody fill traced: the
+//! router's transfer writes the door's balance of the input from zero and the fill clears it), so
+//! that a charge is what the taker's transaction pays for the fill and never more. Same-size first
+//! fills vary by up to about 500 gas from run to run, and other sizes cost up to about 1,100 more,
+//! so a fill may spend up to about that much more than it is charged, and a later run may come in
+//! under its charge. A listing
 //! reading a guarded source is not served there. A fill of a word carried into the block after its
 //! update's costs about 2,400 more than a first fill in the update's block; that is not charged. A
 //! credit listing is charged the four figures its caller measured on its pool instead (see
@@ -272,7 +264,7 @@
 //! Every figure is of a pool that holds some of both the pair's tokens. A custody fill
 //! that pays into its pool a token the pool holds none of writes the pool's balance of it from
 //! zero and is charged 16,964 more (`FIRST_BALANCE_WRITE_GAS`, the least of the 16,964 to 17,100
-//! measured; the balance stays, so nothing is refunded): each Ethereum poll reads what each
+//! measured; the balance stays, so nothing is refunded): each poll reads what each
 //! listing's pool holds of its two tokens (`balanceOf`, beside the samples), and the state adds
 //! it to a custody fill whose input the pool lacks. A routed fill is charged nothing more: a
 //! balance its tokens write from zero is cleared again and all but about 1,900 is refunded.
@@ -288,9 +280,9 @@
 //! refunds, measured through Ethereum's `PropAMMExecutor` on the first pool's four listings. Size
 //! a limit from that sum with at least 25% on top, or the fill runs out of gas and reverts.
 //!
-//! Each Ethereum book carries both figures beside its swaps' charges, as static attributes, each
-//! only where a figure measured on the listing states it. A charge is a floor, never above what
-//! its fill costs, so it is not what a fill is expected to cost wherever the fill has a dearer
+//! Each book carries both figures beside its swaps' charges, as static attributes, each only where
+//! a figure measured on the listing, or named for it, states it. A charge is a floor, never above
+//! what its fill costs, so it is not what a fill is expected to cost wherever the fill has a dearer
 //! branch. [`EXPECTED_GAS_ATTRIBUTE`] is what a fill the pool's custody pays is measured to cost,
 //! in the charge's own terms: the dearer direction's custody fill sent direct (its charge), and
 //! through the fallback router at least that fill and the least of the router's additions
@@ -484,30 +476,31 @@
 //! as below. A front on Ethereum runs the block's second as its clock; one on any other clock ends
 //! the feed.
 //!
-//! A listing with a credit mode (1 to 3, `doorView`'s `creditMode`) is served on Ethereum only
-//! where the caller named it with its gas ([`EfficientPropFeedBuilder::credit_listing`]); one not
-//! named, or of a mode the front does not know, is left out. Past its pool's custody such a listing
-//! fills an input whole through the pool's credit route, and the door's quote there is the pool's
-//! own preview. So beside each door quote the poll asks the front's `quoteFrom` with `PLAN_ONLY`
-//! (bit 253 of its tip word, at no tip, the door as the taker), the front's own decision of whether
-//! the size routes: an answer tagged `ROUTED` (bit 255) shows a size the route fills, an untagged
-//! one equal to the door's quote a size its pool's custody fills, and any other answer leaves the
-//! size unsampled. In the block after, a size whose path differs from the next block's is no
-//! sample. A side's samples are its custody sizes, then its routed ones: a custody size above a
-//! routed one ends the run, as a refusal does, and so does a routed output that does not grow past
-//! custody's last. The state quotes each run exactly and along its own chords, nothing between the
-//! largest custody size and the smallest routed one (it hands back the largest custody size's fill
-//! as the partial result, so amounts under the side's limit can fail there), and charges each fill
-//! its path's configured gas ([`CreditGas`]): no class of `swap_gas` holds for such a listing, a
-//! bid that borrows costing its pool's own, several times a custody fill. What the route refuses
-//! at the sample (a debt cap, a rate ceiling under the market's rate, a darkened print, a pause, a
-//! pool bucket) the door refuses, and the size is not quoted. What moves between the sample and
-//! the fill (another taker's borrow lifting the market's rate past the ceiling, a feed update, a
-//! venue's accrual) reverts the route at the taker's gas, held only by the route's minimum output.
-//! A route's preview costs more gas than a custody quote, so an `eth_call` of 48 calls carrying a
-//! credit listing's needs more of the gas a node grants one: a routed quote measured 563,000 to
-//! 740,000 gas on the first pool (three lender positions), so a full call of 48 is about 36M,
-//! inside the 50M most nodes grant an `eth_call` by default.
+//! A listing with a credit mode (1 to 3, `doorView`'s `creditMode`) is served on Ethereum, as on
+//! every chain, only where the caller named it with its gas
+//! ([`EfficientPropFeedBuilder::credit_listing`]); one not named, or of a mode the front does not
+//! know, is left out. Past its pool's custody such a listing fills an input whole through the
+//! pool's credit route, and the door's quote there is the pool's own preview. So beside each door
+//! quote the poll asks the front's `quoteFrom` with `PLAN_ONLY` (bit 253 of its tip word, at no
+//! tip, the door as the taker), the front's own decision of whether the size routes: an answer
+//! tagged `ROUTED` (bit 255) shows a size the route fills, an untagged one equal to the door's
+//! quote a size its pool's custody fills, and any other answer leaves the size unsampled. In the
+//! block after, a size whose path differs from the next block's is no sample. A side's samples are
+//! its custody sizes, then its routed ones: a custody size above a routed one ends the run, as a
+//! refusal does, and so does a routed output that does not grow past custody's last. The state
+//! quotes each run exactly and along its own chords, nothing between the largest custody size and
+//! the smallest routed one (it hands back the largest custody size's fill as the partial result, so
+//! amounts under the side's limit can fail there), and charges each fill its path's configured gas
+//! ([`CreditGas`]): no class of `swap_gas` holds for such a listing, a bid that borrows costing its
+//! pool's own, several times a custody fill. What the route refuses at the sample (a debt cap, a
+//! rate ceiling under the market's rate, a darkened print, a pause, a pool bucket) the door
+//! refuses, and the size is not quoted. What moves between the sample and the fill (another taker's
+//! borrow lifting the market's rate past the ceiling, a feed update, a venue's accrual) reverts the
+//! route at the taker's gas, held only by the route's minimum output. A route's preview costs more
+//! gas than a custody quote, so an `eth_call` of 48 calls carrying a credit listing's needs more of
+//! the gas a node grants one: a routed quote measured 563,000 to 740,000 gas on the first pool
+//! (three lender positions), so a full call of 48 is about 36M, inside the 50M most nodes grant an
+//! `eth_call` by default.
 //!
 //! The door's `quoteFillable` reports a credit listing's custody alone unless the pool's preview
 //! fills the whole of the maker's depth, and the route fills an input whole or not at all. So a
@@ -596,8 +589,8 @@
 //! The rules read the token itself (its multiplier, its switch time, its pause), each read given
 //! up to 28,000 gas, so such a fill spends what its token's code spends, which no class figure
 //! holds. A stock listing is therefore served only where the caller named it with its gas
-//! ([`EfficientPropFeedBuilder::credit_listing`], Ethereum only): in a credit mode as any credit
-//! listing, and in none at that figure's custody pair. One not named is left out. A SESSION
+//! ([`EfficientPropFeedBuilder::credit_listing`]): in a credit mode as any credit listing, and in
+//! none at that figure's custody pair. One not named is left out. A SESSION
 //! listing with a closed phase, which fills from an aged print inside a wider band while its
 //! market is closed, is not served in either phase.
 //!
@@ -610,8 +603,8 @@
 //!   update's price.
 //!
 //! The doors are filled only through their push swap: tycho-execution's `PropAMMExecutor` on
-//! Ethereum, the one the chain's other `IPropAMM` venues use, sends the input to the door and calls
-//! `swap(…, block.timestamp)`. A book is never filled any other way.
+//! Ethereum, as on Base the one the chain's other `IPropAMM` venues use, sends the input to the
+//! door and calls `swap(…, block.timestamp)`. A book is never filled any other way.
 //!
 //! A book holds no route to the block it was read for. A route priced from it that lands in a
 //! block without the maker's update ahead of it (a block of a builder that does not carry the
@@ -620,6 +613,41 @@
 //! the map; the books show no other block.
 //!
 //! A listing's tip cap reads as on Base, and a stored cap of zero is none.
+//!
+//! # On BNB Chain
+//!
+//! BNB Chain reads the doors as Ethereum does. A maker's update lands only in a block whose
+//! builder carries it (48 Club), so each poll reads the doors at the next block under that
+//! block's state map, by the slot rule above, and the rules of On Ethereum on which listings are
+//! served, credit and stock listings among them, hold there too. No fill was measured on BNB
+//! Chain: as on Base, a listing is served only where its gas is named
+//! ([`EfficientPropFeedBuilder::credit_listing`]). The fallback router is refused. What differs is
+//! the clock.
+//!
+//! A block lands every 450 ms. Its header names its milliseconds (`milliTimestamp`, or the low
+//! eight bytes of its `mixHash` where they are under a second), and its `timestamp` is its second.
+//! A front there runs the block's second as its clock: mode 0, or mode 3 while the millisecond
+//! precompile `0x70` it reads answers nothing, as it does today, the front then taking the start
+//! of the block's second. A front on any other clock, or one whose precompile answers, ends the
+//! feed: no block override sets the milliseconds it would read.
+//!
+//! A map names its block (`blockNumber`) and no slot, and only a map for the block after the
+//! node's latest is used. That block lands 450 ms after the head, in the head's second or the one
+//! after, so the doors are asked at the next block under each of those seconds, and at the block
+//! after under each for the listings that carry. A size is sampled at the least the door answers
+//! across them, and a size whose path (custody or route) differs between two of them is not
+//! quoted. A side lives until the head's milliseconds and 450 ms, or 900 ms where it lives through
+//! the block after, less the landing allowance (100 ms by default,
+//! [`EfficientPropFeedBuilder::landing_allowance`]): a route must reach 48 Club before it seals
+//! the block. A side is served only where 50 ms of that remain, so a poll serves the next block
+//! alone only where it answers within about 300 ms of the head. A node whose latest block is more
+//! than a second and the lag allowance (4 s) behind the poll's start has stalled.
+//!
+//! Nothing is served on BNB Chain yet. The front is not deployed there
+//! ([`EfficientPropDeployment::bnb`] holds it as its rehearsal on a fork of the chain deployed
+//! it), no state URL serving chain 56 is known, and tycho-execution runs no `PropAMMExecutor`
+//! there: its pAMM encoder refuses the chain, so no book there could be encoded. The path runs in
+//! this module's offline tests.
 //!
 //! # What this integration depends on
 //!
@@ -680,9 +708,9 @@ pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 pub const TIP_CAP_WEI_ATTRIBUTE: &str = "tip_cap_wei";
 
 /// Static attribute holding the first block the book's quotes fill in, big-endian, on a chain
-/// whose makers' updates land in a builder's block (Ethereum): the block after the one the book
-/// was read at. A swap landing in an earlier block, or after the side's `*_valid_until_ms`,
-/// reverts or fills at another price.
+/// whose makers' updates land in a builder's block (Ethereum and BNB Chain): the block after the
+/// one the book was read at. A swap landing in an earlier block, or after the side's
+/// `*_valid_until_ms`, reverts or fills at another price.
 pub const VALID_FROM_BLOCK_ATTRIBUTE: &str = "valid_from_block";
 
 /// Static attribute holding the Unix time in milliseconds, big-endian, from which the state
@@ -693,22 +721,23 @@ pub const BID_VALID_UNTIL_MS_ATTRIBUTE: &str = "bid_valid_until_ms";
 /// The same for the ask (a purchase of the base): see [`BID_VALID_UNTIL_MS_ATTRIBUTE`].
 pub const ASK_VALID_UNTIL_MS_ATTRIBUTE: &str = "ask_valid_until_ms";
 
-/// Static attribute holding, on Ethereum, what a fill the listing's pool pays from its custody is
-/// measured to cost its transaction, big-endian, in the terms of a swap's charge (beside what
-/// tycho-execution's gas estimator adds): the dearer direction's. Sent direct it is that
-/// direction's charge; through the fallback router it is the door's branch at the least, which
-/// the charge there, the cheaper branch's, is 64,000 to 121,000 under. Absent on a listing with a
-/// credit mode sent direct, whose routed fills cost several times that, and through the fallback
-/// router for a listing with no figure of its own. See the module doc, Gas.
+/// Static attribute holding what a fill the listing's pool pays from its custody is measured to
+/// cost its transaction (on Base and BNB Chain, what its named gas says it costs), big-endian, in
+/// the terms of a swap's charge (beside what tycho-execution's gas estimator adds): the dearer
+/// direction's. Sent direct it is that direction's charge; through the fallback router it is the
+/// door's branch at the least, which the charge there, the cheaper branch's, is 64,000 to 121,000
+/// under. Absent on a listing with a credit mode sent direct, whose routed fills cost several times
+/// that, and through the fallback router for a listing with no figure of its own. See the module
+/// doc, Gas.
 pub const EXPECTED_GAS_ATTRIBUTE: &str = "expected_gas";
 
-/// Static attribute holding, on Ethereum, what one swap's call adds to a transaction's gas limit,
-/// big-endian: the dearest fill the listing has a figure for, before refunds, and 25% on top. An
-/// addition for the swap's call, not the transaction's limit. On a listing with a credit mode it
-/// is sized from the dearest fill measured on the listing, and absent where the listing's gas
-/// names none, whether its book serves a routed size or its custody sizes alone. Absent too
-/// through the fallback router for a listing with no figure of its own, and it never covers the
-/// pool a solver falls back on. See the module doc, Gas.
+/// Static attribute holding what one swap's call adds to a transaction's gas limit, big-endian: the
+/// dearest fill the listing has a figure for, before refunds, and 25% on top. An addition for the
+/// swap's call, not the transaction's limit. On a listing with a credit mode it is sized from the
+/// dearest fill measured on the listing, and absent where the listing's gas names none, whether its
+/// book serves a routed size or its custody sizes alone. Absent too through the fallback router for
+/// a listing with no figure of its own, and it never covers the pool a solver falls back on. See
+/// the module doc, Gas.
 pub const GAS_LIMIT_ADDITION_ATTRIBUTE: &str = "gas_limit_addition";
 
 /// The one quote contract layout this integration reads: see

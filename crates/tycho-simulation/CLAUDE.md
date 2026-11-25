@@ -164,30 +164,32 @@ for any protocol indexed by Tycho.
   its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
-  `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum: one `IPropAMM` door
-  per listing and one book per door (the door in `pamm_address`, the listing's tip cap in
+  `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum, Base and BNB Chain (Base
+  samples the doors at the head, Ethereum and BNB Chain at the next block): one `IPropAMM` door per
+  listing and one book per door (the door in `pamm_address`, the listing's tip cap in
   `tip_cap_wei`), filled by the generic `PropAMMSwapEncoder` and `PropAMMExecutor`. Nothing of the
-  venue's pricing is ported: `reader.rs` finds the doors (the front's `doorView` scan, each door
-  the factory's CREATE2 child) and samples each door's own `quote`; `overrides.rs` reads the next
+  venue's pricing is ported: `reader.rs` finds the doors (the front's `doorView` scan, each door the
+  factory's CREATE2 child) and samples each door's own `quote`; `overrides.rs` reads the next
   block's state maps (`titan_getPammStateOverrides`), since a maker's update lands only in a
-  builder's block; `slots.rs` is the quote contract's slot rule; `ladder.rs` quotes the samples
-  exactly and along floored chords, nothing outside them; `state.rs` holds the gas and each
-  side's deadline; `desks.rs` the approved makers; `telemetry.rs` the feed's metrics (polls by
-  outcome, listings covered or not by reason, the node's answer age). `mod.rs` documents every
-  rule; what a change must keep:
+  builder's block (`Cadence`: Ethereum's slots, BNB Chain's 450 ms blocks); `slots.rs` is the quote
+  contract's slot rule; `ladder.rs` quotes the samples exactly and along floored chords, nothing
+  outside them; `state.rs` holds the gas and each side's deadline; `desks.rs` the approved makers;
+  `telemetry.rs` the feed's metrics (polls by outcome, listings covered or not by reason, the node's
+  answer age). `mod.rs` documents every rule; what a change must keep:
   - a listing is served only where its maker's desk contract is approved (`with_approved_desks`,
     or the list at `with_approved_desks_url` while its last read is fresh; neither: nothing is
     served, and a read that fails brings no desk in), its price sources are in
     `approved_price_sources`, and the front runs an allow-listed implementation
   - a swap is never charged above what its fill costs its transaction: on Ethereum only figures
-    measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas `credit_listing` names
-    for it (required for a credit listing, a stock listing and any other pair); a listing with
-    neither is left out (`has_gas`). `with_fallback_router()` charges the cheaper branch
-    (`FALLBACK_SWAP_GAS`). The charge stays that floor: what a fill is expected to cost and what
-    its call adds to a gas limit go out as data beside it (`expected_gas`, `gas_limit_addition`,
-    `GasOutlook`), each only where a figure measured on the listing states it, never under and
-    never over: a listing with a credit mode names no expected gas, and an addition only from the
-    dearest fill `credit_listing` names (`CreditGas::most_before_refunds`), not from a charge
+    measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas `credit_listing` names for
+    it (required for a credit listing, a stock listing and any other pair); on Base and BNB Chain
+    only the gas `credit_listing` names; a listing with neither is left out (`has_gas`).
+    `with_fallback_router()` charges the cheaper branch (`FALLBACK_SWAP_GAS`). The charge stays that
+    floor: what a fill is expected to cost and what its call adds to a gas limit go out as data
+    beside it (`expected_gas`, `gas_limit_addition`, `GasOutlook`), each only where a figure
+    measured on the listing states it, never under and never over: a listing with a credit mode
+    names no expected gas, and an addition only from the dearest fill `credit_listing` names
+    (`CreditGas::most_before_refunds`), not from a charge
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
     `ask_valid_until_ms`
@@ -201,13 +203,16 @@ for any protocol indexed by Tycho.
     Only a refusal of the form itself (JSON-RPC -32602 or -32601) counts against the hash form,
     and never for the reader's life: three in a row set it aside for 32 heads (`HashForm`)
   - the quote layout, front, factory, desk contract code hash and allow-list are builder
-    arguments (`EfficientPropDeployment`); the one place that writes them down is
-    `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings hold it
-    (a test holds the two equal), which `EfficientPropFeedBuilder::ethereum` builds on with the
-    deployment's price sources. No other code reads them as constants; `with_door_code_hash`
-    pins the doors'
-  - Base's path is held whole but `build` refuses Base (`BASE_NOT_SERVED`) until its gas is
-    measured on the deployment Base runs; its offline tests build past the refusal (`build_path`)
+    arguments (`EfficientPropDeployment`); the one place that writes them down is the chain's
+    preset: `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings
+    hold it (a test holds the two equal), `base()` from Base's deployment record and `bnb()` from
+    BNB Chain's rehearsal (a test holds each desk contract code hash to its record's first desk),
+    which `EfficientPropFeedBuilder::ethereum`, `base` and `bnb` build on with the deployment's
+    price sources (none on BNB Chain until its record lands). No other code reads them as
+    constants; `with_door_code_hash` pins the doors'
+  - Base and BNB Chain serve no book yet: no listing exists on Base, and BNB Chain has no front,
+    no state URL and no `PropAMMExecutor`. Their paths run in the offline tests, and Base's
+    against the deployed front in ignored tests
   Its tests run on `test_support.rs` (a fake node, and a node replaying `testdata/`'s polls
   recorded from local forks of Ethereum holding the deployed contracts, checked wei for wei).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
