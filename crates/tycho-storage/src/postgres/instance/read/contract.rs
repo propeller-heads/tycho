@@ -13,7 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{resolve_version, unique_by_id, unique_by_key_nested, ReadAt};
+use super::version::{resolve_version, unique_by_key, unique_by_key_nested, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
@@ -315,7 +315,7 @@ async fn codes_at(
     if let ReadAt::Past { ts, head } = read {
         rows.extend(history_code_rows(instance, ids, ts, head, conn).await?);
     }
-    unique_by_id("contract_code", instance, read, rows)
+    unique_by_key("contract_code", instance, read, rows)
 }
 
 /// Loads the current code rows of the accounts `ids` of `instance`.

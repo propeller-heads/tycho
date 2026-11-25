@@ -125,7 +125,7 @@ where
 
 /// Collects `rows` into a map by key. `Unexpected` if two rows have the same key, as for
 /// [`unique_by_key_nested`].
-pub(super) fn unique_by_id<K: Eq + Hash + Debug, V>(
+pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
     entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
