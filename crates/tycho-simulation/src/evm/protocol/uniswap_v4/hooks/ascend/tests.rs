@@ -115,9 +115,9 @@ fn pool_scaled(
     let liquidity = state.curve.liquidity * scale;
     let net = i128::try_from(liquidity).expect("fits");
     let (lower, upper) = if state.token_is_currency0() {
-        (state.start_tick, state.start_tick + 200_000)
+        (state.curve.start_tick, state.curve.start_tick + 200_000)
     } else {
-        (-(state.start_tick + 200_000), -state.start_tick)
+        (-(state.curve.start_tick + 200_000), -state.curve.start_tick)
     };
     let active = if (lower..upper).contains(&tick) { liquidity } else { 0 };
     let mut pool = UniswapV4State::new(
@@ -224,7 +224,16 @@ fn attributes(state: &AscendPoolState) -> HashMap<String, Bytes> {
     [
         ("ascend_fee_pips", u64_attr(state.fee_pips.into())),
         ("ascend_token_is_currency0", Bytes::from(vec![u8::from(state.token_is_currency0())])),
-        ("ascend_start_tick", Bytes::from(state.start_tick.to_be_bytes().to_vec())),
+        (
+            "ascend_start_tick",
+            Bytes::from(
+                state
+                    .curve
+                    .start_tick
+                    .to_be_bytes()
+                    .to_vec(),
+            ),
+        ),
         (
             "ascend_ema_sqrt_price_x96",
             Bytes::from(
@@ -1643,10 +1652,11 @@ fn test_a_fills_new_discount_beyond_uint32_is_refused() {
 
 /// A whole-input fill leaves the pool nothing to swap: `PoolManager.swap` still runs, and v4-core's
 /// `Pool.swap` returns at once on a zero amount (`if (params.amountSpecified == 0) return ...`
-/// before its price checks and its loop), so the swap leg costs the 3,000 of a no-op. The route
-/// around it (`base` 150,000 and `settlement` 30,000 of the Uniswap v4 costs) is charged as for
-/// any swap, with the hook's two frames of a fill (171,820 and 10,475) and the PoolManager's
-/// 1,689 for each of the two calls. The total of such a swap was not measured on chain.
+/// before its price checks and its loop), so the swap leg costs the 3,000 of a no-op. The hook's
+/// `beforeSwap` estimate adds the route around it (`base` 150,000 and `settlement` 30,000 of the
+/// Uniswap v4 costs), with the hook's two frames of a fill (171,820 and 10,475) and the
+/// PoolManager's 1,689 for each of the two calls. The total of such a swap was not measured on
+/// chain.
 #[test]
 fn test_a_whole_input_fill_costs_the_route_the_noop_swap_and_the_hook_frames() {
     let pool = funded_pool(true, 10_000, PLENTY);
@@ -1703,7 +1713,7 @@ fn test_attribute_bytes_of_a_chain_pool_decode() {
 
     assert_eq!(decoded.fee_pips, 10_000);
     assert!(!decoded.token_is_currency0());
-    assert_eq!(decoded.start_tick, -168_600);
+    assert_eq!(decoded.curve.start_tick, -168_600);
     assert_eq!(decoded.bid.max_clip, 11_862_044_423_356_365_469);
 }
 
@@ -2074,12 +2084,13 @@ fn after_swap_gas(pool: &UniswapV4State, zero_for_one: bool, amount: i128, amm_o
 /// The gas of each path as `debug_traceCall` measured it on Elysium (see the constants in
 /// `hook_handler.rs` for the transactions and blocks): the hook's `beforeSwap` and `afterSwap`
 /// frames of a buy, of a sell the hook does not consider filling, of one it considers and the
-/// library leaves unfilled (a bid of 1), and of one it fills.
+/// library leaves unfilled (a bid of 1), and of one it fills. That fill takes the whole input, so
+/// its `beforeSwap` estimate also carries the route's 180,000 (`ASCEND_WHOLE_INPUT_ROUTE_GAS`).
 #[rstest]
 #[case::buy("0", false, 50_203, 5_402)]
 #[case::sell_without_inventory("0", true, 17_388, 20_319)]
 #[case::sell_with_a_bid_of_1("1", true, 47_094, 20_319)]
-#[case::sell_with_a_fill(PLENTY, true, 171_820, 10_475)]
+#[case::sell_with_a_fill_of_the_whole_input(PLENTY, true, 171_820 + 180_000, 10_475)]
 fn test_each_path_costs_the_gas_measured_on_chain(
     #[case] inventory: &str,
     #[case] zero_for_one: bool,

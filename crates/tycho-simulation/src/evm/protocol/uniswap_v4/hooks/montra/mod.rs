@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use tycho_common::{simulation::errors::SimulationError, Bytes};
 
-use super::launchpad::{field, flag, tick_i32 as tick, u64_be};
+use super::launchpad::{field, flag, tick_i32 as tick, u32_be, u64_be};
 use crate::protocol::errors::InvalidSnapshotError;
 
 /// `PoolConfig.totalFeePips`: the fee a sell pays, and a buy once its anti-snipe window is over.
@@ -390,13 +390,13 @@ pub fn decode_paused(value: &Bytes) -> bool {
 
 /// An 8-byte big-endian fee in pips, which the hook stores as a `uint24`.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let pips = u64_be(name, value)?;
-    u32::try_from(pips)
-        .ok()
-        .filter(|pips| *pips < UINT24_LIMIT)
-        .ok_or_else(|| {
-            InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a uint24"))
-        })
+    let pips = u32_be(name, value)?;
+    if pips >= UINT24_LIMIT {
+        return Err(InvalidSnapshotError::ValueError(format!(
+            "{name} = {pips} does not fit a uint24"
+        )));
+    }
+    Ok(pips)
 }
 
 /// A one-byte stage, one of [`Stage`]'s variants.

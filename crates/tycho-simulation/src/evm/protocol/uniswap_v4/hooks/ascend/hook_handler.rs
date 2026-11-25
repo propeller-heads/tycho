@@ -1,6 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::{address, Address, I128, I256, U256};
+use alloy::primitives::{address, Address, I128, U256};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -12,7 +12,7 @@ use tycho_common::{
 };
 
 use super::{
-    super::launchpad::INT128_MAX,
+    super::launchpad::{exact_input, swap_bound, INT128_MAX},
     math::{
         add, fill_price, mul_div_ceil, mul_div_floor, observe, refuse, size_fill, sub_invariant,
         Fill, FillRequest, WINDOW_SECONDS,
@@ -29,12 +29,9 @@ use crate::evm::protocol::{
                 SwapParams, WithGasEstimate,
             },
         },
-        state::UniswapV4State,
+        state::{SwapGasCosts, UniswapV4State},
     },
-    utils::uniswap::{
-        tick_math::{MAX_SQRT_RATIO, MIN_SQRT_RATIO},
-        FEE_PIPS_DENOMINATOR,
-    },
+    utils::uniswap::FEE_PIPS_DENOMINATOR,
 };
 
 /// The Ascend launchpad hook on Elysium (chain id 99901), deployed at block 423647 and not behind
@@ -93,6 +90,13 @@ const ASCEND_SELL_AFTER_SWAP_GAS: u64 = 20_319;
 /// the fill's own: the larger of 10,475 and 10,416, from the replays of the two fill transactions
 /// of [`ASCEND_FILL_BEFORE_SWAP_GAS`].
 const ASCEND_FILL_AFTER_SWAP_GAS: u64 = 10_475;
+/// The route around a swap whose whole input the fill takes, which leaves the pool leg a no-op
+/// (the 3,000 of `UniswapV4State::swap`): the router, the executor's preamble, the token transfer
+/// in and the settlement, charged as Uniswap v4's `base` and `settlement` charge them for any
+/// swap. No trace measured the total of such a swap. The shared state charges nothing for it,
+/// because a generic VM hook's own estimate already covers it.
+const ASCEND_WHOLE_INPUT_ROUTE_GAS: u64 =
+    SwapGasCosts::UNISWAP_V4.base + SwapGasCosts::UNISWAP_V4.settlement;
 /// Gas the PoolManager spends per hook call outside the hook's own frames: half of what the swap
 /// frame holds beyond both hook frames and the median of the hookless swap frames. For the four
 /// transactions above, from their own traces, the halves are 858 (the buy), 1,689 (the sell
@@ -187,12 +191,16 @@ impl SwapPlan {
         }
     }
 
-    /// The gas of the hook's `beforeSwap` frame on this path.
-    fn before_swap_gas(&self) -> u64 {
+    /// The gas of the hook's `beforeSwap` frame on this path for a swap of `amount_in`, with the
+    /// route around the swap when the fill takes the whole input.
+    fn before_swap_gas(&self, amount_in: U256) -> u64 {
         match self.path {
             SwapPath::Buy => ASCEND_BUY_BEFORE_SWAP_GAS,
             SwapPath::SellNotConsidered => ASCEND_SELL_BEFORE_SWAP_GAS,
             SwapPath::SellDeclined => ASCEND_SELL_CONSIDERED_BEFORE_SWAP_GAS,
+            SwapPath::SellFilled(fill) if fill.tokens_in == amount_in => {
+                ASCEND_FILL_BEFORE_SWAP_GAS + ASCEND_WHOLE_INPUT_ROUTE_GAS
+            }
             SwapPath::SellFilled(_) => ASCEND_FILL_BEFORE_SWAP_GAS,
         }
     }
@@ -246,31 +254,6 @@ pub(super) fn max_gross_buy(max_net: U256, fee_pips: u32) -> Result<U256, Simula
     Ok((bound - U256::from(1)) / kept)
 }
 
-/// Validates `amount_specified` as the hook's contract and the pool manager would: the exact
-/// input in raw units.
-fn exact_input(amount_specified: I256) -> Result<U256, SimulationError> {
-    if amount_specified == I256::ZERO {
-        return Err(refuse("a swap of zero reverts SwapAmountCannotBeZero"));
-    }
-    if amount_specified > I256::ZERO {
-        return Err(refuse("exact-output swaps are not quoted"));
-    }
-    let amount_in = amount_specified.unsigned_abs();
-    if amount_in > INT128_MAX {
-        return Err(refuse("an input above type(int128).max overflows the swap delta"));
-    }
-    Ok(amount_in)
-}
-
-/// The swap's price bound for a walk: v4's usable extreme next to `price`.
-fn swap_bound(price: U256, zero_for_one: bool) -> U256 {
-    if zero_for_one {
-        price.max(MIN_SQRT_RATIO + U256::from(1))
-    } else {
-        price.min(MAX_SQRT_RATIO - U256::from(1))
-    }
-}
-
 impl AscendHookHandler {
     pub fn new(address: Address, state: AscendPoolState, block_timestamp: u64) -> Self {
         Self { address, state, block_timestamp }
@@ -298,7 +281,7 @@ impl AscendHookHandler {
         context: &StateContext,
         swap_params: &SwapParams,
     ) -> Result<(U256, SwapPlan), SimulationError> {
-        let amount_in = exact_input(swap_params.amount_specified)?;
+        let amount_in = exact_input(swap_params.amount_specified).map_err(refuse)?;
         let plan =
             self.plan(context.sqrt_price_x96, context.tick, swap_params.zero_for_one, amount_in)?;
         Ok((amount_in, plan))
@@ -452,7 +435,7 @@ impl HookHandler for AscendHookHandler {
             }
         };
         Ok(WithGasEstimate {
-            gas_estimate: plan.before_swap_gas(),
+            gas_estimate: plan.before_swap_gas(amount_in),
             result: BeforeSwapOutput {
                 amount_delta: BeforeSwapDelta(delta.as_i256()),
                 fee: Default::default(),

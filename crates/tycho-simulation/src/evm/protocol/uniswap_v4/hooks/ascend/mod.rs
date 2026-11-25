@@ -18,7 +18,7 @@ use alloy::primitives::U256;
 use math::Curve;
 use tycho_common::Bytes;
 
-use super::launchpad::{field, fixed, flag, tick_i32, u64_be};
+use super::launchpad::{field, fixed, flag, tick_i32, u32_be, u64_be};
 use crate::{
     evm::protocol::utils::uniswap::FEE_PIPS_DENOMINATOR, protocol::errors::InvalidSnapshotError,
 };
@@ -62,9 +62,11 @@ const POOL_ATTRIBUTES: [&str; 11] = [
     BID_MAX_CLIP_ATTRIBUTE,
 ];
 
-/// The smallest and largest `int24`: a stored tick is one.
+/// The smallest `int24`: a stored tick is at least this.
 const INT24_MIN: i32 = -(1 << 23);
+/// The largest `int24`: a stored tick is at most this.
 const INT24_MAX: i32 = (1 << 23) - 1;
+
 /// What the hook keeps for one pool's price observation (`PoolData` word 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Observation {
@@ -105,10 +107,9 @@ struct Bid {
 pub struct AscendPoolState {
     /// The swap fee in pips, below 1e6.
     fee_pips: u32,
-    start_tick: i32,
     observation: Observation,
     bid: Bid,
-    /// The launch curve of `start_tick` and of the orientation, which the curve carries.
+    /// The launch curve, which carries the orientation and the start tick.
     curve: Curve,
 }
 
@@ -127,14 +128,12 @@ impl AscendPoolState {
                 "{START_TICK_ATTRIBUTE} = {start_tick} has no launch curve: {e}"
             ))
         })?;
-        Self::with_curve(fee_pips, start_tick, observation, bid, curve)
+        Self::with_curve(fee_pips, observation, bid, curve)
     }
 
-    /// A state on `curve`, which must be the curve of `start_tick`, with the same checks as
-    /// [`Self::try_new`] on the other parts.
+    /// A state on `curve`, with the same checks as [`Self::try_new`] on the other parts.
     fn with_curve(
         fee_pips: u32,
-        start_tick: i32,
         observation: Observation,
         bid: Bid,
         curve: Curve,
@@ -149,7 +148,7 @@ impl AscendPoolState {
                 "{EMA_SQRT_PRICE_ATTRIBUTE} is 0, which no observation leaves"
             )));
         }
-        Ok(Self { fee_pips, start_tick, observation, bid, curve })
+        Ok(Self { fee_pips, observation, bid, curve })
     }
 
     /// Whether the launched token is `currency0`.
@@ -195,7 +194,8 @@ impl AscendPoolState {
             flag,
             base.map(|b| b.token_is_currency0()),
         )?;
-        let start_tick = field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.start_tick))?;
+        let start_tick =
+            field(attributes, START_TICK_ATTRIBUTE, tick, base.map(|b| b.curve.start_tick))?;
         let observation = Observation {
             ema: field(attributes, EMA_SQRT_PRICE_ATTRIBUTE, uint160, obs.map(|o| o.ema))?,
             updated_at: field(
@@ -205,7 +205,7 @@ impl AscendPoolState {
                 obs.map(|o| o.updated_at),
             )?,
             tick: field(attributes, OBSERVED_TICK_ATTRIBUTE, tick, obs.map(|o| o.tick))?,
-            discount: field(attributes, DISCOUNT_ATTRIBUTE, discount, obs.map(|o| o.discount))?,
+            discount: field(attributes, DISCOUNT_ATTRIBUTE, u32_be, obs.map(|o| o.discount))?,
         };
         let bid = Bid {
             inventory: field(
@@ -233,9 +233,9 @@ impl AscendPoolState {
         match base {
             Some(base)
                 if base.token_is_currency0() == token_is_currency0 &&
-                    base.start_tick == start_tick =>
+                    base.curve.start_tick == start_tick =>
             {
-                Self::with_curve(fee_pips, start_tick, observation, bid, base.curve)
+                Self::with_curve(fee_pips, observation, bid, base.curve)
             }
             _ => Self::try_new(fee_pips, token_is_currency0, start_tick, observation, bid),
         }
@@ -243,26 +243,14 @@ impl AscendPoolState {
 }
 
 /// A fee in pips, which the hook stores as a `uint24`, in the indexer's `u64_be` format.
-/// [`AscendPoolState::with_curve`] checks that it is below 100%; the hook's own bounds on a fee
+/// [`AscendPoolState::try_new`] checks that it is below 100%; the hook's own bounds on a fee
 /// are not known (its source is unverified), so any fee below that decodes, 0 included.
 fn pips(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let pips = u64_be(name, value)?;
-    u32::try_from(pips).map_err(|_overflow| {
-        InvalidSnapshotError::ValueError(format!("{name} = {pips} does not fit a fee in pips"))
-    })
+    u32_be(name, value)
 }
 
-/// The discount `d`: 8 big-endian bytes of a value below 2^32, which the hook stores as a
-/// `uint32`.
-fn discount(name: &str, value: &Bytes) -> Result<u32, InvalidSnapshotError> {
-    let discount = u64_be(name, value)?;
-    u32::try_from(discount).map_err(|_overflow| {
-        InvalidSnapshotError::ValueError(format!("{name} = {discount} does not fit a uint32"))
-    })
-}
-
-/// A 4-byte big-endian two's-complement `int24`, sign-extended to 32 bits. Montra's ticks take any
-/// `i32` (`launchpad::tick_i32`); the range check is Ascend's alone.
+/// A 4-byte big-endian two's-complement `int24`, sign-extended to 32 bits, refused outside the
+/// `int24` range.
 fn tick(name: &str, value: &Bytes) -> Result<i32, InvalidSnapshotError> {
     let tick = tick_i32(name, value)?;
     if !(INT24_MIN..=INT24_MAX).contains(&tick) {

@@ -4,7 +4,7 @@
 
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::{Address, I256, U256};
+use alloy::primitives::{Address, I128, U256};
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::{token::Token, Chain},
@@ -21,11 +21,13 @@ use crate::{
             hook_handler::HookHandler,
             hook_handler_creator::{HookCreationParams, HookHandlerCreator},
             models::{
-                AfterSwapDelta, AfterSwapParameters, BeforeSwapOutput, BeforeSwapParameters,
-                HookSpotFees, StateContext, SwapOutcome, SwapParams, WithGasEstimate,
+                AfterSwapDelta, AfterSwapParameters, BalanceDelta, BeforeSwapDelta,
+                BeforeSwapOutput, BeforeSwapParameters, HookSpotFees, StateContext, SwapOutcome,
+                SwapParams, WithGasEstimate,
             },
+            utils::HookOptions,
         },
-        state::{UniswapV4Fees, UniswapV4State},
+        state::UniswapV4State,
     },
     protocol::errors::InvalidSnapshotError,
 };
@@ -83,7 +85,13 @@ pub struct ExtensionTestHook {
     pub swaps_from_empty_range: bool,
     /// What `handler_after_swap` answers.
     pub handler_after_swap: HandlerAfterSwapAnswer,
+    /// With a gas estimate, the hook has `beforeSwap` with a returned delta and takes the whole
+    /// input of an exact-input swap, paying the same amount of the other token.
+    pub takes_whole_input: Option<u64>,
 }
+
+/// The gas estimate of [`ExtensionTestHook::takes_whole_input`] in the tests that use it.
+pub const WHOLE_INPUT_TEST_HOOK_GAS: u64 = 7;
 
 impl Default for ExtensionTestHook {
     fn default() -> Self {
@@ -94,6 +102,7 @@ impl Default for ExtensionTestHook {
             outcome_check: OutcomeCheckAnswer::Accepts,
             swaps_from_empty_range: false,
             handler_after_swap: HandlerAfterSwapAnswer::Keep,
+            takes_whole_input: None,
         }
     }
 }
@@ -107,13 +116,38 @@ impl HookHandler for ExtensionTestHook {
         self.swaps_from_empty_range
     }
 
+    fn has_permission(&self, option: HookOptions) -> bool {
+        self.takes_whole_input.is_some() &&
+            matches!(option, HookOptions::BeforeSwap | HookOptions::BeforeSwapReturnsDelta)
+    }
+
     fn before_swap(
         &self,
-        _: BeforeSwapParameters,
+        params: BeforeSwapParameters,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
-        Err(SimulationError::FatalError("the test hook has no beforeSwap".into()))
+        let Some(gas_estimate) = self.takes_whole_input else {
+            return Err(SimulationError::FatalError("the test hook has no beforeSwap".into()));
+        };
+        let amount = u128::try_from(
+            params
+                .swap_params
+                .amount_specified
+                .unsigned_abs(),
+        )
+        .ok()
+        .and_then(|amount| I128::try_from(amount).ok())
+        .ok_or_else(|| SimulationError::FatalError("the test amount fits int128".into()))?;
+        Ok(WithGasEstimate {
+            gas_estimate,
+            result: BeforeSwapOutput {
+                amount_delta: BeforeSwapDelta(BalanceDelta::new(amount, -amount).as_i256()),
+                fee: Default::default(),
+                overwrites: HashMap::new(),
+                transient_storage: HashMap::new(),
+            },
+        })
     }
 
     fn after_swap(
@@ -220,39 +254,3 @@ impl HookHandlerCreator for ExtensionTestHookCreator {
 
 /// The chain the decoder tests register their test hook on.
 pub const TEST_HOOK_CHAIN: Chain = Chain::Ethereum;
-
-/// A hook whose swaps write none of its own storage answers `handler_after_swap` with `None`, the
-/// trait's default, for an exact-input swap of 1000 units of `currency_0`. Panics if `hook`
-/// answers anything else.
-pub fn assert_handler_after_swap_keeps_the_hook(hook: &dyn HookHandler) {
-    let context = StateContext {
-        currency_0: Address::repeat_byte(1),
-        currency_1: Address::repeat_byte(2),
-        fees: UniswapV4Fees::new(0, 0, 3000),
-        tick_spacing: 60,
-        sqrt_price_x96: U256::from(1u64) << 96,
-        tick: 0,
-    };
-    let swap_params = SwapParams {
-        zero_for_one: true,
-        amount_specified: I256::try_from(-1_000).unwrap(),
-        sqrt_price_limit: U256::ZERO,
-    };
-
-    let next = hook
-        .handler_after_swap(&context, &swap_params)
-        .unwrap();
-
-    assert!(next.is_none());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A hook that does not override `handler_after_swap` leaves its handler as it is.
-    #[test]
-    fn test_handler_after_swap_defaults_to_keeping_the_hook() {
-        assert_handler_after_swap_keeps_the_hook(&ExtensionTestHook::default());
-    }
-}

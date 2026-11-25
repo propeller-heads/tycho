@@ -9,12 +9,17 @@
 //! down to 0 (a spot at the end, or close enough to it that the whole tokens up to it floor to
 //! 0). `size_fill` reproduces both.
 //!
-//! The errors this module raises are [`SimulationError::InvalidInput`] and mean the same as a
-//! revert of the hook: this one swap cannot be served, as when a checked operation of the
-//! contract overflows. Faults of the pool itself (a curve the contract could not have produced, an
-//! EMA of 0) are refused earlier, when the state is decoded; the errors of the shared Uniswap
-//! functions (a price of 0, an overflow of the pool's own price range) are faults of the pool and
-//! pass through as they are.
+//! The module raises two kinds of error:
+//!
+//! - [`SimulationError::InvalidInput`] ([`refuse`]) for what a revert of the hook means: this one
+//!   swap cannot be served, as when a checked operation of the contract overflows.
+//! - [`SimulationError::FatalError`] ([`broken_invariant`], [`sub_invariant`]) for an invariant of
+//!   the arithmetic that the inputs keep whatever the swap: a failure is a fault of the model.
+//!
+//! Faults of the pool itself (a curve the contract could not have produced, an EMA of 0) are
+//! refused earlier, when the state is decoded; the errors of the shared Uniswap functions (a price
+//! of 0, an overflow of the pool's own price range) are faults of the pool and pass through as
+//! they are.
 
 use alloy::primitives::{uint, U256};
 use tycho_common::simulation::errors::SimulationError;
@@ -23,7 +28,7 @@ use super::{super::launchpad::INT128_MAX, Observation};
 use crate::evm::protocol::utils::{
     solidity_math::{mul_div, mul_div_rounding_up},
     uniswap::{
-        sqrt_price_math::{get_amount0_delta, get_amount1_delta},
+        sqrt_price_math::{get_amount0_delta, get_amount1_delta, Q96},
         tick_math::get_sqrt_ratio_at_tick,
     },
 };
@@ -40,16 +45,16 @@ const EMA_STEP_SECONDS: u64 = 600;
 const EMA_MAX_STEPS: u32 = 8;
 /// The discount decays with this constant: `d1 = ceil(d * 43200 / (dt + 43200))`.
 const DECAY_SECONDS: u64 = 43_200;
-/// A fill needs the spot within `500 / 20000` of the EMA, and sizes `Qmax` from the same ratio.
+/// A fill needs the spot within `BAND_NUMERATOR / BAND_DENOMINATOR` of the EMA, and sizes `Qmax`
+/// from the same ratio.
 const BAND_NUMERATOR: u64 = 500;
+/// The denominator of the band ratio, see [`BAND_NUMERATOR`].
 const BAND_DENOMINATOR: u64 = 20_000;
 /// A bid window lasts this many seconds.
 pub(super) const WINDOW_SECONDS: u64 = 600;
 
 /// One in the discount's fixed point (2^32): `d` is a share of it.
 const Q32: U256 = uint!(4_294_967_296_U256);
-/// One in a square-root price's fixed point (2^96).
-const Q96: U256 = uint!(79_228_162_514_264_337_593_543_950_336_U256);
 
 /// Refuses the swap the contract's arithmetic would revert on, or no router can settle.
 pub(super) fn refuse(reason: impl Into<String>) -> SimulationError {
@@ -88,6 +93,9 @@ fn sqrt_ratio_at(tick: i32) -> Result<U256, SimulationError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Curve {
     pub(super) token_is_currency0: bool,
+    /// The tick the launch position starts at (`PoolData.startTick`), which with the orientation
+    /// decides every other field.
+    pub(super) start_tick: i32,
     /// The liquidity of the single position: the launch supply over the position's width.
     pub(super) liquidity: u128,
     /// Where selling the token ends: `sqrtAt(start)` when the token is `currency0`,
@@ -117,7 +125,8 @@ impl Curve {
         };
         let lower = sqrt_ratio_at(lower_tick)?;
         let upper = sqrt_ratio_at(upper_tick)?;
-        let width = sub(upper, lower, "the position's width")?;
+        // `sqrtAt` grows with the tick and `upper_tick` is above `lower_tick`.
+        let width = sub_invariant(upper, lower, "the position's width")?;
         let liquidity = if token_is_currency0 {
             let product = mul_div_floor(lower, upper, Q96)?;
             mul_div_floor(LAUNCH_SUPPLY, product, width)?
@@ -141,6 +150,7 @@ impl Curve {
         Ok(if token_is_currency0 {
             Self {
                 token_is_currency0,
+                start_tick,
                 liquidity,
                 curve_end: lower,
                 far_end: upper,
@@ -150,6 +160,7 @@ impl Curve {
         } else {
             Self {
                 token_is_currency0,
+                start_tick,
                 liquidity,
                 curve_end: upper,
                 far_end: lower,
@@ -169,6 +180,9 @@ impl Curve {
 /// two differ (and that this one matches a big-integer reference), so that fixing the shared
 /// function fails it and calls for this copy's removal. The rounded-up case is the shared
 /// function's.
+///
+/// Its only caller passes the curve end and a price at or past it, both above 0, so a price of 0
+/// is a fault of the model.
 pub(super) fn amount0_delta_down(
     a: U256,
     b: U256,
@@ -176,13 +190,13 @@ pub(super) fn amount0_delta_down(
 ) -> Result<U256, SimulationError> {
     let (lower, upper) = if a > b { (b, a) } else { (a, b) };
     if lower.is_zero() {
-        return Err(refuse("a price of 0"));
+        return Err(broken_invariant("a price of 0"));
     }
-    let spread = sub(upper, lower, "the price spread")?;
+    let spread = sub_invariant(upper, lower, "the price spread")?;
     Ok(mul_div_floor(U256::from(liquidity) << 96usize, spread, upper)? / lower)
 }
 
-/// `floor(x * 500 / 20000)`, the band width at `x`.
+/// `floor(x * BAND_NUMERATOR / BAND_DENOMINATOR)`, the band width at `x`, which is at most `x`.
 fn band(x: U256) -> Result<U256, SimulationError> {
     mul_div_floor(x, U256::from(BAND_NUMERATOR), U256::from(BAND_DENOMINATOR))
 }
@@ -212,8 +226,8 @@ pub(super) fn observe(
     let old_ema = observation.ema;
     // (1) the spot, clamped to the range around the curve.
     let spot = spot.clamp(curve.clamp.0, curve.clamp.1);
-    // (2) up to 8 steps of at most 600 s, each moving the EMA a share `step / (step + 600)` of
-    // the way to the spot, rounded down.
+    // (2) up to `EMA_MAX_STEPS` steps of at most `EMA_STEP_SECONDS`, each moving the EMA a share
+    // `step / (step + EMA_STEP_SECONDS)` of the way to the spot, rounded down.
     let mut ema = old_ema;
     let mut remaining = dt;
     for _ in 0..EMA_MAX_STEPS {
@@ -233,7 +247,8 @@ pub(super) fn observe(
         U256::from(dt) + U256::from(DECAY_SECONDS),
     )?;
     // (4) re-anchor the bid price to the new EMA, flooring `d` at 0 when it would go negative.
-    // `decayed = ceil(d * 600 / (dt + 600))` is at most `d`, which is below 2^32.
+    // `decayed = ceil(d * DECAY_SECONDS / (dt + DECAY_SECONDS))` is at most `d`, which is below
+    // 2^32.
     let kept = sub_invariant(Q32, decayed, "the decayed discount")?;
     let anchored = if curve.token_is_currency0 {
         mul_div_floor(kept, old_ema, ema)?
@@ -304,7 +319,7 @@ fn end_price_and_quote(
 
 /// A fault of the model: an invariant of the hook's arithmetic that the caller's inputs keep does
 /// not hold, which no swap causes.
-fn broken_invariant(what: &str) -> SimulationError {
+pub(super) fn broken_invariant(what: &str) -> SimulationError {
     SimulationError::FatalError(format!("ascend hook: {what}"))
 }
 
@@ -330,19 +345,23 @@ pub(super) fn tokens_for_capped_quote(
     if curve.token_is_currency0 {
         let d_sqrt = (cap << 96usize) / liquidity;
         let scaled = mul_div_floor(scaled_liquidity, d_sqrt, x0)?;
-        let remaining_price = sub(x0, d_sqrt, "the capped fill's price move")?;
+        let remaining_price = sub_invariant(x0, d_sqrt, "the capped fill's price move")?;
         if remaining_price.is_zero() {
             return Err(broken_invariant("the capped fill reaches a price of 0"));
         }
         Ok(scaled / remaining_price)
     } else {
         let capped_inverse =
-            sub(scaled_liquidity.div_ceil(x0), cap, "the capped fill's inverse price")?;
+            sub_invariant(scaled_liquidity.div_ceil(x0), cap, "the capped fill's inverse price")?;
         if capped_inverse.is_zero() {
             return Err(broken_invariant("the capped fill reaches an infinite price"));
         }
         let capped_price = scaled_liquidity / capped_inverse;
-        mul_div_floor(liquidity, sub(capped_price, x0, "the capped fill's price move")?, Q96)
+        mul_div_floor(
+            liquidity,
+            sub_invariant(capped_price, x0, "the capped fill's price move")?,
+            Q96,
+        )
     }
 }
 
@@ -363,7 +382,7 @@ pub(super) fn size_fill(
     }
     // No fill when the spot is outside the band around the EMA.
     let ema_band = band(ema)?;
-    if spot < sub(ema, ema_band, "the band below the EMA")? ||
+    if spot < sub_invariant(ema, ema_band, "the band below the EMA")? ||
         spot > add(ema, ema_band, "the band above the EMA")?
     {
         return Ok(None);

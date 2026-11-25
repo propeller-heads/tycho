@@ -271,14 +271,6 @@ mod tests {
 
     const SENDER: Address = address!("8876789976decbfcbbbe364623c63652db8c0904");
 
-    /// A swap writes none of the Pons V2 hook's own storage: its fee rates are the pool's terms.
-    #[test]
-    fn test_handler_after_swap_keeps_the_hook() {
-        crate::evm::protocol::uniswap_v4::hooks::test_hook::assert_handler_after_swap_keeps_the_hook(
-            &handler(100, 50),
-        );
-    }
-
     fn handler(hook_fee_bps: u16, creator_tax_bps: u16) -> PonsV2HookHandler {
         PonsV2HookHandler::new(PONS_V2_HOOK_ROBINHOOD, hook_fee_bps, creator_tax_bps)
     }

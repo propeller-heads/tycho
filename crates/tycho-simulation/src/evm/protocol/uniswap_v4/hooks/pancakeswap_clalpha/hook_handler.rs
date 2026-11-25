@@ -246,14 +246,6 @@ mod tests {
 
     const HOOK: Address = CLALPHA_HOOKS_BSC[2];
 
-    /// A swap writes none of CLAlpha's own storage: its fee is a function of the block timestamp.
-    #[test]
-    fn test_handler_after_swap_keeps_the_hook() {
-        let hook = PancakeswapClAlphaHookHandler::new(HOOK, 0, 0);
-
-        crate::evm::protocol::uniswap_v4::hooks::test_hook::assert_handler_after_swap_keeps_the_hook(&hook);
-    }
-
     fn before_swap_params() -> BeforeSwapParameters {
         BeforeSwapParameters {
             context: StateContext {

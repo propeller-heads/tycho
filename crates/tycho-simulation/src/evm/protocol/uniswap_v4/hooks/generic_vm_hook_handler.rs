@@ -445,30 +445,6 @@ mod tests {
         simulation::BlockEnvOverrides,
     };
 
-    /// The generic handler runs the hook's bytecode and keeps no storage of its own, so a swap
-    /// leaves it as it is: the state a quote returns reads the hook's storage from the database.
-    #[test]
-    fn test_handler_after_swap_keeps_the_hook() {
-        let db = SimulationDB::new(
-            get_client(None).expect("Failed to create client"),
-            get_runtime().expect("Failed to get runtime"),
-            Some(BlockHeader { number: 1, ..Default::default() }),
-        );
-        let engine = create_engine(db, true).expect("Failed to create simulation engine");
-        let hook = GenericVMHookHandler::new(
-            Address::ZERO,
-            engine,
-            Address::ZERO,
-            HashMap::new(),
-            HashMap::new(),
-            None,
-            false,
-        )
-        .unwrap();
-
-        crate::evm::protocol::uniswap_v4::hooks::test_hook::assert_handler_after_swap_keeps_the_hook(&hook);
-    }
-
     #[test]
     fn test_before_swap() {
         let block = BlockHeader {

@@ -353,8 +353,8 @@ impl UniswapV4State {
         lp_fee_override: Option<u32>,
     ) -> Result<SwapResults, SimulationError> {
         // v4-core's `Pool.swap` returns the zero delta at once on a zero amount, before its price
-        // checks and its loop, which is what a hook that took the whole input (a bid fill)
-        // leaves the pool leg with.
+        // checks and its loop, which is what a hook that took the whole input leaves the pool leg
+        // with.
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
                 amount_calculated: I256::ZERO,
@@ -1116,16 +1116,11 @@ impl ProtocolSim for UniswapV4State {
             let hook_calls = u64::from(before_swap_gas > 0) + u64::from(after_swap_gas > 0);
             hook_overhead += hook_calls * hook.pool_manager_call_overhead();
         }
-        // A hook that took the whole input leaves the pool leg a no-op, whose own gas is the 3,000
-        // of `swap`. The router overhead, the executor preamble and the token transfer in (`base`)
-        // and the settlement still run around it. No trace measured the total of such a swap;
-        // `base` is a fitted constant for the whole route, so it is charged as for any swap.
-        let route_gas = if amount_to_swap.is_zero() {
-            U256::from(self.gas_costs.base + self.gas_costs.settlement)
-        } else {
-            U256::ZERO
-        };
-        let total_gas_used = result.gas_used + route_gas + U256::from(hook_overhead);
+        // A hook that takes the whole input leaves the pool leg a no-op, costed at the 3,000 of
+        // `swap`; the hook's own estimate covers what runs around it (the generic VM hook's
+        // includes the call's intrinsic gas, which traced whole-input swaps of Bunni and EulerSwap
+        // on Ethereum match without `base` or `settlement`).
+        let total_gas_used = result.gas_used + U256::from(hook_overhead);
         Ok(GetAmountOutResult::new(
             u256_to_biguint(U256::from(amount_out.abs())),
             u256_to_biguint(total_gas_used),
@@ -1530,7 +1525,7 @@ mod tests {
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
                     test_hook::{
                         ExtensionTestHook, HandlerAfterSwapAnswer, OutcomeCheckAnswer,
-                        SpotFeesAnswer,
+                        SpotFeesAnswer, WHOLE_INPUT_TEST_HOOK_GAS,
                     },
                 },
                 utils::uniswap::{
@@ -3495,6 +3490,29 @@ mod tests {
             .expect("the swap");
 
         assert_eq!(hook_address_of(quote.new_state.as_ref()), Address::repeat_byte(3));
+    }
+
+    /// A hook that takes the whole input in `beforeSwap` leaves the pool leg a no-op: the quote's
+    /// gas is the no-op swap's 3,000, the hook's frame and the PoolManager's dispatch of the one
+    /// call, with no route charge on top.
+    #[test]
+    fn test_get_amount_out_of_a_hook_taking_the_whole_input_charges_the_noop_swap() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            takes_whole_input: Some(WHOLE_INPUT_TEST_HOOK_GAS),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(BigUint::from(1_000_000u64), &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(quote.amount, BigUint::from(1_000_000u64));
+        assert_eq!(
+            quote.gas,
+            BigUint::from(3_000 + WHOLE_INPUT_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
+        );
     }
 
     /// A refusal of `handler_after_swap` reaches the caller as `InvalidInput`, and any other

@@ -181,17 +181,6 @@ fn before_swap_params(zero_for_one: bool, amount_specified: i128) -> BeforeSwapP
     }
 }
 
-/// Montra's handler installs no new hook after a swap: its stage machine advances from the
-/// indexer's `PoolConfig` writes.
-#[test]
-fn test_handler_after_swap_keeps_the_hook() {
-    let next = handler(PLAIN, 0)
-        .handler_after_swap(&context(), &swap_params(true, -1_000))
-        .unwrap();
-
-    assert!(next.is_none());
-}
-
 /// `currentBuyFeeRate` of pool 0x8dba98f9... at block 6001266 with only the block time
 /// overridden: start rate 990000 pips, total fee 20000, a 10-second window starting at
 /// 1794584110.

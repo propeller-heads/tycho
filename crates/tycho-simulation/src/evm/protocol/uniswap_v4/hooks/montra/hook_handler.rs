@@ -12,8 +12,8 @@ use tycho_common::{
 };
 
 use super::{
-    super::launchpad::INT128_MAX, decode_paused, MontraPoolConfig, PAUSED_ATTRIBUTE,
-    POOL_CONFIG_ATTRIBUTES,
+    super::launchpad::{exact_input, swap_bound, INT128_MAX},
+    decode_paused, MontraPoolConfig, PAUSED_ATTRIBUTE, POOL_CONFIG_ATTRIBUTES,
 };
 use crate::evm::protocol::{
     uniswap_v4::{
@@ -29,9 +29,7 @@ use crate::evm::protocol::{
     utils::{
         solidity_math::{mul_div, truncate_to_u256},
         uniswap::{
-            lp_fee::OVERRIDE_FEE_FLAG,
-            tick_math::{get_sqrt_ratio_at_tick, MAX_SQRT_RATIO, MIN_SQRT_RATIO},
-            FEE_PIPS_DENOMINATOR,
+            lp_fee::OVERRIDE_FEE_FLAG, tick_math::get_sqrt_ratio_at_tick, FEE_PIPS_DENOMINATOR,
         },
     },
 };
@@ -280,16 +278,10 @@ pub(super) fn max_gross_buy(max_net: U256, hook_fee_pips: u32) -> Result<U256, S
     })
 }
 
-/// The square-root price at `tick`, inside the range a swap's price limit allows: the
-/// executor and V4Quoter pass `MIN_SQRT_PRICE + 1` or `MAX_SQRT_PRICE - 1`, which a walk to
-/// TickMath's own extreme (at tick spacings 1, 2, 4 and 8) stops at.
+/// The square-root price at `tick`, inside the range a swap's price limit allows
+/// ([`swap_bound`]); TickMath's own extreme is outside it at tick spacings 1, 2, 4 and 8.
 fn swap_bound_sqrt_price(tick: i32, zero_for_one: bool) -> Result<U256, SimulationError> {
-    let sqrt_price = get_sqrt_ratio_at_tick(tick)?;
-    Ok(if zero_for_one {
-        sqrt_price.max(MIN_SQRT_RATIO + U256::from(1))
-    } else {
-        sqrt_price.min(MAX_SQRT_RATIO - U256::from(1))
-    })
+    Ok(swap_bound(get_sqrt_ratio_at_tick(tick)?, zero_for_one))
 }
 
 /// The largest exact input a swap sitting at `sqrt_price` with active `liquidity` takes
@@ -377,17 +369,8 @@ impl HookHandler for MontraHookHandler {
         if self.paused {
             return Err(self.refuse("the pool is paused"));
         }
-        let amount_specified = params.swap_params.amount_specified;
-        if amount_specified == I256::ZERO {
-            return Err(self.refuse("a swap of zero reverts SwapAmountCannotBeZero"));
-        }
-        if amount_specified > I256::ZERO {
-            return Err(self.refuse("exact-output swaps are not quoted"));
-        }
-        let amount_in = amount_specified.unsigned_abs();
-        if amount_in > INT128_MAX {
-            return Err(self.refuse("an input above type(int128).max overflows the swap delta"));
-        }
+        let amount_in = exact_input(params.swap_params.amount_specified)
+            .map_err(|reason| self.refuse(reason))?;
 
         let (fee, gas_estimate) = if self.is_buy(zero_for_one) {
             (hook_fee(amount_in, fees.hook_fee_pips)?, MONTRA_BUY_BEFORE_SWAP_GAS)
