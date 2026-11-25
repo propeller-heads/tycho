@@ -35,8 +35,8 @@ impl PostgresGatewayNew {
     ///   without an active instance has no balances.
     /// - `ids`: only components with these external ids.
     /// - `at`: the version. Before the head of the instance, the history tables answer too.
-    ///   `Unsupported` for a version before the history retention horizon or before the base block
-    ///   of the instance.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     ///
     /// Components without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
     /// an unknown chain.
@@ -83,8 +83,8 @@ impl PostgresGatewayNew {
     /// `None`.
     ///
     /// - `at`: the version. Before the head of the instance, the history tables answer too.
-    ///   `Unsupported` for a version before the history retention horizon or before the base block
-    ///   of the instance.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     /// - `system`: the protocol system. Required, because a pool id can repeat across protocol
     ///   systems: `None` is `Unsupported`. `NotFound` for an unknown name. A protocol system
     ///   without an active instance has no states.
