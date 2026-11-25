@@ -277,6 +277,8 @@ mod tests {
         previous: Option<u8>,
         valid_from: NaiveDateTime,
         tx_index: i32,
+        /// Whether a change with the value of the version it replaces only repeats it.
+        drops_repeats: bool,
     }
 
     #[derive(Debug, PartialEq)]
@@ -305,6 +307,10 @@ mod tests {
 
         fn link_next(&self, next: &mut Self) {
             next.previous = Some(self.value);
+        }
+
+        fn repeats(&self, replaced: &Self) -> bool {
+            self.drops_repeats && self.value == replaced.value
         }
 
         fn into_history(self, valid_to: NaiveDateTime) -> HistoryRow {
@@ -354,11 +360,21 @@ mod tests {
     }
 
     fn row(key: u8, value: u8, block: u32, tx_index: i32) -> Row {
-        Row { key, value, previous: None, valid_from: ts(block), tx_index }
+        Row { key, value, previous: None, valid_from: ts(block), tx_index, drops_repeats: false }
     }
 
     fn update(key: u8, value: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
         VersionedChange::Update(row(key, value, block, tx_index))
+    }
+
+    /// An update of an entity that drops a change with the value of the version it replaces.
+    fn update_dropping_repeats(
+        key: u8,
+        value: u8,
+        block: u32,
+        tx_index: i32,
+    ) -> VersionedChange<Row> {
+        VersionedChange::Update(Row { drops_repeats: true, ..row(key, value, block, tx_index) })
     }
 
     fn delete(key: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
@@ -443,6 +459,69 @@ mod tests {
 
         assert_eq!(writes.current.len(), 2);
         assert_eq!(writes.history, vec![archived(row(2, 10, 1, 0), 3)]);
+    }
+
+    #[test]
+    fn test_repeat_of_the_stored_version_writes_nothing() {
+        let stored = row(1, 10, 1, 0);
+
+        let writes = plan(vec![stored], vec![update_dropping_repeats(1, 10, 2, 0)]).unwrap();
+
+        assert!(writes.current.is_empty());
+        assert!(writes.deleted.is_empty());
+        assert!(writes.history.is_empty());
+    }
+
+    #[test]
+    fn test_repeat_after_a_change_keeps_the_change() {
+        let stored = row(1, 10, 1, 0);
+        let changes =
+            vec![update_dropping_repeats(1, 20, 2, 0), update_dropping_repeats(1, 20, 3, 0)];
+
+        let writes = plan(vec![stored.clone()], changes).unwrap();
+
+        assert_eq!(
+            writes.current,
+            vec![Row { previous: Some(10), drops_repeats: true, ..row(1, 20, 2, 0) }]
+        );
+        assert_eq!(writes.history, vec![archived(stored, 2)]);
+    }
+
+    #[test]
+    fn test_repeat_in_a_batch_is_dropped_between_changes() {
+        let changes = vec![
+            update_dropping_repeats(1, 20, 2, 0),
+            update_dropping_repeats(1, 20, 3, 0),
+            update_dropping_repeats(1, 30, 4, 0),
+        ];
+
+        let writes = plan(vec![], changes).unwrap();
+
+        let first = Row { drops_repeats: true, ..row(1, 20, 2, 0) };
+        assert_eq!(
+            writes.current,
+            vec![Row { previous: Some(20), drops_repeats: true, ..row(1, 30, 4, 0) }]
+        );
+        assert_eq!(writes.history, vec![archived(first, 4)]);
+    }
+
+    #[test]
+    fn test_change_at_a_dropped_repeat_fails() {
+        let changes = vec![update_dropping_repeats(1, 10, 2, 0), update(1, 20, 2, 0)];
+
+        let result = plan(vec![row(1, 10, 1, 0)], changes);
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))));
+    }
+
+    #[test]
+    fn test_same_value_is_a_new_version_by_default() {
+        let stored = row(1, 10, 1, 0);
+
+        let writes = plan(vec![stored.clone()], vec![update(1, 10, 2, 0)]).unwrap();
+
+        assert_eq!(writes.current, vec![Row { previous: Some(10), ..row(1, 10, 2, 0) }]);
+        assert_eq!(writes.history, vec![archived(stored, 2)]);
     }
 
     #[rstest]
