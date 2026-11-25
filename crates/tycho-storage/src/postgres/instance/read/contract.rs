@@ -181,7 +181,7 @@ impl PostgresGatewayNew {
             .map(|(_, address, _)| address.clone())
             .collect();
         let mut balances =
-            load_account_balances(chain, instance, Some(&page_addresses), true, read, conn).await?;
+            account_balances_at(chain, instance, Some(&page_addresses), true, read, conn).await?;
         let mut slots = if include_slots {
             slots_at(instance, &ids, read, conn).await?
         } else {
@@ -249,7 +249,7 @@ impl PostgresGatewayNew {
             return Ok(HashMap::new());
         };
         let read = resolve_version(&active, at, conn).await?;
-        load_account_balances(chain, active.id, accounts, include_native, read, conn).await
+        account_balances_at(chain, active.id, accounts, include_native, read, conn).await
     }
 }
 
@@ -258,7 +258,7 @@ impl PostgresGatewayNew {
 ///
 /// A `Past` read adds the history rows to the current rows. `Unexpected` when two rows of one
 /// account and token are valid at the version.
-async fn load_account_balances(
+async fn account_balances_at(
     chain: &Chain,
     instance: InstanceId,
     accounts: Option<&[Address]>,
