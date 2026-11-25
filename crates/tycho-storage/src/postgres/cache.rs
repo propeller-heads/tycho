@@ -585,9 +585,21 @@ impl DBCacheWriteExecutor {
                     .insert_component_balances(instance, origins, balances, conn)
                     .await?
             }
-            WriteOp::InsertContract(_) |
-            WriteOp::UpdateContracts(_) |
-            WriteOp::InsertAccountBalances(_) |
+            WriteOp::InsertContract(accounts) => {
+                self.instance_gateway
+                    .insert_contracts(instance, origins, accounts, conn)
+                    .await?
+            }
+            WriteOp::UpdateContracts(deltas) => {
+                self.instance_gateway
+                    .update_contracts(instance, origins, deltas, conn)
+                    .await?
+            }
+            WriteOp::InsertAccountBalances(balances) => {
+                self.instance_gateway
+                    .insert_account_balances(instance, origins, balances, conn)
+                    .await?
+            }
             WriteOp::InsertProtocolComponents(_) |
             WriteOp::UpdateTokens(_) |
             WriteOp::UpsertProtocolState(_) |
