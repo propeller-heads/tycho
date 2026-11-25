@@ -230,7 +230,7 @@ async fn current_state_rows(
 }
 
 /// Loads the history state rows of the components of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `ids`: only components with these external ids.
 async fn history_state_rows(
     instance: InstanceId,
@@ -304,7 +304,7 @@ async fn current_balance_rows(
 }
 
 /// Loads the history balance rows of the components of `instance` that are valid at `ts`:
-/// `valid_from <= ts < valid_to`, with `valid_to <= head`.
+/// `valid_from <= ts < valid_to`, with `valid_to <= head` (see [`ReadAt::Past`]).
 /// `ids`: only components with these external ids.
 async fn history_balance_rows(
     instance: InstanceId,
