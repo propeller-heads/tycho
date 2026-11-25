@@ -3,6 +3,11 @@
 --
 -- After this migration the previous indexer release cannot start on the database: it joins
 -- tokens to accounts. Roll back by switching to the previous deployment, not with down.sql.
+--
+-- The ALTERs take ACCESS EXCLUSIVE on token, held until the migration commits. If the lock isn't
+-- granted within the timeout, the migration fails, the indexer stops at startup, and the
+-- restarted process tries again, instead of every read of token waiting behind the migration.
+SET LOCAL lock_timeout = '5s';
 
 UPDATE public.token t
 SET address = a.address
