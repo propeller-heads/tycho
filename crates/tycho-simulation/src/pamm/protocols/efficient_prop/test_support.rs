@@ -261,7 +261,11 @@ pub(super) fn direction_gas(sell_base: u64, buy_base: u64) -> DirectionGas {
 /// The gas the tests name for a fake listing on Ethereum in no credit mode, whose pair of test
 /// tokens no figure was measured for: 95,825 selling base and 96,239 buying it.
 pub(super) fn named_gas() -> CreditGas {
-    CreditGas { custody: direction_gas(95_825, 96_239), route: direction_gas(95_825, 96_239) }
+    CreditGas {
+        custody: direction_gas(95_825, 96_239),
+        route: direction_gas(95_825, 96_239),
+        most_before_refunds: None,
+    }
 }
 
 /// Base's figure for a swap in `direction` into a listing of the class `reads` at `pair`.
@@ -278,7 +282,11 @@ pub(super) fn base_gas(direction: SwapDirection, reads: FillReads, pair: PairPla
 /// A credit listing's gas: 160,877 selling base and 158,340 buying it inside custody, 610,501
 /// selling base and 187,000 buying it through the route.
 pub(super) fn credit_gas() -> CreditGas {
-    CreditGas { custody: direction_gas(160_877, 158_340), route: direction_gas(610_501, 187_000) }
+    CreditGas {
+        custody: direction_gas(160_877, 158_340),
+        route: direction_gas(610_501, 187_000),
+        most_before_refunds: None,
+    }
 }
 
 /// A WETH/USDC credit listing on Ethereum: its bid sells 0.05 WETH for 149.5 USDC and 0.1 WETH

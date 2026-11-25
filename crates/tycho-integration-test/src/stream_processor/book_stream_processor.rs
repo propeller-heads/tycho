@@ -764,7 +764,9 @@ fn efficient_prop_approved_desks(
 
 /// The listings served with gas named for them, each with the gas its fills are charged, from
 /// `EFFICIENT_PROP_CREDIT_LISTINGS` (comma-separated `listing=custody sell:custody buy:route
-/// sell:route buy`, the four figures measured on that listing's pool): none when it is unset, so
+/// sell:route buy`, the four figures measured on that listing's pool, and optionally a fifth, its
+/// dearest fill before refunds, which its book's gas limit addition is sized from): none when it is
+/// unset, so
 /// no listing with a credit mode, of a stock token's pair, or of a pair and place the feed holds
 /// no measured figure for is served. The feed refuses one on Base.
 fn efficient_prop_credit_listings(

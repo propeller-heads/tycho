@@ -379,11 +379,6 @@ pub(super) const FALLBACK_SWAP_GAS: u64 = 90_445 - FALLBACK_ROUTER_OVERHEAD_GAS;
 /// work: [`FALLBACK_SWAP_GAS`] and [`GasOutlook::expected`] are stated less it.
 pub(super) const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
-/// The least a fill at the door cost its transaction through the fallback router: the wstETH/WETH
-/// sale, its direct fill and the least of the router's additions (see [`FALLBACK_SWAP_GAS`]).
-pub(super) const FALLBACK_DOOR_FILL_LEAST_GAS: u64 =
-    ETHEREUM_SELL_BASE_PRINT_SWAP_GAS + FALLBACK_DOOR_FILL_EXTRA_GAS.0;
-
 /// What a fill at the door spends more through the fallback router than sent direct, the least
 /// and the most measured: the router's quotes of the door and of the pool, and its own work (see
 /// [`FALLBACK_SWAP_GAS`]).
@@ -393,29 +388,29 @@ pub(super) const FALLBACK_DOOR_FILL_EXTRA_GAS: (u64, u64) = (48_794, 74_415);
 /// refund counter of every custody fill traced (see [`ETHEREUM_SELL_BASE_PRINT_SWAP_GAS`]).
 pub(super) const CUSTODY_FILL_REFUND: u64 = 19_900;
 
-/// The same for a routed fill: the largest refund measured on the first pool's route, 84,400 to
-/// 99,500 (see [`CreditGas`]). Another pool's route refunds what its own lender's storage clears.
-pub(super) const ROUTE_FILL_REFUND_MOST: u64 = 99_500;
-
 /// What a listing's fills were measured to cost beside the charge of each swap, published with
-/// its book (`expected_gas`, `gas_limit`). A charge is a floor: never above what the fill costs
-/// its transaction, so on the fallback path it is the cheaper branch's. These two say what to
-/// rank and to size by. Ethereum's alone: Base's path is not served.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// its book (`expected_gas`, `gas_limit_addition`). A charge is a floor: never above what the
+/// fill costs its transaction, so on the fallback path it is the cheaper branch's. These two say
+/// what to rank and to size by, and each is left out where no figure measured on the listing
+/// states it: a figure is neither under nor over what was measured. Ethereum's alone: Base's
+/// path is not served.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct GasOutlook {
-    /// What a fill at the door is measured to cost its transaction, in the charge's own terms
-    /// (beside what tycho-execution's estimator adds): the dearer direction's fill inside
-    /// custody. Sent direct that is the charge of that direction. Through the fallback router it
-    /// is that fill and the least of the router's additions, less the estimator's own
-    /// ([`FALLBACK_ROUTER_OVERHEAD_GAS`]); for a listing with no figure of its own, the least
-    /// door fill measured there ([`FALLBACK_DOOR_FILL_LEAST_GAS`]).
-    pub expected: u64,
-    /// The gas to allow the swap's call: the dearest fill the listing has a figure for, before
-    /// refunds, and a quarter on top, the headroom the calls' forwarding needs (see the module
-    /// doc of `efficient_prop`, Gas). Sent direct: the custody fill and its refund, or on a
-    /// listing with a credit route the routed fill and the largest refund measured on a route,
-    /// whatever the size. Through the fallback router: the custody fill, the most of the router's
-    /// additions and the refund. `None` there for a listing with no figure of its own, and
+    /// What a fill the pool's custody pays is measured to cost its transaction, in the charge's
+    /// own terms (beside what tycho-execution's estimator adds): the dearer direction's. Sent
+    /// direct that is the charge of that direction. Through the fallback router it is at least
+    /// that fill and the least of the router's additions, less the estimator's own
+    /// ([`FALLBACK_ROUTER_OVERHEAD_GAS`]). `None` on a book with a credit route sent direct,
+    /// whose routed fills cost several times a custody fill (each swap's charge is its own
+    /// path's figure), and through the fallback router for a listing with no figure of its own.
+    pub expected: Option<u64>,
+    /// What one swap's call adds to a transaction's gas limit: the dearest fill the listing has a
+    /// figure for, before refunds, and a quarter on top, the headroom the calls' forwarding
+    /// needs (see the module doc of `efficient_prop`, Gas). Sent direct: the custody fill and its
+    /// refund; on a book with a credit route, the dearest fill measured on that listing where
+    /// its gas names one ([`CreditGas::most_before_refunds`]), whatever the size, and `None`
+    /// where it names none. Through the fallback router: the custody fill, the most of the
+    /// router's additions and the refund, `None` for a listing with no figure of its own, and
     /// nothing in it for the pool a solver names to fall back on.
     pub limit: Option<u64>,
 }
@@ -461,6 +456,24 @@ const fn with_headroom(gas: u64) -> u64 {
 pub struct CreditGas {
     pub custody: DirectionGas,
     pub route: DirectionGas,
+    /// The dearest fill measured on the listing, before refunds: what its call used on the
+    /// dearest path and pool state seen, either direction (on the first pool's listing
+    /// 1,134,823, a purchase repaying what the pool owes). The charges are the least figures; a
+    /// gas limit is sized from this one, so the book of a listing with a route names a limit
+    /// (`gas_limit_addition`) only where its gas names it. Never under any of the four charges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub most_before_refunds: Option<NonZeroU64>,
+}
+
+impl CreditGas {
+    /// The dearest of the four charges, which no figure before refunds is under.
+    fn dearest_charge(&self) -> u64 {
+        [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase]
+            .into_iter()
+            .flat_map(|direction| [self.custody.of(direction), self.route.of(direction)])
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 impl std::str::FromStr for CreditGas {
@@ -468,6 +481,8 @@ impl std::str::FromStr for CreditGas {
 
     /// Reads `custody sell:custody buy:route sell:route buy`, four gas figures above zero: a
     /// custody fill selling base and buying it, then a routed fill selling base and buying it.
+    /// A fifth, where given, is the dearest fill measured on the listing before refunds
+    /// ([`Self::most_before_refunds`]), refused where it is under one of the four.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let figures = text
             .split(':')
@@ -478,15 +493,34 @@ impl std::str::FromStr for CreditGas {
                     .map_err(|e| format!("{figure} is not a gas figure above zero: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let [custody_sell, custody_buy, route_sell, route_buy] = figures[..] else {
-            return Err(format!(
-                "{text} is not four gas figures, custody sell:custody buy:route sell:route buy"
-            ));
-        };
-        Ok(Self {
+        let ([custody_sell, custody_buy, route_sell, route_buy], most_before_refunds) =
+            (match figures[..] {
+                [custody_sell, custody_buy, route_sell, route_buy] => {
+                    Some(([custody_sell, custody_buy, route_sell, route_buy], None))
+                }
+                [custody_sell, custody_buy, route_sell, route_buy, most] => {
+                    Some(([custody_sell, custody_buy, route_sell, route_buy], Some(most)))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{text} is not four gas figures, custody sell:custody buy:route sell:route \
+                     buy, or five with the dearest fill before refunds"
+                )
+            })?;
+        let gas = Self {
             custody: DirectionGas { sell_base: custody_sell, buy_base: custody_buy },
             route: DirectionGas { sell_base: route_sell, buy_base: route_buy },
-        })
+            most_before_refunds,
+        };
+        match most_before_refunds {
+            Some(most) if most.get() < gas.dearest_charge() => Err(format!(
+                "{most} is under one of the four charges, so it is not the dearest fill before \
+                 refunds"
+            )),
+            _ => Ok(gas),
+        }
     }
 }
 
@@ -754,36 +788,44 @@ impl EfficientPropState {
     }
 
     /// What the listing's fills were measured to cost beside each swap's charge
-    /// ([`GasOutlook`]), on a listing whose larger sizes fill through a credit route where
-    /// `routes`. `None` on Base, and for a listing sent direct with no figure, which no feed
-    /// serves.
-    pub(super) fn gas_outlook(&self, routes: bool) -> Option<GasOutlook> {
+    /// ([`GasOutlook`]), on a listing whose book has a credit route where `routes`: a size
+    /// sampled inside custody fills through it too, where another fill takes the pool's balance
+    /// first. Neither figure on Base, nor for a listing with no figure of its own.
+    pub(super) fn gas_outlook(&self, routes: bool) -> GasOutlook {
         if self.gas_chain != GasChain::Ethereum {
-            return None;
+            return GasOutlook::default();
         }
-        let dearer = |path: FillPath| {
-            [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase]
-                .into_iter()
-                .filter_map(|direction| self.door_fill_gas(direction, path))
-                .max()
+        let Some(custody) = [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase]
+            .into_iter()
+            .filter_map(|direction| self.door_fill_gas(direction, FillPath::Custody))
+            .max()
+        else {
+            return GasOutlook::default();
         };
-        let custody = dearer(FillPath::Custody);
         if self.through_fallback {
             let (least, most) = FALLBACK_DOOR_FILL_EXTRA_GAS;
-            let door_fill = custody.map_or(FALLBACK_DOOR_FILL_LEAST_GAS, |custody| custody + least);
-            return Some(GasOutlook {
-                expected: door_fill - FALLBACK_ROUTER_OVERHEAD_GAS,
-                limit: custody.map(|custody| with_headroom(custody + most + CUSTODY_FILL_REFUND)),
-            });
+            return GasOutlook {
+                expected: Some(custody + least - FALLBACK_ROUTER_OVERHEAD_GAS),
+                limit: Some(with_headroom(custody + most + CUSTODY_FILL_REFUND)),
+            };
         }
-        let custody = custody?;
-        let route = dearer(FillPath::Route)
-            .filter(|_| routes)
-            .map_or(0, |route| route + ROUTE_FILL_REFUND_MOST);
-        Some(GasOutlook {
-            expected: custody,
-            limit: Some(with_headroom(route.max(custody + CUSTODY_FILL_REFUND))),
-        })
+        if routes {
+            // The custody figure is a seventh of what a routed fill costs, and the route's
+            // charges are the least seen: neither sizes this book. Its limit is the dearest fill
+            // measured on the listing where its gas names one, and nothing where it names none
+            // or names less than a charge.
+            let most = self.credit.and_then(|credit| {
+                credit
+                    .most_before_refunds
+                    .map(NonZeroU64::get)
+                    .filter(|most| *most >= credit.dearest_charge())
+            });
+            return GasOutlook { expected: None, limit: most.map(with_headroom) };
+        }
+        GasOutlook {
+            expected: Some(custody),
+            limit: Some(with_headroom(custody + CUSTODY_FILL_REFUND)),
+        }
     }
 
     /// The state after a fill: the same pair, quoting nothing.
@@ -1200,44 +1242,68 @@ mod tests {
         state.credit = Some(CreditGas {
             custody: direction_gas(117_990, 113_508),
             route: direction_gas(824_095, 932_904),
+            most_before_refunds: None,
+        });
+        state
+    }
+
+    /// That listing, its gas naming the dearest fill measured on it before refunds as well.
+    fn first_pool_state_naming(most_before_refunds: u64) -> EfficientPropState {
+        let mut state = first_pool_state();
+        state.credit = state.credit.map(|credit| CreditGas {
+            most_before_refunds: NonZeroU64::new(most_before_refunds),
+            ..credit
         });
         state
     }
 
     /// What a listing's book names beside its swaps' charges, from the figures measured: the
     /// dearer direction's custody fill, and the dearest fill before refunds with a quarter on
-    /// top. A listing with a route sizes its limit from the routed fill whatever the size; a
-    /// pool holding none of a fill's input adds that write; through the fallback router the
-    /// door's branch is the fill and the router's additions, the least of them expected (less
-    /// the estimator's 40,000) and the most of them allowed for.
+    /// top. A pool holding none of a fill's input adds that write; through the fallback router
+    /// the door's branch is the fill and the router's additions, the least of them expected
+    /// (less the estimator's 40,000) and the most of them allowed for. A book with a credit
+    /// route names no expected gas, and a limit only from the dearest fill its gas names; a
+    /// listing with no figure of its own names neither.
     #[rstest]
     // 106,520; (106,520 + 19,900) * 1.25.
-    #[case::a_measured_pair(wsteth_weth_state(), false, Some((106_520, Some(158_025))))]
+    #[case::a_measured_pair(wsteth_weth_state(), false, (Some(106_520), Some(158_025)))]
     // 106,520 + 16,964 buying into a pool with no WETH; (123,484 + 19,900) * 1.25.
     #[case::a_pool_holding_none_of_the_quote(
         wsteth_weth_state().with_pool_lacking(false, true),
         false,
-        Some((123_484, Some(179_230)))
+        (Some(123_484), Some(179_230))
     )]
-    // 117,990; (932,904 + 99,500) * 1.25.
-    #[case::a_credit_listing(
-        first_pool_state(),
+    // 1,134,823 * 1.25, rounded up.
+    #[case::a_credit_listing_naming_its_dearest_fill(
+        first_pool_state_naming(1_134_823),
         true,
-        Some((117_990, Some(1_290_505)))
+        (None, Some(1_418_529))
+    )]
+    #[case::a_credit_listing_naming_four_figures(first_pool_state(), true, (None, None))]
+    // Under the 932,904 a routed purchase is charged: not a figure before refunds.
+    #[case::a_credit_listing_naming_less_than_a_charge(
+        first_pool_state_naming(932_903),
+        true,
+        (None, None)
     )]
     // 117,990; (117,990 + 19,900) * 1.25, rounded up.
     #[case::a_listing_named_its_gas_with_no_route(
         first_pool_state(),
         false,
-        Some((117_990, Some(172_363)))
+        (Some(117_990), Some(172_363))
     )]
-    // 106,520 + 48,794 - 40,000; (106,520 + 74,415 + 19,900) * 1.25, rounded up.
+    // The dearest fill named is the route's, which this book does not have.
+    #[case::a_listing_naming_its_dearest_fill_with_no_route(
+        first_pool_state_naming(1_134_823),
+        false,
+        (Some(117_990), Some(172_363))
+    )]
+    // At least 106,520 + 48,794 - 40,000; (106,520 + 74,415 + 19,900) * 1.25, rounded up.
     #[case::a_measured_pair_through_the_fallback_router(
         wsteth_weth_state().with_fallback_router(true),
         false,
-        Some((115_314, Some(251_044)))
+        (Some(115_314), Some(251_044))
     )]
-    // 154,693 - 40,000, and no limit.
     #[case::a_pair_with_no_figure_through_the_fallback_router(
         {
             let mut state = wsteth_weth_state().with_fallback_router(true);
@@ -1245,7 +1311,7 @@ mod tests {
             state
         },
         false,
-        Some((114_693, None))
+        (None, None)
     )]
     #[case::a_pair_with_no_figure_sent_direct(
         {
@@ -1254,56 +1320,93 @@ mod tests {
             state
         },
         false,
-        None
+        (None, None)
     )]
-    #[case::on_base(weth_usdc_state(), false, None)]
+    #[case::on_base(weth_usdc_state(), false, (None, None))]
     fn a_listings_gas_outlook_follows_its_measured_figures(
         #[case] state: EfficientPropState,
         #[case] routes: bool,
-        #[case] outlook: Option<(u64, Option<u64>)>,
+        #[case] outlook: (Option<u64>, Option<u64>),
     ) {
-        assert_eq!(
-            state
-                .gas_outlook(routes)
-                .map(|outlook| (outlook.expected, outlook.limit)),
-            outlook
-        );
+        let found = state.gas_outlook(routes);
+
+        assert_eq!((found.expected, found.limit), outlook);
     }
 
-    /// The charge stays the floor: what a book names as expected is never under the charge of
-    /// any swap of either side, and the limit is over it.
+    /// Where a book names an expected gas, no swap of either side, at any size sampled, is
+    /// charged above it, and its limit is over it. A book with a credit route names none: its
+    /// routed sizes are charged several times its custody sizes.
     #[rstest]
-    #[case::sent_direct(wsteth_weth_state())]
-    #[case::through_the_fallback_router(wsteth_weth_state().with_fallback_router(true))]
-    #[case::a_credit_listing(weth_usdc_credit_state())]
-    fn no_swap_is_charged_above_what_its_book_expects(#[case] state: EfficientPropState) {
-        let outlook = state
-            .gas_outlook(state.bid.routes() || state.ask.routes())
-            .unwrap();
+    #[case::sent_direct(wsteth_weth_state(), false)]
+    #[case::through_the_fallback_router(wsteth_weth_state().with_fallback_router(true), false)]
+    #[case::a_credit_listing_served_its_custody_alone(
+        {
+            let mut state = weth_usdc_credit_state();
+            for direction in [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase] {
+                let custody: Vec<_> = state
+                    .side(direction)
+                    .points()
+                    .iter()
+                    .filter(|(amount, _)| {
+                        matches!(state.side(direction).quote(*amount), Ok((_, FillPath::Custody)))
+                    })
+                    .copied()
+                    .collect();
+                let side = Ladder::new(custody, None).unwrap();
+                match direction {
+                    SwapDirection::BaseToQuote => state.bid = side,
+                    SwapDirection::QuoteToBase => state.ask = side,
+                }
+            }
+            state
+        },
+        false
+    )]
+    #[case::a_credit_listing_with_its_route(weth_usdc_credit_state(), true)]
+    fn no_sampled_size_is_charged_above_an_expected_gas_its_book_names(
+        #[case] state: EfficientPropState,
+        #[case] routes: bool,
+    ) {
+        assert_eq!(state.bid.routes() || state.ask.routes(), routes);
+        let outlook = state.gas_outlook(routes);
         let (base, quote) = (state.base_token.clone(), state.quote_token.clone());
 
+        let mut dearest = BigUint::from(0u8);
         for (direction, token_in, token_out) in [
             (SwapDirection::BaseToQuote, &base, &quote),
             (SwapDirection::QuoteToBase, &quote, &base),
         ] {
-            let custody: Vec<_> = state
+            assert!(!state
                 .side(direction)
                 .points()
-                .iter()
-                .filter(|(amount, _)| {
-                    matches!(state.side(direction).quote(*amount), Ok((_, FillPath::Custody)))
-                })
-                .collect();
-            assert!(!custody.is_empty());
-            for (amount, _) in custody {
+                .is_empty());
+            for (amount, _) in state.side(direction).points() {
                 let charged = state
                     .get_amount_out(u256_to_biguint(*amount), token_in, token_out)
                     .unwrap()
                     .gas;
-                assert!(charged <= BigUint::from(outlook.expected), "{charged} at {amount}");
+                dearest = dearest.max(charged);
             }
         }
-        assert!(outlook.limit.unwrap() > outlook.expected);
+        match outlook.expected {
+            Some(expected) => {
+                assert!(dearest <= BigUint::from(expected), "{dearest} charged, {expected} named");
+                assert!(outlook.limit.unwrap() > expected);
+            }
+            None => {
+                assert!(routes);
+                let custody = state.credit.unwrap().custody;
+                assert!(
+                    dearest >
+                        BigUint::from(
+                            custody
+                                .of(SwapDirection::BaseToQuote)
+                                .max(custody.of(SwapDirection::QuoteToBase))
+                        ),
+                    "a routed size is charged above the custody figure"
+                );
+            }
+        }
     }
 
     /// A pair's place from `doorView`'s indices: the hook pair is base 0 and quote 1; past it, a
@@ -1515,7 +1618,7 @@ mod tests {
     #[case::four_figures("137909:133427:925544:1035811", Some((137_909, 133_427, 925_544, 1_035_811)))]
     #[case::spaced(" 187000 : 192000 : 610501 : 610501 ", Some((187_000, 192_000, 610_501, 610_501)))]
     #[case::three_figures("137909:133427:925544", None)]
-    #[case::five_figures("1:2:3:4:5", None)]
+    #[case::six_figures("1:2:3:4:5:6", None)]
     #[case::a_zero("137909:0:925544:1035811", None)]
     #[case::no_number("137909:x:925544:1035811", None)]
     fn credit_gas_reads_from_its_text_form(
@@ -1530,9 +1633,37 @@ mod tests {
                     buy_base: figure(custody_buy),
                 },
                 route: DirectionGas { sell_base: figure(route_sell), buy_base: figure(route_buy) },
+                most_before_refunds: None,
             });
 
         assert_eq!(text.parse::<CreditGas>().ok(), expected);
+    }
+
+    /// A fifth figure is the dearest fill measured on the listing before refunds, which a gas
+    /// limit is sized from; one under any of the four charges is refused.
+    #[rstest]
+    #[case::the_first_pools("117990:113508:824095:932904:1134823", Ok(Some(1_134_823)))]
+    #[case::equal_to_the_dearest_charge("117990:113508:824095:932904:932904", Ok(Some(932_904)))]
+    #[case::none_named("117990:113508:824095:932904", Ok(None))]
+    #[case::under_a_charge(
+        "117990:113508:824095:932904:932903",
+        Err("under one of the four charges")
+    )]
+    #[case::a_zero("117990:113508:824095:932904:0", Err("not a gas figure above zero"))]
+    fn credit_gas_reads_its_dearest_fill_before_refunds(
+        #[case] text: &str,
+        #[case] most: Result<Option<u64>, &str>,
+    ) {
+        let read = text.parse::<CreditGas>().map(|gas| {
+            gas.most_before_refunds
+                .map(NonZeroU64::get)
+        });
+
+        match (read, most) {
+            (Ok(read), Ok(most)) => assert_eq!(read, most),
+            (Err(why), Err(part)) => assert!(why.contains(part), "{why}"),
+            (read, most) => panic!("read {read:?}, not {most:?}"),
+        }
     }
 
     /// The most a routed side fills is handed back at the route's gas, and a side every point of
