@@ -90,7 +90,7 @@ impl TychoRunner {
                 "--initialized-accounts",
                 &all_accounts.join(","),
                 "--initialization-block",
-                &start_block.to_string(),
+                &initialization_block(start_block).to_string(),
             ]);
         }
 
@@ -297,7 +297,7 @@ impl TychoRunner {
                     .map(|acc| format!("      - \"{}\"", acc))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                start_block
+                initialization_block(start_block)
             )
         };
 
@@ -351,6 +351,15 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
         Chain::Arbitrum => Some("https://arb-one.streamingfast.io:443".to_string()),
         Chain::Starknet | Chain::ZkSync | Chain::Plasma | Chain::Custom(_) | _ => None,
     }
+}
+
+/// Block of the initialized accounts for a run from `start_block`: the block before it.
+///
+/// The indexer reads the accounts at the end of this block, and the extractor applies the start
+/// block on top. At the start block itself, a change of an initialized account in its first
+/// transaction would start at the same version as the account, and its batch would fail.
+fn initialization_block(start_block: u64) -> u64 {
+    start_block.saturating_sub(1)
 }
 
 #[cfg(test)]
