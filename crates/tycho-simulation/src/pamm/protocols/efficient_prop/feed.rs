@@ -7821,11 +7821,15 @@ mod tests {
         }
 
         /// The feed counts what it does, through the `metrics` facade: each poll by how it ended,
-        /// each listing a poll's state answer covers or does not, by reason, and how old the
-        /// node's answer was. Three polls here: one samples, one finds nothing changed, and one
-        /// finds no state map for the next block (the node has moved on a block); each of the
-        /// first two covers three listings and finds no update for the fourth. Every outcome and
-        /// reason is registered at zero from the build.
+        /// each listing whose door a poll's read holds, each listing it leaves out, by reason,
+        /// and how old the node's answer was. Three polls here: one samples, one finds nothing
+        /// changed, and one finds no state map for the next block (the node has moved on a
+        /// block). Each of the first two holds three doors, finds no update for the fourth
+        /// listing, no door open for the fifth, which the state answer covers, and no token of
+        /// the feed's for the seventh; all three leave out the sixth, of a desk not approved,
+        /// in their first request. The third poll's block is ahead of the wall clock, and its
+        /// age is recorded as zero. Every outcome and reason is registered at zero from the
+        /// build.
         #[test]
         fn the_feed_counts_its_polls_its_listings_and_its_answers_age() {
             use metrics_util::{
@@ -7847,10 +7851,32 @@ mod tests {
             // `with_local_recorder` takes a sync closure, so the polls run on a runtime inside it.
             metrics::with_local_recorder(&recorder, || {
                 runtime.block_on(async {
-                    let (listings, map) = reuse_fixture();
+                    let (mut listings, map) = reuse_fixture();
+                    listings.extend([
+                        FakeListing { opened: false, ..FakeListing::ethereum(5) },
+                        FakeListing { desk: 99, ..FakeListing::ethereum(6) },
+                        FakeListing {
+                            base: Address::repeat_byte(0x77),
+                            ..FakeListing::ethereum(7)
+                        },
+                    ]);
+                    // The fifth listing's maker has its update in the state answer.
+                    let mut entry = state_map_of(
+                        ETHEREUM_BLOCK + 1,
+                        ETHEREUM_SLOT,
+                        &[(
+                            "desk-5".to_string(),
+                            5,
+                            0,
+                            quote_word(ETHEREUM_BLOCK + 1, 0, false, false),
+                        )],
+                    );
+                    let mut map = map;
+                    map["desk-5"] = entry["desk-5"].take();
                     let polled = Polled::new(FakeNode::ethereum(listings), map).await;
-                    published(&polled.source).await;
-                    published(&polled.source).await;
+                    assert_eq!(published(&polled.source).await.len(), 3);
+                    assert_eq!(published(&polled.source).await.len(), 3);
+                    assert_eq!(polled.reuses(), 1);
                     {
                         let mut node = polled.node.lock().unwrap();
                         node.block += 1;
@@ -7891,8 +7917,17 @@ mod tests {
                 assert_eq!(counter(POLLS, Some(("outcome", outcome))), polls, "{outcome}");
             }
             assert_eq!(counter(LISTINGS_COVERED, None), 6);
+            let left_out = [
+                (NotCovered::DeskNotApproved, 3),
+                (NotCovered::UnknownToken, 2),
+                (NotCovered::NoEntry, 2),
+                (NotCovered::NotOpened, 2),
+            ];
             for reason in NotCovered::iter() {
-                let not_covered = if reason == NotCovered::NoEntry { 2 } else { 0 };
+                let not_covered = left_out
+                    .iter()
+                    .find(|(left_out, _)| *left_out == reason)
+                    .map_or(0, |(_, listings)| *listings);
                 let reason = <&'static str>::from(reason);
                 assert_eq!(
                     counter(LISTINGS_NOT_COVERED, Some(("reason", reason))),
@@ -7901,7 +7936,8 @@ mod tests {
                 );
             }
             // The wall clock stands six seconds before the next block: six after the node's
-            // latest on the first two polls, and six before it once the node has moved on.
+            // latest on the first two polls, and six before it once the node has moved on, which
+            // is recorded as zero.
             let ages = &recorded[&(MetricKind::Histogram, ANSWER_AGE.to_string(), Vec::new())];
             let DebugValue::Histogram(ages) = ages else {
                 panic!("{ANSWER_AGE} is not a histogram: {ages:?}");
@@ -7910,7 +7946,7 @@ mod tests {
                 .iter()
                 .map(|age| age.into_inner())
                 .collect();
-            assert_eq!(ages, [6.0, 6.0, -6.0]);
+            assert_eq!(ages, [6.0, 6.0, 0.0]);
         }
 
         /// SplitMix64: the seeded chance of

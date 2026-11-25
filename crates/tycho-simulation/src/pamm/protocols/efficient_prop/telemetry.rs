@@ -13,19 +13,27 @@ use super::overrides::NotTaken;
 /// `outcome` is the polls made. Every outcome starts at zero.
 pub(super) const POLLS: &str = "efficient_prop_polls_total";
 /// Counter, no labels. Incremented once per listing and poll, on a chain whose builders land
-/// makers' updates, where the next block's state answer covers the listing: its doors are then
-/// asked, or answered from the last poll that sampled them.
+/// makers' updates, whose door the poll's read holds: the next block's state answer covers the
+/// listing and its door was opened, asked at this poll or answered from the last poll that
+/// sampled it. Counted when the read ends, so a poll that fails before then counts none. A door
+/// read is not yet a book: one that fills nothing publishes none.
 pub(super) const LISTINGS_COVERED: &str = "efficient_prop_listings_covered_total";
-/// Counter, label `reason`, one of [`NotCovered`]. Incremented once per listing and poll where no
-/// state answer covers the listing, so it is not served by that poll. A poll that finds no state
-/// map for the next block counts none (see `no_state_map` on [`POLLS`]). `no_entry` is a maker
-/// that sent no update for the block; the others say an update came and could not be used. Every
-/// reason starts at zero.
+/// Counter, label `reason`, one of [`NotCovered`]. Incremented once per poll and listing the
+/// front has reserved that the poll's read leaves out before its door is sampled, on a chain
+/// whose builders land makers' updates. The reasons follow the read's order: what the first
+/// request rules out (`desk_not_approved`, `no_gas`, `credit_mode`, `tip_cap_under_floor`), a
+/// token the feed was not given (`unknown_token`), then the next block's state (`no_entry` is a
+/// maker that sent no update for the block; the others up to `other_answer` say an update came
+/// and could not be used), then `not_opened`. Each is counted where the read finds it, so a poll
+/// that fails later has counted those it found, and a poll that finds no state map for the next
+/// block (see `no_state_map` on [`POLLS`]) counts what its first request rules out and no more.
+/// Every reason starts at zero.
 pub(super) const LISTINGS_NOT_COVERED: &str = "efficient_prop_listings_not_covered_total";
 /// Histogram, no labels. The age of the node's answer at each poll, in seconds: the wall clock at
-/// the poll's start less the time of the node's latest block, negative where that block's time is
-/// ahead of the local clock. Under one slot on a node at the chain's head; more after a missed
-/// slot, on a node that lags, or under a clock skew between the chain and this host.
+/// the poll's start less the time of the node's latest block. Recorded as zero where that block's
+/// time is ahead of the local clock, so every observation is zero or more and an exported sum
+/// only rises: a clock skew that way shows as a run of zeros, not as its size. Under one slot on
+/// a node at the chain's head; more after a missed slot or on a node that lags.
 pub(super) const ANSWER_AGE: &str = "efficient_prop_answer_age_seconds";
 
 /// How a poll ended.
@@ -48,6 +56,16 @@ pub(super) enum PollOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr, EnumIter)]
 #[strum(serialize_all = "snake_case")]
 pub(super) enum NotCovered {
+    /// Its maker's desk contract is not approved.
+    DeskNotApproved,
+    /// It has a credit mode, or trades a stock token, and the caller named no gas for it.
+    NoGas,
+    /// Its credit mode is one the feed does not serve.
+    CreditMode,
+    /// It caps the taker's tip under the feed's floor.
+    TipCapUnderFloor,
+    /// The feed was not given one of its tokens.
+    UnknownToken,
     /// The listing is bound to no quote contract.
     NoQuoteContract,
     /// The node did not answer where its quote sits, or a word of its record.
@@ -72,6 +90,10 @@ pub(super) enum NotCovered {
     MissingPriceContract,
     /// See [`NotTaken::OtherAnswer`].
     OtherAnswer,
+    /// A state answer covers it, and the read holds no door of it: it has no door yet, its door
+    /// does not answer as this front's, or its record rules it out (a price source not approved,
+    /// a tied listing, a session with a closed phase, a word of it unread).
+    NotOpened,
 }
 
 impl From<NotTaken> for NotCovered {
@@ -95,6 +117,11 @@ impl NotCovered {
     /// The reason as the poll's DEBUG log states it.
     pub(super) fn why(self) -> &'static str {
         match self {
+            Self::DeskNotApproved => "its desk contract is not approved",
+            Self::NoGas => "it has a credit mode or trades a stock token, and no gas is named",
+            Self::CreditMode => "its credit mode is not served",
+            Self::TipCapUnderFloor => "it caps the tip under the floor",
+            Self::UnknownToken => "one of its tokens is not in the feed's",
             Self::NoQuoteContract => "it has no quote contract",
             Self::Unread => "its quote's place or its record is unread",
             Self::NoEntry => "its maker has no update in the next block's state map",
@@ -125,6 +152,7 @@ impl NotCovered {
                 "the answer with its update does not write a price contract it reads"
             }
             Self::OtherAnswer => "slots it reads are taken from another answer",
+            Self::NotOpened => "its door is not open, or its record rules it out",
         }
     }
 }
@@ -133,16 +161,22 @@ pub(super) fn record_poll(outcome: PollOutcome) {
     counter!(POLLS, "outcome" => <&'static str>::from(outcome)).increment(1);
 }
 
-pub(super) fn record_listing_covered() {
-    counter!(LISTINGS_COVERED).increment(1);
+pub(super) fn record_listings_covered(listings: usize) {
+    counter!(LISTINGS_COVERED).increment(u64::try_from(listings).unwrap_or(u64::MAX));
 }
 
 pub(super) fn record_listing_not_covered(reason: NotCovered) {
-    counter!(LISTINGS_NOT_COVERED, "reason" => <&'static str>::from(reason)).increment(1);
+    record_listings_not_covered(reason, 1);
 }
 
+pub(super) fn record_listings_not_covered(reason: NotCovered, listings: usize) {
+    counter!(LISTINGS_NOT_COVERED, "reason" => <&'static str>::from(reason))
+        .increment(u64::try_from(listings).unwrap_or(u64::MAX));
+}
+
+/// Records an answer's age, zero where it is negative (see [`ANSWER_AGE`]).
 pub(super) fn record_answer_age(age_seconds: f64) {
-    histogram!(ANSWER_AGE).record(age_seconds);
+    histogram!(ANSWER_AGE).record(age_seconds.max(0.0));
 }
 
 /// Registers every counter at zero, so a series exists before its first event and a rate over it

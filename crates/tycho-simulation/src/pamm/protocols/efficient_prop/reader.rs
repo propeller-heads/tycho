@@ -1307,8 +1307,13 @@ impl DoorsReader {
         let served: Vec<_> = listings
             .into_iter()
             .filter_map(|listing| {
-                let probes = (probe(decimals(&listing.token0)?), probe(decimals(&listing.token1)?));
-                Some((listing, probes))
+                let probes = decimals(&listing.token0)
+                    .zip(decimals(&listing.token1))
+                    .map(|(decimals0, decimals1)| (probe(decimals0), probe(decimals1)));
+                if probes.is_none() {
+                    telemetry::record_listing_not_covered(NotCovered::UnknownToken);
+                }
+                Some((listing, probes?))
             })
             .collect();
         let NextTaken { served, state, listings, head: taken_at, implementation } = self
@@ -1420,6 +1425,15 @@ impl DoorsReader {
             .iter()
             .flat_map(|door| [door.bid_until_ms, door.ask_until_ms])
             .fold(read.until_ms, u64::max);
+        // Counted once the read holds its doors: each listing the state covers either has its
+        // door among them or was left out on the way.
+        telemetry::record_listings_covered(read.doors.len());
+        telemetry::record_listings_not_covered(
+            NotCovered::NotOpened,
+            served
+                .len()
+                .saturating_sub(read.doors.len()),
+        );
         Ok(read)
     }
 
@@ -1626,7 +1640,6 @@ impl DoorsReader {
                 let taken = wanted.map(|(_, read)| (read, results.next()));
                 let reason = match taken {
                     Some((taken, Some(Ok(())))) => {
-                        telemetry::record_listing_covered();
                         read.push(taken);
                         return Some((listing, probes));
                     }
@@ -1755,6 +1768,12 @@ impl DoorsReader {
         let timestamp =
             to_u64(setting::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?, "timestamp")?;
         let mut found = Vec::new();
+        // Counted by reason on a chain whose builders land makers' updates, the one served.
+        let left_out = |reason: NotCovered| {
+            if self.next_block.is_some() {
+                telemetry::record_listing_not_covered(reason);
+            }
+        };
         // The highest id the front has reserved, served or not: the next poll scans past it, so a
         // listing this read leaves out never hides the ones reserved after it.
         let mut highest = 0;
@@ -1771,6 +1790,7 @@ impl DoorsReader {
                 let desk = SLOT_RULE.account(self.front, cell_codehash, view.desk);
                 if view.desk == 0 || !approved_desks.contains(&desk) {
                     debug!(listing = id, %desk, "skipping listing of a desk that is not approved");
+                    left_out(NotCovered::DeskNotApproved);
                     continue;
                 }
             }
@@ -1788,12 +1808,14 @@ impl DoorsReader {
                             credit_mode = mode,
                             "skipping credit listing with no gas configured"
                         );
+                        left_out(NotCovered::NoGas);
                         continue;
                     };
                     Some(*gas)
                 }
                 mode => {
                     debug!(listing = id, credit_mode = mode, "skipping credit listing");
+                    left_out(NotCovered::CreditMode);
                     continue;
                 }
             };
@@ -1811,6 +1833,7 @@ impl DoorsReader {
                         listing = id,
                         "skipping listing of an asset-module pair with no gas configured"
                     );
+                    left_out(NotCovered::NoGas);
                     continue;
                 }
                 (None, None) => None,
@@ -1822,6 +1845,7 @@ impl DoorsReader {
                     tip_cap_wei = ?tip_cap_wei,
                     "skipping listing capping the tip under the floor"
                 );
+                left_out(NotCovered::TipCapUnderFloor);
                 continue;
             }
             // `doorView`'s depth words by role: the bid's (the base in) first, then the ask's. Each
@@ -3223,7 +3247,8 @@ pub(super) fn listing_carries(settings: U256) -> bool {
 }
 
 /// How old the node's answer is at a poll that started at `from_ms` on the wall clock, its latest
-/// block's time `timestamp`: seconds, negative where the block's time is ahead of the clock.
+/// block's time `timestamp`: seconds, negative where the block's time is ahead of the clock (the
+/// metric records that as zero, see `telemetry::ANSWER_AGE`).
 fn answer_age(from_ms: u64, timestamp: u64) -> f64 {
     Duration::from_millis(from_ms).as_secs_f64() - Duration::from_secs(timestamp).as_secs_f64()
 }
