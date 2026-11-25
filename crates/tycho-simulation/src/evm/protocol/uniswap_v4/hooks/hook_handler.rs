@@ -86,9 +86,16 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// `get_amount_out` returns it to the caller unchanged; any other error means the hook
     /// cannot be simulated, and `get_amount_out` reports it as `FatalError`.
     ///
-    /// The handler is not changed here. A hook whose swap writes its own storage must also
-    /// implement [`HookHandler::handler_after_swap`], or the next swap of a route reads the old
-    /// storage.
+    /// `before_swap` leaves the handler unchanged. A hook whose swap writes its own storage must
+    /// also implement [`HookHandler::handler_after_swap`], or the next swap of a route reads the
+    /// old storage.
+    ///
+    /// The gas estimate covers the hook's `beforeSwap` frame. A hook whose delta takes the whole
+    /// input leaves the pool leg a no-op, which `get_amount_out` charges as the no-op `swap` alone,
+    /// so its estimate also covers the route around the swap (the router, the transfer in and the
+    /// settlement) wherever that is not already in it. The generic VM hook's estimate includes the
+    /// call's intrinsic gas, which traced whole-input swaps of Bunni and EulerSwap on Ethereum
+    /// match; the Ascend hook adds a measured route charge.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,

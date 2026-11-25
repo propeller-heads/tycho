@@ -1685,10 +1685,10 @@ fn test_a_fills_new_discount_beyond_uint32_is_refused() {
 /// A whole-input fill leaves the pool nothing to swap: `PoolManager.swap` still runs, and v4-core's
 /// `Pool.swap` returns at once on a zero amount (`if (params.amountSpecified == 0) return ...`
 /// before its price checks and its loop), so the swap leg costs the 3,000 of a no-op. The hook's
-/// `beforeSwap` estimate adds the route around it (`base` 150,000 and `settlement` 30,000 of the
-/// Uniswap v4 costs), with the hook's two frames of a fill (171,820 and 10,475) and the
-/// PoolManager's 1,689 for each of the two calls. The total of such a swap was not measured on
-/// chain.
+/// `beforeSwap` estimate adds the route around it (164,000), with the hook's two frames of a
+/// whole-input fill (171,820 and 5,728, which mints no fee) and the PoolManager's 1,689 for each
+/// of the two calls. Transaction 0x8af6cf71b4222e56d26e344759bba226738856de7e5c38690e97520436f995bd
+/// (block 8523475), a whole-input fill through a Universal-Router-style router, used 330,972.
 #[test]
 fn test_a_whole_input_fill_costs_the_route_the_noop_swap_and_the_hook_frames() {
     let pool = pool_with_inventory(true, 10_000, PLENTY);
@@ -1699,7 +1699,7 @@ fn test_a_whole_input_fill_costs_the_route_the_noop_swap_and_the_hook_frames() {
         .unwrap();
 
     assert_eq!(result.amount, big("47658354437"));
-    assert_eq!(result.gas, big("368673"));
+    assert_eq!(result.gas, big("347926"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2168,23 +2168,74 @@ fn after_swap_gas(pool: &UniswapV4State, zero_for_one: bool, amount: i128, amm_o
         .gas_estimate
 }
 
-/// The gas of each path as `debug_traceCall` measured it on Elysium (see the constants in
-/// `hook_handler.rs` for the transactions and blocks): the hook's `beforeSwap` and `afterSwap`
-/// frames of a buy, of a sell the hook does not consider filling, of one it considers and the
-/// library leaves unfilled (a bid of 1), and of one it fills. That fill takes the whole input, so
-/// its `beforeSwap` estimate also carries the route's 180,000 (`ASCEND_WHOLE_INPUT_ROUTE_GAS`).
+/// When a swap runs relative to the pool's last observation, for the per-path gas test.
+#[derive(Debug, Clone, Copy)]
+enum SwapTiming {
+    /// One second after the observation.
+    Elapsed,
+    /// In the second of the observation.
+    SameSecond,
+    /// After a buy of the same pool earlier in the route, in the same second.
+    Repeat,
+}
+
+/// The fixture pool of `pool_with_inventory`, observed at `TS`, moved to `timing`.
+fn pool_at(inventory: &str, timing: SwapTiming) -> UniswapV4State {
+    let mut pool = pool_with_inventory(true, 10_000, inventory);
+    match timing {
+        SwapTiming::Elapsed => {
+            ProtocolSim::apply_block(&mut pool, &BlockContext::new(1, TS + 1));
+        }
+        SwapTiming::SameSecond => {}
+        SwapTiming::Repeat => {
+            // A buy (quote in, `zero_for_one` false on a token0 pool) leaves the bid as it is.
+            let next = hook_of(&pool)
+                .handler_after_swap(
+                    &state_context(u(SQRT_M168500), -168_500),
+                    &swap_params(false, I256::try_from(-1_000_000_000_000_000i128).unwrap()),
+                )
+                .unwrap()
+                .expect("the hook after a buy");
+            pool.set_hook_handler(next);
+        }
+    }
+    pool
+}
+
+/// The gas of each path and timing (see the constants in `hook_handler.rs` for the transactions
+/// and blocks): the hook's `beforeSwap` and `afterSwap` frames of a buy, of a sell the hook does
+/// not consider filling, of one it considers and the library leaves unfilled (a bid of 1), and of
+/// a fill that takes the whole input, whose `beforeSwap` estimate also carries the route's 164,000
+/// and whose `afterSwap` mints nothing. A fill is charged the same at every timing.
 #[rstest]
-#[case::buy("0", false, 50_203, 5_402)]
-#[case::sell_without_inventory("0", true, 17_388, 20_319)]
-#[case::sell_with_a_bid_of_1("1", true, 47_094, 20_319)]
-#[case::sell_with_a_fill_of_the_whole_input(PLENTY, true, 171_820 + 180_000, 10_475)]
+#[case::buy(SwapTiming::Elapsed, "0", false, 50_203, 5_402, 1_689)]
+#[case::sell_without_inventory(SwapTiming::Elapsed, "0", true, 17_388, 20_319, 1_689)]
+#[case::sell_with_a_bid_of_1(SwapTiming::Elapsed, "1", true, 47_094, 20_319, 1_689)]
+#[case::whole_input_fill(SwapTiming::Elapsed, PLENTY, true, 171_820 + 164_000, 5_728, 1_689)]
+#[case::same_second_buy(SwapTiming::SameSecond, "0", false, 41_436, 5_402, 1_689)]
+#[case::same_second_sell_without_inventory(SwapTiming::SameSecond, "0", true, 8_995, 20_319, 1_689)]
+#[case::same_second_sell_with_a_bid_of_1(SwapTiming::SameSecond, "1", true, 23_171, 20_319, 1_689)]
+#[case::same_second_whole_input_fill(
+    SwapTiming::SameSecond,
+    PLENTY,
+    true,
+    171_820 + 164_000,
+    5_728,
+    1_689
+)]
+#[case::repeat_buy(SwapTiming::Repeat, "0", false, 21_743, 5_402, 0)]
+#[case::repeat_sell_without_inventory(SwapTiming::Repeat, "0", true, 8_994, 10_660, 0)]
+#[case::repeat_sell_with_a_bid_of_1(SwapTiming::Repeat, "1", true, 9_171, 10_660, 0)]
+#[case::repeat_whole_input_fill(SwapTiming::Repeat, PLENTY, true, 171_820 + 164_000, 5_728, 0)]
 fn test_each_path_costs_the_gas_measured_on_chain(
+    #[case] timing: SwapTiming,
     #[case] inventory: &str,
     #[case] zero_for_one: bool,
     #[case] before: u64,
     #[case] after: u64,
+    #[case] dispatch: u64,
 ) {
-    let pool = pool_with_inventory(true, 10_000, inventory);
+    let pool = pool_at(inventory, timing);
     let amount = 1_000_000_000_000_000_000i128;
 
     let (_, _, before_gas) =
@@ -2192,8 +2243,32 @@ fn test_each_path_costs_the_gas_measured_on_chain(
     let after_gas = after_swap_gas(&pool, zero_for_one, amount, 1_000_000);
 
     assert_eq!((before_gas, after_gas), (before, after));
-    // 1,689 is the lower median of the four transactions' own PoolManager overhead.
+    assert_eq!(hook_of(&pool).pool_manager_call_overhead(), dispatch);
+}
+
+/// A partial fill's `afterSwap` mints the fee on the pool's output, at the partial-fill value.
+#[test]
+fn test_a_partial_fill_after_swap_costs_the_mint_after_a_fill() {
+    let pool = pool_with_inventory(true, 10_000, "1000000000");
+
+    let gas = after_swap_gas(&pool, true, 1_000_000_000_000_000_000, 1_000_000);
+
+    assert_eq!(gas, 10_475);
+}
+
+/// A new block, or a delta from the indexer, ends the route a carried handler came from: the
+/// next swap is priced as the first of its block again.
+#[test]
+fn test_a_new_block_or_a_delta_ends_the_repeat_swap_pricing() {
+    let mut pool = pool_at("0", SwapTiming::Repeat);
+    assert_eq!(hook_of(&pool).pool_manager_call_overhead(), 0);
+
+    ProtocolSim::apply_block(&mut pool, &BlockContext::new(2, TS + 1));
     assert_eq!(hook_of(&pool).pool_manager_call_overhead(), 1_689);
+
+    let mut handler = hook_of(&pool_at("0", SwapTiming::Repeat)).clone();
+    transition(&mut handler, HashMap::new(), &[]).unwrap();
+    assert_eq!(handler.pool_manager_call_overhead(), 1_689);
 }
 
 /// A pool whose position holds a tenth of the launch liquidity, which the hook's curve does not

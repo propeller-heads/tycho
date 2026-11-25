@@ -1105,20 +1105,15 @@ impl ProtocolSim for UniswapV4State {
             new_state.hook = Some(next_hook);
         }
 
-        // Add hook gas costs to baseline swap cost.
-        // before_swap_gas / after_swap_gas capture the hook contract's internal
-        // logic. The hook's pool_manager_call_overhead accounts for the pool
-        // manager's dispatch wrapper that is not captured by either the native swap
-        // constants or the hook's own estimates.
+        // Add the hooks' estimates and the PoolManager's dispatch of each hook call to the pool
+        // leg's cost. A hook's estimates cover its own frames and, when it takes the whole input
+        // and leaves the pool leg the no-op of `swap`, the route around the swap too (see
+        // `HookHandler::before_swap`).
         let mut hook_overhead = before_swap_gas + after_swap_gas;
         if let Some(hook) = &self.hook {
             let hook_calls = u64::from(before_swap_gas > 0) + u64::from(after_swap_gas > 0);
             hook_overhead += hook_calls * hook.pool_manager_call_overhead();
         }
-        // A hook that takes the whole input leaves the pool leg a no-op, costed at the 3,000 of
-        // `swap`; the hook's own estimate covers what runs around it (the generic VM hook's
-        // includes the call's intrinsic gas, which traced whole-input swaps of Bunni and EulerSwap
-        // on Ethereum match without `base` or `settlement`).
         let total_gas_used = result.gas_used + U256::from(hook_overhead);
         Ok(GetAmountOutResult::new(
             u256_to_biguint(U256::from(amount_out.abs())),

@@ -29,7 +29,7 @@ use crate::evm::protocol::{
                 SwapParams, WithGasEstimate,
             },
         },
-        state::{SwapGasCosts, UniswapV4State},
+        state::UniswapV4State,
     },
     utils::uniswap::FEE_PIPS_DENOMINATOR,
 };
@@ -83,36 +83,68 @@ const ASCEND_FILL_BEFORE_SWAP_GAS: u64 = 171_820;
 /// A sell's `afterSwap` without a fill: the mint of the fee on the pool's output. Measured by
 /// replaying the transaction of [`ASCEND_SELL_CONSIDERED_BEFORE_SWAP_GAS`], with the same value
 /// when the bid inventory is set to 0. It costs more than the mint after a fill
-/// ([`ASCEND_FILL_AFTER_SWAP_GAS`]); no trace shows which storage slots account for the
-/// difference.
-///
-/// These two `afterSwap` constants come from two states only: a sell with no fill in an otherwise
-/// untouched transaction, and a sell after its own fill. Every other state is priced by whether
-/// this swap fills: the cheaper mint after a fill, the dearer one otherwise. That covers a second
-/// swap of the same pool in one transaction, the case `handler_after_swap` carries state for, and
-/// a claim slot written earlier by another call. Neither was traced, since no such transaction
-/// was found on Elysium.
+/// ([`ASCEND_FILL_AFTER_SWAP_GAS`]), whose claim slot the fill's own mint has written.
 const ASCEND_SELL_AFTER_SWAP_GAS: u64 = 20_319;
-/// A sell's `afterSwap` after a fill, whose mint finds the hook's claim slot already written by
-/// the fill's own: the larger of 10,475 and 10,416, from the replays of the two fill transactions
-/// of [`ASCEND_FILL_BEFORE_SWAP_GAS`].
+/// A sell's `afterSwap` after a fill that left the pool an output, whose mint finds the hook's
+/// claim slot already written by the fill's own. The larger of the two values traced on 897
+/// partial fills to block 10810289 (10,416 and 10,475; 10,475 on transaction 0xff4dc2c1…).
 const ASCEND_FILL_AFTER_SWAP_GAS: u64 = 10_475;
-/// The route around a swap whose whole input the fill takes, which leaves the pool leg a no-op
-/// (the 3,000 of `UniswapV4State::swap`): the router, the executor's preamble, the token transfer
-/// in and the settlement, charged as Uniswap v4's `base` and `settlement` charge them for any
-/// swap. No trace measured the total of such a swap. The shared state charges nothing for it,
-/// because a generic VM hook's own estimate already covers it.
-const ASCEND_WHOLE_INPUT_ROUTE_GAS: u64 =
-    SwapGasCosts::UNISWAP_V4.base + SwapGasCosts::UNISWAP_V4.settlement;
+/// A sell's `afterSwap` after a fill that took the whole input: the pool's output is 0, so the
+/// hook mints no fee. The larger of the two values traced on all 44 such fills to block 10810289
+/// (5,669 and 5,728; 5,728 on transaction 0xfdb7885b…).
+const ASCEND_WHOLE_INPUT_FILL_AFTER_SWAP_GAS: u64 = 5_728;
+/// The route around a swap whose whole input the fill takes, which leaves the pool leg a no-op:
+/// the modelled route of a partial fill (`base` 150,000, one bitmap lookup 3,500 and
+/// `settlement` 30,000 of the Uniswap v4 costs, the 0 ticks every traced partial fill crossed),
+/// less 16,600, by which the gas outside the hook frames of the 44 whole-input fills to block
+/// 10810289 is below that of the 897 partial fills on each of the 8 routers that carried both,
+/// less the 3,000 of the no-op swap `UniswapV4State::swap` charges. Transaction
+/// 0x8af6cf71b4222e56d26e344759bba226738856de7e5c38690e97520436f995bd (block 8523475) used
+/// 330,972 in all, against 347,926 modelled; a partial fill on the same router and pool,
+/// 0xd2cce086b4b757570059c981735f534fcbe85a1dc28d06935400989a2d2f7e5d, used 362,866.
+const ASCEND_WHOLE_INPUT_ROUTE_GAS: u64 = 164_000;
 /// Gas the PoolManager spends per hook call outside the hook's own frames: half of what the swap
-/// frame holds beyond both hook frames and the median of the hookless swap frames. For the four
-/// transactions above, from their own traces, the halves are 858 (the buy), this value (the sell
-/// without a fill), 2,159 and 2,069 (the fills); this is the lower median. The hookless median
-/// is 28,932, the lower median of the 46 hookless `swap` frames among the first 200 transactions
-/// with a `Swap` event in blocks 8363000 to 8366000. Quotes assume an external sender and no hook
-/// data. One value serves all four paths. No second swap of a pool in the same second, whose
-/// observation does nothing, was traced.
+/// frame holds beyond both hook frames and the median of the hookless swap frames (28,932, the
+/// lower median of the 46 hookless `swap` frames among the first 200 transactions with a `Swap`
+/// event in blocks 8363000 to 8366000). On swaps traced to block 10810289 the half is about 1,700
+/// for sells, 2,100 for fills and 590 for buys; one value serves all paths, so buys are charged
+/// about 2,200 more than they use. Quotes assume an external sender and no hook data.
 const ASCEND_HOOK_DISPATCH_GAS: u64 = 1_689;
+
+// A swap in the same second as the pool's last observation (`dt == 0`) runs no observation, and a
+// second swap of the pool in one transaction also finds the hook's slots warm and its claim slot
+// written. Medians and upper values of the frames traced on Elysium to block 10810289, with the
+// quote token cold as on the Universal Router, so the declined sell is shown less the documented
+// 5,000 of two cold accounts.
+
+/// A buy's `beforeSwap` in the second of the pool's last observation: the median of 85 single-swap
+/// transactions (39,340 to 59,134; e.g.
+/// 0x591d6fa3c89e08645035d0019f8ee88ce054fcea4628e2047cc81abfa2738296).
+const ASCEND_BUY_SAME_SECOND_BEFORE_SWAP_GAS: u64 = 41_436;
+/// A sell's `beforeSwap` in the second of the pool's last observation when the fill is not
+/// considered: the larger of the two values on 40 transactions (8,994 and 8,995; e.g.
+/// 0x7546fcd5e4665c949148e6c793f37bcfaf71bc2fdeeea458315bb38c989106eb).
+const ASCEND_SELL_SAME_SECOND_BEFORE_SWAP_GAS: u64 = 8_995;
+/// A sell's `beforeSwap` in the second of the pool's last observation when the fill is considered
+/// and declined: the median of 52 transactions, 28,171 (9,170 to 44,294; e.g.
+/// 0x6d802ee39057c338d099afc8d99763bb7c7e792f61d1bba0edcfea9afb64b9cb), less 5,000 for the quote
+/// token warm.
+const ASCEND_SELL_CONSIDERED_SAME_SECOND_BEFORE_SWAP_GAS: u64 = 23_171;
+/// A buy's `beforeSwap` when the same pool was already swapped earlier in the route: the median
+/// of 112 repeat swaps (20,387 to 50,286; e.g. the third swap of
+/// 0xa61dd1b79b714835686c9bb7cfd7b68cf4e672ebe68a048cfa14773d20a82004).
+const ASCEND_BUY_REPEAT_BEFORE_SWAP_GAS: u64 = 21_743;
+/// A sell's `beforeSwap` when the same pool was already swapped earlier in the route and the fill
+/// is not considered: the upper value of 6 repeat swaps (2,994 to 8,994).
+const ASCEND_SELL_REPEAT_BEFORE_SWAP_GAS: u64 = 8_994;
+/// A sell's `beforeSwap` when the same pool was already swapped earlier in the route and the fill
+/// is considered and declined: the median of 8 repeat swaps (9,170 to 45,043; e.g. the second
+/// swap of 0x31143a15b807265700ee53497dafbe48aa0a91768f2d75a1cfee7aa92a14363f).
+const ASCEND_SELL_CONSIDERED_REPEAT_BEFORE_SWAP_GAS: u64 = 9_171;
+/// A sell's `afterSwap` without a fill when the same pool was already swapped earlier in the
+/// route, whose mint finds the claim slot written: the median of 14 repeat sells (10,660 to
+/// 20,260).
+const ASCEND_SELL_REPEAT_AFTER_SWAP_GAS: u64 = 10_660;
 
 /// Native model of the Ascend launchpad hook for one pool.
 ///
@@ -166,6 +198,22 @@ pub struct AscendHookHandler {
     /// Timestamp of the block quotes are for: the decoded block's at first, then the one
     /// `apply_block` last moved to.
     pub(super) block_timestamp: u64,
+    /// Whether this handler is the one `handler_after_swap` left after a swap of the pool, so the
+    /// next swap is a repeat swap of the pool in the same route. `apply_block` and
+    /// `delta_transition` clear it.
+    follows_swap_in_route: bool,
+}
+
+/// When a swap runs relative to the pool's last observation, which decides the gas of its
+/// frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Timing {
+    /// Time has passed since the last observation, which the swap writes.
+    Elapsed,
+    /// The swap is in the second of the last observation, which it leaves as it is.
+    SameSecond,
+    /// The pool was already swapped earlier in the route, in the same second.
+    Repeat,
 }
 
 /// The path a swap takes through the hook, which decides its deltas and its gas.
@@ -187,6 +235,7 @@ enum SwapPath {
 #[derive(Debug, Clone, Copy)]
 struct SwapPlan {
     path: SwapPath,
+    timing: Timing,
     /// The hook's observation after the swap.
     observation: Observation,
     /// The hook's bid after the swap.
@@ -202,26 +251,51 @@ impl SwapPlan {
         }
     }
 
+    /// Whether the fill takes the whole input of a swap of `amount_in`, leaving the pool leg a
+    /// no-op.
+    fn fills_whole_input(&self, amount_in: U256) -> bool {
+        matches!(self.path, SwapPath::SellFilled(fill) if fill.tokens_in == amount_in)
+    }
+
     /// The gas of the hook's `beforeSwap` frame on this path for a swap of `amount_in`, with the
-    /// route around the swap when the fill takes the whole input.
+    /// route around the swap when the fill takes the whole input. A fill is charged as traced
+    /// whatever its timing: no fill in the second of an observation was told apart.
     fn before_swap_gas(&self, amount_in: U256) -> u64 {
-        match self.path {
-            SwapPath::Buy => ASCEND_BUY_BEFORE_SWAP_GAS,
-            SwapPath::SellNotConsidered => ASCEND_SELL_BEFORE_SWAP_GAS,
-            SwapPath::SellDeclined => ASCEND_SELL_CONSIDERED_BEFORE_SWAP_GAS,
-            SwapPath::SellFilled(fill) if fill.tokens_in == amount_in => {
+        match (self.path, self.timing) {
+            (SwapPath::Buy, Timing::Elapsed) => ASCEND_BUY_BEFORE_SWAP_GAS,
+            (SwapPath::Buy, Timing::SameSecond) => ASCEND_BUY_SAME_SECOND_BEFORE_SWAP_GAS,
+            (SwapPath::Buy, Timing::Repeat) => ASCEND_BUY_REPEAT_BEFORE_SWAP_GAS,
+            (SwapPath::SellNotConsidered, Timing::Elapsed) => ASCEND_SELL_BEFORE_SWAP_GAS,
+            (SwapPath::SellNotConsidered, Timing::SameSecond) => {
+                ASCEND_SELL_SAME_SECOND_BEFORE_SWAP_GAS
+            }
+            (SwapPath::SellNotConsidered, Timing::Repeat) => ASCEND_SELL_REPEAT_BEFORE_SWAP_GAS,
+            (SwapPath::SellDeclined, Timing::Elapsed) => ASCEND_SELL_CONSIDERED_BEFORE_SWAP_GAS,
+            (SwapPath::SellDeclined, Timing::SameSecond) => {
+                ASCEND_SELL_CONSIDERED_SAME_SECOND_BEFORE_SWAP_GAS
+            }
+            (SwapPath::SellDeclined, Timing::Repeat) => {
+                ASCEND_SELL_CONSIDERED_REPEAT_BEFORE_SWAP_GAS
+            }
+            (SwapPath::SellFilled(_), _) if self.fills_whole_input(amount_in) => {
                 ASCEND_FILL_BEFORE_SWAP_GAS + ASCEND_WHOLE_INPUT_ROUTE_GAS
             }
-            SwapPath::SellFilled(_) => ASCEND_FILL_BEFORE_SWAP_GAS,
+            (SwapPath::SellFilled(_), _) => ASCEND_FILL_BEFORE_SWAP_GAS,
         }
     }
 
-    /// The gas of the hook's `afterSwap` frame on this path.
-    fn after_swap_gas(&self) -> u64 {
-        match self.path {
-            SwapPath::Buy => ASCEND_BUY_AFTER_SWAP_GAS,
-            SwapPath::SellNotConsidered | SwapPath::SellDeclined => ASCEND_SELL_AFTER_SWAP_GAS,
-            SwapPath::SellFilled(_) => ASCEND_FILL_AFTER_SWAP_GAS,
+    /// The gas of the hook's `afterSwap` frame on this path for a swap of `amount_in`.
+    fn after_swap_gas(&self, amount_in: U256) -> u64 {
+        match (self.path, self.timing) {
+            (SwapPath::Buy, _) => ASCEND_BUY_AFTER_SWAP_GAS,
+            (SwapPath::SellNotConsidered | SwapPath::SellDeclined, Timing::Repeat) => {
+                ASCEND_SELL_REPEAT_AFTER_SWAP_GAS
+            }
+            (SwapPath::SellNotConsidered | SwapPath::SellDeclined, _) => ASCEND_SELL_AFTER_SWAP_GAS,
+            (SwapPath::SellFilled(_), _) if self.fills_whole_input(amount_in) => {
+                ASCEND_WHOLE_INPUT_FILL_AFTER_SWAP_GAS
+            }
+            (SwapPath::SellFilled(_), _) => ASCEND_FILL_AFTER_SWAP_GAS,
         }
     }
 }
@@ -272,7 +346,18 @@ fn price_of(context: &StateContext) -> PoolPrice {
 
 impl AscendHookHandler {
     pub fn new(address: Address, state: AscendPoolState, block_timestamp: u64) -> Self {
-        Self { address, state, block_timestamp }
+        Self { address, state, block_timestamp, follows_swap_in_route: false }
+    }
+
+    /// When a swap at the handler's block timestamp runs relative to the pool's last observation.
+    fn timing(&self) -> Timing {
+        if self.follows_swap_in_route {
+            Timing::Repeat
+        } else if self.state.observation.updated_at == self.block_timestamp {
+            Timing::SameSecond
+        } else {
+            Timing::Elapsed
+        }
     }
 
     /// Whether a swap in the direction given by `zero_for_one` sells the quote asset into the
@@ -356,7 +441,7 @@ impl AscendHookHandler {
                 None => SwapPath::SellDeclined,
             }
         };
-        Ok(SwapPlan { path, observation, bid })
+        Ok(SwapPlan { path, timing: self.timing(), observation, bid })
     }
 
     /// What `afterSwap` takes from a swap whose pool output is `amm_out`, and what the swapper
@@ -399,7 +484,9 @@ impl HookHandler for AscendHookHandler {
     /// either the pool has bid inventory (only a fill's amount depends on the time) or the move
     /// started or ended the refusal of every swap, which a pool observed after the block's
     /// timestamp makes.
+    /// A new block also ends the route a carried handler came from (`handler_after_swap`).
     fn apply_block(&mut self, block: &BlockContext) -> bool {
+        self.follows_swap_in_route = false;
         let moved = self.block_timestamp != block.timestamp();
         let was_refusing = self.refuses_every_swap();
         self.block_timestamp = block.timestamp();
@@ -416,14 +503,21 @@ impl HookHandler for AscendHookHandler {
     }
 
     /// The hook gas constants are the hook's call frames alone; this is the PoolManager's side.
+    /// A repeat swap of the pool in the route finds the PoolManager's slots warm: on the 126
+    /// repeat swaps traced to block 10810289 the swap frame holds about 9,500 less than a first
+    /// swap's beyond the hook frames, more than the dispatch charge, so it is 0 there.
     fn pool_manager_call_overhead(&self) -> u64 {
-        ASCEND_HOOK_DISPATCH_GAS
+        if self.follows_swap_in_route {
+            0
+        } else {
+            ASCEND_HOOK_DISPATCH_GAS
+        }
     }
 
     /// Takes a buy's fee out of its input, or fills part of a sell from the bid.
     ///
-    /// Refuses with `InvalidInput` a zero input, an exact-output swap and an input above
-    /// `type(int128).max`.
+    /// Refuses with `InvalidInput` a zero input, an exact-output swap, an input above
+    /// `type(int128).max` and a block timestamp before the pool's last observation.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,
@@ -462,14 +556,15 @@ impl HookHandler for AscendHookHandler {
     }
 
     /// Takes a sell's fee `ceil(out * f / 1e6)` from the pool's output; a buy pays nothing more
-    /// here. Refuses with `InvalidInput` a swap that leaves the swapper an output of 0.
+    /// here. Refuses with `InvalidInput` a swap that leaves the swapper an output of 0, and the
+    /// swaps `before_swap` refuses.
     fn after_swap(
         &self,
         params: AfterSwapParameters,
         _overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         _transient_storage_params: Option<HashMap<Address, HashMap<U256, U256>>>,
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
-        let (_, plan) = self.plan_swap(&params.context, &params.swap_params)?;
+        let (amount_in, plan) = self.plan_swap(&params.context, &params.swap_params)?;
         // An exact-input swap's pool output is the unspecified leg.
         let amm_out = U256::from(
             if params.swap_params.zero_for_one {
@@ -484,7 +579,7 @@ impl HookHandler for AscendHookHandler {
             return Err(refuse("the swap's output is 0, which no minimum output accepts"));
         }
         Ok(WithGasEstimate {
-            gas_estimate: plan.after_swap_gas(),
+            gas_estimate: plan.after_swap_gas(amount_in),
             result: to_i128(settled.fee, "the sell's fee")?,
         })
     }
@@ -592,7 +687,8 @@ impl HookHandler for AscendHookHandler {
         Ok(Some(limit))
     }
 
-    /// The hook after the swap: the observation and the bid as the swap leaves them.
+    /// The hook after the swap: the observation and the bid as the swap leaves them, and a next
+    /// swap of the pool in the same route priced as a repeat swap.
     fn handler_after_swap(
         &self,
         context: &StateContext,
@@ -602,6 +698,7 @@ impl HookHandler for AscendHookHandler {
         let mut next = self.clone();
         next.state.observation = plan.observation;
         next.state.bid = plan.bid;
+        next.follows_swap_in_route = true;
         Ok(Some(Box::new(next)))
     }
 
@@ -628,6 +725,7 @@ impl HookHandler for AscendHookHandler {
             .state
             .with_updates(&delta.updated_attributes)
             .map_err(|e| TransitionError::DecodeError(e.to_string()))?;
+        self.follows_swap_in_route = false;
         Ok(())
     }
 
