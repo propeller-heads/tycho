@@ -1372,6 +1372,8 @@ mod tests {
                     .run(|reader| {
                         let writer = &mut writer;
                         async move {
+                            // Repeats the statements of `states_of` in its order, to move the row
+                            // between them. Keep it in step when `states_of` changes.
                             let active = active_instance_limits("vm:curve", reader)
                                 .await
                                 .unwrap()
