@@ -103,8 +103,8 @@ where
     /// PoolManager storage the call runs on: the price and tick, the liquidity and, with
     /// [`PoolAfterSwap::fees`](super::models::PoolAfterSwap::fees), the fee accounting. A hook that
     /// reads the pool there then sees the swap's result, and the pool stays consistent for a
-    /// hook that modifies a position in `afterSwap`. Slot layout: v4-core `StateLibrary`
-    /// (`POOLS_SLOT` 6; fee growth at offsets 1 and 2, liquidity at 3, ticks at 4) and `Slot0`.
+    /// hook that modifies a position in `afterSwap`. Bit layout of the first slot: v4-core
+    /// `Slot0`.
     fn store_pool_state_after_swap(
         &self,
         overwrites: &mut HashMap<Address, HashMap<U256, U256>>,
@@ -112,7 +112,7 @@ where
         params: &AfterSwapParameters,
     ) -> Result<(), SimulationError> {
         let pool = &params.pool_after_swap;
-        let state_slot = mapping_slot(pool_id, U256::from(6));
+        let state_slot = mapping_slot(pool_id, POOLS_SLOT);
         let storage = overwrites
             .entry(self.pool_manager)
             .or_default();
@@ -120,7 +120,7 @@ where
         let fees = self.stored_word(storage, state_slot)? >> 184 << 184;
         let tick = U256::from(pool.tick.cast_unsigned() & 0xFF_FFFF) << 160;
         storage.insert(state_slot, fees | tick | pool.sqrt_price);
-        storage.insert(state_slot + U256::from(3), U256::from(pool.liquidity));
+        storage.insert(state_slot + LIQUIDITY_OFFSET, U256::from(pool.liquidity));
         if let Some(accrual) = &pool.fees {
             let zero_for_one = params.swap_params.zero_for_one;
             let input =
@@ -132,7 +132,7 @@ where
 
     /// Writes a swap's fee accrual as `Pool.swap` and `PoolManager._swap` do: the input token's
     /// fee growth, every crossed tick's fee growth outside flipped against the growth at its
-    /// crossing, and the protocol's fees on the input token (`protocolFeesAccrued`, slot 1).
+    /// crossing, and the protocol's fees on the input token (`protocolFeesAccrued`).
     fn store_swap_fees(
         &self,
         storage: &mut HashMap<U256, U256>,
@@ -142,9 +142,9 @@ where
         accrual: &SwapFeeAccrual,
     ) -> Result<(), SimulationError> {
         let (input_growth_slot, other_growth_slot) = if zero_for_one {
-            (state_slot + U256::from(1), state_slot + U256::from(2))
+            (state_slot + FEE_GROWTH_GLOBAL0_OFFSET, state_slot + FEE_GROWTH_GLOBAL1_OFFSET)
         } else {
-            (state_slot + U256::from(2), state_slot + U256::from(1))
+            (state_slot + FEE_GROWTH_GLOBAL1_OFFSET, state_slot + FEE_GROWTH_GLOBAL0_OFFSET)
         };
         let input_growth = self.stored_word(storage, input_growth_slot)?;
         let other_growth = self.stored_word(storage, other_growth_slot)?;
@@ -158,16 +158,19 @@ where
             let tick = I256::try_from(*tick).map_err(|e| {
                 SimulationError::FatalError(format!("Failed to convert tick {tick}: {e:?}"))
             })?;
-            let tick_slot = mapping_slot(tick, state_slot + U256::from(4));
-            for (offset, global) in [(1u8, globals[0]), (2u8, globals[1])] {
-                let slot = tick_slot + U256::from(offset);
+            let tick_slot = mapping_slot(tick, state_slot + TICKS_OFFSET);
+            for (offset, global) in [
+                (TICK_FEE_GROWTH_OUTSIDE0_OFFSET, globals[0]),
+                (TICK_FEE_GROWTH_OUTSIDE1_OFFSET, globals[1]),
+            ] {
+                let slot = tick_slot + offset;
                 let outside = self.stored_word(storage, slot)?;
                 storage.insert(slot, global.wrapping_sub(outside));
             }
         }
         storage.insert(input_growth_slot, input_growth.wrapping_add(accrual.fee_growth));
         if !accrual.protocol_fee.is_zero() {
-            let slot = mapping_slot(input, U256::from(1));
+            let slot = mapping_slot(input, PROTOCOL_FEES_ACCRUED_SLOT);
             let accrued = self.stored_word(storage, slot)?;
             storage.insert(slot, accrued.wrapping_add(accrual.protocol_fee));
         }
@@ -195,6 +198,19 @@ where
             })
     }
 }
+
+/// The PoolManager's `pools` mapping, and the offsets of a pool's fields from the slot of its state
+/// (v4-core `StateLibrary`).
+const POOLS_SLOT: U256 = U256::from_limbs([6, 0, 0, 0]);
+const FEE_GROWTH_GLOBAL0_OFFSET: U256 = U256::from_limbs([1, 0, 0, 0]);
+const FEE_GROWTH_GLOBAL1_OFFSET: U256 = U256::from_limbs([2, 0, 0, 0]);
+const LIQUIDITY_OFFSET: U256 = U256::from_limbs([3, 0, 0, 0]);
+const TICKS_OFFSET: U256 = U256::from_limbs([4, 0, 0, 0]);
+/// The offsets of a tick's fee growth outside of token 0 and of token 1 from the slot of its info.
+const TICK_FEE_GROWTH_OUTSIDE0_OFFSET: U256 = U256::from_limbs([1, 0, 0, 0]);
+const TICK_FEE_GROWTH_OUTSIDE1_OFFSET: U256 = U256::from_limbs([2, 0, 0, 0]);
+/// The PoolManager's `protocolFeesAccrued` mapping (v4-core `ProtocolFees`).
+const PROTOCOL_FEES_ACCRUED_SLOT: U256 = U256::from_limbs([1, 0, 0, 0]);
 
 /// The storage slot of `key` in a Solidity mapping at `slot`: `keccak256(abi.encode(key, slot))`.
 fn mapping_slot(key: impl alloy::sol_types::SolValue, slot: U256) -> U256 {
