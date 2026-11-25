@@ -19,6 +19,7 @@
 
 #[cfg_attr(not(test), expect(dead_code, reason = "no read of the instance tables uses them yet"))]
 pub mod active;
+mod create;
 #[cfg_attr(not(test), expect(dead_code, reason = "no public gateway calls it until cut-over"))]
 pub mod gateway;
 pub mod origins;
@@ -30,6 +31,7 @@ pub mod write;
 
 use std::fmt;
 
+pub use create::ensure_instance;
 use diesel::{
     deserialize::{self, FromSql, FromSqlRow},
     expression::AsExpression,

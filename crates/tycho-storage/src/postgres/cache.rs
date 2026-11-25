@@ -41,7 +41,7 @@ use tycho_common::{
 };
 
 use super::{
-    instance::{gateway::PostgresGatewayNew, origins::BatchOrigins},
+    instance::{ensure_instance, gateway::PostgresGatewayNew, origins::BatchOrigins},
     is_transaction_conflict,
     pool::{self, EXTRACTION_POOL},
     InstanceId, PostgresError,
@@ -810,6 +810,21 @@ impl CachedGateway {
     /// change. A gateway with no instance writes nothing: the old gateway is off.
     pub fn for_instance(&self, instance: InstanceId) -> Self {
         CachedGateway { instance: Some(instance), ..self.new_instance() }
+    }
+
+    /// Returns the instance `label` of `protocol_system`, created when the database does not have
+    /// it yet, and makes it the active instance of the protocol.
+    ///
+    /// For the initialized accounts, until extractors create their instances. Fails with
+    /// `NotFound` when the protocol system is not stored, and with `Unexpected` when the instance
+    /// exists but is not ready.
+    pub async fn ensure_instance(
+        &self,
+        protocol_system: &str,
+        label: &str,
+    ) -> Result<InstanceId, StorageError> {
+        let mut conn = pool::checkout(&self.pool, self.pool_label).await?;
+        ensure_instance(protocol_system, label, &mut conn).await
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
