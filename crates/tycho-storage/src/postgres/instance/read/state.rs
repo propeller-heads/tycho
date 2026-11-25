@@ -146,6 +146,8 @@ async fn states_of(
     };
     let attributes: HashMap<ComponentId, HashMap<String, Bytes>> = unique_by_key(
         "protocol_state",
+        instance,
+        read,
         rows.into_iter()
             .map(|(external_id, name, value)| ((external_id, name), value)),
     )?
@@ -359,6 +361,8 @@ async fn component_balances_at(
     };
     unique_by_key(
         "component_balance",
+        instance,
+        read,
         rows.into_iter()
             .map(|(id, token, balance, float)| ((id, token), (balance, float))),
     )
