@@ -260,8 +260,8 @@ impl Display for SynchronizerState {
 struct StaleLimits {
     /// How long a synchronizer may make no progress before it is marked stale.
     threshold: Duration,
-    /// How many blocks behind the round's tip a stale synchronizer's block may be and still
-    /// keep it stale. A replay further behind would hold every round if it went Delayed.
+    /// How many blocks a synchronizer may fall behind the round's tip. A synchronizer further
+    /// behind is stale: as Delayed, its replay would hold every round.
     max_missed_blocks: u64,
 }
 

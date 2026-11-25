@@ -179,7 +179,7 @@ pub struct WsDeltasClient {
     /// Authorization key for the websocket connection.
     auth_key: Option<String>,
     /// Maximum amount of consecutive failed connections before giving up. A connection that
-    /// receives a frame starts the count again.
+    /// receives a frame other than a close starts the count again.
     max_reconnects: u64,
     /// Duration to wait before attempting to reconnect
     retry_cooldown: Duration,
@@ -450,7 +450,7 @@ fn build_ws_handshake_request(
 
 /// Tycho client websocket implementation.
 impl WsDeltasClient {
-    // Construct a new client with 5 reconnection attempts.
+    /// Constructs a client that gives up after 5 consecutive failed connections.
     pub fn new(ws_uri: &str, auth_key: Option<&str>) -> Result<Self, DeltasError> {
         let uri = ws_uri
             .parse::<Uri>()
@@ -469,7 +469,8 @@ impl WsDeltasClient {
         })
     }
 
-    // Construct a new client with a custom number of reconnection attempts.
+    /// Constructs a client that gives up after `max_reconnects` consecutive failed connections,
+    /// starting at most one attempt per `retry_cooldown`.
     pub fn new_with_reconnects(
         ws_uri: &str,
         auth_key: Option<&str>,
