@@ -511,14 +511,15 @@ mod tests {
         let stored: Vec<_> = current(&mut setup)
             .await
             .into_iter()
-            .map(|row| (row.token, row.new_balance, row.valid_from, row.tx_index))
+            .map(|row| (row.token, row.new_balance, row.previous_value, row.valid_from, row.tx_index))
             .collect();
+        let none = Bytes::from("0x00");
         assert_eq!(
             stored,
             vec![
-                (token(1), value(1), stored_since(), 0),
-                (token(2), value(20), ts, 1),
-                (token(3), value(30), ts, 3),
+                (token(1), value(1), none.clone(), stored_since(), 0),
+                (token(2), value(20), none.clone(), ts, 1),
+                (token(3), value(30), none, ts, 3),
             ]
         );
     }
