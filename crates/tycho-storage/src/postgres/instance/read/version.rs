@@ -64,13 +64,13 @@ pub(super) enum ReadAt {
 }
 
 /// Resolves the version `at` of `instance` to the rows that answer it. The head, the base and the
-/// retention horizon are the ones the read looked up with the instance.
+/// history horizon are the ones the read looked up with the instance.
 ///
 /// In this order:
 /// - `None` or the `Latest` block with kind `Last`: `Current(None)`. Reads nothing.
 /// - a timestamp at or after the head, or any timestamp when the instance has no head:
 ///   `Current(Some(ts))`.
-/// - a timestamp before the retention horizon: `Unsupported`, because older history is dropped.
+/// - a timestamp before the history horizon: `Unsupported`, because older history is dropped.
 /// - a timestamp before the base block of the instance: `Unsupported`, because the instance has no
 ///   history before it.
 /// - any other timestamp before the head: `Past { ts, head }`.
@@ -91,10 +91,11 @@ pub(super) async fn resolve_version(
     let Some(head) = instance.head.filter(|head| ts < *head) else {
         return Ok(ReadAt::Current(Some(ts)));
     };
-    if ts < instance.retention_horizon {
+    if ts < instance.history_horizon {
         return Err(StorageError::Unsupported(format!(
-            "version {ts} is before the history retention horizon {}: older history is dropped",
-            instance.retention_horizon
+            "version {ts} is before the history horizon {} (now() - partition_retention()): older \
+             history is dropped",
+            instance.history_horizon
         )));
     }
     if let Some(base) = instance.base.filter(|base| ts < *base) {

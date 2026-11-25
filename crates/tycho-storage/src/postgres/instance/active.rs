@@ -27,7 +27,7 @@ use crate::postgres::{
     PostgresError, StorageError,
 };
 
-/// The active instance of a protocol system, with its head, its base block time and the retention
+/// The active instance of a protocol system, with its head, its base block time and the history
 /// horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveInstance {
@@ -44,7 +44,7 @@ pub struct ActiveInstance {
     /// its `--retention-horizon` is not later than this point. With a later `--retention-horizon`,
     /// a past read between the two leaves out every key that changed after the version, with no
     /// error.
-    pub retention_horizon: NaiveDateTime,
+    pub history_horizon: NaiveDateTime,
 }
 
 /// The active instance of the protocol system `name`.
@@ -67,7 +67,7 @@ pub async fn active_instance(
 }
 
 /// The active instance of the protocol system `name`, with its head, its base block time and the
-/// retention horizon, in one query.
+/// history horizon, in one query.
 ///
 /// `None` if the protocol system has no active instance, or if no protocol system has that name.
 /// Filter with the returned id as a bound value, as for [`active_instance`].
@@ -99,8 +99,8 @@ pub async fn active_instance_head(
         .await
         .optional()
         .map_err(PostgresError::from)?;
-    Ok(row.and_then(|(id, head, base, retention_horizon)| {
-        id.map(|id| ActiveInstance { id, head, base, retention_horizon })
+    Ok(row.and_then(|(id, head, base, history_horizon)| {
+        id.map(|id| ActiveInstance { id, head, base, history_horizon })
     }))
 }
 
