@@ -673,7 +673,7 @@
 //! factory serves that front and that the front's `CELL_CODEHASH` is the configured one: a mismatch
 //! ends the feed, so nothing is listed that cannot be simulated.
 
-use alloy::primitives::{address, b256};
+use alloy::primitives::{address, b256, B256};
 use tycho_common::Bytes;
 
 mod desks;
@@ -779,6 +779,22 @@ pub const ETHEREUM_PRICE_SOURCES: [u32; 4] = [1, 2, 3, 4];
 /// there, which [`EfficientPropFeedBuilder::base`] approves. It is a guarded lane: the reader
 /// samples its hold (see the module doc, A book's life).
 pub const BASE_PRICE_SOURCES: [u32; 1] = [1];
+
+/// The runtime code hash of the front's implementation on Ethereum, read from the chain. The
+/// implementation's address, `0x48C6efab497EeC8501483Ceb23B6623f626d8371`, is the same on
+/// Ethereum, Base and BNB Chain, and the code at it differs on each: each chain's preset pins its
+/// own hash ([`EfficientPropFeedBuilder::with_implementation_code_hashes`]), so a preset given a
+/// node of another chain ends at its first poll.
+pub(super) const ETHEREUM_IMPLEMENTATION_CODEHASH: B256 =
+    b256!("ed09aca39254f4b0c9daaa2cc72f2ddfe9242600c541e1fdda845926486b6378");
+
+/// The same on Base.
+pub(super) const BASE_IMPLEMENTATION_CODEHASH: B256 =
+    b256!("614d29e839560fe31787583f5e133e2de8157aeb58d63c4f92806d04dca00b66");
+
+/// The same on BNB Chain.
+pub(super) const BNB_IMPLEMENTATION_CODEHASH: B256 =
+    b256!("2aa41223971899b7002026d8a4b6e693b253e647ea3cec7df158424803a711b9");
 
 impl EfficientPropDeployment {
     /// The front deployed on Ethereum, as this integration was checked against it and as its

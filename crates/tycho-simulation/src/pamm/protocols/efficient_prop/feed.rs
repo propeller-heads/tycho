@@ -29,8 +29,9 @@ use crate::{
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
         telemetry::{self, PollOutcome},
-        EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BASE_PRICE_SOURCES,
-        BID_VALID_UNTIL_MS_ATTRIBUTE, ETHEREUM_PRICE_SOURCES, EXPECTED_GAS_ATTRIBUTE,
+        EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BASE_IMPLEMENTATION_CODEHASH,
+        BASE_PRICE_SOURCES, BID_VALID_UNTIL_MS_ATTRIBUTE, BNB_IMPLEMENTATION_CODEHASH,
+        ETHEREUM_IMPLEMENTATION_CODEHASH, ETHEREUM_PRICE_SOURCES, EXPECTED_GAS_ATTRIBUTE,
         FALLBACK_PROTOCOL_SYSTEM, GAS_LIMIT_ADDITION_ATTRIBUTE, PAMM_ADDRESS_ATTRIBUTE,
         PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE,
         VALID_FROM_BLOCK_ATTRIBUTE,
@@ -110,6 +111,9 @@ pub struct EfficientPropFeedBuilder {
     approved_desks_url: Option<String>,
     approved_desks_max_age: Duration,
     door_code_hash: Option<Bytes>,
+    implementation_code_hashes: Vec<Bytes>,
+    /// The chain whose deployment a preset names, which the feed refuses to build for any other.
+    preset_chain: Option<Chain>,
     landing_allowance: Option<Duration>,
     state_urls: Vec<String>,
     usd_quote_tokens: HashSet<Bytes>,
@@ -130,9 +134,17 @@ impl EfficientPropFeedBuilder {
     /// set, or starts from [`Self::new`]. A credit listing, the first pool's wstETH/WETH among
     /// them, is served only where [`Self::credit_listing`] names its gas, which is its pool's
     /// settings' and no constant.
+    ///
+    /// The preset is Ethereum's alone: it fails to build for any other chain, and pins the code
+    /// hash of Ethereum's implementation ([`Self::with_implementation_code_hashes`]). The front,
+    /// its factory and its implementation sit at the same addresses on Base and BNB Chain, where
+    /// the implementation's code differs and a price source of the same id is another contract,
+    /// or one anyone may still register.
     pub fn ethereum(book_config: BookFeedConfig, rpc_url: String) -> Self {
         Self::new(book_config, rpc_url, EfficientPropDeployment::ethereum())
             .approved_price_sources(ETHEREUM_PRICE_SOURCES)
+            .with_implementation_code_hashes([bytes32(ETHEREUM_IMPLEMENTATION_CODEHASH)])
+            .preset_for(Chain::Ethereum)
     }
 
     /// A feed of the front deployed on Base ([`EfficientPropDeployment::base`]), with the price
@@ -141,9 +153,14 @@ impl EfficientPropFeedBuilder {
     /// serve ([`Self::with_approved_desks`]) and what each one's fills cost
     /// ([`Self::credit_listing`]): no fill of the deployed build was measured on Base, so a
     /// listing whose gas is not named is not served there.
+    ///
+    /// The preset is Base's alone, as [`Self::ethereum`] is Ethereum's: it fails to build for any
+    /// other chain, and pins the code hash of Base's implementation.
     pub fn base(book_config: BookFeedConfig, rpc_url: String) -> Self {
         Self::new(book_config, rpc_url, EfficientPropDeployment::base())
             .approved_price_sources(BASE_PRICE_SOURCES)
+            .with_implementation_code_hashes([bytes32(BASE_IMPLEMENTATION_CODEHASH)])
+            .preset_for(Chain::Base)
     }
 
     /// A feed of the front as it is to be deployed on BNB Chain ([`EfficientPropDeployment::bnb`]),
@@ -154,8 +171,13 @@ impl EfficientPropFeedBuilder {
     /// on Base), and which price sources to approve ([`Self::approved_price_sources`]): none is
     /// approved here, since the deployment's record has not landed and anyone may register a
     /// source, so an id names a price contract only once the deployment's record shows it.
+    ///
+    /// The preset is BNB Chain's alone, as [`Self::ethereum`] is Ethereum's: it fails to build
+    /// for any other chain, and pins the code hash of BNB Chain's implementation.
     pub fn bnb(book_config: BookFeedConfig, rpc_url: String) -> Self {
-        let mut builder = Self::new(book_config, rpc_url, EfficientPropDeployment::bnb());
+        let mut builder = Self::new(book_config, rpc_url, EfficientPropDeployment::bnb())
+            .with_implementation_code_hashes([bytes32(BNB_IMPLEMENTATION_CODEHASH)])
+            .preset_for(Chain::Bsc);
         builder
             .usd_quote_tokens
             .insert(Bytes::from(BNB_USD1.0.to_vec()));
@@ -180,6 +202,8 @@ impl EfficientPropFeedBuilder {
             approved_desks_url: None,
             approved_desks_max_age: DEFAULT_MAX_AGE,
             door_code_hash: None,
+            implementation_code_hashes: Vec::new(),
+            preset_chain: None,
             landing_allowance: None,
             state_urls: Vec::new(),
             usd_quote_tokens,
@@ -309,6 +333,27 @@ impl EfficientPropFeedBuilder {
     /// address; with it, a poll that finds the factory answering another hash ends the feed.
     pub fn with_door_code_hash(mut self, hash: Bytes) -> Self {
         self.door_code_hash = Some(hash);
+        self
+    }
+
+    /// Pins the runtime code hashes the front's implementation may have, replacing any pinned
+    /// before; none by default, where the implementation is checked by its address alone
+    /// ([`EfficientPropDeployment::implementations`]). With them, each implementation a poll
+    /// finds on the allow-list has its code read once (`eth_getCode` at the poll's block, the
+    /// first time it is found), and code hashing to none of these ends the feed: an address
+    /// holds the same code on one chain for good, while one deployer's address may hold other
+    /// code on another chain. Each chain's preset pins its own implementation's hash.
+    pub fn with_implementation_code_hashes(
+        mut self,
+        hashes: impl IntoIterator<Item = Bytes>,
+    ) -> Self {
+        self.implementation_code_hashes = hashes.into_iter().collect();
+        self
+    }
+
+    /// Binds the builder to `chain`, as a preset of its deployment: it fails to build for another.
+    fn preset_for(mut self, chain: Chain) -> Self {
+        self.preset_chain = Some(chain);
         self
     }
 
@@ -458,14 +503,16 @@ impl EfficientPropFeedBuilder {
 
     /// The feed of the chain's own path.
     ///
-    /// Fails for a chain other than Base, Ethereum and BNB Chain, for Ethereum or BNB Chain without
-    /// a state URL or Base with one, for a quote layout other than [`QUOTE_LAYOUT_BUILDER`] on
-    /// Ethereum and BNB Chain or any on Base, for an RPC URL or a state URL that is not one, for a
-    /// front, factory or implementation that is not an address, for a desk contract code hash
-    /// missing or not 32 bytes, for an empty allow-list, for a feed config that never withdraws a
-    /// snapshot, for a number of sizes outside 1 to 64, for the fallback router off Ethereum, and
-    /// for a credit listing of an id the front cannot hand out, or named twice. The node's chain is
-    /// checked on every poll, which fails fatally when the node serves another one.
+    /// Fails for a chain other than Base, Ethereum and BNB Chain, for a preset given another
+    /// chain than its own, for Ethereum or BNB Chain without a state URL or Base with one, for a
+    /// quote layout other than [`QUOTE_LAYOUT_BUILDER`] on Ethereum and BNB Chain or any on Base,
+    /// for an RPC URL or a state URL that is not one, for a front, factory or implementation that
+    /// is not an address, for a desk contract code hash missing or not 32 bytes, for an
+    /// implementation code hash not 32 bytes, for an empty allow-list, for a feed config that
+    /// never withdraws a snapshot, for a number of sizes outside 1 to 64, for the fallback router
+    /// off Ethereum, and for a credit listing of an id the front cannot hand out, or named twice.
+    /// The node's chain is checked on every poll, which fails fatally when the node serves another
+    /// one.
     pub fn build(self) -> Result<EfficientPropFeed, FeedError> {
         self.build_path()
     }
@@ -474,6 +521,16 @@ impl EfficientPropFeedBuilder {
     pub(super) fn build_path(self) -> Result<EfficientPropFeed, FeedError> {
         telemetry::init();
         let chain = self.book_config.chain;
+        if let Some(preset) = self
+            .preset_chain
+            .filter(|preset| *preset != chain)
+        {
+            return Err(FeedError::InvalidInput(format!(
+                "Efficient PropAMM's {preset} preset names {preset}'s deployment, not {chain}'s: \
+                 the front's addresses are the same there, its implementation's code and its \
+                 price sources are not"
+            )));
+        }
         let (gas_chain, default_landing_allowance) = if chain == Chain::Base {
             (GasChain::Base, DEFAULT_LANDING_ALLOWANCE)
         } else if chain == Chain::Ethereum {
@@ -644,6 +701,18 @@ impl EfficientPropFeedBuilder {
                 })
             })
             .transpose()?;
+        let implementation_codehashes = self
+            .implementation_code_hashes
+            .iter()
+            .map(|hash| {
+                B256::try_from(hash.as_ref()).map_err(|e| {
+                    FeedError::InvalidInput(format!(
+                        "Efficient PropAMM implementation code hash {hash} is not a hash of 32 \
+                         bytes: {e}"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
         let mut reader = DoorsReader::new(
             rpc_url,
             self.book_config.chain,
@@ -659,6 +728,7 @@ impl EfficientPropFeedBuilder {
             next_block,
         );
         reader.door_codehash = door_codehash;
+        reader.implementation_codehashes = implementation_codehashes;
         Ok(EfficientPropFeed {
             feed_config: self.feed_config,
             source: EfficientPropBookSource {
@@ -678,6 +748,11 @@ impl EfficientPropFeedBuilder {
             },
         })
     }
+}
+
+/// A hash as the builder takes it.
+fn bytes32(hash: B256) -> Bytes {
+    Bytes::from(hash.0.to_vec())
 }
 
 fn address(bytes: &Bytes, what: &str) -> Result<Address, FeedError> {
@@ -8786,13 +8861,19 @@ mod tests {
 
         /// A feed built from the preset needs a node, one state URL and its approved desks, and
         /// no more: it replays the recorded poll that serves four listings, every call answered
-        /// from the recording, and publishes its four books.
+        /// from the recording, and publishes its four books. The recording holds no read of the
+        /// implementation's code, which the preset pins: the node answers a stand-in, whose hash
+        /// replaces the preset's.
         #[tokio::test]
         async fn a_feed_from_the_ethereum_preset_needs_a_node_a_state_url_and_its_desks() {
+            use alloy::primitives::keccak256;
+
+            use crate::pamm::protocols::efficient_prop::test_support::IMPLEMENTATION_CODE;
+
             let poll: RecordedEthereumPoll =
                 serde_json::from_str(include_str!("testdata/ethereum_fork_26479480_served.json"))
                     .unwrap();
-            let node = RecordedNode::new(&poll.rpc);
+            let node = RecordedNode::new(&poll.rpc).with_code(IMPLEMENTATION_CODE);
             let unrecorded = node.unrecorded();
             let node = node.spawn().await;
             let state = spawn_state_server(poll.maps[0].clone()).await;
@@ -8827,6 +8908,7 @@ mod tests {
                         .iter()
                         .map(|listing| bytes(listing.quote_contract)),
                 )
+                .with_implementation_code_hashes([bytes32(keccak256(IMPLEMENTATION_CODE))])
                 .build()
                 .unwrap()
                 .source;
@@ -9244,8 +9326,12 @@ mod tests {
 
     /// The presets of the three chains, held to their deployments' records.
     mod presets {
+        use alloy::primitives::{b256, keccak256};
+
         use super::*;
-        use crate::pamm::protocols::efficient_prop::slots::SLOT_RULE;
+        use crate::pamm::protocols::efficient_prop::{
+            slots::SLOT_RULE, test_support::IMPLEMENTATION_CODE,
+        };
 
         /// Each preset's desk contract code hash places desk 1's contract under the preset's front
         /// where its deployment's record has it (its `desk1`; on BNB Chain the rehearsal's): a
@@ -9302,6 +9388,127 @@ mod tests {
             assert_eq!(EfficientPropDeployment::bnb(), ethereum);
         }
 
+        /// A preset of one chain does not build for another: the front, its factory and its
+        /// implementation sit at the same addresses on all three, while the implementation's
+        /// code differs, and a price source of the same id is another contract or one anyone may
+        /// still register.
+        #[rstest]
+        #[case::ethereum_on_base(EfficientPropFeedBuilder::ethereum as Preset, Chain::Base)]
+        #[case::ethereum_on_bnb(EfficientPropFeedBuilder::ethereum as Preset, Chain::Bsc)]
+        #[case::base_on_ethereum(EfficientPropFeedBuilder::base as Preset, Chain::Ethereum)]
+        #[case::base_on_bnb(EfficientPropFeedBuilder::base as Preset, Chain::Bsc)]
+        #[case::bnb_on_ethereum(EfficientPropFeedBuilder::bnb as Preset, Chain::Ethereum)]
+        #[case::bnb_on_base(EfficientPropFeedBuilder::bnb as Preset, Chain::Base)]
+        fn a_preset_does_not_build_for_another_chain(#[case] preset: Preset, #[case] chain: Chain) {
+            let config = BookFeedConfig { chain, ..book_config() };
+            let state_urls = ["http://state".to_string()]
+                .into_iter()
+                .filter(|_| chain != Chain::Base);
+
+            let error = preset(config, "http://node".into())
+                .state_urls(state_urls)
+                .build()
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, FeedError::InvalidInput(message) if message.contains("preset")),
+                "{error}"
+            );
+        }
+
+        /// A preset builder.
+        type Preset = fn(BookFeedConfig, String) -> EfficientPropFeedBuilder;
+
+        /// Each preset pins its own chain's implementation code hash, as read from that chain:
+        /// the one implementation address runs other code on each.
+        #[rstest]
+        #[case::ethereum(
+            EfficientPropFeedBuilder::ethereum as Preset,
+            Chain::Ethereum,
+            b256!("ed09aca39254f4b0c9daaa2cc72f2ddfe9242600c541e1fdda845926486b6378")
+        )]
+        #[case::base(
+            EfficientPropFeedBuilder::base as Preset,
+            Chain::Base,
+            b256!("614d29e839560fe31787583f5e133e2de8157aeb58d63c4f92806d04dca00b66")
+        )]
+        #[case::bnb(
+            EfficientPropFeedBuilder::bnb as Preset,
+            Chain::Bsc,
+            b256!("2aa41223971899b7002026d8a4b6e693b253e647ea3cec7df158424803a711b9")
+        )]
+        fn each_preset_pins_its_chains_implementation_code(
+            #[case] preset: Preset,
+            #[case] chain: Chain,
+            #[case] hash: B256,
+        ) {
+            let config = BookFeedConfig { chain, ..book_config() };
+
+            let builder = preset(config, "http://node".into());
+
+            assert_eq!(builder.implementation_code_hashes, vec![bytes32(hash)]);
+            assert_eq!(builder.preset_chain, Some(chain));
+        }
+
+        /// With code hashes pinned, the implementation a poll finds has its code read the first
+        /// time, and the feed serves where it hashes to one of them, reading it no more; code
+        /// hashing to none ends the feed, as a preset given a node of another chain does. With
+        /// none pinned, no code is read.
+        #[rstest]
+        #[case::its_code(Some(keccak256(IMPLEMENTATION_CODE)), true, 1)]
+        #[case::other_code(Some(B256::repeat_byte(0xed)), false, 1)]
+        #[case::none_pinned(None, true, 0)]
+        #[tokio::test]
+        async fn a_pinned_implementation_code_is_read_once_and_held(
+            #[case] pinned: Option<B256>,
+            #[case] served: bool,
+            #[case] reads: usize,
+        ) {
+            let node = FakeNode::new(vec![FakeListing::weth_usdc(1)]);
+            let code_reads = Arc::clone(&node.code_reads);
+            let now = node.timestamp * 1000;
+            let server = node.spawn().await;
+            let mut source =
+                EfficientPropFeedBuilder::new(book_config(), server.url(), deployment())
+                    .with_approved_desks(approved_desks())
+                    .credit_listing(1, named_gas())
+                    .with_implementation_code_hashes(pinned.map(bytes32))
+                    .build()
+                    .unwrap()
+                    .source;
+            source.clock = Arc::new(move || now);
+
+            for _ in 0..2 {
+                match source.fetch().await {
+                    Ok(snapshot) => {
+                        assert!(served);
+                        assert_eq!(snapshot.books.len(), 1);
+                    }
+                    Err(error) => {
+                        assert!(!served, "{error}");
+                        assert!(matches!(error, FeedError::Fatal(_)), "{error}");
+                        break;
+                    }
+                }
+            }
+
+            assert_eq!(code_reads.load(Ordering::SeqCst), reads);
+        }
+
+        /// A pinned implementation code hash must be one.
+        #[test]
+        fn an_implementation_code_hash_of_another_length_does_not_build() {
+            let error = EfficientPropFeedBuilder::base(book_config(), "http://node".into())
+                .with_implementation_code_hashes([Bytes::from(vec![0xed; 31])])
+                .build()
+                .unwrap_err();
+
+            assert!(
+                matches!(&error, FeedError::InvalidInput(message) if message.contains("code hash")),
+                "{error}"
+            );
+        }
+
         /// A feed from the Base preset builds from a Base node alone, approving the one price
         /// source of Base's deployment, and refuses a state URL.
         #[test]
@@ -9348,7 +9555,8 @@ mod tests {
 
         /// Polls Base through the preset with desk 1 approved and prints what it serves. Each
         /// poll checks the preset against the chain (the factory's `FRONT`, the front's
-        /// `CELL_CODEHASH` and the implementation it runs), and fails where any differs. Set
+        /// `CELL_CODEHASH` and the implementation it runs, whose code the first poll hashes), and
+        /// fails where any differs. Set
         /// `EFFICIENT_PROP_BASE_RPC` to a Base node.
         #[tokio::test]
         #[ignore = "reads Base mainnet; set EFFICIENT_PROP_BASE_RPC"]
@@ -9382,11 +9590,12 @@ mod tests {
         }
 
         /// Reads BNB Chain's front through a node and holds it to the preset: the implementation
-        /// the proxy runs, the front's `CELL_CODEHASH`, desk 1's contract where the preset places
-        /// it, and a clock reading the block's second (mode 3, with the millisecond precompile
-        /// answering nothing). Where the listing-door factory has code, its `FRONT` must be the
-        /// front. A poll needs a state URL serving chain 56, which none does yet, so this reads
-        /// the values directly. Set `EFFICIENT_PROP_BNB_RPC` to a BNB Chain node.
+        /// the proxy runs and its code's hash, the front's `CELL_CODEHASH`, desk 1's contract where
+        /// the preset places it, and a clock reading the block's second (mode 3, with the
+        /// millisecond precompile answering nothing). Where the listing-door factory has code, its
+        /// `FRONT` must be the front. A poll needs a state URL serving chain 56, which none does
+        /// yet, so this reads the values directly. Set `EFFICIENT_PROP_BNB_RPC` to a BNB Chain
+        /// node.
         #[tokio::test]
         #[ignore = "reads BNB Chain mainnet; set EFFICIENT_PROP_BNB_RPC"]
         async fn live_bnb_front_is_the_preset() {
@@ -9433,10 +9642,15 @@ mod tests {
                 .get_storage_at(front, U256::from_be_bytes(IMPLEMENTATION_SLOT.0))
                 .await
                 .unwrap();
-            let implementation = bytes(Address::from_word(slot.into()));
+            let implementation = Address::from_word(slot.into());
             assert!(deployment
                 .implementations
-                .contains(&implementation));
+                .contains(&bytes(implementation)));
+            let code = provider
+                .get_code_at(implementation)
+                .await
+                .unwrap();
+            assert_eq!(keccak256(&code), BNB_IMPLEMENTATION_CODEHASH);
             let answer = call(front, CELL_CODEHASHCall {}.abi_encode())
                 .await
                 .unwrap();

@@ -1203,6 +1203,16 @@ pub(super) struct DoorsReader {
     /// [`EfficientPropFeedBuilder::with_door_code_hash`]:
     /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::with_door_code_hash
     pub(super) door_codehash: Option<B256>,
+    /// The runtime code hashes the front's implementation may have, where the caller pins them:
+    /// see [`EfficientPropFeedBuilder::with_implementation_code_hashes`]. Empty where only the
+    /// implementation's address is checked.
+    ///
+    /// [`EfficientPropFeedBuilder::with_implementation_code_hashes`]:
+    /// crate::pamm::protocols::efficient_prop::EfficientPropFeedBuilder::with_implementation_code_hashes
+    pub(super) implementation_codehashes: BTreeSet<B256>,
+    /// The implementations whose code a read found pinned: code at an address does not change on
+    /// a chain, so each is read once.
+    code_checked: Arc<Mutex<BTreeSet<Address>>>,
     /// Each guarded source's lane's `HOLD_MS` once it answered: an immutable of the lane's code,
     /// so it is asked once per lane.
     holds_ms: Arc<Mutex<BTreeMap<Address, u64>>>,
@@ -1260,6 +1270,8 @@ impl DoorsReader {
             credit,
             desks,
             door_codehash: None,
+            implementation_codehashes: BTreeSet::new(),
+            code_checked: Arc::default(),
             holds_ms: Arc::default(),
             next_block,
             stepping_back: Arc::new(AtomicBool::new(false)),
@@ -1283,13 +1295,13 @@ impl DoorsReader {
     /// later block than at the read ([`FrontClock::may_step_back`]), no door is read or served: no
     /// sample at a few blocks bounds what the door quotes over the book's life there.
     ///
-    /// Fails fatally when the front runs an implementation outside the allow-list, when the node
-    /// serves another chain, when the factory serves another front, or when the front's or the
-    /// factory's views revert, since no later read will differ. A factory with no code yet fails
-    /// only the read: a factory's address is known before it is deployed. So does a node lagging
-    /// the poll's start by more than `hold.max_lag_secs`, at the first request, before any door is
-    /// asked: the asks of a print's life run from the block to the book's end, one more for each
-    /// second the node lags.
+    /// Fails fatally when the front runs an implementation outside the allow-list, or one whose
+    /// code hashes to none of the hashes pinned, when the node serves another chain, when the
+    /// factory serves another front, or when the front's or the factory's views revert, since no
+    /// later read will differ. A factory with no code yet fails only the read: a factory's address
+    /// is known before it is deployed. So does a node lagging the poll's start by more than
+    /// `hold.max_lag_secs`, at the first request, before any door is asked: the asks of a print's
+    /// life run from the block to the book's end, one more for each second the node lags.
     pub(super) async fn read(
         &self,
         scan_to: u32,
@@ -3336,7 +3348,9 @@ impl DoorsReader {
 
     /// Sends `groups` at `block` as one JSON-RPC batch of `aggregate3` calls, every call allowed
     /// to fail, with reads of the storage `slots` (account and slot) at the block and, when
-    /// `with_implementation`, of its implementation slot, checked before any answer is looked at.
+    /// `also` asks it, of the front's implementation slot, checked before any answer is looked
+    /// at: against the allow-list, and where code hashes are pinned, against them by a read of
+    /// the implementation's code after the batch, the first time the implementation is found.
     ///
     /// Each `aggregate3` of a group under a block override starts with Multicall3's block number
     /// and timestamp and the front's millisecond source, read under it, from which `clock` computes
@@ -3471,6 +3485,16 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("implementation slot", e))?;
                 let found = Address::from_word(B256::from(word));
                 self.check_implementation(found)?;
+                if self.code_unchecked(found) {
+                    let code = self
+                        .provider
+                        .get_code_at(found)
+                        .block_id(block)
+                        .await
+                        .inspect_err(note)
+                        .map_err(|e| self.connection_error("implementation code", e))?;
+                    self.check_implementation_code(found, &code)?;
+                }
                 Some(found)
             }
             None => None,
@@ -3573,6 +3597,43 @@ impl DoorsReader {
                 self.front
             )));
         }
+        Ok(())
+    }
+
+    /// Whether the implementation `found` is to have its code read: the caller pinned code hashes,
+    /// and no read has found its code among them yet.
+    fn code_unchecked(&self, found: Address) -> bool {
+        !self
+            .implementation_codehashes
+            .is_empty() &&
+            !self
+                .code_checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&found)
+    }
+
+    /// Fails fatally where `code`, the implementation `found`'s, hashes to none of the pinned
+    /// hashes: the proxy runs code this feed was not built for, as where a preset of one chain
+    /// was given a node of another, at whose same address another code runs. Code that matches
+    /// is not read again.
+    fn check_implementation_code(&self, found: Address, code: &[u8]) -> Result<(), FeedError> {
+        let hash = keccak256(code);
+        if !self
+            .implementation_codehashes
+            .contains(&hash)
+        {
+            return Err(FeedError::Fatal(format!(
+                "Efficient PropAMM: the front proxy {} runs implementation {found}, whose code \
+                 hashes to {hash}, none of the hashes pinned; the same address holds other code \
+                 on another chain, so the feed may be configured for another chain than its node's",
+                self.front
+            )));
+        }
+        self.code_checked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(found);
         Ok(())
     }
 

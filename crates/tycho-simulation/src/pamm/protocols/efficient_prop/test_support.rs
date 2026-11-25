@@ -50,6 +50,8 @@ use crate::{
 pub(super) const FRONT: Address = Address::repeat_byte(0xf0);
 pub(super) const FACTORY: Address = Address::repeat_byte(0xfa);
 pub(super) const IMPLEMENTATION: Address = Address::repeat_byte(0x1a);
+/// The fake implementation's runtime code.
+pub(super) const IMPLEMENTATION_CODE: &[u8] = b"the fake front implementation";
 /// The creation code hash of the fake factory's doors.
 pub(super) const DOOR_CODEHASH: B256 = B256::repeat_byte(0xdc);
 /// The creation code hash of the fake front's desk contracts.
@@ -977,6 +979,10 @@ pub(super) struct FakeNode {
     pub door_quotes: Arc<AtomicUsize>,
     /// How many of those it was asked at a block named by its number, not its hash.
     pub door_quotes_by_number: Arc<AtomicUsize>,
+    /// The runtime code of every implementation the front's slot may name.
+    pub implementation_code: Vec<u8>,
+    /// How many times the node was asked an account's code.
+    pub code_reads: Arc<AtomicUsize>,
 }
 
 /// The fake front's clock, as `PropAMMClock.read` reads it, and the chain's blocks: in its mode 2
@@ -1204,6 +1210,8 @@ impl FakeNode {
             implementation_by_hash: None,
             door_quotes: Arc::default(),
             door_quotes_by_number: Arc::default(),
+            implementation_code: IMPLEMENTATION_CODE.to_vec(),
+            code_reads: Arc::default(),
         }
     }
 
@@ -1326,6 +1334,29 @@ impl FakeNode {
                     header
                 });
                 serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": header })
+            }
+            Some("eth_getCode") => {
+                self.code_reads
+                    .fetch_add(1, Ordering::SeqCst);
+                let account: Address =
+                    serde_json::from_value(request["params"][0].clone()).unwrap();
+                assert!(
+                    [self.implementation, self.pinned_implementation]
+                        .into_iter()
+                        .chain(self.implementation_by_hash)
+                        .any(|implementation| implementation == account),
+                    "only an implementation's code is read"
+                );
+                let block = &request["params"][1];
+                assert!(
+                    *block == "latest" || self.names(block),
+                    "the code is read at a read's block"
+                );
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": alloy::primitives::Bytes::from(self.implementation_code.clone()),
+                })
             }
             method => panic!("the fake node does not serve {method:?}"),
         }
@@ -2108,6 +2139,9 @@ pub(super) struct RecordedNode {
     named: Mutex<Option<Value>>,
     door_quotes: Arc<AtomicUsize>,
     by_hash: Arc<AtomicUsize>,
+    /// The code the node answers for any account, where a test gives one: no recording holds a
+    /// read of code.
+    code: Option<alloy::primitives::Bytes>,
 }
 
 impl RecordedNode {
@@ -2128,7 +2162,14 @@ impl RecordedNode {
             named: Mutex::default(),
             door_quotes: Arc::default(),
             by_hash: Arc::default(),
+            code: None,
         }
+    }
+
+    /// The node answering every read of an account's code with `code`.
+    pub(super) fn with_code(mut self, code: &[u8]) -> Self {
+        self.code = Some(alloy::primitives::Bytes::copy_from_slice(code));
+        self
     }
 
     /// How many requests named their block by the node's hash.
@@ -2213,6 +2254,13 @@ impl RecordedNode {
         let answer = |request: &Value| {
             let id = request["id"].clone();
             self.count_door_quotes(request);
+            if let Some(code) = self
+                .code
+                .as_ref()
+                .filter(|_| request["method"] == "eth_getCode")
+            {
+                return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": code });
+            }
             if request["method"] == "eth_getBlockByNumber" {
                 let header = self.head_hash.map(
                     |hash| serde_json::json!({ "hash": hash, "number": request["params"][0] }),
