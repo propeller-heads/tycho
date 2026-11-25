@@ -21,9 +21,8 @@ use crate::postgres::{
 pub(super) enum ReadAt {
     /// The current tables answer: every current row is valid at this version, so the read takes
     /// them all, unfiltered. No current row is newer than the head, because the writer saves the
-    /// extraction state in the same transaction as the rows. `None` for the latest version, else
-    /// the timestamp of the version.
-    Current(Option<NaiveDateTime>),
+    /// extraction state in the same transaction as the rows.
+    Current,
     /// A version before the head: current rows with `valid_from <= ts`, and history rows with
     /// `valid_from <= ts < valid_to` and `valid_to <= head`.
     ///
@@ -39,7 +38,7 @@ impl ReadAt {
     /// row, and `ts` for `Past`.
     pub(super) fn current_until(self) -> Option<NaiveDateTime> {
         match self {
-            ReadAt::Current(_) => None,
+            ReadAt::Current => None,
             ReadAt::Past { ts, .. } => Some(ts),
         }
     }
@@ -49,9 +48,8 @@ impl ReadAt {
 /// history horizon are the ones the read looked up with the instance.
 ///
 /// In this order:
-/// - `None` or the `Latest` block with kind `Last`: `Current(None)`. Reads nothing.
-/// - a timestamp at or after the head, or any timestamp when the instance has no head:
-///   `Current(Some(ts))`.
+/// - `None` or the `Latest` block with kind `Last`: `Current`. Reads nothing.
+/// - a timestamp at or after the head, or any timestamp when the instance has no head: `Current`.
 /// - a timestamp before the history horizon: `Unsupported`, because older history is dropped.
 /// - a timestamp before the base block of the instance: `Unsupported`, because the instance has no
 ///   history before it.
@@ -64,14 +62,14 @@ pub(super) async fn resolve_version(
     conn: &mut AsyncPgConnection,
 ) -> Result<ReadAt, StorageError> {
     let Some(at) = at else {
-        return Ok(ReadAt::Current(None));
+        return Ok(ReadAt::Current);
     };
     if let Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last) = at {
-        return Ok(ReadAt::Current(None));
+        return Ok(ReadAt::Current);
     }
     let ts = maybe_lookup_version_ts(at, conn).await?;
     let Some(head) = instance.head.filter(|head| ts < *head) else {
-        return Ok(ReadAt::Current(Some(ts)));
+        return Ok(ReadAt::Current);
     };
     if ts < instance.history_horizon {
         return Err(StorageError::Unsupported(format!(
@@ -151,8 +149,8 @@ fn overlap(
 ) -> StorageError {
     counter!("storage_overlapping_versions", "entity" => entity).increment(1);
     let version = match read {
-        ReadAt::Current(None) => "the latest version".to_string(),
-        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
+        ReadAt::Current => "the head".to_string(),
+        ReadAt::Past { ts, head: _ } => format!("version {ts}"),
     };
     StorageError::Unexpected(format!(
         "{entity} of instance {instance} at {version}: two rows of {key:?} are valid"
@@ -199,11 +197,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::no_version(Some(day(5)), None, None, Ok(ReadAt::Current(None)))]
-    #[case::latest(Some(day(5)), None, Some(latest()), Ok(ReadAt::Current(None)))]
-    #[case::at_head(Some(day(5)), None, Some(at(day(5))), Ok(ReadAt::Current(Some(day(5)))))]
-    #[case::after_head(Some(day(5)), None, Some(at(day(6))), Ok(ReadAt::Current(Some(day(6)))))]
-    #[case::without_head(None, None, Some(at(day(1))), Ok(ReadAt::Current(Some(day(1)))))]
+    #[case::no_version(Some(day(5)), None, None, Ok(ReadAt::Current))]
+    #[case::latest(Some(day(5)), None, Some(latest()), Ok(ReadAt::Current))]
+    #[case::at_head(Some(day(5)), None, Some(at(day(5))), Ok(ReadAt::Current))]
+    #[case::after_head(Some(day(5)), None, Some(at(day(6))), Ok(ReadAt::Current))]
+    #[case::without_head(None, None, Some(at(day(1))), Ok(ReadAt::Current))]
     #[case::before_head(Some(day(5)), None, Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
     #[case::at_horizon(Some(day(5)), None, Some(at(day(2))), Ok(ReadAt::Past { ts: day(2), head: day(5) }))]
     #[case::at_base(Some(day(5)), Some(day(3)), Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
@@ -234,7 +232,7 @@ mod tests {
         let map = unique_by_key_nested(
             "protocol_state",
             InstanceId(7),
-            ReadAt::Current(None),
+            ReadAt::Current,
             [((1, "x"), "a"), ((1, "y"), "b"), ((2, "x"), "c")],
         )
         .unwrap();
@@ -249,8 +247,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::latest(ReadAt::Current(None), "the latest version")]
-    #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
+    #[case::current(ReadAt::Current, "the head")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
     fn test_unique_by_key_nested_fails_on_a_repeated_key(
         #[case] read: ReadAt,
