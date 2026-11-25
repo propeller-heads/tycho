@@ -2,16 +2,28 @@
 //!
 //! Each instance stores its own copy of every contract it uses, so the same address can have one
 //! account in each instance.
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::{models::contract::Account, storage::StorageError, Bytes};
+use tycho_common::{
+    keccak256,
+    models::{
+        contract::{Account, AccountDelta},
+        ChangeType, TxHash,
+    },
+    storage::StorageError,
+    Bytes,
+};
 
 use crate::postgres::{
     instance::{
-        gateway::PostgresGatewayNew, origins::BatchOrigins, orm::NewAccount,
-        schema::tycho::account, InstanceId,
+        gateway::PostgresGatewayNew,
+        origins::BatchOrigins,
+        orm::{NewAccount, NewAccountBalance, NewContractCode, NewContractStorage},
+        schema::tycho::account,
+        write::{token::check_tokens_stored, versioning::VersionedChange},
+        InstanceId,
     },
     storage_error_from_diesel,
 };
@@ -70,6 +82,96 @@ impl PostgresGatewayNew {
         Ok(())
     }
 
+    /// Writes the code, storage slots and native balance of each account delta as new versions,
+    /// at the block timestamp and index of its transaction from `origins`.
+    ///
+    /// A code with the hash of the version it replaces adds no version. A slot without value is
+    /// a version with a NULL value. The native balance is the balance of the chain's native token.
+    ///
+    /// `NotFound` for an account that is not in the instance, a transaction that is not in the
+    /// batch, or a native token that is not stored. `Unexpected` for an account deletion, two
+    /// deltas of one account in one transaction, or a change that does not start after the stored
+    /// version of its key.
+    pub(crate) async fn update_contracts(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        deltas: &[(TxHash, AccountDelta)],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        if let Some((_, deleted)) = deltas
+            .iter()
+            .find(|(_, delta)| delta.change_type() == ChangeType::Deletion)
+        {
+            return Err(StorageError::Unexpected(format!(
+                "Account {}: the instance writer does not delete accounts",
+                deleted.address
+            )));
+        }
+        let addresses: Vec<&Bytes> = deltas
+            .iter()
+            .map(|(_, delta)| &delta.address)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let account_ids = self
+            .account_ids(instance, &addresses, conn)
+            .await?;
+        let native_tokens = deltas
+            .iter()
+            .filter(|(_, delta)| delta.balance.is_some())
+            .map(|(_, delta)| native_token(delta))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        check_tokens_stored(&native_tokens.iter().collect::<Vec<_>>(), conn).await?;
+
+        let mut code = Vec::new();
+        let mut storage = Vec::new();
+        let mut balances = Vec::new();
+        for (tx, delta) in deltas {
+            let origin = origins.change(tx)?;
+            let account_id = account_ids[&delta.address];
+            if let Some(new_code) = delta.code() {
+                code.push(VersionedChange::Update(NewContractCode {
+                    instance_id: instance,
+                    account_id,
+                    code: new_code.clone(),
+                    hash: keccak256(new_code).into(),
+                    modify_tx_hash: tx.clone(),
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }));
+            }
+            for (slot, value) in &delta.slots {
+                storage.push(VersionedChange::Update(NewContractStorage {
+                    instance_id: instance,
+                    account_id,
+                    slot: slot.clone(),
+                    value: value.clone(),
+                    // write_versions links every later version to the one it replaces.
+                    previous_value: None,
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }));
+            }
+            if let Some(balance) = &delta.balance {
+                balances.push(VersionedChange::Update(NewAccountBalance {
+                    instance_id: instance,
+                    account_id,
+                    token: native_token(delta)?,
+                    balance: balance.clone(),
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }));
+            }
+        }
+        self.write_versions(instance, code, conn)
+            .await?;
+        self.write_versions(instance, storage, conn)
+            .await?;
+        self.write_versions(instance, balances, conn)
+            .await
+    }
+
     /// Returns the id of each account of the instance, by address. Deleted accounts are found too.
     ///
     /// `NotFound` for the first address that has no account in the instance.
@@ -96,6 +198,15 @@ impl PostgresGatewayNew {
         }
         Ok(ids)
     }
+}
+
+/// Address of the native token of the delta's chain: the token of its native balance.
+fn native_token(delta: &AccountDelta) -> Result<Bytes, StorageError> {
+    delta
+        .chain
+        .try_native_token()
+        .map(|token| token.address)
+        .map_err(|err| StorageError::Unexpected(format!("Account {}: {err}", delta.address)))
 }
 
 #[cfg(test)]
