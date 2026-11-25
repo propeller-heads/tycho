@@ -295,11 +295,17 @@ mod tests {
             "protocol_state",
             InstanceId(7),
             ReadAt::Current(None),
-            [(1, "a"), (2, "b"), (3, "c")],
+            [((1, "x"), "a"), ((1, "y"), "b"), ((2, "x"), "c")],
         )
         .unwrap();
 
-        assert_eq!(map, HashMap::from([(1, "a"), (2, "b"), (3, "c")]));
+        assert_eq!(
+            map,
+            HashMap::from([
+                (1, HashMap::from([("x", "a"), ("y", "b")])),
+                (2, HashMap::from([("x", "c")])),
+            ])
+        );
     }
 
     #[rstest]
@@ -307,14 +313,19 @@ mod tests {
     #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
     fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
-        let result = unique_by_key("protocol_state", InstanceId(7), read, [(42, "a"), (42, "b")]);
+        let result = unique_by_key(
+            "protocol_state",
+            InstanceId(7),
+            read,
+            [((42, "x"), "a"), ((42, "x"), "b")],
+        );
 
         let Err(StorageError::Unexpected(msg)) = result else {
             panic!("expected Unexpected, got {result:?}");
         };
         assert_eq!(
             msg,
-            format!("protocol_state of instance 7 at {version}: two rows of 42 are valid")
+            format!("protocol_state of instance 7 at {version}: two rows of (42, \"x\") are valid")
         );
     }
 }
