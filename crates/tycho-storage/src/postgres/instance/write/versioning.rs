@@ -47,6 +47,14 @@ pub trait VersionedRowNew: Debug + Send + Sync + Sized {
     /// Records on `next` what it keeps of the version it replaces, such as the previous value.
     fn link_next(&self, next: &mut Self);
 
+    /// Whether this row only repeats `replaced`, the version it would replace. A repeat adds no
+    /// version: `replaced` stays the latest version of the key.
+    ///
+    /// No entity repeats by default: every change is a new version.
+    fn repeats(&self, _replaced: &Self) -> bool {
+        false
+    }
+
     /// The history row of this version, ended at `valid_to`.
     fn into_history(self, valid_to: NaiveDateTime) -> Self::History;
 
@@ -115,7 +123,19 @@ struct VersionWrites<R: VersionedRowNew> {
     history: Vec<R::History>,
 }
 
-/// Chains `changes` after the `stored` current rows of their keys, in the order they start.
+/// The last change of a key in [`plan_writes`].
+struct Latest<R: VersionedRowNew> {
+    /// Start of the last change: a later change must start after it.
+    version: (NaiveDateTime, i32),
+    /// The latest row of the key: `None` once deleted.
+    row: Option<R>,
+    /// Whether the batch changed the stored row. A key with only repeats is not written.
+    changed: bool,
+}
+
+/// Chains `changes` after the `stored` current rows of their keys, in the order they start. An
+/// update that repeats the version it replaces is dropped, and a key with only repeats is not
+/// written.
 ///
 /// Fails on each failure that `write_versions` lists, except a missing history day: only the
 /// history insert finds that one.
@@ -127,28 +147,36 @@ fn plan_writes<R: VersionedRowNew>(
 ) -> Result<VersionWrites<R>, StorageError> {
     changes.sort_by_key(VersionedChange::version);
 
-    // The start of the last version of each key, and its latest row: `None` once deleted.
     let mut latest: BTreeMap<_, _> = stored
         .into_iter()
-        .map(|row| (row.key(), (row.version(), Some(row))))
+        .map(|row| (row.key(), Latest { version: row.version(), row: Some(row), changed: false }))
         .collect();
 
     let mut history = Vec::new();
     for change in changes {
         let key = change.key();
         let version = change.version();
-        let replaced = match latest.remove(&key) {
-            Some((last, _)) if version <= last => {
+        let (replaced, changed) = match latest.remove(&key) {
+            Some(last) if version <= last.version => {
                 return Err(StorageError::Unexpected(format!(
                     "{} {key:?}: a change at {version:?} does not start after the version it \
-                     replaces, at {last:?}",
-                    R::ENTITY
+                     replaces, at {:?}",
+                    R::ENTITY,
+                    last.version
                 )));
             }
-            Some((_, replaced)) => replaced,
-            None => None,
+            Some(last) => (last.row, last.changed),
+            None => (None, false),
         };
         let next = match change {
+            VersionedChange::Update(row)
+                if replaced
+                    .as_ref()
+                    .is_some_and(|replaced| row.repeats(replaced)) =>
+            {
+                latest.insert(key, Latest { version, row: replaced, changed });
+                continue;
+            }
             VersionedChange::Update(mut row) => {
                 if row.instance() != instance {
                     return Err(StorageError::Unexpected(format!(
@@ -178,15 +206,16 @@ fn plan_writes<R: VersionedRowNew>(
                 history.push(replaced.into_history(valid_from));
             }
         }
-        latest.insert(key, (version, next));
+        latest.insert(key, Latest { version, row: next, changed: true });
     }
 
     let mut current = Vec::new();
     let mut deleted = Vec::new();
-    for (key, (_, row)) in latest {
-        match row {
-            Some(row) => current.push(row),
-            None => deleted.push(key),
+    for (key, last) in latest {
+        match last {
+            Latest { changed: false, .. } => {}
+            Latest { row: Some(row), .. } => current.push(row),
+            Latest { row: None, .. } => deleted.push(key),
         }
     }
     Ok(VersionWrites { current, deleted, history })
