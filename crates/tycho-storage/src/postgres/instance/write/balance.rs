@@ -18,10 +18,7 @@ use crate::postgres::{
         origins::BatchOrigins,
         orm::{NewComponentBalance, NewComponentBalanceHistory},
         schema::tycho::{component_balance, component_balance_history},
-        write::{
-            versioning::{VersionedChange, VersionedRowNew},
-            ROWS_PER_INSERT,
-        },
+        write::versioning::{VersionedChange, VersionedRowNew},
         InstanceId,
     },
     schema::token,
@@ -163,7 +160,7 @@ impl VersionedRowNew for NewComponentBalance {
         rows: &[Self],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(Self::MAX_BATCH_SIZE) {
             diesel::insert_into(component_balance::table)
                 .values(chunk)
                 .on_conflict((
@@ -212,7 +209,7 @@ impl VersionedRowNew for NewComponentBalance {
         rows: &[NewComponentBalanceHistory],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(NewComponentBalanceHistory::MAX_BATCH_SIZE) {
             diesel::insert_into(component_balance_history::table)
                 .values(chunk)
                 .execute(conn)
@@ -498,7 +495,9 @@ mod tests {
         let stored: Vec<_> = current(&mut setup)
             .await
             .into_iter()
-            .map(|row| (row.token, row.new_balance, row.previous_value, row.valid_from, row.tx_index))
+            .map(|row| {
+                (row.token, row.new_balance, row.previous_value, row.valid_from, row.tx_index)
+            })
             .collect();
         let none = Bytes::from("0x00");
         assert_eq!(

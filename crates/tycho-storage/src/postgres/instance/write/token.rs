@@ -3,10 +3,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{models::token::Token, storage::StorageError};
 
 use crate::postgres::{
-    instance::{gateway::PostgresGatewayNew, write::ROWS_PER_INSERT},
-    orm::NewToken,
-    schema::token,
-    storage_error_from_diesel,
+    instance::gateway::PostgresGatewayNew, orm::NewToken, schema::token, storage_error_from_diesel,
 };
 
 impl PostgresGatewayNew {
@@ -21,7 +18,7 @@ impl PostgresGatewayNew {
             .iter()
             .map(NewToken::from_token)
             .collect::<Result<Vec<_>, _>>()?;
-        for chunk in rows.chunks(ROWS_PER_INSERT) {
+        for chunk in rows.chunks(NewToken::MAX_BATCH_SIZE) {
             diesel::insert_into(token::table)
                 .values(chunk)
                 .on_conflict(token::address)

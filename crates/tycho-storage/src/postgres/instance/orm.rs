@@ -264,6 +264,15 @@ pub struct NewComponentBalance {
     pub tx_index: i32,
 }
 
+impl NewComponentBalance {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::component_balance_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -293,6 +302,15 @@ pub struct NewComponentBalanceHistory {
     pub valid_from: NaiveDateTime,
     pub valid_to: NaiveDateTime,
     pub tx_index: i32,
+}
+
+impl NewComponentBalanceHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 9;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
