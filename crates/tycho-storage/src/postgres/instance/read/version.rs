@@ -6,6 +6,7 @@ use std::{
 
 use chrono::NaiveDateTime;
 use diesel_async::AsyncPgConnection;
+use metrics::counter;
 use tycho_common::storage::{
     BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind,
 };
@@ -113,9 +114,9 @@ pub(super) async fn resolve_version(
 
 /// Collects `rows` into a map by key. `Unexpected` if two rows have the same key: two rows of
 /// `entity` are then valid at one version, which the writer must prevent. The error names the
-/// `instance` and the version of `read`.
+/// `instance` and the version of `read`, and `storage_overlapping_versions{entity}` counts it.
 pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
-    entity: &str,
+    entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
     rows: impl IntoIterator<Item = (K, V)>,
@@ -123,6 +124,7 @@ pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
     rows.into_iter()
         .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
             Entry::Occupied(e) => {
+                counter!("storage_overlapping_versions", "entity" => entity).increment(1);
                 let version = match read {
                     ReadAt::Current(None) => "the latest version".to_string(),
                     ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
