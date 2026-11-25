@@ -270,19 +270,11 @@ async fn load_account_balances(
 ) -> Result<HashMap<Address, HashMap<Address, AccountBalance>>, StorageError> {
     let native = chain.native_token().address;
     let skip = (!include_native).then_some(&native);
-    let rows = match read {
-        ReadAt::Current(_) => {
-            current_account_balance_rows(instance, accounts, skip, None, conn).await?
-        }
-        ReadAt::Past { ts, head } => {
-            let mut rows =
-                current_account_balance_rows(instance, accounts, skip, Some(ts), conn).await?;
-            rows.extend(
-                history_account_balance_rows(instance, accounts, skip, ts, head, conn).await?,
-            );
-            rows
-        }
-    };
+    let mut rows =
+        current_account_balance_rows(instance, accounts, skip, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_account_balance_rows(instance, accounts, skip, ts, head, conn).await?);
+    }
     Ok(unique_by_key(
         "account_balance",
         instance,
@@ -319,14 +311,10 @@ async fn codes_at(
     read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<i64, (Bytes, Bytes, Bytes)>, StorageError> {
-    let rows = match read {
-        ReadAt::Current(_) => current_code_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_code_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_code_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
+    let mut rows = current_code_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_code_rows(instance, ids, ts, head, conn).await?);
+    }
     unique_by_id("contract_code", instance, read, rows)
 }
 
@@ -397,14 +385,10 @@ async fn slots_at(
     read: ReadAt,
     conn: &mut AsyncPgConnection,
 ) -> Result<HashMap<i64, HashMap<Bytes, Bytes>>, StorageError> {
-    let rows = match read {
-        ReadAt::Current(_) => current_slot_rows(instance, ids, None, conn).await?,
-        ReadAt::Past { ts, head } => {
-            let mut rows = current_slot_rows(instance, ids, Some(ts), conn).await?;
-            rows.extend(history_slot_rows(instance, ids, ts, head, conn).await?);
-            rows
-        }
-    };
+    let mut rows = current_slot_rows(instance, ids, read.current_until(), conn).await?;
+    if let ReadAt::Past { ts, head } = read {
+        rows.extend(history_slot_rows(instance, ids, ts, head, conn).await?);
+    }
     unique_by_key(
         "contract_storage",
         instance,
