@@ -170,7 +170,7 @@ mod tests {
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::{resolve_version, unique_by_key, ReadAt};
+    use super::{resolve_version, unique_by_id, unique_by_key, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -266,6 +266,33 @@ mod tests {
         assert_eq!(
             msg,
             format!("protocol_state of instance 7 at {version}: two rows of (42, \"x\") are valid")
+        );
+    }
+
+    #[test]
+    fn test_unique_by_id_collects_rows() {
+        let map = unique_by_id(
+            "contract_code",
+            InstanceId(7),
+            ReadAt::Current(None),
+            [(1, "a"), (2, "b")],
+        )
+        .unwrap();
+
+        assert_eq!(map, HashMap::from([(1, "a"), (2, "b")]));
+    }
+
+    #[test]
+    fn test_unique_by_id_fails_on_a_repeated_key() {
+        let read = ReadAt::Past { ts: day(3), head: day(5) };
+        let result = unique_by_id("contract_code", InstanceId(7), read, [(42, "a"), (42, "b")]);
+
+        let Err(StorageError::Unexpected(msg)) = result else {
+            panic!("expected Unexpected, got {result:?}");
+        };
+        assert_eq!(
+            msg,
+            "contract_code of instance 7 at version 2020-01-03 00:00:00: two rows of 42 are valid"
         );
     }
 }
