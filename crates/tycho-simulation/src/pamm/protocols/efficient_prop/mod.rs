@@ -344,12 +344,19 @@
 //! answered every word and every block asked for them: a read answered in part (a listing left
 //! out for an unread word, a side without its second block) is published by its own poll and
 //! asked again by the next. A node that does not answer the header, or refuses a block named by
-//! its hash, is asked every door on every poll, by number; after three polls in a row that find
-//! the hash form refused and the number form answered, the feed stops naming blocks by hash. The
-//! key is one for the whole poll, not one a listing: a second maker's update samples every
-//! listing again. A poll that asks no door still stamps its snapshot as received at that poll:
-//! the stamp is the poll's time, not the time its samples were asked, and how long each book
-//! holds is in its validity attributes, which follow the target block.
+//! its hash, is asked every door on every poll, by number. A read by hash that fails is asked
+//! again by number on that poll, unless its failure ends the feed. Only a node's refusal of the
+//! form itself counts against the hash form (a JSON-RPC invalid-params or method-not-found
+//! error on a request naming its block by hash, on a poll the number form then answers): after
+//! three such polls in a row the feed sets the form aside for 32 heads, then tries it once more,
+//! and any answer by hash brings it back. A backend that does not know the head's hash yet, a
+//! block replaced under the read or a timeout sets nothing aside. The feed counts each read it
+//! does not keep, by reason (`efficient_prop_reads_not_kept_total`), and each time it sets the
+//! form aside (`efficient_prop_hash_form_set_aside_total`): see `telemetry.rs`. The key is one
+//! for the whole poll, not one a listing: a second maker's update samples every listing again. A
+//! poll that asks no door still stamps its snapshot as received at that poll: the stamp is the
+//! poll's time, not the time its samples were asked, and how long each book holds is in its
+//! validity attributes, which follow the target block.
 //!
 //! A route through a door therefore reverts whole where it lands in a block without the update.
 //! [`EfficientPropFeedBuilder::with_fallback_router`] (off by default) publishes the same books as

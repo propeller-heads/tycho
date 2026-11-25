@@ -971,6 +971,9 @@ pub(super) struct FakeNode {
     pub head_hash: Option<B256>,
     /// What the node does with a request naming its block by that hash.
     pub hash_pins: HashPins,
+    /// The front's implementation as a request naming its block by that hash reads it, where
+    /// that is another than the block named by its number holds.
+    pub implementation_by_hash: Option<Address>,
     /// How many quotes the node has answered at a door, its most-fillable reads among them, or
     /// at the front for a door's plan.
     pub door_quotes: Arc<AtomicUsize>,
@@ -1148,8 +1151,12 @@ impl FakeClock {
 pub(super) enum HashPins {
     /// Answers it at the block of that hash, its latest.
     Taken,
-    /// Answers it with an error, as a node that reads a block by number or tag alone.
+    /// Answers it with an invalid-params error, as a node that reads a block by number or tag
+    /// alone.
     Refused,
+    /// Answers it that it knows no block of that hash, as a backend a block behind the one that
+    /// named the head.
+    Unknown,
 }
 
 /// What a node does with an `eth_call`'s block override.
@@ -1194,6 +1201,7 @@ impl FakeNode {
             desk_word_spare: U256::ZERO,
             head_hash: Some(HEAD_HASH),
             hash_pins: HashPins::Taken,
+            implementation_by_hash: None,
             door_quotes: Arc::default(),
             door_quotes_by_number: Arc::default(),
         }
@@ -1261,11 +1269,16 @@ impl FakeNode {
                     .iter()
                     .any(|param| param.get("blockHash").is_some())
             });
-        if by_hash && self.hash_pins == HashPins::Refused {
+        let refusal = match self.hash_pins {
+            HashPins::Taken => None,
+            HashPins::Refused => Some((-32602, "invalid argument: a block tag or number")),
+            HashPins::Unknown => Some((-32000, "header for hash not found")),
+        };
+        if let Some((code, message)) = refusal.filter(|_| by_hash) {
             return serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": request["id"],
-                "error": { "code": -32602, "message": "invalid argument: a block tag or number" },
+                "error": { "code": code, "message": message },
             });
         }
         match request["method"].as_str() {
@@ -1335,7 +1348,9 @@ impl FakeNode {
                 self.implementation
             } else {
                 assert!(self.names(&params[2]), "the slot is read at the listings' block");
-                self.pinned_implementation
+                self.implementation_by_hash
+                    .filter(|_| params[2].is_object())
+                    .unwrap_or(self.pinned_implementation)
             };
             implementation.into_word()
         } else {

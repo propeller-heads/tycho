@@ -7605,10 +7605,71 @@ mod tests {
             assert_eq!(again, sampled);
         }
 
+        /// The node's head `blocks` further on, with its makers' updates for the block after it
+        /// and the wall clock.
+        fn head_moves_on(polled: &Polled, blocks: u64) {
+            let mut node = polled.node.lock().unwrap();
+            node.block += blocks;
+            node.timestamp += blocks * SLOT_SECS;
+            for listing in &mut node.listings {
+                listing.maker_ms += blocks * SLOT_SECS * 1000;
+            }
+            polled
+                .now_ms
+                .fetch_add(blocks * SLOT_SECS * 1000, Ordering::SeqCst);
+            *polled.map.lock().unwrap() =
+                reuse_map(node.block + 1, ETHEREUM_SLOT + node.block - ETHEREUM_BLOCK);
+        }
+
+        /// What `polls` count through the `metrics` facade: each counter, by its name and label.
+        fn counted(
+            polls: impl std::future::Future<Output = ()>,
+        ) -> impl Fn(&str, Option<(&str, &str)>) -> u64 {
+            use metrics_util::{
+                debugging::{DebugValue, DebuggingRecorder},
+                MetricKind,
+            };
+
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            // `with_local_recorder` takes a sync closure, so the polls run on a runtime inside it.
+            metrics::with_local_recorder(&recorder, || runtime.block_on(polls));
+            let recorded: HashMap<_, _> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.kind() == MetricKind::Counter)
+                .map(|(key, _, _, value)| {
+                    let labels: Vec<_> = key
+                        .key()
+                        .labels()
+                        .map(|label| (label.key().to_string(), label.value().to_string()))
+                        .collect();
+                    ((key.key().name().to_string(), labels), value)
+                })
+                .collect();
+            move |name, label| {
+                let labels = label
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .into_iter()
+                    .collect();
+                match recorded.get(&(name.to_string(), labels)) {
+                    Some(DebugValue::Counter(count)) => *count,
+                    other => panic!("{name} {label:?} is not a counter recorded: {other:?}"),
+                }
+            }
+        }
+
         /// A node that refuses a block named by its hash is asked every door on every poll, by
         /// number, as every poll was before any read was kept, and publishes what a node taking
         /// the hash does. The reader asks by hash first on three polls, one request more each,
-        /// finds the number form answered every time, and names no block by its hash again.
+        /// finds the form refused and the number form answered every time, and sets the hash
+        /// form aside for 32 heads. Then it tries once, is refused, and sets it aside as long
+        /// again.
         #[tokio::test]
         async fn a_node_refusing_a_block_named_by_its_hash_is_asked_every_door_by_number() {
             let (listings, map) = reuse_fixture();
@@ -7634,6 +7695,187 @@ mod tests {
                 .map(|pair| pair[1] - pair[0])
                 .collect();
             assert_eq!(a_poll, [6, 6, 5, 5]);
+
+            let mut a_poll = Vec::new();
+            for blocks in [31, 1, 0, 32] {
+                head_moves_on(&polled, blocks);
+                let before = polled._servers.0.request_count();
+                published(&polled.source).await;
+                a_poll.push(polled._servers.0.request_count() - before);
+            }
+            assert_eq!(a_poll, [5, 6, 5, 6]);
+            assert_eq!(polled.door_quotes_by_number(), polled.door_quotes());
+            assert_eq!(polled.reuses(), 0);
+        }
+
+        /// The hash form comes back. Three polls of a node that refuses a block named by its
+        /// hash set the form aside; the node then takes it, and the reader goes on asking by
+        /// number until 32 heads have passed, tries the hash once, is answered, keeps that read,
+        /// and the poll after it asks no door. Before, the form stayed off for the reader's
+        /// life, and no read was kept again. The feed counts the once it set the form aside and
+        /// each read it did not keep, by reason.
+        #[test]
+        fn a_node_taking_the_hash_form_again_is_named_its_blocks_by_hash_again() {
+            use crate::pamm::protocols::efficient_prop::telemetry::{
+                HASH_FORM_SET_ASIDE, POLLS, READS_NOT_KEPT,
+            };
+
+            let counter = counted(async {
+                let (listings, map) = reuse_fixture();
+                let node =
+                    FakeNode { hash_pins: HashPins::Refused, ..FakeNode::ethereum(listings) };
+                let polled = Polled::new(node, map).await;
+                for _ in 0..3 {
+                    published(&polled.source).await;
+                }
+                polled.node.lock().unwrap().hash_pins = HashPins::Taken;
+                let by_number = polled.door_quotes_by_number();
+                published(&polled.source).await;
+                published(&polled.source).await;
+                assert!(polled.door_quotes_by_number() > by_number);
+                assert_eq!(polled.reuses(), 0);
+
+                head_moves_on(&polled, 32);
+                let by_number = polled.door_quotes_by_number();
+                let sampled = published(&polled.source).await;
+                assert_eq!(polled.door_quotes_by_number(), by_number, "a door asked by number");
+                let asked = polled.door_quotes();
+                assert_eq!(published(&polled.source).await, sampled);
+                assert_eq!(polled.door_quotes(), asked, "the poll after the kept read asked");
+                assert_eq!(polled.reuses(), 1);
+            });
+
+            assert_eq!(counter(HASH_FORM_SET_ASIDE, None), 1);
+            for (reason, reads) in [
+                ("hash_read_failed", 3),
+                ("hash_form_set_aside", 2),
+                ("no_block_hash", 0),
+                ("answered_in_part", 0),
+            ] {
+                assert_eq!(counter(READS_NOT_KEPT, Some(("reason", reason))), reads, "{reason}");
+            }
+            assert_eq!(counter(POLLS, Some(("outcome", "sampled"))), 6);
+            assert_eq!(counter(POLLS, Some(("outcome", "reused"))), 1);
+        }
+
+        /// A backend that knows no block of the head's hash, one a block behind the backend that
+        /// named the head, sets nothing aside, however many polls meet it: each is asked again
+        /// by number and tries the hash on the next. Once a backend knows the hash, that read is
+        /// kept and the poll after it asks no door. Before, three such polls in a row switched
+        /// the hash form off for good.
+        #[tokio::test]
+        async fn a_backend_that_knows_no_block_of_the_heads_hash_sets_nothing_aside() {
+            let (listings, map) = reuse_fixture();
+            let node = FakeNode { hash_pins: HashPins::Unknown, ..FakeNode::ethereum(listings) };
+            let polled = Polled::new(node, map).await;
+
+            for poll in 1..=5 {
+                let before = polled._servers.0.request_count();
+                published(&polled.source).await;
+                assert_eq!(polled._servers.0.request_count() - before, 6, "poll {poll}");
+            }
+            assert_eq!(polled.door_quotes_by_number(), polled.door_quotes());
+            assert_eq!(polled.reuses(), 0);
+
+            polled.node.lock().unwrap().hash_pins = HashPins::Taken;
+            let by_number = polled.door_quotes_by_number();
+            let sampled = published(&polled.source).await;
+            assert_eq!(polled.door_quotes_by_number(), by_number, "a door asked by number");
+            assert_eq!(published(&polled.source).await, sampled);
+            assert_eq!(polled.reuses(), 1);
+        }
+
+        /// A read the node answers by hash starts the count of refusals again: two refused
+        /// polls, one answered, and two more refused on the next head set nothing aside, so the
+        /// read after them is asked by hash and kept.
+        #[tokio::test]
+        async fn a_read_answered_by_hash_starts_the_count_of_refusals_again() {
+            let (listings, map) = reuse_fixture();
+            let node = FakeNode { hash_pins: HashPins::Refused, ..FakeNode::ethereum(listings) };
+            let polled = Polled::new(node, map).await;
+
+            for blocks in [0, 1] {
+                head_moves_on(&polled, blocks);
+                polled.node.lock().unwrap().hash_pins = HashPins::Refused;
+                published(&polled.source).await;
+                published(&polled.source).await;
+                polled.node.lock().unwrap().hash_pins = HashPins::Taken;
+                let by_number = polled.door_quotes_by_number();
+                published(&polled.source).await;
+                assert_eq!(
+                    polled.door_quotes_by_number(),
+                    by_number,
+                    "the hash form was set aside after two refusals in a row"
+                );
+            }
+            let asked = polled.door_quotes();
+            published(&polled.source).await;
+            assert_eq!(polled.door_quotes(), asked);
+            assert_eq!(polled.reuses(), 1);
+        }
+
+        /// A failure of the read by hash that ends the feed is not asked again by number: a
+        /// front found on an implementation outside the allow-list at the block named by its
+        /// hash fails the poll at that request, its third.
+        #[tokio::test]
+        async fn a_fatal_failure_of_the_read_by_hash_is_not_asked_again_by_number() {
+            let (listings, map) = reuse_fixture();
+            let node = FakeNode {
+                implementation_by_hash: Some(Address::repeat_byte(0x99)),
+                ..FakeNode::ethereum(listings)
+            };
+            let polled = Polled::new(node, map).await;
+
+            let error = polled.source.fetch().await.unwrap_err();
+
+            assert!(matches!(error, FeedError::Fatal(_)), "{error:?}");
+            assert_eq!(polled._servers.0.request_count(), 3);
+            assert_eq!(polled.door_quotes_by_number(), 0);
+        }
+
+        /// The feed counts each read it does not keep by its reason: a node that names no block
+        /// by hash, and a node that never answers the block after the next for a listing that
+        /// carries, are each asked every door on every poll, which the poll's outcome alone
+        /// does not tell from a poll that sampled because something changed.
+        #[test]
+        fn the_feed_counts_a_read_it_does_not_keep_by_its_reason() {
+            use crate::pamm::protocols::efficient_prop::telemetry::{
+                HASH_FORM_SET_ASIDE, READS_NOT_KEPT,
+            };
+
+            let counter = counted(async {
+                let (mut listings, map) = reuse_fixture();
+                let node = FakeNode { head_hash: None, ..FakeNode::ethereum(listings.clone()) };
+                let polled = Polled::new(node, map.clone()).await;
+                published(&polled.source).await;
+                published(&polled.source).await;
+
+                listings[0].carry = true;
+                let map = written(
+                    map,
+                    "desk-1",
+                    desk_cell(1),
+                    U256::from(QUOTE_BASE),
+                    quote_word(ETHEREUM_BLOCK + 1, 0, true, true),
+                );
+                let mut node = FakeNode::ethereum(listings);
+                Unanswered::BlockAfter.on(&mut node, true);
+                let polled = Polled::new(node, map).await;
+                for _ in 0..3 {
+                    published(&polled.source).await;
+                }
+                assert_eq!(polled.reuses(), 0);
+            });
+
+            for (reason, reads) in [
+                ("no_block_hash", 2),
+                ("answered_in_part", 3),
+                ("hash_read_failed", 0),
+                ("hash_form_set_aside", 0),
+            ] {
+                assert_eq!(counter(READS_NOT_KEPT, Some(("reason", reason))), reads, "{reason}");
+            }
+            assert_eq!(counter(HASH_FORM_SET_ASIDE, None), 0);
         }
 
         /// What a node leaves unanswered of one read of the doors, which fails no poll.

@@ -27,7 +27,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -66,7 +66,7 @@ use crate::{
         overrides::{NextBlock, NextBlockReader, Wanted, SLOT_SECS},
         slots::{HeadWords, ListingSlots, SLOT_RULE},
         state::{CreditGas, FillReads, PairPlace},
-        telemetry::{self, NotCovered, PollOutcome},
+        telemetry::{self, NotCovered, NotKept, PollOutcome},
     },
     snapshot_feed::errors::FeedError,
 };
@@ -161,9 +161,18 @@ const MAX_CREDIT_MODE: u8 = 3;
 /// so the answer is the listing's own prefix.
 const PROBE_WHOLE_TOKENS_EXP: u32 = 12;
 
-/// How many polls in a row may find the node answering by number what it refused by the head's
-/// hash before the reader stops naming a block by its hash, for its life (see [`SampledOn`]).
-const HASH_PIN_TRIES: u32 = 3;
+/// How many polls in a row may find the node refusing a block named by its hash, and answering
+/// the same read by number, before the reader sets the hash form aside (see [`HashForm`]).
+const HASH_FORM_REFUSALS: u32 = 3;
+
+/// For how many heads the hash form is set aside before the reader tries it once more.
+const HASH_FORM_RETRY_HEADS: u64 = 32;
+
+/// The JSON-RPC error codes by which a node says it does not take a request's form: invalid
+/// params and method not found. A node that reads a block by number or tag alone answers a
+/// request naming its block by hash with one of them. A block it does not know, a timeout or a
+/// transport failure is none of these, and says nothing of the form.
+const FORM_REFUSED_CODES: [i64; 2] = [-32602, -32601];
 
 // The front's listing view, the factory's door address and the listing door's IPropAMM surface,
 // as the PropAMM front, `PropAMMListingDoors` and `PropAMMListingDoor` declare them.
@@ -886,7 +895,7 @@ struct TakenListing {
 /// words read beside that one header are members themselves and only decide which calls are
 /// made. A read is kept only where its doors were so pinned and every word and block asked for
 /// them was answered ([`Answered`]). A node that names no block, or refuses a block named by its
-/// hash, is asked by number, and nothing of it is kept.
+/// hash, is asked by number, and nothing of it is kept ([`HashForm`] says for how long).
 #[derive(Debug, Clone, PartialEq)]
 struct SampledOn {
     head: B256,
@@ -916,6 +925,68 @@ impl Answered {
             _ => Self::InPart,
         }
     }
+}
+
+/// Whether the reader names the block its doors are asked at by the head's hash, the form a
+/// kept read needs (see [`SampledOn`]). It does until the node refuses the form itself on
+/// [`HASH_FORM_REFUSALS`] polls in a row: a request naming its block by hash answered with one of
+/// [`FORM_REFUSED_CODES`], on a poll whose read by number then answers. The form is then set
+/// aside for [`HASH_FORM_RETRY_HEADS`] heads and tried once more: any answer by hash brings it
+/// back into use, and one more refusal sets it aside as long again. A read by hash that fails
+/// otherwise (a backend that does not know the head's hash yet, a block replaced under the read,
+/// a timeout) is asked again by number on that poll and counts for nothing here.
+#[derive(Debug, Default)]
+struct HashForm {
+    /// Polls in a row on which the node refused the form and answered by number.
+    refusals: AtomicU32,
+    /// The head from which the form is tried again; zero while it has not been set aside since
+    /// the node last answered by hash.
+    retry_from: AtomicU64,
+    /// Whether a request of the read in flight that named its block by hash was refused its
+    /// form: set by [`DoorsReader::batch`], read once that read has failed.
+    refused: AtomicBool,
+}
+
+impl HashForm {
+    /// Whether the form is set aside at the head `number`.
+    fn set_aside(&self, number: u64) -> bool {
+        number < self.retry_from.load(Ordering::Relaxed)
+    }
+
+    /// The node answered a read by hash: the form is in use, and no refusal counts any more.
+    fn taken(&self) {
+        self.refusals
+            .store(0, Ordering::Relaxed);
+        self.retry_from
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// The node refused the form at the head `number` and answered that read by number. Whether
+    /// that sets the form aside: the last of [`HASH_FORM_REFUSALS`] in a row, or the one try
+    /// after it was set aside.
+    fn refused_at(&self, number: u64) -> bool {
+        let tried_again = self.retry_from.load(Ordering::Relaxed) != 0;
+        let refusals = self
+            .refusals
+            .fetch_add(1, Ordering::Relaxed) +
+            1;
+        if !tried_again && refusals < HASH_FORM_REFUSALS {
+            return false;
+        }
+        self.refusals
+            .store(0, Ordering::Relaxed);
+        self.retry_from
+            .store(number.saturating_add(HASH_FORM_RETRY_HEADS), Ordering::Relaxed);
+        true
+    }
+}
+
+/// Whether a node's `error` says it does not take the request's form (see
+/// [`FORM_REFUSED_CODES`]).
+fn refuses_the_form(error: &TransportError) -> bool {
+    error
+        .as_error_resp()
+        .is_some_and(|payload| FORM_REFUSED_CODES.contains(&payload.code))
 }
 
 /// A next-block read's doors as sampled, and what they were asked on.
@@ -1043,9 +1114,8 @@ pub(super) struct DoorsReader {
     /// The last next-block read whose doors were sampled, with what they were asked on: a read
     /// asked on the same is answered from it, and no door is asked (see [`SampledOn`]).
     sampled: Arc<Mutex<Option<Sampled>>>,
-    /// How many polls in a row found the node answering by number what it refused by the head's
-    /// hash: at [`HASH_PIN_TRIES`] the reader names no block by its hash any more.
-    hash_refusals: Arc<AtomicU32>,
+    /// Whether the doors' block is named by the head's hash, or that form is set aside.
+    hash_form: Arc<HashForm>,
     /// How many reads were answered from it.
     #[cfg(test)]
     pub(super) reuses: Arc<std::sync::atomic::AtomicUsize>,
@@ -1091,7 +1161,7 @@ impl DoorsReader {
             #[cfg(test)]
             step_back_warnings: Arc::default(),
             sampled: Arc::default(),
-            hash_refusals: Arc::default(),
+            hash_form: Arc::default(),
             #[cfg(test)]
             reuses: Arc::default(),
         }
@@ -1247,7 +1317,9 @@ impl DoorsReader {
     /// all the same. A read that does ask its doors names their block by the head's hash, and is
     /// kept for the polls after it only where the node answered all of it so. A node that does
     /// not name the head by its hash, or refuses a block named so, is asked every door on every
-    /// poll, by number.
+    /// poll, by number, and a read by hash that fails is asked again by number on that poll,
+    /// unless its failure is fatal ([`HashForm`]). Each read that is not kept is counted by its
+    /// reason ([`NotKept`]).
     async fn read_next_block(
         &self,
         next_block: &NextBlockReader,
@@ -1356,41 +1428,57 @@ impl DoorsReader {
                 doors
             }
             None => {
-                // The doors' block by its hash, where the node named it: the node then answers
-                // from that very block or refuses.
+                // The doors' block by its hash, where the node named it and the form is not set
+                // aside: the node then answers from that very block or refuses.
+                let by_number = match &asked_on {
+                    None => Some(NotKept::NoBlockHash),
+                    Some(_) if self.hash_form.set_aside(head.number) => {
+                        Some(NotKept::HashFormSetAside)
+                    }
+                    Some(_) => None,
+                };
                 let by_hash = asked_on
                     .as_ref()
-                    .filter(|_| {
-                        self.hash_refusals
-                            .load(Ordering::Relaxed) <
-                            HASH_PIN_TRIES
-                    })
+                    .filter(|_| by_number.is_none())
                     .map(|asked_on| BlockId::hash_canonical(asked_on.head));
                 let pinned = match by_hash {
-                    Some(by_hash) => self
-                        .ask_doors(&served, by_hash, &clock, &state)
-                        .await
-                        .inspect_err(|error| {
-                            debug!(
-                                front = %self.front,
-                                head = head.number,
-                                %error,
-                                "the doors' read by the head's hash failed: asking by number"
-                            );
-                        })
-                        .ok(),
+                    Some(by_hash) => {
+                        self.hash_form
+                            .refused
+                            .store(false, Ordering::Relaxed);
+                        match self
+                            .ask_doors(&served, by_hash, &clock, &state)
+                            .await
+                        {
+                            Ok(asked) => Some(asked),
+                            // No other form of the read passes what ends the feed: a front on
+                            // an implementation outside the allow-list.
+                            Err(error @ FeedError::Fatal(_)) => return Err(error),
+                            Err(error) => {
+                                debug!(
+                                    front = %self.front,
+                                    head = head.number,
+                                    %error,
+                                    "the doors' read by the head's hash failed: asking by number"
+                                );
+                                None
+                            }
+                        }
+                    }
                     None => None,
                 };
                 match pinned {
                     Some((doors, answered)) => {
-                        self.hash_refusals
-                            .store(0, Ordering::Relaxed);
-                        if let Some(asked_on) = asked_on.filter(|_| answered == Answered::Whole) {
-                            *self
-                                .sampled
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(Sampled { on: asked_on, doors: doors.clone() });
+                        self.hash_form.taken();
+                        match asked_on.filter(|_| answered == Answered::Whole) {
+                            Some(asked_on) => {
+                                *self
+                                    .sampled
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(Sampled { on: asked_on, doors: doors.clone() });
+                            }
+                            None => telemetry::record_read_not_kept(NotKept::AnsweredInPart),
                         }
                         doors
                     }
@@ -1400,19 +1488,24 @@ impl DoorsReader {
                         let (doors, _) = self
                             .ask_doors(&served, block, &clock, &state)
                             .await?;
-                        // The node answers by number what it did not by hash: a refusal of the
-                        // hash form, unless the block was replaced under the read.
+                        telemetry::record_read_not_kept(
+                            by_number.unwrap_or(NotKept::HashReadFailed),
+                        );
+                        // The node answered by number a read whose form by hash it refused.
                         if by_hash.is_some() &&
-                            self.hash_refusals
-                                .fetch_add(1, Ordering::Relaxed) +
-                                1 ==
-                                HASH_PIN_TRIES
+                            self.hash_form
+                                .refused
+                                .load(Ordering::Relaxed) &&
+                            self.hash_form.refused_at(head.number)
                         {
+                            telemetry::record_hash_form_set_aside();
                             warn!(
                                 front = %self.front,
-                                polls = HASH_PIN_TRIES,
-                                "the node answers the doors by block number and not by block \
-                                 hash: asking every door on every poll from here on"
+                                head = head.number,
+                                heads = HASH_FORM_RETRY_HEADS,
+                                "the node refuses a block named by its hash and answers one \
+                                 named by its number: asking every door on every poll, by \
+                                 number, until the hash form is tried again"
                             );
                         }
                         doors
@@ -3041,6 +3134,16 @@ impl DoorsReader {
                 implementation: None,
             });
         }
+        // A request naming its block by hash that the node refuses the form of, which the read's
+        // caller asks about once the read has failed (see [`HashForm`]).
+        let by_hash = block.is_hash();
+        let note = |error: &TransportError| {
+            if by_hash && refuses_the_form(error) {
+                self.hash_form
+                    .refused
+                    .store(true, Ordering::Relaxed);
+            }
+        };
         let client = self.provider.client();
         let mut batch = BatchRequest::new(client);
         let mut sent: Vec<(Option<At>, usize, Vec<SentChunk>)> = Vec::new();
@@ -3120,6 +3223,7 @@ impl DoorsReader {
             Some(slot) => {
                 let word = slot
                     .await
+                    .inspect_err(note)
                     .map_err(|e| self.connection_error("implementation slot", e))?;
                 let found = Address::from_word(B256::from(word));
                 self.check_implementation(found)?;
@@ -3146,11 +3250,15 @@ impl DoorsReader {
                 let raw = match waiter.await {
                     Ok(raw) => raw,
                     Err(e) if at.is_some() => {
+                        note(&e);
                         debug!(error = %self.connection_error("overridden multicall", e), "block override refused");
                         honoured = false;
                         continue;
                     }
-                    Err(e) => return Err(self.connection_error("multicall", e)),
+                    Err(e) => {
+                        note(&e);
+                        return Err(self.connection_error("multicall", e));
+                    }
                 };
                 let chunk = aggregate3Call::abi_decode_returns(&raw)
                     .map_err(|e| FeedError::Parsing(format!("Efficient PropAMM multicall: {e}")))?;
@@ -3175,6 +3283,7 @@ impl DoorsReader {
         for word in words {
             read.push(
                 word.await
+                    .inspect_err(note)
                     .map_err(|e| self.connection_error("listing record", e)),
             );
         }
@@ -3597,6 +3706,27 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    /// A node refuses a request's form by the two JSON-RPC codes that say so, and by no other:
+    /// a block it does not know, under either code nodes answer that with, says nothing of the
+    /// form.
+    #[rstest]
+    #[case::invalid_params(-32602, true)]
+    #[case::method_not_found(-32601, true)]
+    #[case::a_header_not_found(-32000, false)]
+    #[case::a_resource_not_found(-32001, false)]
+    #[case::an_internal_error(-32603, false)]
+    fn only_an_error_of_its_form_refuses_a_request(#[case] code: i64, #[case] refuses: bool) {
+        let payload = serde_json::from_str(&format!(r#"{{"code":{code},"message":"no"}}"#));
+
+        assert_eq!(refuses_the_form(&TransportError::ErrorResp(payload.unwrap())), refuses);
+    }
+
+    /// Nor does a failure that is no answer of the node's at all, as a timeout.
+    #[test]
+    fn a_transport_failure_refuses_no_form() {
+        assert!(!refuses_the_form(&TransportErrorKind::custom_str("timed out")));
+    }
     use crate::pamm::protocols::efficient_prop::slots::DeskHead;
 
     /// What a read of one listing reading a print was asked on.

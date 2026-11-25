@@ -29,6 +29,21 @@ pub(super) const LISTINGS_COVERED: &str = "efficient_prop_listings_covered_total
 /// block (see `no_state_map` on [`POLLS`]) counts what its first request rules out and no more.
 /// Every reason starts at zero.
 pub(super) const LISTINGS_NOT_COVERED: &str = "efficient_prop_listings_not_covered_total";
+/// Counter, label `reason`, one of [`NotKept`]. Incremented once per poll, on a chain whose
+/// builders land makers' updates, that asked its doors and whose read is not kept, so the next
+/// poll asks every door again even where it finds nothing changed. `no_block_hash`,
+/// `hash_form_set_aside` and `hash_read_failed` are the polls whose doors were asked at a block
+/// named by its number, not its hash; `answered_in_part` is a read by hash the node left a word
+/// or a block of unanswered. A reason that keeps rising on an unchanged chain is a feed asking
+/// every door on every poll: a node that never names a block by hash, or never answers the block
+/// after the next. Every reason starts at zero.
+pub(super) const READS_NOT_KEPT: &str = "efficient_prop_reads_not_kept_total";
+/// Counter, no labels. Incremented each time the feed sets aside naming a block by its hash, for
+/// 32 heads: on the third poll in a row where the node refused that form of a request (JSON-RPC
+/// invalid params or method not found) and answered the same read by number, and on each try
+/// after those heads that it refuses again. A block the node does not know, or a timeout, sets
+/// nothing aside.
+pub(super) const HASH_FORM_SET_ASIDE: &str = "efficient_prop_hash_form_set_aside_total";
 /// Histogram, no labels. The age of the node's answer at each poll, in seconds: the wall clock at
 /// the poll's start less the time of the node's latest block. Recorded as zero where that block's
 /// time is ahead of the local clock, so every observation is zero or more and an exported sum
@@ -49,6 +64,21 @@ pub(super) enum PollOutcome {
     NoStateMap,
     /// The poll failed and published nothing.
     Failed,
+}
+
+/// Why a poll that asked its doors does not keep their read for the polls after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr, EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub(super) enum NotKept {
+    /// The node named no hash for the head, so the doors were asked by its number.
+    NoBlockHash,
+    /// Naming a block by its hash is set aside, the node having refused that form: asked by
+    /// number.
+    HashFormSetAside,
+    /// The read by the head's hash failed, and was asked again by number.
+    HashReadFailed,
+    /// The node answered the read by hash, but for a word or a block asked for the doors.
+    AnsweredInPart,
 }
 
 /// Why a poll does not serve a listing the front has reserved, on a chain whose builders land
@@ -174,6 +204,14 @@ pub(super) fn record_listings_not_covered(reason: NotCovered, listings: usize) {
         .increment(u64::try_from(listings).unwrap_or(u64::MAX));
 }
 
+pub(super) fn record_read_not_kept(reason: NotKept) {
+    counter!(READS_NOT_KEPT, "reason" => <&'static str>::from(reason)).increment(1);
+}
+
+pub(super) fn record_hash_form_set_aside() {
+    counter!(HASH_FORM_SET_ASIDE).increment(1);
+}
+
 /// Records an answer's age, zero where it is negative (see [`ANSWER_AGE`]).
 pub(super) fn record_answer_age(age_seconds: f64) {
     histogram!(ANSWER_AGE).record(age_seconds.max(0.0));
@@ -189,4 +227,8 @@ pub(super) fn init() {
     for reason in NotCovered::iter() {
         counter!(LISTINGS_NOT_COVERED, "reason" => <&'static str>::from(reason)).increment(0);
     }
+    for reason in NotKept::iter() {
+        counter!(READS_NOT_KEPT, "reason" => <&'static str>::from(reason)).increment(0);
+    }
+    counter!(HASH_FORM_SET_ASIDE).increment(0);
 }
