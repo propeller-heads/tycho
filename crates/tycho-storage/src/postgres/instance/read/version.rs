@@ -112,33 +112,47 @@ pub(super) async fn resolve_version(
     Ok(ReadAt::Past { ts, head })
 }
 
-/// Collects `rows` into a map by key. `Unexpected` if two rows have the same key: two rows of
-/// `entity` are then valid at one version, which the writer must prevent. The error names the
-/// `instance` and the version of `read`, and `storage_overlapping_versions{entity}` counts it.
-pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
+/// Collects `rows` into a map by outer key, then by inner key. `Unexpected` if two rows have the
+/// same outer and inner key: two rows of `entity` are then valid at one version, which the writer
+/// must prevent. The error names the `instance` and the version of `read`, and
+/// `storage_overlapping_versions{entity}` counts it.
+pub(super) fn unique_by_key<O, I, V>(
     entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
-    rows: impl IntoIterator<Item = (K, V)>,
-) -> Result<HashMap<K, V>, StorageError> {
-    rows.into_iter()
-        .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
-            Entry::Occupied(e) => {
-                counter!("storage_overlapping_versions", "entity" => entity).increment(1);
-                let version = match read {
-                    ReadAt::Current(None) => "the latest version".to_string(),
-                    ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
-                };
-                Err(StorageError::Unexpected(format!(
-                    "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
-                    e.key()
-                )))
+    rows: impl IntoIterator<Item = ((O, I), V)>,
+) -> Result<HashMap<O, HashMap<I, V>>, StorageError>
+where
+    O: Eq + Hash + Debug,
+    I: Eq + Hash + Debug,
+{
+    rows.into_iter().try_fold(
+        HashMap::new(),
+        |mut map: HashMap<O, HashMap<I, V>>, ((outer, inner), value)| {
+            match map.entry(outer) {
+                Entry::Vacant(e) => {
+                    e.insert(HashMap::from([(inner, value)]));
+                }
+                Entry::Occupied(mut e) if !e.get().contains_key(&inner) => {
+                    e.get_mut().insert(inner, value);
+                }
+                Entry::Occupied(e) => {
+                    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
+                    let version = match read {
+                        ReadAt::Current(None) => "the latest version".to_string(),
+                        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => {
+                            format!("version {ts}")
+                        }
+                    };
+                    return Err(StorageError::Unexpected(format!(
+                        "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
+                        (e.key(), &inner)
+                    )));
+                }
             }
-            Entry::Vacant(e) => {
-                e.insert(value);
-                Ok(map)
-            }
-        })
+            Ok(map)
+        },
+    )
 }
 
 #[cfg(test)]
