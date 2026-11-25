@@ -1081,7 +1081,7 @@ mod tests {
     /// PoolManager storage of block 26399071 gives the storage of block 26399072. The accrual is
     /// the one this swap records (`state::tests::eth_cbbtc_sell`).
     #[test]
-    fn test_pool_state_after_swap_with_fees_matches_the_pool_managers_storage() {
+    fn test_pool_state_after_swap_with_fees() {
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap();
         let pool_id =
             B256::from_str("0x8514479827d1884c2957e8015b2aed79c4422e89e44476a170a70101b5422203")
@@ -1121,7 +1121,7 @@ mod tests {
             slots
                 .iter()
                 .zip(before)
-                .map(|(slot, word)| (*slot, U256::from_str(word).unwrap()))
+                .map(|(slot, value)| (*slot, U256::from_str(value).unwrap()))
                 .collect::<HashMap<_, _>>(),
         )]);
         let params = after_swap_params(
@@ -1155,7 +1155,7 @@ mod tests {
             .collect();
         let expected: Vec<U256> = after
             .iter()
-            .map(|word| U256::from_str(word).unwrap())
+            .map(|value| U256::from_str(value).unwrap())
             .collect();
         assert_eq!(written, expected);
         assert_eq!(overwrites[&pool_manager].len(), slots.len(), "no protocol fee to write");
@@ -1164,7 +1164,7 @@ mod tests {
     /// A swap's protocol fee is added to `protocolFeesAccrued` of its input token. The slot is the
     /// one the mainnet PoolManager's `protocolFeesAccrued(USDC)` getter reads.
     #[test]
-    fn test_pool_state_after_swap_adds_the_protocol_fee_of_the_input_token() {
+    fn test_pool_state_after_swap_protocol_fee() {
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap();
         let usdc = Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         let accrued_usdc =
@@ -1194,9 +1194,9 @@ mod tests {
     /// PoolManager storage of mainnet ETH/USDC pool
     /// 0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27 (protocol fee 512125,
     /// LP fee 500) at blocks 26400000 and 26400200: writing the later price, tick and liquidity
-    /// over the earlier slot0 gives the later slot0 word.
+    /// over the earlier slot0 gives the later slot0 value.
     #[test]
-    fn test_pool_state_after_swap_matches_the_pool_managers_storage() {
+    fn test_pool_state_after_swap() {
         let pool_manager = Address::from_str("0x000000000004444c5dc75cb358380d2e3de08a90").unwrap();
         let pool_id =
             B256::from_str("0x21c67e77068de97969ba93d4aab21826d33ca12bb9f565d8496e8fda8a82ca27")

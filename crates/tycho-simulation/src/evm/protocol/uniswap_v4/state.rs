@@ -2278,7 +2278,7 @@ mod tests {
 
     #[test]
     #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
-    fn test_generic_hook_after_swap_reads_the_post_swap_price() {
+    fn test_generic_hook_after_swap_price() {
         // ETH/cbBTC pool 0x8514479827d1884c2957e8015b2aed79c4422e89e44476a170a70101b5422203. Its
         // AdaptivePoolPolicyHookV1 reads the pool price in afterSwap and reverts with
         // PriceOutOfBounds (0xccb2e471) when an ETH sell ends below its minSqrtPriceX96,
@@ -2342,7 +2342,7 @@ mod tests {
 
     #[test]
     #[ignore = "Requires RPC_URL to be set in environment variables or .env file"]
-    fn test_generic_hook_trimming_its_position_after_the_swap() {
+    fn test_generic_hook_position_trim() {
         // VIBE/ETH pool 0x415829f72e9f54531c26eae76f107618540e898a45d6ae35959e143f5faca704. At
         // the price after this VIBE sell, its CappedBurnHook holds more VIBE than its cap, so in
         // afterSwap it removes liquidity from its full-range position (ticks -887220 and 887220),
@@ -2416,7 +2416,7 @@ mod tests {
         outside_after: [&'static str; 2],
     }
 
-    fn word(hex: &str) -> U256 {
+    fn u256(hex: &str) -> U256 {
         U256::from_str(hex).unwrap()
     }
 
@@ -2514,7 +2514,7 @@ mod tests {
     #[rstest]
     #[case::sell_without_protocol_fee(eth_cbbtc_sell())]
     #[case::buy_with_protocol_fee(eth_usdc_buy())]
-    fn test_swap_fee_accrual_matches_the_pool_managers_storage(#[case] swap: RecordedSwap) {
+    fn test_swap_fee_accrual(#[case] swap: RecordedSwap) {
         let mut accrual = SwapFeeAccrual::default();
         let amount_specified = -I256::try_from(swap.amount_in).unwrap();
 
@@ -2530,11 +2530,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.amount_calculated.unsigned_abs(), U256::from(swap.amount_out));
-        assert_eq!(result.sqrt_price, word(swap.sqrt_price_after));
-        let [input_growth, other_growth] = swap.fee_growth_before.map(word);
+        assert_eq!(result.sqrt_price, u256(swap.sqrt_price_after));
+        let [input_growth, other_growth] = swap.fee_growth_before.map(u256);
         assert_eq!(
             input_growth.wrapping_add(accrual.fee_growth),
-            word(swap.input_fee_growth_after)
+            u256(swap.input_fee_growth_after)
         );
         let [(tick, growth_at_cross)] = accrual.crossed_ticks[..] else {
             panic!("the swap crosses one tick: {:?}", accrual.crossed_ticks);
@@ -2546,10 +2546,10 @@ mod tests {
         } else {
             [other_growth, input_global]
         };
-        let [outside0, outside1] = swap.outside_before.map(word);
+        let [outside0, outside1] = swap.outside_before.map(u256);
         assert_eq!(
             [globals[0].wrapping_sub(outside0), globals[1].wrapping_sub(outside1)],
-            swap.outside_after.map(word)
+            swap.outside_after.map(u256)
         );
     }
 
@@ -2843,10 +2843,7 @@ mod tests {
     #[rstest]
     #[case::refusal_stays_invalid_input(AfterSwapRefusal::InvalidInput, true)]
     #[case::other_failure_is_fatal(AfterSwapRefusal::Fatal, false)]
-    fn test_after_swap_refusal_keeps_its_error_variant(
-        #[case] refusal: AfterSwapRefusal,
-        #[case] invalid_input: bool,
-    ) {
+    fn test_after_swap_refusal(#[case] refusal: AfterSwapRefusal, #[case] invalid_input: bool) {
         let (token_in, token_out) = basic_v4_test_pool_tokens(true);
         let mut pool = create_basic_v4_test_pool();
         pool.set_hook_handler(Box::new(AfterSwapTestHook {
