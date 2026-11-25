@@ -85,6 +85,14 @@ what it collected over time remains visible in `credited_as_fees`.
 Balances are per router: each deployment holds its own vault, and a rotation leaves the old
 balance where it was.
 
+Read `vault_balances_snapshot` from a dashboard or an alert, not the view. Summing the view reads
+every trade, because each fee credit finds its router by joining to `trades`, and that takes
+longer than Grafana waits for a query. The snapshot holds the same rows plus `decimals`,
+`price_usd` (the token's most recent settled price) and `balance_usd`, and `refreshed_at` says
+when it was built. The pricer rebuilds it after a pricing pass every `VAULT_SNAPSHOT_INTERVAL`
+seconds (default 600) with `refresh_vault_balances_snapshot()`, which a reader never sees half
+done. Call that function by hand to rebuild it sooner, for example after a re-index.
+
 Two things to know when reading real data:
 
 * A **negative** balance means credits are missing. Expect one on a chain that still holds trades
@@ -411,7 +419,9 @@ It mirrors `protocols/substreams/release.sh`, including its rules:
   testing.
 
 Run it from CI with the **Release Router Trades Substreams** workflow (`workflow_dispatch`, with
-an optional space-separated `chains` input). It prints the `db_out` module hash of every package.
+an optional space-separated `chains` input), started from the release tag: only a tag can assume
+the role that uploads, so a run from a branch fails at its AWS credentials, and the run uses the
+workflow file as it is at that tag. It prints the `db_out` module hash of every package.
 That hash is the identity the cursors are keyed by, so compare it with the running
 `cursors_<chain>.id` before pinning, to know whether a chain will resume or restart.
 

@@ -69,6 +69,14 @@ impl SubstreamsStream {
             )),
         }
     }
+
+    /// Wraps any block stream, for tests that drive a runner without a substreams endpoint.
+    #[cfg(test)]
+    pub(crate) fn from_stream(
+        stream: impl Stream<Item = Result<BlockResponse, Error>> + Send + 'static,
+    ) -> Self {
+        SubstreamsStream { stream: Box::pin(stream) }
+    }
 }
 
 /// Delays between reconnection attempts: none before the first, then 200ms, 400ms, 800ms, 1.6s,

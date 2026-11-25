@@ -713,7 +713,7 @@ impl PostgresGateway {
                 StorageError::DecodeError(format!("Failed to deserialize TracingResult: {e}"))
             })?;
             results_by_entry_point
-                .entry(ep_ext_id.clone())
+                .entry(ep_ext_id)
                 .or_insert_with(HashMap::new)
                 .insert((&tracing_params).try_into()?, converted_tracing_result);
         }

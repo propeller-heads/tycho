@@ -81,20 +81,20 @@ A message names its assets by address and prices every level in human units:
 
 ```json
 {
-  "slot": 15440991,
-  "block": 26201953,
-  "ts": 1792115918290990905,
+  "slot": 15683312,
+  "block": 26443516,
+  "ts": 1795023759106137739,
   "books": [
     {
       "maker": "Fermi",
-      "quoteAddress": "0x5979458912f80b96d30d4220af8e2e4925a33320",
+      "quoteAddress": "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
       "token1": "WBTC",
       "token2": "USDC",
       "token1Address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
       "token2Address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-      "calculated_from": 284836009221452523116691695,
-      "bids": [{ "price": 80970.38, "cumVolume": 0.0005 }],
-      "asks": [{ "price": 80997.89405475458, "cumVolume": 0.00012346 }]
+      "calculated_from": 289306042692137895373832195,
+      "bids": [{ "price": 63219.731999999996, "cumVolume": 0.0005 }],
+      "asks": [{ "price": 63239.10706380826, "cumVolume": 0.00015813 }]
     }
   ]
 }

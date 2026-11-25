@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2
+
+The hook bitmap, dynamic fee flag, `pool_state_base_slot`, protocol fee split and deployment params
+come from the `pancakeswap-infinity-substreams` crate, shared with the Bin package. The output is
+unchanged; the wasm hash is not.
+
+`map_pools_created` now rejects a params key other than `pool_manager` and `vault`. The rlib no
+longer exports `decode_address` or the shared `parameters` items: they are in
+`pancakeswap-infinity-substreams`.
+
 ## v0.1.1
 
 The crate also builds as an rlib and exports `pool_component` and `decode_address`, so

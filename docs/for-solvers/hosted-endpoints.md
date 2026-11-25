@@ -10,7 +10,7 @@ description: Tycho Indexer's hosted endpoints
 <thead><tr><th width="244">Chain</th><th>URL</th></tr></thead>
 <tbody>
 <tr><td>Ethereum (Mainnet)</td><td>tycho-beta.propellerheads.xyz</td></tr>
-<tr><td>Base Mainnet (supports Flashblocks)</td><td>tycho-base-beta.propellerheads.xyz</td></tr>
+<tr><td>Base Mainnet</td><td>tycho-base-beta.propellerheads.xyz</td></tr>
 <tr><td>Unichain Mainnet</td><td>tycho-unichain-beta.propellerheads.xyz</td></tr>
 <tr><td>Arbitrum Mainnet</td><td>tycho-arbitrum-beta.propellerheads.xyz</td></tr>
 <tr><td>Polygon Mainnet</td><td>tycho-polygon-beta.propellerheads.xyz</td></tr>

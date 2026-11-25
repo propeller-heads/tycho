@@ -5,7 +5,8 @@
 #                     START_BLOCK, STOP_BLOCK, FLUSH_INTERVAL (default 100), METRICS_ADDR,
 #                     TYCHO_S3_BUCKET, SPKG_CACHE_DIR
 #   entrypoint price  DSN, TYCHO_<CHAIN>_DATABASE_URL...; optional MAX_AGE (default "1 hour"),
-#                     INTERVAL (default 60), LOCAL_PRICING=1 for local stand-in tables
+#                     INTERVAL (default 60), VAULT_SNAPSHOT_INTERVAL (default 600),
+#                     LOCAL_PRICING=1 for local stand-in tables
 #
 # Both modes wait for the database first, so the container can start together with Postgres.
 # `sink` applies schema.sql with `substreams-sink-sql setup`; `price` registers the postgres_fdw
@@ -60,7 +61,10 @@ sink)
 		--history-table "substreams_history_${CHAIN}"
 	)
 	args=("$DSN" "$spkg")
-	[ -n "${START_BLOCK:-}${STOP_BLOCK:-}" ] && args+=("${START_BLOCK:-}:${STOP_BLOCK:-}")
+	# Flags rather than the positional START:STOP range, which substreams-sink-sql rejects
+	# without a stop block. An unset STOP_BLOCK keeps the sink following the chain.
+	[ -n "${START_BLOCK:-}" ] && args+=(--start-block "$START_BLOCK")
+	[ -n "${STOP_BLOCK:-}" ] && args+=(--stop-block "$STOP_BLOCK")
 	[ -n "${SUBSTREAMS_ENDPOINT:-}" ] && args+=(-e "$SUBSTREAMS_ENDPOINT")
 	wait_for_db "$DSN"
 	substreams-sink-sql setup "$DSN" "$spkg" "${system_table_args[@]}"

@@ -107,6 +107,9 @@ where
     /// Live override providers keyed by `protocol_system`. A pool of that protocol subscribes to
     /// its provider at creation time and reads fresh overrides on every simulation.
     override_providers: HashMap<String, Arc<dyn StateOverrideProvider>>,
+    /// Protocol systems to publish an exchange's components under, keyed by exchange. Decoding
+    /// is unaffected: states still decode with the exchange's registered decoder.
+    component_labels: HashMap<String, String>,
     /// Seconds between blocks, used to project a confirmed block header onto the next block when
     /// deriving the execution block for block-sensitive states.
     block_time_secs: u64,
@@ -142,6 +145,7 @@ where
             inclusion_filters: HashMap::new(),
             protocols_skip_unknown_tokens: HashSet::new(),
             override_providers: HashMap::new(),
+            component_labels: HashMap::new(),
             block_time_secs: chain.block_time_secs(),
             chain,
         }
@@ -149,7 +153,7 @@ where
 
     /// The block a quote produced from `header` is expected to execute in.
     ///
-    /// A partial (flashblock) header describes a block that is still open, so a quote can still
+    /// A partial header describes a block that is still open, so a quote can still
     /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
     fn execution_block(&self, header: &BlockHeader) -> BlockContext {
         if header.partial_block_index.is_some() {
@@ -211,6 +215,11 @@ where
     pub async fn set_tokens(&self, tokens: HashMap<Bytes, Token>) {
         let mut guard = self.state.write().await;
         guard.tokens = tokens;
+    }
+
+    /// Returns read access to the decoder's token metadata, keyed by token address.
+    pub(crate) async fn tokens(&self) -> RwLockReadGuard<'_, HashMap<Bytes, Token>> {
+        RwLockReadGuard::map(self.state.read().await, |state| &state.tokens)
     }
 
     pub fn skip_state_decode_failures(&mut self, skip: bool) {
@@ -293,6 +302,23 @@ where
         );
         self.registry
             .insert(exchange.to_string(), decoder);
+    }
+
+    /// Publishes `exchange`'s components under `protocol_system` instead of the indexer's name.
+    ///
+    /// Used to route a native protocol through another execution path, e.g. `fallback:biconomy`
+    /// for a natively indexed `IPropAMM` venue: the components keep their id, attributes and
+    /// decoder, and only `protocol_system` changes, so the encoder registry picks the other path.
+    pub fn label_components(&mut self, exchange: &str, protocol_system: String) {
+        self.component_labels
+            .insert(exchange.to_string(), protocol_system);
+    }
+
+    fn labelled(&self, exchange: &str, mut component: ProtocolComponent) -> ProtocolComponent {
+        if let Some(label) = self.component_labels.get(exchange) {
+            component.protocol_system = label.clone();
+        }
+        component
     }
 
     /// Registers a decoder for a given exchange.
@@ -441,7 +467,10 @@ where
                         if tokens.len() == comp.tokens.len() {
                             Ok(Some((
                                 id.clone(),
-                                ProtocolComponent::from_with_tokens(comp.clone(), tokens),
+                                self.labelled(
+                                    protocol.as_str(),
+                                    ProtocolComponent::from_with_tokens(comp.clone(), tokens),
+                                ),
                             )))
                         } else {
                             Ok(None)
@@ -539,7 +568,7 @@ where
                         let impl_update = ResponseAccount {
                             address: impl_addr,
                             slots: HashMap::new(),
-                            ..account.clone()
+                            ..account
                         };
                         storage_by_address.insert(impl_addr, impl_update);
                     } else {
@@ -678,9 +707,12 @@ where
                             }
                         }
                     }
-                    let component = ProtocolComponent::from_with_tokens(
-                        snapshot.component.clone(),
-                        component_tokens,
+                    let component = self.labelled(
+                        protocol.as_str(),
+                        ProtocolComponent::from_with_tokens(
+                            snapshot.component.clone(),
+                            component_tokens,
+                        ),
                     );
 
                     // Add new tokens to the simulation engine
@@ -868,7 +900,7 @@ where
                             let impl_update = AccountUpdate {
                                 address: impl_addr,
                                 slots: HashMap::new(),
-                                ..update.clone()
+                                ..update
                             };
                             account_update_by_address.insert(impl_addr, impl_update);
                         }
@@ -1773,6 +1805,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_decode_publishes_labelled_components() {
+        let mut decoder = setup_decoder(true).await;
+        decoder.label_components("uniswap_v2", "fallback:uniswap_v2".to_string());
+
+        let msg = load_test_msg("uniswap_v2_snapshot");
+        let update = decoder
+            .decode(&msg)
+            .await
+            .expect("decode failure");
+
+        // The label changes only the protocol system: the id and the decoded state stay.
+        assert_eq!(update.states.len(), 1);
+        let (id, component) = update
+            .new_pairs
+            .iter()
+            .next()
+            .expect("one new pair");
+        assert_eq!(component.protocol_system, "fallback:uniswap_v2");
+        assert_eq!(component.id.to_string(), *id);
+        assert!(update.states.contains_key(id));
+    }
+
+    #[tokio::test]
     async fn test_decode_token_creation_delta_with_existing_proxy() {
         let decoder = setup_decoder(true).await;
         let msg = load_test_msg("uniswap_v2_delta_token_creation");
@@ -1899,9 +1954,8 @@ mod tests {
             Ok(res) => {
                 if !skip_failures {
                     panic!("Expected failures to be raised")
-                } else {
-                    assert_eq!(res.states.len(), 0);
                 }
+                assert_eq!(res.states.len(), 0);
             }
         }
     }

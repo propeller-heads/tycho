@@ -48,7 +48,7 @@ jobs:
           brew install libpq
           brew link --force libpq
 
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6  # v1.30.2
         with:
           bin: ${{ matrix.package }}
           archive: ${{ matrix.package }}-${{ matrix.target }}-${{ github.event.release.tag_name }}
@@ -90,47 +90,17 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Wave 1: foundation crate
-      - name: Publish tycho-common
+      # Publishes in dependency order, skips crates already on crates.io so a rerun resumes a
+      # partial release, and waits for each crate to be indexed before the next one.
+      - name: Publish crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
         run: >
-          cargo publish -p tycho-common --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+          .github/scripts/publish-crates.sh
+          tycho-common tycho-ethereum tycho-client tycho-execution tycho-simulation
 
-      - name: Wait for crates.io to index wave 1
-        run: sleep 30
-
-      # Wave 2: crates that depend only on tycho-common
-      - name: Publish tycho-ethereum
-        run: >
-          cargo publish -p tycho-ethereum --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Publish tycho-client
-        run: >
-          cargo publish -p tycho-client --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io to index wave 2
-        run: sleep 30
-
-      # Wave 3: crates that depend on wave 1+2
-      - name: Publish tycho-storage
-        run: >
-          cargo publish -p tycho-storage --locked --dry-run
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Publish tycho-execution
-        run: >
-          cargo publish -p tycho-execution --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Publish tycho-simulation
-        run: >
-          cargo publish -p tycho-simulation --locked
-          --token ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io to index wave 3
-        run: sleep 30
+      - name: Check that tycho-storage packages
+        run: cargo publish -p tycho-storage --locked --dry-run
 
       # Wave 4: indexer (depends on storage, common, client, ethereum)
       # TODO: Re-enable this when we can release tycho-storage to crates.io

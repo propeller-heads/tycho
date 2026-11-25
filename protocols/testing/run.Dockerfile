@@ -18,12 +18,6 @@ ARG PROTOCOLS=""
 WORKDIR /build/tycho-protocol-sdk
 COPY . .
 
-# Build EVM contracts first (protocol-testing depends on the runtime JSON files)
-WORKDIR /build/tycho-protocol-sdk/protocols/adapter-integration/evm
-COPY --from=tools /out/forge /usr/local/bin/forge
-# The forge libraries come from the lib/ submodules in the build context.
-RUN forge build
-
 # Build substreams (wasm targets only - source not needed in final image)
 WORKDIR /build/tycho-protocol-sdk/protocols/substreams
 # resolve_base maps clone protocol names to buildable substreams directories.
@@ -73,7 +67,7 @@ RUN resolve_base() { \
 WORKDIR /build/tycho-protocol-sdk
 RUN cargo build --release --bin tycho-indexer
 
-# Build protocol-testing binary (after EVM contracts are built)
+# Build protocol-testing binary
 WORKDIR /build/tycho-protocol-sdk/protocols/testing
 RUN cargo build --release
 
@@ -159,34 +153,39 @@ RUN mkdir -p /app/adapter-integration/evm
 # layout is protocols/substreams/<pkg>, one level deeper). So the tycho protos must sit at /proto.
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/proto /proto
 
-# Copy EVM directory
-COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/out /app/adapter-integration/evm/out
+# The EVM project, buildable: the runner builds each package's VM adapter with its own
+# constructor arguments, and a strict package's balance lens, with `forge script` at run time
+# (scripts/buildRuntime.sh), so the sources, libraries and Foundry config ship with the image.
+COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/src /app/adapter-integration/evm/src
+COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/lib /app/adapter-integration/evm/lib
 COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/scripts /app/adapter-integration/evm/scripts
-# Remove unnecessary EVM build artifacts
-RUN find /app/adapter-integration/evm/out -name "*.json" ! -name "*.runtime.json" -delete && \
-    find /app/adapter-integration/evm/out -type d -empty -delete 2>/dev/null || true
+COPY --from=protocol-sdk-builder /build/tycho-protocol-sdk/protocols/adapter-integration/evm/foundry.toml /build/tycho-protocol-sdk/protocols/adapter-integration/evm/remappings.txt /app/adapter-integration/evm/
+COPY --from=tools /out/forge /out/cast /usr/local/bin/
+# Compiled here, at the path the runner uses, so the compiler is installed in the image and the
+# compile cache holds when a test builds an adapter or a lens.
+RUN cd /app/adapter-integration/evm && forge build
 
 # Copy filtered substreams from filter stage
 COPY --from=substreams-filter /filtered /app/substreams
 
-# Clean up unnecessary files to reduce size
-RUN find /app -name "*.rs" -delete && \
-    find /app -name "Cargo.toml" -delete && \
-    find /app -name "Cargo.lock" -delete && \
-    find /app -name "src" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -name "*.d" -delete && \
-    find /app -name "*.rlib" -delete && \
-    find /app -name "*.rmeta" -delete && \
-    find /app -name ".fingerprint" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -name "build" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -name "deps" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -name "incremental" -type d -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -type d -empty -delete 2>/dev/null || true
+# Clean up unnecessary files to reduce size: the substreams' Rust sources and build leftovers. The
+# EVM project above keeps its `src`, which the runner builds from.
+RUN find /app/substreams -name "*.rs" -delete && \
+    find /app/substreams -name "Cargo.toml" -delete && \
+    find /app/substreams -name "Cargo.lock" -delete && \
+    find /app/substreams -name "src" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/substreams -name "*.d" -delete && \
+    find /app/substreams -name "*.rlib" -delete && \
+    find /app/substreams -name "*.rmeta" -delete && \
+    find /app/substreams -name ".fingerprint" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/substreams -name "build" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/substreams -name "deps" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/substreams -name "incremental" -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /app/substreams -type d -empty -delete 2>/dev/null || true
 
 # Copy external tools
 COPY --from=substreams-cli /app/substreams /usr/local/bin/substreams
 RUN chmod +x /usr/local/bin/substreams
-COPY --from=tools /out/forge /out/cast /usr/local/bin/
 
 # Strip binaries to reduce size
 RUN strip /usr/local/bin/* 2>/dev/null || true
