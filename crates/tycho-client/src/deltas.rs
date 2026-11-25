@@ -983,19 +983,7 @@ impl DeltasClient for WsDeltasClient {
                                     *guard = None;
                                     break; // break inner loop → reconnect
                                 }
-                                Ok(Some(msg)) => {
-                                    // A connection that delivers frames is healthy, so a server
-                                    // that closes it later does not use up the reconnect budget.
-                                    // A read error or a close frame ends the connection, so it
-                                    // does not count.
-                                    if matches!(
-                                        msg,
-                                        Ok(ref frame) if !frame.is_close()
-                                    ) {
-                                        retry_count = 0;
-                                    }
-                                    this.handle_msg(msg).await
-                                }
+                                Ok(Some(msg)) => this.handle_msg(msg).await,
                                 Ok(None) => {
                                     // This code should not be reachable since the stream
                                     // should return ConnectionClosed in the case above
@@ -1007,29 +995,33 @@ impl DeltasClient for WsDeltasClient {
                         },
                         _ = cmd_rx.recv() => {break 'retry},
                     };
-                    if let Err(error) = res {
-                        debug!(?error, "WsError");
-                        if matches!(
-                            error,
-                            DeltasError::ConnectionClosed | DeltasError::ConnectionError { .. }
-                        ) {
-                            // Prepare for reconnection
-                            retry_count += 1;
-                            let mut guard = this.inner.as_ref().lock().await;
-                            *guard = None;
+                    let Err(error) = res else {
+                        // A connection that delivers frames is healthy, so a server that
+                        // closes it later does not use up the reconnect budget.
+                        retry_count = 0;
+                        continue;
+                    };
+                    debug!(?error, "WsError");
+                    if matches!(
+                        error,
+                        DeltasError::ConnectionClosed | DeltasError::ConnectionError { .. }
+                    ) {
+                        // Prepare for reconnection
+                        retry_count += 1;
+                        let mut guard = this.inner.as_ref().lock().await;
+                        *guard = None;
 
-                            warn!(
-                                ?error,
-                                ?retry_count,
-                                "Connection dropped unexpectedly; Reconnecting..."
-                            );
-                            break;
-                        }
-                        // Other errors are considered fatal
-                        error!(?error, "Fatal error; Exiting");
-                        result = Err(error);
-                        break 'retry;
+                        warn!(
+                            ?error,
+                            ?retry_count,
+                            "Connection dropped unexpectedly; Reconnecting..."
+                        );
+                        break;
                     }
+                    // Other errors are considered fatal
+                    error!(?error, "Fatal error; Exiting");
+                    result = Err(error);
+                    break 'retry;
                 }
             }
             debug!(
