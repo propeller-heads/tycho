@@ -186,6 +186,11 @@ for any protocol indexed by Tycho.
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
     `ask_valid_until_ms`
+  - a poll asks no door only where everything the doors' answers are read from equals the last
+    sampled poll's (`SampledOn` in `reader.rs`): the head's hash and number, the next block's
+    number and second, the whole state override sent, each listing taken with its `doorView`
+    bytes and its record's and desk's words, the implementation. Whatever a door's calls are
+    newly derived from joins that key; a node that names no block hash is asked every door
   - the quote layout, front, factory, desk contract code hash and allow-list are builder
     arguments (`EfficientPropDeployment`), never constants; `with_door_code_hash` pins the doors'
   - Base's path is held whole but `build` refuses Base (`BASE_NOT_SERVED`) until its gas is

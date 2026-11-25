@@ -19,6 +19,10 @@
 //! the doors may fail (a door refuses a size by reverting), so each is allowed to; the calls of a
 //! batch are split over several `aggregate3` calls so that none needs more gas than a node grants
 //! one `eth_call`.
+//!
+//! On a chain whose builders land makers' updates ([`DoorsReader::read_next_block`]), a read that
+//! finds everything its doors' answers are read from as the last sampled read found it asks no
+//! door and is answered that read's samples ([`SampledOn`]).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,7 +54,7 @@ use alloy::{
     transports::{utils::guess_local_url, TransportError, TransportErrorKind, TransportFut},
 };
 use reqwest::Url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use tycho_common::models::Chain;
 
@@ -59,7 +63,7 @@ use crate::{
         desks::ApprovedDesks,
         ladder::FillPath,
         overrides::{NextBlock, NextBlockReader, NotTaken, Wanted, SLOT_SECS},
-        slots::{HeadWords, SLOT_RULE},
+        slots::{HeadWords, ListingSlots, SLOT_RULE},
         state::{CreditGas, FillReads, PairPlace},
     },
     snapshot_feed::errors::FeedError,
@@ -340,7 +344,7 @@ pub(super) struct Hold {
 
 /// What one side of a listing reads from its depth word: when it runs out, how fast its levels
 /// drift (ppm a second) and the depth's nonce (ms).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SideView {
     runs_out_ms: u64,
     drift: u64,
@@ -348,9 +352,12 @@ struct SideView {
 }
 
 /// A listing the front has reserved, and where its door would be.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Listing {
     id: u32,
+    /// The hash of the front's whole `doorView` answer for it, every word of it: the listing's
+    /// pool, flags, word, depths and ticket among them, read or not (see [`SampledOn`]).
+    view: B256,
     token0: Address,
     token1: Address,
     door: Address,
@@ -796,9 +803,107 @@ struct Group {
 /// A batch's answers: per group, its calls' results, or `None` where the node refused the group's
 /// block override or ran its calls at another moment on the front's clock; and the storage
 /// words asked for, in order, each failing where the node did not answer it.
+/// What a batch reads of its block beside its calls and storage words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Also {
+    Nothing,
+    /// The front's implementation slot, checked against the allow-list before any answer is
+    /// looked at.
+    Implementation,
+    /// The block's header, for its hash.
+    Head,
+    ImplementationAndHead,
+}
+
+impl Also {
+    fn implementation(self) -> bool {
+        matches!(self, Self::Implementation | Self::ImplementationAndHead)
+    }
+
+    fn head(self) -> bool {
+        matches!(self, Self::Head | Self::ImplementationAndHead)
+    }
+}
+
 struct BatchAnswers {
     groups: Vec<Option<Vec<Call3Result>>>,
     words: Vec<Result<U256, FeedError>>,
+    /// The hash of the batch's block, where it was asked and the node answered that block.
+    head: Option<B256>,
+    /// The front's implementation at the batch's block, where it was asked.
+    implementation: Option<Address>,
+}
+
+/// A block as `eth_getBlockByNumber` answers it: the two fields read.
+#[derive(Debug, Deserialize)]
+struct Header {
+    hash: B256,
+    number: U64,
+}
+
+/// One listing a next-block read took: what the reads before its door's answered of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TakenListing {
+    /// The front's `doorView` of it, whole (its `view` hash), and the door derived from it.
+    listing: Listing,
+    /// The inputs its most-fillable reads ask, from its tokens' configured decimals.
+    probes: (U256, U256),
+    /// Its record's settings word at the head.
+    settings: U256,
+    /// Its record's live-source word at the head, where it reads a print.
+    price: Option<U256>,
+    /// Its desk contract's desk word at the head, whole.
+    desk: U256,
+    /// Its desk contract, its two slots there, and the pair's own words at the head.
+    slots: ListingSlots,
+}
+
+/// Everything a next-block read's doors were asked on. A door's answer is an `eth_call`'s: the
+/// node's run of the call on one block's state under the overrides sent with it. So two reads
+/// agreeing on all of the following ask every door the same calls of the same state, and the
+/// second is answered as the first was:
+/// - the head: its hash, which stands for every account's state there (the front and its records,
+///   the pools and their lenders, the tokens, the desk contracts' own words, the price contracts'
+///   code, the doors), and its number, which pins each request;
+/// - the block the doors are asked at, its number and its second, the block override;
+/// - the state override, whole as it is sent: each listing's own slots of its desk contract and
+///   each price contract a listing reads, as the state answer wrote them;
+/// - what decides which calls are made: each listing taken with its `doorView`, its record's words,
+///   its desk word and its probes, the front's implementation, the tip cap floor and the sizes
+///   sampled per side.
+///
+/// The head's hash is read with the listings' words and again with each batch that asks a door,
+/// all pinned to the head's number: a read is kept only where every one of them names the same
+/// block, so no answer kept came from another block of that number.
+#[derive(Debug, Clone, PartialEq)]
+struct SampledOn {
+    head: B256,
+    head_number: u64,
+    target_number: u64,
+    target_time: u64,
+    implementation: Address,
+    min_tip_cap_wei: U256,
+    rungs: u32,
+    state: serde_json::Value,
+    listings: Vec<TakenListing>,
+}
+
+/// A next-block read's doors as sampled, and what they were asked on.
+#[derive(Debug)]
+struct Sampled {
+    on: SampledOn,
+    doors: Vec<DoorRead>,
+}
+
+/// What [`DoorsReader::take_next_block`] answers: the listings the next block's state serves, the
+/// state override their doors are asked under, and the head it was all read at, where the node
+/// names it.
+struct NextTaken {
+    served: Vec<(Listing, (U256, U256))>,
+    state: serde_json::Value,
+    listings: Vec<TakenListing>,
+    head: Option<B256>,
+    implementation: Option<Address>,
 }
 
 /// The node's JSON-RPC transport over HTTP: alloy's own, less the URL it records on every
@@ -905,6 +1010,12 @@ pub(super) struct DoorsReader {
     /// How many times that warning was logged.
     #[cfg(test)]
     pub(super) step_back_warnings: Arc<std::sync::atomic::AtomicUsize>,
+    /// The last next-block read whose doors were sampled, with what they were asked on: a read
+    /// asked on the same is answered from it, and no door is asked (see [`SampledOn`]).
+    sampled: Arc<Mutex<Option<Sampled>>>,
+    /// How many reads were answered from it.
+    #[cfg(test)]
+    pub(super) reuses: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl DoorsReader {
@@ -946,6 +1057,9 @@ impl DoorsReader {
             stepping_back: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             step_back_warnings: Arc::default(),
+            sampled: Arc::default(),
+            #[cfg(test)]
+            reuses: Arc::default(),
         }
     }
 
@@ -1042,7 +1156,7 @@ impl DoorsReader {
                 Some((listing, probes))
             })
             .collect();
-        let open = self
+        let (open, _) = self
             .open_doors(&served, block, None)
             .await?;
         let doors = self
@@ -1087,6 +1201,14 @@ impl DoorsReader {
     /// stalled, since with one slot missed its latest block is at most two slots old, and a poll
     /// that served nothing there would otherwise succeed in silence for as long as the node stays
     /// stuck.
+    ///
+    /// The doors are asked only where something their answers are read from has changed since
+    /// the last read that sampled them: a read finding the same head, the same next block, the
+    /// same state override and the same listings as that one ([`SampledOn`]) is answered its
+    /// doors' reads, and stops after its second request. Its listings, their words at the head,
+    /// the state maps, the front's implementation and the lag are read and checked on every poll
+    /// all the same. A node that does not name the head by its hash is asked every door on every
+    /// poll.
     async fn read_next_block(
         &self,
         next_block: &NextBlockReader,
@@ -1147,15 +1269,67 @@ impl DoorsReader {
                 Some((listing, probes))
             })
             .collect();
-        let (served, state) = self
+        let NextTaken { served, state, listings, head: taken_at, implementation } = self
             .take_next_block(served, block, &next)
             .await?;
-        let open = self
-            .open_doors(&served, block, Some((&clock, &state)))
-            .await?;
-        read.doors = self
-            .sample_next_block(&open, &clock, block, &state)
-            .await?;
+        let asked_on = taken_at
+            .zip(implementation)
+            .map(|(hash, implementation)| SampledOn {
+                head: hash,
+                head_number: head.number,
+                target_number: next.number,
+                target_time: next.time,
+                implementation,
+                min_tip_cap_wei: self.min_tip_cap_wei,
+                rungs: self.rungs,
+                state: state.clone(),
+                listings,
+            });
+        let kept = asked_on.as_ref().and_then(|asked_on| {
+            self.sampled
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|sampled| sampled.on == *asked_on)
+                .map(|sampled| sampled.doors.clone())
+        });
+        read.doors = match kept {
+            Some(doors) => {
+                debug!(
+                    front = %self.front,
+                    head = head.number,
+                    listings = doors.len(),
+                    "asking no door: nothing its answers are read from has changed since they \
+                     were sampled"
+                );
+                #[cfg(test)]
+                self.reuses
+                    .fetch_add(1, Ordering::Relaxed);
+                doors
+            }
+            None => {
+                let (open, opened_at) = self
+                    .open_doors(&served, block, Some((&clock, &state)))
+                    .await?;
+                let (doors, sampled_at) = self
+                    .sample_next_block(&open, &clock, block, &state)
+                    .await?;
+                // Kept only where every batch that asked a door names the block the listings'
+                // words were read at.
+                if let Some(asked_on) = asked_on.filter(|asked_on| {
+                    std::iter::once(&opened_at)
+                        .chain(&sampled_at)
+                        .all(|at| *at == Some(asked_on.head))
+                }) {
+                    *self
+                        .sampled
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(Sampled { on: asked_on, doors: doors.clone() });
+                }
+                doors
+            }
+        };
         read.until_ms = read
             .doors
             .iter()
@@ -1187,7 +1361,7 @@ impl DoorsReader {
         listings: Vec<(Listing, (U256, U256))>,
         block: BlockId,
         next: &NextBlock,
-    ) -> Result<(Vec<(Listing, (U256, U256))>, serde_json::Value), FeedError> {
+    ) -> Result<NextTaken, FeedError> {
         let listings: Vec<_> = listings
             .into_iter()
             .filter(|(listing, _)| {
@@ -1240,8 +1414,17 @@ impl DoorsReader {
                     [(account, quote), (account, firm)]
                 }),
         );
-        let BatchAnswers { groups, mut words } = self
-            .batch(block, vec![Group { calls, at: None }], &slots, false, None, None)
+        // With them the front's implementation and the head's hash: what a read that asks no
+        // door is checked on and matched by (see [`SampledOn`]).
+        let BatchAnswers { groups, mut words, head: taken_at, implementation } = self
+            .batch(
+                block,
+                vec![Group { calls, at: None }],
+                &slots,
+                Also::ImplementationAndHead,
+                None,
+                None,
+            )
             .await?;
         let places = groups
             .into_iter()
@@ -1257,7 +1440,7 @@ impl DoorsReader {
         let mut words = words.into_iter();
         let mut pair_words = pair_words.into_iter();
         let mut wanted = Vec::with_capacity(listings.len());
-        for (place, (listing, _)) in (0..listings.len())
+        for (place, (listing, probes)) in (0..listings.len())
             .map(|i| places.get(i))
             .zip(&listings)
         {
@@ -1280,14 +1463,15 @@ impl DoorsReader {
                 .filter(|place| place.success)
                 .zip(head)
                 .and_then(|(place, head)| {
-                    SLOT_RULE.slots(
+                    let slots = SLOT_RULE.slots(
                         &place.returnData,
                         desks[&listing.desk],
                         listing.word_index,
                         head,
-                    )
+                    )?;
+                    Some((slots, head.desk))
                 });
-            let (Some(quote), Ok(settings)) = (quote, settings) else {
+            let (Some((quote, desk)), Ok(settings)) = (quote, settings) else {
                 wanted.push(None);
                 continue;
             };
@@ -1299,6 +1483,7 @@ impl DoorsReader {
                     .map(|id| price_contract(self.front, id))
             };
             let mut needs = Vec::new();
+            let mut live_source = None;
             if prints {
                 // The source the fill reads: the live source's id, the copy's low 32 bits. The
                 // fill reads no other: a listing's backup source is read only once a front op
@@ -1308,50 +1493,68 @@ impl DoorsReader {
                     continue;
                 };
                 needs.extend(contract(field(price, 0, 32)));
+                live_source = Some(price);
             }
-            wanted.push(Some(Wanted { quote, carries: listing_carries(settings), needs }));
+            let read = TakenListing {
+                listing: *listing,
+                probes: *probes,
+                settings,
+                price: live_source,
+                desk,
+                slots: quote.clone(),
+            };
+            wanted.push(Some((Wanted { quote, carries: listing_carries(settings), needs }, read)));
         }
-        let taken = next.take(wanted.iter().flatten());
+        let taken = next.take(
+            wanted
+                .iter()
+                .flatten()
+                .map(|(wanted, _)| wanted),
+        );
         let mut results = taken.listings.into_iter();
+        let mut read = Vec::new();
         let served = listings
             .into_iter()
             .zip(wanted)
             .filter_map(|((listing, probes), wanted)| {
-                let taken = wanted.and_then(|_| results.next());
+                let taken = wanted.map(|(_, read)| (read, results.next()));
                 let skipped = match taken {
-                    Some(Ok(())) => return Some((listing, probes)),
-                    None => "its quote's place or its record is unread",
-                    Some(Err(NotTaken::NoEntry)) => {
+                    Some((taken, Some(Ok(())))) => {
+                        read.push(taken);
+                        return Some((listing, probes));
+                    }
+                    None | Some((_, None)) => "its quote's place or its record is unread",
+                    Some((_, Some(Err(NotTaken::NoEntry)))) => {
                         "its maker has no update in the next block's state map"
                     }
-                    Some(Err(NotTaken::Stale)) => {
+                    Some((_, Some(Err(NotTaken::Stale)))) => {
                         "its maker's update in the next block's state map stamps a block it does \
                          not fill in"
                     }
-                    Some(Err(NotTaken::Missing(_))) => {
+                    Some((_, Some(Err(NotTaken::Missing(_))))) => {
                         "the answer with its update does not write a price contract it reads"
                     }
-                    Some(Err(NotTaken::OtherAnswer(_))) => {
+                    Some((_, Some(Err(NotTaken::OtherAnswer(_))))) => {
                         "slots it reads are taken from another answer"
                     }
-                    Some(Err(NotTaken::Stopped)) => "its desk is stopped at the head",
-                    Some(Err(NotTaken::OtherEpoch)) => {
+                    Some((_, Some(Err(NotTaken::Stopped)))) => "its desk is stopped at the head",
+                    Some((_, Some(Err(NotTaken::OtherEpoch)))) => {
                         "its maker's update in the next block's state map is of another desk epoch \
                          than the head's"
                     }
-                    Some(Err(NotTaken::Foreign)) => {
+                    Some((_, Some(Err(NotTaken::Foreign)))) => {
                         "an answer wrote a slot of its desk contract that is the front's, and no \
                          answer covered it"
                     }
-                    Some(Err(NotTaken::Malformed)) => {
+                    Some((_, Some(Err(NotTaken::Malformed)))) => {
                         "every answer with its maker's update has an entry that could not be read \
                          whole"
                     }
-                    Some(Err(NotTaken::NotHeld)) => {
+                    Some((_, Some(Err(NotTaken::NotHeld)))) => {
                         "its maker's word carried from the head block is not the word the head \
                          holds"
                     }
-                    Some(Err(NotTaken::Conflict)) => {
+                    Some((_, Some(Err(NotTaken::Conflict)))) => {
                         "an answer's entries disagree on a slot of its maker's update or of a price \
                          contract it reads"
                     }
@@ -1365,7 +1568,7 @@ impl DoorsReader {
                 None
             })
             .collect();
-        Ok((served, taken.state))
+        Ok(NextTaken { served, state: taken.state, listings: read, head: taken_at, implementation })
     }
 
     /// The first request: the block, the front's implementation and clock, and every reserved
@@ -1480,8 +1683,8 @@ impl DoorsReader {
         // The highest id the front has reserved, served or not: the next poll scans past it, so a
         // listing this read leaves out never hides the ones reserved after it.
         let mut highest = 0;
-        for (id, view) in (1..=scan_to).zip(listings) {
-            let view = setting::<doorViewCall>(view, "front's doorView")?;
+        for (id, answer) in (1..=scan_to).zip(listings) {
+            let view = setting::<doorViewCall>(answer, "front's doorView")?;
             if view.pool == Address::ZERO {
                 continue;
             }
@@ -1557,6 +1760,7 @@ impl DoorsReader {
             let (bid, ask) = (side(view.depth[0]), side(view.depth[2]));
             found.push(Listing {
                 id,
+                view: keccak256(&answer.returnData),
                 token0: view.token0,
                 token1: view.token1,
                 door: self
@@ -1595,13 +1799,14 @@ impl DoorsReader {
     /// state override of the listings it serves (see [`Self::take_next_block`]): the doors are
     /// asked under both, and a listing reading a print from a guarded source is left out, since
     /// that chain's sources are price contracts and no lane holds a print there. A node that
-    /// refuses or ignores the next block's overrides fails the read.
+    /// refuses or ignores the next block's overrides fails the read. Beside the doors there, the
+    /// batch's block as the node names it (see [`SampledOn`]).
     async fn open_doors(
         &self,
         listings: &[(Listing, (U256, U256))],
         block: BlockId,
         next: Option<(&FrontClock, &serde_json::Value)>,
-    ) -> Result<Vec<OpenDoor>, FeedError> {
+    ) -> Result<(Vec<OpenDoor>, Option<B256>), FeedError> {
         let mut calls = Vec::with_capacity(listings.len() * DOOR_CALLS);
         let mut slots = Vec::with_capacity(listings.len() * RECORD_WORDS);
         for (Listing { id, token0, token1, door, .. }, (probe0, probe1)) in listings {
@@ -1631,7 +1836,8 @@ impl DoorsReader {
         // The implementation again, at the block every door is read at: the first request's read
         // at the latest block may have come from another backend than its listings.
         let at = next.map(|(clock, _)| clock.read_at());
-        let BatchAnswers { groups, words } = self
+        let also = if next.is_some() { Also::ImplementationAndHead } else { Also::Implementation };
+        let BatchAnswers { groups, words, head, .. } = self
             .batch(
                 block,
                 vec![Group { calls, at }],
@@ -1639,7 +1845,7 @@ impl DoorsReader {
                     .iter()
                     .map(|slot| (self.front, *slot))
                     .collect::<Vec<_>>(),
-                true,
+                also,
                 next.map(|(clock, _)| clock),
                 next.map(|(_, state)| state),
             )
@@ -1807,7 +2013,7 @@ impl DoorsReader {
                 pool: listing.pool,
             });
         }
-        Ok(open)
+        Ok((open, head))
     }
 
     /// The third request: every open door's quotes at each side's sampled sizes, at the read's
@@ -2007,7 +2213,7 @@ impl DoorsReader {
             groups.push(Group { calls: probes.clone(), at: Some(*at) });
         }
         let BatchAnswers { groups: answers, .. } = self
-            .batch(BlockId::number(clock.number), groups, &[], false, Some(clock), None)
+            .batch(BlockId::number(clock.number), groups, &[], Also::Nothing, Some(clock), None)
             .await?;
         let mut answers = answers.into_iter();
         let at_block = answers
@@ -2142,9 +2348,16 @@ impl DoorsReader {
         let at_refine = if refine_groups.is_empty() {
             Vec::new()
         } else {
-            self.batch(BlockId::number(clock.number), refine_groups, &[], false, Some(clock), None)
-                .await?
-                .groups
+            self.batch(
+                BlockId::number(clock.number),
+                refine_groups,
+                &[],
+                Also::Nothing,
+                Some(clock),
+                None,
+            )
+            .await?
+            .groups
         };
         // Per side, its place in each of the fourth request's groups it is asked in, in the order
         // of their blocks.
@@ -2318,7 +2531,8 @@ impl DoorsReader {
     /// through the one after where the door fills every size there that it fills in the next block;
     /// its samples are then the least of the two. Elsewhere it lives through the next block alone,
     /// with its samples there. The samples are the door's own answers at every block of the side's
-    /// life, so they hold through it, whatever its word, depth, premium, print or source.
+    /// life, so they hold through it, whatever its word, depth, premium, print or source. Beside
+    /// the reads, the block of each batch sent, as the node names it (see [`SampledOn`]).
     ///
     /// On a credit listing each size is also asked of the front's `quoteFrom` with `PLAN_ONLY`,
     /// beside the door's quote in the same call: an answer tagged `ROUTED` shows the size fills
@@ -2335,10 +2549,11 @@ impl DoorsReader {
         clock: &FrontClock,
         block: BlockId,
         state: &serde_json::Value,
-    ) -> Result<Vec<DoorRead>, FeedError> {
+    ) -> Result<(Vec<DoorRead>, Vec<Option<B256>>), FeedError> {
         if doors.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
+        let mut asked_at = Vec::new();
         let target = clock.read_at();
         let after_time = target.time.saturating_add(SLOT_SECS);
         let after = At {
@@ -2351,7 +2566,7 @@ impl DoorsReader {
         // A credit listing's route fills sizes its door's most-fillable read does not report:
         // each side that may route is first asked how far it reaches.
         let reaches = self
-            .reaches(doors, target, clock, block, state)
+            .reaches(doors, target, clock, block, state, &mut asked_at)
             .await?;
         // Per side: its sizes, and its door's quote at each, then on a credit listing the
         // front's plan at each.
@@ -2389,9 +2604,10 @@ impl DoorsReader {
         if !carried.is_empty() {
             groups.push(Group { calls: carried, at: Some(after) });
         }
-        let BatchAnswers { groups: answers, .. } = self
-            .batch(block, groups, &[], false, Some(clock), Some(state))
+        let BatchAnswers { groups: answers, head, .. } = self
+            .batch(block, groups, &[], Also::Head, Some(clock), Some(state))
             .await?;
+        asked_at.push(head);
         let mut answers = answers.into_iter();
         let at_target = answers
             .next()
@@ -2497,7 +2713,7 @@ impl DoorsReader {
                 pool_lacks,
             });
         }
-        Ok(reads)
+        Ok((reads, asked_at))
     }
 
     /// The front's plan for each of `sizes` on one side of a credit listing's `door`, the bid
@@ -2592,7 +2808,8 @@ impl DoorsReader {
     /// `PropAMMFront`), so it reports none of a route that fills less than that depth, and the
     /// route fills an input whole or not at all. Each such side is therefore asked its door's
     /// `quote` at [`reach_probes`], one more batch in a poll that serves such a listing, and its
-    /// reach is the largest answered.
+    /// reach is the largest answered. The batch's block, as the node names it, is added to
+    /// `asked_at`.
     async fn reaches(
         &self,
         doors: &[OpenDoor],
@@ -2600,6 +2817,7 @@ impl DoorsReader {
         clock: &FrontClock,
         block: BlockId,
         state: &serde_json::Value,
+        asked_at: &mut Vec<Option<B256>>,
     ) -> Result<Vec<[Reach; 2]>, FeedError> {
         let mut reaches = vec![[Reach::default(); 2]; doors.len()];
         let asked: Vec<_> = doors
@@ -2620,16 +2838,17 @@ impl DoorsReader {
             .iter()
             .flat_map(|(d, bid, probes)| quote_calls(&doors[*d], *bid, probes))
             .collect();
-        let BatchAnswers { groups, .. } = self
+        let BatchAnswers { groups, head, .. } = self
             .batch(
                 block,
                 vec![Group { calls, at: Some(target) }],
                 &[],
-                false,
+                Also::Head,
                 Some(clock),
                 Some(state),
             )
             .await?;
+        asked_at.push(head);
         let answers = groups
             .into_iter()
             .next()
@@ -2668,7 +2887,7 @@ impl DoorsReader {
         block: BlockId,
     ) -> Result<Vec<Call3Result>, FeedError> {
         let BatchAnswers { groups, .. } = self
-            .batch(block, vec![Group { calls, at: None }], &[], true, None, None)
+            .batch(block, vec![Group { calls, at: None }], &[], Also::Implementation, None, None)
             .await?;
         Ok(groups
             .into_iter()
@@ -2690,12 +2909,17 @@ impl DoorsReader {
     ///
     /// Where `state` is given, each group under a block override runs under it as the state
     /// override: the next block's state map, on a chain whose builders land makers' updates.
+    ///
+    /// Where `also` asks the block's header, the batch carries an `eth_getBlockByNumber` of it,
+    /// and its hash is answered only where the node answers that very block: a node that does not
+    /// answer it, or answers another, fails nothing, and the batch's block is then not named. A
+    /// batch with no call and no word reads no header.
     async fn batch(
         &self,
         block: BlockId,
         groups: Vec<Group>,
         slots: &[(Address, U256)],
-        with_implementation: bool,
+        also: Also,
         clock: Option<&FrontClock>,
         state: Option<&serde_json::Value>,
     ) -> Result<BatchAnswers, FeedError> {
@@ -2703,7 +2927,7 @@ impl DoorsReader {
             .iter()
             .all(|group| group.calls.is_empty()) &&
             slots.is_empty() &&
-            !with_implementation
+            !also.implementation()
         {
             return Ok(BatchAnswers {
                 groups: groups
@@ -2711,6 +2935,8 @@ impl DoorsReader {
                     .map(|_| Some(Vec::new()))
                     .collect(),
                 words: Vec::new(),
+                head: None,
+                implementation: None,
             });
         }
         let client = self.provider.client();
@@ -2761,7 +2987,7 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("listing record", e))?,
             );
         }
-        let implementation = if with_implementation {
+        let implementation = if also.implementation() {
             let slot = U256::from_be_bytes(IMPLEMENTATION_SLOT.0);
             Some(
                 batch
@@ -2771,17 +2997,45 @@ impl DoorsReader {
         } else {
             None
         };
+        let head = match block.as_u64().filter(|_| also.head()) {
+            Some(number) => Some((
+                number,
+                batch
+                    .add_call::<_, Option<Header>>(
+                        "eth_getBlockByNumber",
+                        &(U64::from(number), false),
+                    )
+                    .map_err(|e| self.connection_error("block header", e))?,
+            )),
+            None => None,
+        };
         batch
             .send()
             .await
             .map_err(|e| self.connection_error("batch", e))?;
 
-        if let Some(slot) = implementation {
-            let word = slot
+        let implementation = match implementation {
+            Some(slot) => {
+                let word = slot
+                    .await
+                    .map_err(|e| self.connection_error("implementation slot", e))?;
+                let found = Address::from_word(B256::from(word));
+                self.check_implementation(found)?;
+                Some(found)
+            }
+            None => None,
+        };
+        let head = match head {
+            // The header names the batch's block only where it is that block's: no error of this
+            // one read fails the batch.
+            Some((number, header)) => header
                 .await
-                .map_err(|e| self.connection_error("implementation slot", e))?;
-            self.check_implementation(Address::from_word(B256::from(word)))?;
-        }
+                .ok()
+                .flatten()
+                .filter(|header| header.number == U64::from(number))
+                .map(|header| header.hash),
+            None => None,
+        };
         let mut answers = Vec::with_capacity(sent.len());
         for (at, checks, waiters) in sent {
             let mut group = Vec::new();
@@ -2822,7 +3076,7 @@ impl DoorsReader {
                     .map_err(|e| self.connection_error("listing record", e)),
             );
         }
-        Ok(BatchAnswers { groups: answers, words: read })
+        Ok(BatchAnswers { groups: answers, words: read, head, implementation })
     }
 
     /// The calls that open each `aggregate3` run under a block override, from which the front's
@@ -3234,6 +3488,123 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::pamm::protocols::efficient_prop::slots::DeskHead;
+
+    /// What a read of one listing reading a print was asked on.
+    fn sampled_on() -> SampledOn {
+        let desk = Address::repeat_byte(0xde);
+        let listing = Listing {
+            id: 7,
+            view: B256::repeat_byte(0x71),
+            token0: Address::repeat_byte(0xa0),
+            token1: Address::repeat_byte(0xa1),
+            door: Address::repeat_byte(0xd0),
+            word_ms: 1,
+            bid: SideView::default(),
+            ask: SideView::default(),
+            tip_cap_wei: None,
+            desk: 3,
+            word_index: 0,
+            asset_module: false,
+            pair: PairPlace::HookPair,
+            credit: None,
+            named_gas: None,
+            pool: Address::repeat_byte(0xb0),
+        };
+        SampledOn {
+            head: B256::repeat_byte(0xb1),
+            head_number: 100,
+            target_number: 101,
+            target_time: 1_790_000_012,
+            implementation: Address::repeat_byte(0x1a),
+            min_tip_cap_wei: U256::ZERO,
+            rungs: 8,
+            state: serde_json::json!({
+                desk.to_string(): { "stateDiff": { "0x100": "0x01", "0x200": "0x02" } },
+                Address::repeat_byte(0x9c).to_string(): { "stateDiff": { "0x0": "0x03" } },
+            }),
+            listings: vec![TakenListing {
+                listing,
+                probes: (U256::from(1u8), U256::from(2u8)),
+                settings: U256::from(3u8),
+                price: Some(U256::from(4u8)),
+                desk: U256::from(5u8),
+                slots: ListingSlots {
+                    account: desk,
+                    quote_slot: B256::from(U256::from(0x100u64)),
+                    firm_slot: B256::from(U256::from(0x200u64)),
+                    head: DeskHead { epoch: 0, stopped: false },
+                    head_quote: B256::ZERO,
+                    head_firm: B256::ZERO,
+                },
+            }],
+        }
+    }
+
+    fn desk_diff(on: &mut SampledOn) -> &mut serde_json::Value {
+        &mut on.state[Address::repeat_byte(0xde).to_string()]["stateDiff"]
+    }
+
+    /// A read is answered from the last one sampled only where it is asked on the same: one
+    /// differing in any one thing the doors' answers are read from is asked on another, and its
+    /// doors are asked again.
+    #[rstest]
+    #[case::the_heads_hash(|on: &mut SampledOn| on.head = B256::repeat_byte(0xb2))]
+    #[case::the_heads_number(|on: &mut SampledOn| on.head_number += 1)]
+    #[case::the_next_blocks_number(|on: &mut SampledOn| on.target_number += 1)]
+    #[case::the_next_blocks_second(|on: &mut SampledOn| on.target_time += 12)]
+    #[case::the_fronts_implementation(
+        |on: &mut SampledOn| on.implementation = Address::repeat_byte(0x1b)
+    )]
+    #[case::the_tip_cap_floor(|on: &mut SampledOn| on.min_tip_cap_wei = U256::from(1u8))]
+    #[case::the_sizes_sampled(|on: &mut SampledOn| on.rungs += 1)]
+    #[case::a_quote_word_of_the_state_answer(
+        |on: &mut SampledOn| desk_diff(on)["0x100"] = "0x11".into()
+    )]
+    #[case::a_firm_word_of_the_state_answer(
+        |on: &mut SampledOn| desk_diff(on)["0x200"] = "0x12".into()
+    )]
+    #[case::a_price_contracts_slot_of_the_state_answer(|on: &mut SampledOn| {
+        on.state[Address::repeat_byte(0x9c).to_string()]["stateDiff"]["0x0"] = "0x13".into();
+    })]
+    #[case::an_account_more_in_the_state_answer(|on: &mut SampledOn| {
+        on.state[Address::repeat_byte(0x9d).to_string()] = serde_json::json!({ "stateDiff": {} });
+    })]
+    #[case::a_listing_less(|on: &mut SampledOn| on.listings.clear())]
+    #[case::a_listings_door_view(
+        |on: &mut SampledOn| on.listings[0].listing.view = B256::repeat_byte(0x72)
+    )]
+    #[case::a_listings_tip_cap(
+        |on: &mut SampledOn| on.listings[0].listing.tip_cap_wei = Some(U256::from(1u8))
+    )]
+    #[case::a_listings_pool(
+        |on: &mut SampledOn| on.listings[0].listing.pool = Address::repeat_byte(0xb9)
+    )]
+    #[case::a_listings_gas(|on: &mut SampledOn| {
+        on.listings[0].listing.pair = PairPlace::PastWithAsset;
+    })]
+    #[case::a_listings_probes(|on: &mut SampledOn| on.listings[0].probes.0 = U256::from(9u8))]
+    #[case::a_listings_settings_word(|on: &mut SampledOn| on.listings[0].settings = U256::ZERO)]
+    #[case::a_listings_live_source_word(|on: &mut SampledOn| on.listings[0].price = None)]
+    #[case::a_listings_desk_word(|on: &mut SampledOn| on.listings[0].desk = U256::from(6u8))]
+    #[case::a_listings_desk_epoch(|on: &mut SampledOn| on.listings[0].slots.head.epoch = 1)]
+    #[case::a_listings_quote_word_at_the_head(
+        |on: &mut SampledOn| on.listings[0].slots.head_quote = B256::repeat_byte(1)
+    )]
+    #[case::a_listings_firm_word_at_the_head(
+        |on: &mut SampledOn| on.listings[0].slots.head_firm = B256::repeat_byte(1)
+    )]
+    fn a_read_differing_in_one_thing_its_doors_read_is_asked_on_another(
+        #[case] change: fn(&mut SampledOn),
+    ) {
+        let sampled = sampled_on();
+        let mut asked = sampled.clone();
+
+        change(&mut asked);
+
+        assert_ne!(asked, sampled);
+        assert_eq!(sampled, sampled_on());
+    }
 
     /// A source's price contract is the CREATE3 child of the front at its id, as the front derives
     /// it: the price contracts of sources 1 and 2 of the front on Ethereum, which hold code there.

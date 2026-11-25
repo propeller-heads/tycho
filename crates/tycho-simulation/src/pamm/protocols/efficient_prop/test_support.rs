@@ -120,6 +120,9 @@ pub(super) const ETHEREUM_NEXT_TIME: u64 = BEACON_GENESIS + SLOT_SECS * ETHEREUM
 /// The fake Ethereum node's latest block number; its next is one more.
 pub(super) const ETHEREUM_BLOCK: u64 = 24_000_000;
 
+/// The hash a fake node names its latest block by, unless a test sets another.
+pub(super) const HEAD_HASH: B256 = B256::repeat_byte(0xb1);
+
 /// The BaseTime predeploy, whose `timestampMs()` answers the block's milliseconds.
 const BASE_TIME: Address = address!("4200000000000000000000000000000000000030");
 
@@ -949,6 +952,14 @@ pub(super) struct FakeNode {
     /// On such a node, each desk's desk word at the latest block, as `(epoch, stopped)`: a desk
     /// not listed is at epoch 0 and running. A stop and a revive raise the epoch.
     pub desk_heads: BTreeMap<u32, (u32, bool)>,
+    /// Bits set in every desk word at the latest block beside its pusher, its epoch and its stop:
+    /// bits no cover reads.
+    pub desk_word_spare: U256,
+    /// The hash the node names its latest block by; `None` for a node that names no block.
+    pub head_hash: Option<B256>,
+    /// How many quotes the node has answered at a door, its most-fillable reads among them, or
+    /// at the front for a door's plan.
+    pub door_quotes: Arc<AtomicUsize>,
 }
 
 /// The fake front's clock, as `PropAMMClock.read` reads it, and the chain's blocks: in its mode 2
@@ -1155,6 +1166,9 @@ impl FakeNode {
             lands_in_block: false,
             overridden: Arc::default(),
             desk_heads: BTreeMap::new(),
+            desk_word_spare: U256::ZERO,
+            head_hash: Some(HEAD_HASH),
+            door_quotes: Arc::default(),
         }
     }
 
@@ -1189,6 +1203,16 @@ impl FakeNode {
         spawn_http_server(move |request| Some(("200 OK", self.answer(request)))).await
     }
 
+    /// A server answering as `node` is when each request arrives: a test changes the node
+    /// between two polls of one source.
+    pub(super) async fn spawn_shared(node: Arc<Mutex<Self>>) -> MockHttpServer {
+        spawn_http_server(move |request| {
+            let node = node.lock().unwrap().clone();
+            Some(("200 OK", node.answer(request)))
+        })
+        .await
+    }
+
     /// Answers one request or a batch of them, each by its method.
     fn answer(&self, request: &MockRequest) -> String {
         let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
@@ -1210,6 +1234,15 @@ impl FakeNode {
                 self.answer_call(request)
             }
             Some("eth_getStorageAt") => self.answer_storage(request),
+            Some("eth_getBlockByNumber") => {
+                // The block the listings were read at, named by its hash where the node names it.
+                assert_eq!(request["params"][0], self.pinned(), "the header of the pinned block");
+                assert_eq!(request["params"][1], false, "a header without its transactions");
+                let header = self
+                    .head_hash
+                    .map(|hash| serde_json::json!({ "hash": hash, "number": self.pinned() }));
+                serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": header })
+            }
             method => panic!("the fake node does not serve {method:?}"),
         }
     }
@@ -1234,7 +1267,9 @@ impl FakeNode {
             assert_eq!(params[2], self.pinned(), "a desk contract is read at the listings' block");
             let (epoch, stopped) = self.head(desk);
             let word = if slot == U256::from(1u8) {
-                desk_word_of(epoch, stopped)
+                B256::from(
+                    U256::from_be_bytes(desk_word_of(epoch, stopped).0) | self.desk_word_spare,
+                )
             } else {
                 self.listings
                     .iter()
@@ -1557,6 +1592,8 @@ impl FakeNode {
                 return Some(self.front_cell_codehash.abi_encode());
             }
             if selector == quoteFromCall::SELECTOR {
+                self.door_quotes
+                    .fetch_add(1, Ordering::SeqCst);
                 let call = quoteFromCall::abi_decode(data).unwrap();
                 assert_eq!(call.tip, U256::from(1u8) << 253usize, "the plan is asked at no tip");
                 // The front refuses the plan of a listing it does not hold.
@@ -1623,6 +1660,8 @@ impl FakeNode {
             LISTINGCall::SELECTOR => U256::from(listing.door_listing).abi_encode(),
             BASECall::SELECTOR => listing.base.abi_encode(),
             quoteCall::SELECTOR => {
+                self.door_quotes
+                    .fetch_add(1, Ordering::SeqCst);
                 let call = quoteCall::abi_decode(data).unwrap();
                 if self.lands_in_block && !self.word_fresh(listing, at.0, landings) {
                     return None;
@@ -1637,6 +1676,8 @@ impl FakeNode {
                     .abi_encode()
             }
             quoteFillableCall::SELECTOR => {
+                self.door_quotes
+                    .fetch_add(1, Ordering::SeqCst);
                 let call = quoteFillableCall::abi_decode(data).unwrap();
                 listing
                     .side(call.tokenIn, call.tokenOut)?
@@ -1734,6 +1775,19 @@ pub(super) async fn spawn_state_server(map: Value) -> MockHttpServer {
     spawn_http_server(move |request| {
         let request: Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(request["method"], STATE_METHOD);
+        let answer = serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": map });
+        Some(("200 OK", answer.to_string()))
+    })
+    .await
+}
+
+/// A `/state` endpoint answering with `map` as it is when each request arrives: a test changes
+/// the map between two polls of one source.
+pub(super) async fn spawn_shared_state_server(map: Arc<Mutex<Value>>) -> MockHttpServer {
+    spawn_http_server(move |request| {
+        let request: Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(request["method"], STATE_METHOD);
+        let map = map.lock().unwrap().clone();
         let answer = serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": map });
         Some(("200 OK", answer.to_string()))
     })
@@ -1925,9 +1979,16 @@ fn call_key(method: &Value, params: &Value) -> String {
 
 /// A node that answers each call with the answer recorded for its method and parameters, and an
 /// error for a call never recorded, which it counts.
+///
+/// The recordings were made before a poll read its pinned block's header, so none holds an
+/// `eth_getBlockByNumber`: the node answers it as a node that names no block, with no header,
+/// unless a test gives it a hash to name every block by (see [`Self::naming_blocks`]). Either way
+/// that read is not counted as unrecorded.
 pub(super) struct RecordedNode {
     answers: HashMap<String, Exchange>,
     unrecorded: Arc<AtomicUsize>,
+    head_hash: Option<B256>,
+    door_quotes: Arc<AtomicUsize>,
 }
 
 impl RecordedNode {
@@ -1941,12 +2002,53 @@ impl RecordedNode {
                 )
             })
             .collect();
-        Self { answers, unrecorded: Arc::default() }
+        Self { answers, unrecorded: Arc::default(), head_hash: None, door_quotes: Arc::default() }
+    }
+
+    /// The node naming every block it is asked the header of by `hash`: a hash made by the test,
+    /// since no recording holds one.
+    pub(super) fn naming_blocks(mut self, hash: B256) -> Self {
+        self.head_hash = Some(hash);
+        self
     }
 
     /// How many calls the node was asked that were never recorded.
     pub(super) fn unrecorded(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.unrecorded)
+    }
+
+    /// How many quotes the node was asked at a door, its most-fillable reads among them, or at
+    /// the front for a door's plan: the calls of each `aggregate3` it was sent, by selector.
+    pub(super) fn door_quotes(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.door_quotes)
+    }
+
+    fn count_door_quotes(&self, request: &Value) {
+        if request["method"] != "eth_call" {
+            return;
+        }
+        let Some(calls) = request["params"][0]["input"]
+            .as_str()
+            .and_then(|input| alloy::primitives::hex::decode(input).ok())
+            .and_then(|input| aggregate3Call::abi_decode(&input).ok())
+        else {
+            return;
+        };
+        let quotes = calls
+            .calls
+            .iter()
+            .filter(|call| {
+                call.callData
+                    .get(..4)
+                    .is_some_and(|selector| {
+                        selector == quoteCall::SELECTOR ||
+                            selector == quoteFillableCall::SELECTOR ||
+                            selector == quoteFromCall::SELECTOR
+                    })
+            })
+            .count();
+        self.door_quotes
+            .fetch_add(quotes, Ordering::SeqCst);
     }
 
     pub(super) async fn spawn(self) -> MockHttpServer {
@@ -1957,6 +2059,13 @@ impl RecordedNode {
         let request: Value = serde_json::from_str(body).unwrap();
         let answer = |request: &Value| {
             let id = request["id"].clone();
+            self.count_door_quotes(request);
+            if request["method"] == "eth_getBlockByNumber" {
+                let header = self.head_hash.map(
+                    |hash| serde_json::json!({ "hash": hash, "number": request["params"][0] }),
+                );
+                return serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": header });
+            }
             match self
                 .answers
                 .get(&call_key(&request["method"], &request["params"]))

@@ -309,6 +309,20 @@
 //! therefore says nothing of what a door fills next, so each poll reads the doors at the next
 //! block, as the state maps for it describe that block.
 //!
+//! A door's answer is an `eth_call`'s: the node's run of the call on the head block's state,
+//! under the next block's number and second and the state maps' storage. So a poll asks the doors
+//! only where one of those has changed since the last poll that sampled them: where the head's
+//! hash and number, the next block's number and second, the whole state override sent, the
+//! front's implementation and every listing taken (its `doorView` answer, its record's settings
+//! and live-source words, its desk word and its pair's words at the head) are the same, it
+//! publishes that poll's samples again and stops after its second request. The head's hash
+//! stands for all the state the doors read that the poll does not: the pools' custody and pause,
+//! a credit listing's lender, the tokens' balances, the price contracts' code. It is read with
+//! the listings' words and again with every batch that asks a door, and a poll's samples are kept
+//! only where all of them name one block. A node that does not answer the header is asked every
+//! door on every poll. The key is one for the whole poll, not one a listing: a second maker's
+//! update samples every listing again.
+//!
 //! A route through a door therefore reverts whole where it lands in a block without the update.
 //! [`EfficientPropFeedBuilder::with_fallback_router`] (off by default) publishes the same books as
 //! [`FALLBACK_PROTOCOL_SYSTEM`] instead, which tycho-execution settles through Tycho's

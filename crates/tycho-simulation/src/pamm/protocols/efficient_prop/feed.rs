@@ -363,7 +363,13 @@ impl EfficientPropFeedBuilder {
     /// is asked at one block, the next, and again at the block after for the listings that carry:
     /// `ceil(32n / 46)` `eth_call`s for the quotes, and `ceil(32c / 46)` more for `c` carrying
     /// listings. No premium, print or hold asks are made. A credit listing served asks the front's
-    /// plan beside each of its quotes, twice its calls.
+    /// plan beside each of its quotes, twice its calls. Each request after the first also reads
+    /// its block's header (`eth_getBlockByNumber`), for its hash.
+    ///
+    /// A poll that finds nothing the doors read changed since the last poll that sampled them
+    /// asks no door: it is the first two requests and the POSTs alone, and publishes that poll's
+    /// samples (see the module doc of `efficient_prop`, "On Ethereum"). Between two blocks that
+    /// is every poll but the ones a state URL answers a new update on.
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
             poll_interval: Duration::from_millis(250),
@@ -4308,7 +4314,13 @@ mod tests {
     /// The listing doors on Ethereum, whose builders land each maker's update in the block that
     /// fills it: every door is read at the next block under the state map the state URLs answer.
     mod ethereum {
-        use std::sync::atomic::AtomicUsize;
+        use std::{
+            collections::BTreeMap,
+            sync::{
+                atomic::{AtomicU64, AtomicUsize},
+                Mutex,
+            },
+        };
 
         use tycho_common::{models::token::Token, simulation::errors::SimulationError};
 
@@ -4316,17 +4328,21 @@ mod tests {
         use crate::{
             book::sim::SwapDirection,
             pamm::protocols::efficient_prop::{
-                overrides::{MERGE_WINDOW, SLOT_SECS},
+                overrides::{BEACON_GENESIS, MERGE_WINDOW, SLOT_SECS},
                 state::GasChain,
                 test_support::{
                     approved_desks, credit_gas, desk_cell, ethereum_deployment, left_out_of_a_poll,
-                    named_gas, price_contract, quote_word, read_state_map, spawn_state_server,
-                    state_map, state_map_of, with_account, FakeAging, RecordedEthereumPoll,
-                    RecordedListing, RecordedSide, ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME,
-                    ETHEREUM_SLOT, FENCE_NONE, QUOTE_BASE, VECTOR_WORDS,
+                    named_gas, price_contract, quote_word, read_state_map,
+                    spawn_shared_state_server, spawn_state_server, state_map, state_map_of,
+                    with_account, FakeAging, RecordedEthereumPoll, RecordedListing, RecordedSide,
+                    ETHEREUM_BLOCK, ETHEREUM_NEXT_TIME, ETHEREUM_SLOT, FENCE_NONE, IMPLEMENTATION,
+                    QUOTE_BASE, VECTOR_WORDS,
                 },
             },
-            snapshot_feed::http::test_support::{spawn_http_server, MockRequest, MockResponse},
+            protocol::models::ProtocolComponent,
+            snapshot_feed::http::test_support::{
+                spawn_http_server, MockHttpServer, MockRequest, MockResponse,
+            },
         };
 
         /// The wall clock of the tests: six seconds before the next block.
@@ -4349,15 +4365,22 @@ mod tests {
             state_urls: Vec<String>,
             now_ms: u64,
         ) -> EfficientPropBookSource {
-            let source = EfficientPropFeedBuilder::new(
-                ethereum_config(),
-                node_url.to_string(),
-                ethereum_deployment(),
-            )
-            .approved_price_sources([APPROVED_SOURCE])
-            .with_approved_desks(approved_desks())
-            .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
-            .state_urls(state_urls);
+            ethereum_source_of(node_url, state_urls, now_ms, ethereum_deployment())
+        }
+
+        /// As [`ethereum_source`], of the front `deployment` names.
+        fn ethereum_source_of(
+            node_url: &str,
+            state_urls: Vec<String>,
+            now_ms: u64,
+            deployment: EfficientPropDeployment,
+        ) -> EfficientPropBookSource {
+            let source =
+                EfficientPropFeedBuilder::new(ethereum_config(), node_url.to_string(), deployment)
+                    .approved_price_sources([APPROVED_SOURCE])
+                    .with_approved_desks(approved_desks())
+                    .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
+                    .state_urls(state_urls);
             // The fake listings trade test tokens, which no figure was measured for.
             let mut source = (1..=64)
                 .fold(source, |builder, listing| builder.credit_listing(listing, named_gas()))
@@ -7286,6 +7309,567 @@ mod tests {
             }
         }
 
+        /// A second implementation the reuse tests' front may run.
+        const OTHER_IMPLEMENTATION: Address = Address::repeat_byte(0x1b);
+
+        /// One source polling a node and a state URL that a test changes between its polls.
+        struct Polled {
+            node: Arc<Mutex<FakeNode>>,
+            map: Arc<Mutex<serde_json::Value>>,
+            source: EfficientPropBookSource,
+            now_ms: Arc<AtomicU64>,
+            urls: (String, String),
+            _servers: (MockHttpServer, MockHttpServer),
+        }
+
+        impl Polled {
+            async fn new(node: FakeNode, map: serde_json::Value) -> Self {
+                let node = Arc::new(Mutex::new(node));
+                let map = Arc::new(Mutex::new(map));
+                let servers = (
+                    FakeNode::spawn_shared(Arc::clone(&node)).await,
+                    spawn_shared_state_server(Arc::clone(&map)).await,
+                );
+                let urls = (servers.0.url(), servers.1.url());
+                let now_ms = Arc::new(AtomicU64::new(NOW_MS));
+                let mut polled = Self {
+                    node,
+                    map,
+                    source: ethereum_source(&urls.0, vec![urls.1.clone()], NOW_MS),
+                    now_ms,
+                    urls,
+                    _servers: servers,
+                };
+                polled.source = polled.fresh();
+                polled
+            }
+
+            /// A source that has sampled nothing yet, polling the same node and state URL on the
+            /// same clock: its front may run either implementation.
+            fn fresh(&self) -> EfficientPropBookSource {
+                let deployment = EfficientPropDeployment {
+                    implementations: vec![bytes(IMPLEMENTATION), bytes(OTHER_IMPLEMENTATION)],
+                    ..ethereum_deployment()
+                };
+                let mut source =
+                    ethereum_source_of(&self.urls.0, vec![self.urls.1.clone()], NOW_MS, deployment);
+                let now_ms = Arc::clone(&self.now_ms);
+                source.clock = Arc::new(move || now_ms.load(Ordering::SeqCst));
+                source
+            }
+
+            /// How many quotes the node has answered at a door.
+            fn door_quotes(&self) -> usize {
+                let node = self.node.lock().unwrap();
+                node.door_quotes.load(Ordering::SeqCst)
+            }
+
+            /// How many of the source's polls asked no door.
+            fn reuses(&self) -> usize {
+                self.source
+                    .reader
+                    .reuses
+                    .load(Ordering::SeqCst)
+            }
+        }
+
+        /// One book as a poll publishes it: its component, its state, and when each side stops
+        /// quoting on the wall clock, the bid then the ask. The state is held without those two
+        /// deadlines, whose monotonic moments are each poll's own.
+        type Published = (ProtocolComponent, EfficientPropState, [Option<u64>; 2]);
+
+        /// What one poll of `source` publishes, by component id.
+        async fn published(source: &EfficientPropBookSource) -> BTreeMap<String, Published> {
+            let snapshot = source.fetch().await.unwrap();
+            snapshot
+                .books
+                .iter()
+                .map(|(id, book)| {
+                    let mut state = book
+                        .state
+                        .as_any()
+                        .downcast_ref::<EfficientPropState>()
+                        .unwrap()
+                        .clone();
+                    let until = [state.bid_until.take(), state.ask_until.take()]
+                        .map(|until| until.map(|until| until.unix_ms));
+                    (id.clone(), (book.component.clone(), state, until))
+                })
+                .collect()
+        }
+
+        /// `map` with `word` written at `slot` of `account` by its entry `key`.
+        fn written(
+            mut map: serde_json::Value,
+            key: &str,
+            account: Address,
+            slot: U256,
+            word: B256,
+        ) -> serde_json::Value {
+            map[key]["stateOverride"][account.to_string()]["stateDiff"]
+                [B256::from(slot).to_string()] = word.to_string().into();
+            map
+        }
+
+        /// The firm word's slot of pair 0 in a desk contract.
+        fn firm_slot() -> U256 {
+            U256::from(0x200u64)
+        }
+
+        /// Four listings of four desks: a plain one whose word counts its firm word, one reading
+        /// a print, one whose maker has sent no update, and a credit listing. The map writes the
+        /// first's quote and firm words, the second's quote word and its price contract, and the
+        /// fourth's quote word.
+        fn reuse_fixture() -> (Vec<FakeListing>, serde_json::Value) {
+            let listings = vec![
+                FakeListing::ethereum(1),
+                FakeListing { fence: FENCE_PRINT, ..FakeListing::ethereum(2) },
+                FakeListing::ethereum(3),
+                FakeListing::ethereum_credit(4),
+            ];
+            (listings, reuse_map(ETHEREUM_BLOCK + 1, ETHEREUM_SLOT))
+        }
+
+        /// The state answer of [`reuse_fixture`] for block `next` at slot `slot`.
+        fn reuse_map(next: u64, slot: u64) -> serde_json::Value {
+            let map = state_map_of(
+                next,
+                slot,
+                &[
+                    ("desk-1".to_string(), 1, 0, quote_word(next, 0, false, true)),
+                    ("desk-2".to_string(), 2, 0, quote_word(next, 0, false, false)),
+                    ("desk-4".to_string(), 4, 0, quote_word(next, 0, false, false)),
+                ],
+            );
+            let map = written(map, "desk-1", desk_cell(1), firm_slot(), B256::repeat_byte(0xf1));
+            with_account(map, "desk-2", price_contract(APPROVED_SOURCE))
+        }
+
+        /// A poll that finds nothing changed asks no door: the head, the next block, the state
+        /// answer and every listing's words are as the last sampled poll found them, so it stops
+        /// after its second request to the node and publishes that poll's books, the credit
+        /// listing's among them. Before, every poll asked every door again.
+        #[tokio::test]
+        async fn a_poll_that_finds_nothing_changed_asks_no_door() {
+            let (listings, map) = reuse_fixture();
+            let polled = Polled::new(FakeNode::ethereum(listings), map).await;
+
+            let sampled = published(&polled.source).await;
+            let (asked, requests) = (polled.door_quotes(), polled._servers.0.request_count());
+            let kept = published(&polled.source).await;
+
+            assert_eq!(sampled.len(), 3);
+            assert!(asked > 0);
+            assert_eq!(polled.door_quotes(), asked, "an unchanged poll asked a door");
+            assert_eq!(polled._servers.0.request_count(), requests + 2);
+            assert_eq!(polled.reuses(), 1);
+            assert_eq!(kept, sampled);
+        }
+
+        /// A node that does not name its blocks by hash is asked every door on every poll: no
+        /// read of it is kept.
+        #[tokio::test]
+        async fn a_node_that_names_no_block_is_asked_every_door_on_every_poll() {
+            let (listings, map) = reuse_fixture();
+            let node = FakeNode { head_hash: None, ..FakeNode::ethereum(listings) };
+            let polled = Polled::new(node, map).await;
+
+            let sampled = published(&polled.source).await;
+            let asked = polled.door_quotes();
+            let again = published(&polled.source).await;
+
+            assert_eq!(polled.door_quotes(), 2 * asked);
+            assert_eq!(polled.reuses(), 0);
+            assert_eq!(again, sampled);
+        }
+
+        /// One thing the doors' answers are read from, which a test moves alone on the fake node
+        /// or in the state answer.
+        #[derive(Debug, Clone, Copy)]
+        enum Moved {
+            HeadHash,
+            NextSecond,
+            /// Its numbers, its time and the words' stamps together.
+            NewBlock,
+            QuoteWordInTheAnswer,
+            FirmWordInTheAnswer,
+            PriceContractInTheAnswer,
+            DeskWord,
+            DoorView,
+            SettingsWord,
+            LiveSourceWord,
+            Implementation,
+            ListingsServed,
+        }
+
+        impl Moved {
+            fn on(self, node: &mut FakeNode, map: &mut serde_json::Value) {
+                let next = ETHEREUM_BLOCK + 1;
+                match self {
+                    Self::HeadHash => node.head_hash = Some(B256::repeat_byte(0xb2)),
+                    Self::NextSecond => {
+                        node.timestamp += SLOT_SECS;
+                        map["slot"] = (ETHEREUM_SLOT + 1).into();
+                    }
+                    Self::NewBlock => {
+                        node.block += 1;
+                        node.timestamp += SLOT_SECS;
+                        *map = reuse_map(next + 1, ETHEREUM_SLOT + 1);
+                    }
+                    Self::QuoteWordInTheAnswer => {
+                        let word = U256::from_be_bytes(quote_word(next, 0, false, true).0);
+                        let word = B256::from(word | (U256::from(1u8) << 64usize));
+                        *map = written(
+                            map.take(),
+                            "desk-1",
+                            desk_cell(1),
+                            U256::from(QUOTE_BASE),
+                            word,
+                        );
+                    }
+                    Self::FirmWordInTheAnswer => {
+                        let word = B256::repeat_byte(0xf2);
+                        *map = written(map.take(), "desk-1", desk_cell(1), firm_slot(), word);
+                    }
+                    Self::PriceContractInTheAnswer => {
+                        let (account, word) =
+                            (price_contract(APPROVED_SOURCE), B256::repeat_byte(0x5b));
+                        *map = written(map.take(), "desk-2", account, U256::ZERO, word);
+                    }
+                    Self::DeskWord => node.desk_word_spare = U256::from(1u8) << 192usize,
+                    // A tip cap of 5 gwei.
+                    Self::DoorView => node.listings[0].tip_cap = 5 | (9 << 12),
+                    Self::SettingsWord => node.listings[0].carry = true,
+                    Self::LiveSourceWord => node.listings[1].guarded = true,
+                    Self::Implementation => {
+                        node.implementation = OTHER_IMPLEMENTATION;
+                        node.pinned_implementation = OTHER_IMPLEMENTATION;
+                    }
+                    Self::ListingsServed => {
+                        let word = quote_word(next, 0, false, false);
+                        *map = written(
+                            map.take(),
+                            "desk-3",
+                            desk_cell(3),
+                            U256::from(QUOTE_BASE),
+                            word,
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A change in any one thing the doors' answers are read from makes the next poll ask
+        /// them again, and it publishes what a source that never sampled publishes there; the
+        /// poll after it, finding that again, asks none. Each case moves one thing alone, but a
+        /// new block, which moves its numbers, its time and the words' stamps together (each of
+        /// those alone is another read in
+        /// `a_read_differing_in_one_thing_its_doors_read_is_asked_on_another`).
+        #[rstest]
+        #[case::the_heads_hash(Moved::HeadHash)]
+        #[case::the_next_blocks_second(Moved::NextSecond)]
+        #[case::a_new_block(Moved::NewBlock)]
+        #[case::its_quote_words_bytes_in_the_state_answer(Moved::QuoteWordInTheAnswer)]
+        #[case::its_firm_words_bytes_in_the_state_answer(Moved::FirmWordInTheAnswer)]
+        #[case::its_price_contracts_bytes_in_the_state_answer(Moved::PriceContractInTheAnswer)]
+        #[case::its_desk_word(Moved::DeskWord)]
+        #[case::its_door_view(Moved::DoorView)]
+        #[case::its_settings_word(Moved::SettingsWord)]
+        #[case::its_live_source_word(Moved::LiveSourceWord)]
+        #[case::the_fronts_implementation(Moved::Implementation)]
+        #[case::the_listings_served(Moved::ListingsServed)]
+        #[tokio::test]
+        async fn a_change_in_what_the_doors_read_asks_them_again(#[case] moved: Moved) {
+            let (listings, map) = reuse_fixture();
+            let polled = Polled::new(FakeNode::ethereum(listings), map).await;
+            published(&polled.source).await;
+            published(&polled.source).await;
+            let asked = polled.door_quotes();
+            assert_eq!(polled.reuses(), 1);
+
+            moved.on(&mut polled.node.lock().unwrap(), &mut polled.map.lock().unwrap());
+            let changed = published(&polled.source).await;
+
+            assert!(polled.door_quotes() > asked, "the changed poll asked no door");
+            assert_eq!(polled.reuses(), 1);
+            let asked = polled.door_quotes();
+            assert_eq!(published(&polled.source).await, changed);
+            assert_eq!(polled.door_quotes(), asked, "the poll after the changed one asked a door");
+            assert_eq!(polled.reuses(), 2);
+            assert_eq!(changed, published(&polled.fresh()).await);
+        }
+
+        /// SplitMix64: the seeded chance of
+        /// `no_run_of_changes_publishes_other_books_than_a_source_that_asks_every_door`.
+        struct Seeded(u64);
+
+        impl Seeded {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            }
+
+            fn below(&mut self, bound: usize) -> usize {
+                usize::try_from(self.next() % u64::try_from(bound).unwrap()).unwrap()
+            }
+        }
+
+        /// What the run's makers have sent for the next block, per desk: how many updates, each
+        /// writing other bytes, or `None` where the maker sent none.
+        struct Sent {
+            words: BTreeMap<u32, Option<u64>>,
+            prints: u64,
+        }
+
+        impl Sent {
+            /// The state answer for the block after `block`: each update's quote word stamped for
+            /// it under its desk's epoch at the head, its count in bits no reader reads, and the
+            /// print listing's price contract with it.
+            fn map(&self, node: &FakeNode) -> serde_json::Value {
+                let next = node.block + 1;
+                let slot = (node.timestamp + SLOT_SECS - BEACON_GENESIS) / SLOT_SECS;
+                let entries: Vec<_> = self
+                    .words
+                    .iter()
+                    .filter_map(|(&desk, &count)| {
+                        let epoch = node
+                            .desk_heads
+                            .get(&desk)
+                            .map_or(0, |head| head.0);
+                        let word = U256::from_be_bytes(quote_word(next, epoch, false, false).0);
+                        let word = B256::from(word | (U256::from(count?) << 64usize));
+                        Some((format!("desk-{desk}"), desk, 0u8, word))
+                    })
+                    .collect();
+                let map = state_map_of(next, slot, &entries);
+                if self.words[&2].is_none() {
+                    return map;
+                }
+                written(
+                    map,
+                    "desk-2",
+                    price_contract(APPROVED_SOURCE),
+                    U256::ZERO,
+                    B256::from(U256::from(self.prints)),
+                )
+            }
+        }
+
+        /// Whatever happens between its polls, in whatever order, a source that keeps its doors'
+        /// reads publishes what a source that never sampled publishes at that moment. Each step
+        /// of a seeded run does nothing, or one thing a chain or its makers do: a maker's update
+        /// (other bytes in the state answer, and another price at its door), a price update, a
+        /// maker sending none, a new block, a block replaced at the same height, a desk stopped
+        /// or revived. Every change of a door's answer comes as on chain, with other bytes in the
+        /// state answer or under another head hash; some steps ask no door and some ask them all.
+        #[rstest]
+        #[case::seed_1(1)]
+        #[case::seed_2(2)]
+        #[case::seed_3(3)]
+        #[case::seed_4(4)]
+        #[tokio::test]
+        async fn no_run_of_changes_publishes_other_books_than_a_source_that_asks_every_door(
+            #[case] seed: u64,
+        ) {
+            let (listings, _) = reuse_fixture();
+            let node = FakeNode::ethereum(listings);
+            let mut sent = Sent {
+                words: BTreeMap::from([(1, Some(0)), (2, Some(0)), (3, None), (4, Some(0))]),
+                prints: 0,
+            };
+            let polled = Polled::new(node.clone(), sent.map(&node)).await;
+            let mut chance = Seeded(seed);
+            let mut hashes = 0u8;
+            let mut sampled = 0;
+
+            for step in 0..40 {
+                let mut node = polled.node.lock().unwrap().clone();
+                let mut new_head = false;
+                let did = match chance.below(12) {
+                    0..=4 => "nothing",
+                    5 | 6 => {
+                        // A maker's update: other bytes, and another price at its door.
+                        let at = chance.below(4);
+                        let desk = 1 + u32::try_from(at).unwrap();
+                        let count = sent.words[&desk].map_or(0, |count| count + 1);
+                        sent.words.insert(desk, Some(count));
+                        let listing = &mut node.listings[at];
+                        listing.bid_out_cap = match listing.bid_out_cap {
+                            None => Some(U256::from(100_000_000u64)),
+                            Some(_) => None,
+                        };
+                        "a maker's update"
+                    }
+                    7 => {
+                        sent.prints += 1;
+                        let listing = &mut node.listings[1];
+                        listing.ask_out_cap = match listing.ask_out_cap {
+                            None => Some(U256::from(10u64).pow(U256::from(16u8))),
+                            Some(_) => None,
+                        };
+                        "a price update"
+                    }
+                    8 => {
+                        let desk = 1 + u32::try_from(chance.below(4)).unwrap();
+                        sent.words.insert(desk, None);
+                        "a maker sending no update"
+                    }
+                    9 => {
+                        node.block += 1;
+                        node.timestamp += SLOT_SECS;
+                        polled
+                            .now_ms
+                            .fetch_add(SLOT_SECS * 1000, Ordering::SeqCst);
+                        for listing in &mut node.listings {
+                            listing.maker_ms += SLOT_SECS * 1000;
+                        }
+                        new_head = true;
+                        "a new block"
+                    }
+                    10 => {
+                        // Another block at the same height: its pool holds, or lacks, the base.
+                        let listing = &mut node.listings[chance.below(4)];
+                        listing.pool_lacks.0 = !listing.pool_lacks.0;
+                        new_head = true;
+                        "a block replaced"
+                    }
+                    _ => {
+                        let desk = 1 + u32::try_from(chance.below(4)).unwrap();
+                        let (epoch, stopped) = node
+                            .desk_heads
+                            .get(&desk)
+                            .copied()
+                            .unwrap_or((0, false));
+                        node.desk_heads
+                            .insert(desk, (epoch + 1, !stopped));
+                        new_head = true;
+                        "a desk stopped or revived"
+                    }
+                };
+                if new_head {
+                    hashes += 1;
+                    node.head_hash = Some(B256::repeat_byte(hashes));
+                }
+                *polled.map.lock().unwrap() = sent.map(&node);
+                *polled.node.lock().unwrap() = node;
+                let reuses = polled.reuses();
+
+                let kept = published(&polled.source).await;
+
+                sampled += usize::from(polled.reuses() == reuses);
+                let fresh = published(&polled.fresh()).await;
+                assert_eq!(kept, fresh, "seed {seed}, step {step}, after {did}");
+            }
+            assert!(polled.reuses() > 0, "seed {seed}: no poll asked no door");
+            assert!(sampled > 1, "seed {seed}: no poll after the first asked its doors");
+        }
+
+        /// The door quotes a poll of each recorded Ethereum read asks, on a node naming its
+        /// blocks by hash: the first poll asks every door as before, and a second one finding the
+        /// same asks none and publishes the same books. The recordings hold no header, so the
+        /// hash is the test's own; on a node naming no block (the recordings as they are) both
+        /// polls ask every door, as every poll did before.
+        #[rstest]
+        #[case::no_update(include_str!("testdata/ethereum_fork_26482068.json"), 0)]
+        #[case::served(include_str!("testdata/ethereum_fork_26479480_served.json"), 43)]
+        #[case::served_with_the_credit_listing(
+            include_str!("testdata/ethereum_fork_26479480_credit.json"),
+            135
+        )]
+        #[tokio::test]
+        async fn a_second_poll_of_a_recorded_read_asks_no_door(
+            #[case] recording: &str,
+            #[case] quotes_a_poll: usize,
+            #[values(true, false)] names_blocks: bool,
+        ) {
+            let poll: RecordedEthereumPoll = serde_json::from_str(recording).unwrap();
+            let node = RecordedNode::new(&poll.rpc);
+            let node =
+                if names_blocks { node.naming_blocks(B256::repeat_byte(0xb1)) } else { node };
+            let (unrecorded, door_quotes) = (node.unrecorded(), node.door_quotes());
+            let node = node.spawn().await;
+            let mut servers = Vec::new();
+            for map in &poll.maps {
+                servers.push(spawn_state_server(map.clone()).await);
+            }
+            let source = recorded_source(&poll, &node.url(), &servers);
+
+            let first = published(&source).await;
+            let asked = door_quotes.load(Ordering::SeqCst);
+            // The recording holds one scan of the listings, the first poll's from no listing
+            // known: the second poll scans as that one did.
+            source
+                .highest_listing
+                .store(0, Ordering::Relaxed);
+            let second = published(&source).await;
+
+            assert_eq!(asked, quotes_a_poll);
+            let asked_again = door_quotes.load(Ordering::SeqCst) - asked;
+            assert_eq!(asked_again, if names_blocks { 0 } else { quotes_a_poll });
+            assert_eq!(unrecorded.load(Ordering::SeqCst), 0, "calls the recording does not answer");
+            assert_eq!(first.len(), poll.books);
+            assert_eq!(second, first);
+        }
+
+        /// The source a recorded Ethereum read was made by, polling `node_url` and the state
+        /// `servers`: the recording's tokens, front, credit listings, price sources and desks,
+        /// its wall clock stopped where the recording's was.
+        fn recorded_source(
+            poll: &RecordedEthereumPoll,
+            node_url: &str,
+            servers: &[MockHttpServer],
+        ) -> EfficientPropBookSource {
+            let tokens: HashMap<Bytes, Token> = poll
+                .tokens
+                .iter()
+                .map(|&(address, decimals)| {
+                    let address = bytes(address);
+                    let token = Token::new(
+                        &address,
+                        "TKN",
+                        decimals,
+                        0,
+                        &[Some(10_000)],
+                        Chain::Ethereum,
+                        100,
+                    );
+                    (address, token)
+                })
+                .collect();
+            let config = BookFeedConfig {
+                chain: Chain::Ethereum,
+                tokens: Arc::new(tokens),
+                min_tvl_usd: 0.0,
+            };
+            let builder = poll.credit.iter().fold(
+                EfficientPropFeedBuilder::new(config, node_url.to_string(), poll.deployment()),
+                |builder, &(listing, gas)| builder.credit_listing(listing, gas),
+            );
+            let mut source = builder
+                .approved_price_sources(poll.price_sources.iter().copied())
+                .with_approved_desks(
+                    poll.listings
+                        .iter()
+                        .map(|listing| bytes(listing.quote_contract)),
+                )
+                .state_urls(
+                    servers
+                        .iter()
+                        .map(|server| server.url()),
+                )
+                .build()
+                .unwrap()
+                .source;
+            let now_ms = poll.now_ms;
+            source.clock = Arc::new(move || now_ms);
+            source
+        }
+
         /// An Ethereum poll replayed call for call from `testdata/`: every call it makes of the
         /// node answered there, its state URLs answering the maps recorded, on the path that reads
         /// the makers' desk contract by the slot rule. The poll publishes the books recorded: a
@@ -7346,49 +7930,7 @@ mod tests {
             for map in &poll.maps {
                 servers.push(spawn_state_server(map.clone()).await);
             }
-            let tokens: HashMap<Bytes, Token> = poll
-                .tokens
-                .iter()
-                .map(|&(address, decimals)| {
-                    let address = bytes(address);
-                    let token = Token::new(
-                        &address,
-                        "TKN",
-                        decimals,
-                        0,
-                        &[Some(10_000)],
-                        Chain::Ethereum,
-                        100,
-                    );
-                    (address, token)
-                })
-                .collect();
-            let config = BookFeedConfig {
-                chain: Chain::Ethereum,
-                tokens: Arc::new(tokens),
-                min_tvl_usd: 0.0,
-            };
-            let builder = poll.credit.iter().fold(
-                EfficientPropFeedBuilder::new(config, node.url(), poll.deployment()),
-                |builder, &(listing, gas)| builder.credit_listing(listing, gas),
-            );
-            let mut source = builder
-                .approved_price_sources(poll.price_sources.iter().copied())
-                .with_approved_desks(
-                    poll.listings
-                        .iter()
-                        .map(|listing| bytes(listing.quote_contract)),
-                )
-                .state_urls(
-                    servers
-                        .iter()
-                        .map(|server| server.url()),
-                )
-                .build()
-                .unwrap()
-                .source;
-            let now_ms = poll.now_ms;
-            source.clock = Arc::new(move || now_ms);
+            let source = recorded_source(&poll, &node.url(), &servers);
 
             let books = source.fetch().await.unwrap().books;
 
