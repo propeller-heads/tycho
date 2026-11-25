@@ -271,13 +271,9 @@ mod tests {
 
     #[test]
     fn test_unique_by_key_collects_rows() {
-        let map = unique_by_key(
-            "contract_code",
-            InstanceId(7),
-            ReadAt::Current,
-            [(1, "a"), (2, "b")],
-        )
-        .unwrap();
+        let map =
+            unique_by_key("contract_code", InstanceId(7), ReadAt::Current, [(1, "a"), (2, "b")])
+                .unwrap();
 
         assert_eq!(map, HashMap::from([(1, "a"), (2, "b")]));
     }

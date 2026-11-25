@@ -113,8 +113,8 @@ impl PostgresGatewayNew {
                         .filter(contract_code::account_id.eq(account::id));
                     query = match read {
                         ReadAt::Current => query.filter(exists(current)),
-                        // The writer can move the code of a deleted account to history, so an
-                        // account deleted after `ts` can have no current code row.
+                        // The code valid at `ts` can be in history: replaced after `ts`, or moved
+                        // there when the account was deleted.
                         ReadAt::Past { ts, head } => query.filter(
                             exists(current.filter(contract_code::valid_from.le(ts))).or(exists(
                                 contract_code_history::table
