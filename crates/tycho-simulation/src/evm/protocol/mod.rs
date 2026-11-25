@@ -3,6 +3,7 @@ pub mod aerodrome_slipstreams;
 pub mod aerodrome_v1;
 pub mod balancer_v3;
 pub mod biconomy;
+pub mod checkable;
 mod clmm;
 pub mod cowamm;
 mod cpmm;

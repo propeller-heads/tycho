@@ -20,7 +20,7 @@ use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::{
     evm::{
         protocol::{
-            u256_num::bytes_to_u256,
+            checkable::LimitKind, u256_num::bytes_to_u256,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
         stream::ProtocolStreamBuilder,
@@ -58,7 +58,7 @@ use crate::{
     balances,
     config::{
         component_directions, DeclaredTolerance, Direction, ExecutionTolerances, Harness,
-        IntegrationTest, IntegrationTestsConfig, LimitKind, ProtocolComponentWithTestConfig, Skip,
+        IntegrationTest, IntegrationTestsConfig, ProtocolComponentWithTestConfig, Skip,
     },
     execution,
     report::{CheckId, Checks, Finished, Report},
@@ -2161,10 +2161,7 @@ mod tests {
     use tycho_simulation::tycho_common::{
         models::protocol::ProtocolComponentState, simulation::protocol_sim::ProtocolSim, Bytes,
     };
-    use tycho_test::{
-        execution::models::Transaction,
-        expectations::{DeclaredBy, LimitKind},
-    };
+    use tycho_test::{execution::models::Transaction, expectations::DeclaredBy};
 
     use super::*;
     use crate::{

@@ -309,6 +309,7 @@ per pool. Another extractor's override set would also replace a V4 pool's own.
 | `book-feeds` | yes | The off-chain book feeds: `snapshot_feed`'s transport loops, `book/`, `rfq/`, `pamm/` (implies `evm`). The `SnapshotFeed` trait is unconditional |
 | `price-level-stream` | yes | Titan pAMM price level stream client |
 | `network_tests` | no | Gates tests that require live network access |
+| `proptest` | no | The generators of `evm::protocol::checkable`, built on proptest: `StateCases`, the `Domain` trait with the shared domains, and each state's `StateCases` implementation. `LimitKind` and `CheckableState` sit beside them without the feature. |
 
 ## Conventions
 

@@ -11,7 +11,7 @@ use similar::{ChangeTag, TextDiff};
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 use tycho_test::expectations::check_declaration;
 pub use tycho_test::expectations::{
-    DeclaredBy, DeclaredTolerance, Direction, ExecutionTolerances, Harness, LimitKind, Limits,
+    DeclaredBy, DeclaredTolerance, Direction, ExecutionTolerances, Harness, Limits,
     LimitsDeclaration, Skip, Tolerance,
 };
 
@@ -719,7 +719,7 @@ pub fn component_directions(component: &ProtocolComponentWithTestConfig) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use tycho_test::expectations::LimitKind;
+    use tycho_simulation::evm::protocol::checkable::LimitKind;
 
     use super::*;
 

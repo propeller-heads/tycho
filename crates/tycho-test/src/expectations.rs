@@ -23,7 +23,10 @@ use serde::{
     de::{self, DeserializeOwned, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use tycho_simulation::tycho_common::{models::Chain, Bytes};
+use tycho_simulation::{
+    evm::protocol::checkable::LimitKind,
+    tycho_common::{models::Chain, Bytes},
+};
 
 /// Which checks a package's tests run.
 ///
@@ -122,14 +125,6 @@ impl<'de> Deserialize<'de> for Skip {
     }
 }
 
-/// What kind of bound a direction's `get_limits` reports, which decides how strict mode tests it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LimitKind {
-    Hard,
-    Soft,
-    UnderCap,
-}
-
 /// What one direction's limit is. Every kind must be quotable and executable at the limit itself.
 ///
 /// ```yaml
@@ -140,18 +135,12 @@ pub enum LimitKind {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Limits {
-    /// `max_input` is the largest input the venue accepts (a vault cap, a redemption limit, the
-    /// end of the liquidity range), whichever side of the swap the venue bounds. One unit more,
-    /// `get_amount_out` must error and execution must revert.
+    /// A [`LimitKind::Hard`] limit.
     Hard {},
-    /// The venue has no bound on the input, so the limit is a recommended size, as the
-    /// `ProtocolSim::get_limits` documentation allows. The reason names the code that shows it.
-    /// Twice the limit must still quote.
+    /// A [`LimitKind::Soft`] limit. The reason names the code that shows the venue has no bound.
     Soft { reason: String },
-    /// The venue has a bound, and `max_input` stays below it because `get_limits` cannot report
-    /// the largest input the venue accepts, such as a bound on the output without an exact
-    /// inverse. The reason shows why, and what capacity the limit gives up. One unit past the
-    /// limit, the quote and the execution must still succeed.
+    /// A [`LimitKind::UnderCap`] limit. The reason shows why `get_limits` cannot report the
+    /// venue's bound, and what capacity the limit gives up.
     UnderCap { reason: String },
 }
 

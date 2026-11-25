@@ -14,6 +14,7 @@ alloy-chains = "0.2.39"
 alloy-rpc-types-trace = "1.0.38"
 async-trait = { workspace = true }
 colored = "3.0.0"
+derive_more = { workspace = true, features = ["display"] }
 futures = { workspace = true }
 hex = { workspace = true }
 itertools = { workspace = true }
