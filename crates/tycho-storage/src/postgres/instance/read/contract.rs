@@ -57,8 +57,8 @@ impl PostgresGatewayNew {
     /// - `addresses`: only the accounts at these addresses. An account without code is left out
     ///   with a warning. Without addresses, all accounts with code.
     /// - `at`: the version. Before the head of the instance, the history tables answer too.
-    ///   `Unsupported` for a version before the history retention horizon or before the base block
-    ///   of the instance. Accounts created after it or deleted at or before it are left out.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance. Accounts created after it or deleted at or before it are left out.
     /// - `include_slots`: add the storage slots. A slot without a value has empty bytes.
     /// - `pagination_params`: the page of accounts to return, in account id order. The total is
     ///   then the number of matching accounts on all pages. With `addresses`, accounts without code
@@ -230,8 +230,8 @@ impl PostgresGatewayNew {
     ///   an unknown name. A protocol system without an active instance has no balances.
     /// - `accounts`: only these accounts.
     /// - `at`: the version. Before the head of the instance, the history tables answer too.
-    ///   `Unsupported` for a version before the history retention horizon or before the base block
-    ///   of the instance.
+    ///   `Unsupported` for a version before the history horizon or before the base block of the
+    ///   instance.
     /// - `include_native`: add the balance of the chain's native token.
     ///
     /// Accounts without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
