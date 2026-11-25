@@ -528,7 +528,7 @@ async fn history_account_balance_rows(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Utc};
+    use chrono::{NaiveDate, NaiveDateTime};
     use diesel_async::AsyncPgConnection;
     use tycho_common::{
         models::{
@@ -541,7 +541,11 @@ mod tests {
 
     use crate::postgres::{
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, InstanceId},
+        instance::{
+            gateway::PostgresGatewayNew,
+            read::testing::{before_retention, recent},
+            InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -579,13 +583,6 @@ mod tests {
         NaiveDate::from_ymd_opt(2020, 1, d)
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .expect("a valid date")
-    }
-
-    /// Midnight UTC of the day `d` days after the day 10 days ago: inside the default retention.
-    fn recent(d: i64) -> NaiveDateTime {
-        (Utc::now().date_naive() - Duration::days(10 - d))
-            .and_hms_opt(0, 0, 0)
-            .expect("a valid time")
     }
 
     fn at(ts: NaiveDateTime) -> Version {
@@ -751,7 +748,7 @@ mod tests {
             &mut conn,
             "vm:curve",
             true,
-            Some(&at(recent(5) - Duration::days(40))),
+            Some(&at(before_retention(recent(5)))),
         )
         .await;
 
@@ -1163,7 +1160,7 @@ mod tests {
             "vm:curve",
             None,
             None,
-            Some(&at(recent(5) - Duration::days(40))),
+            Some(&at(before_retention(recent(5)))),
         )
         .await;
 
