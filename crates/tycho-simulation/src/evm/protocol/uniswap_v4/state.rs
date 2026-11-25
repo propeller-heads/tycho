@@ -490,14 +490,14 @@ impl UniswapV4State {
                 let protocol_fee =
                     if zero_for_one { self.fees.zero_for_one } else { self.fees.one_for_zero };
                 accrue_step_fee(accrual, &step, fee, (fee_pips, protocol_fee), state.liquidity);
-                if state.sqrt_price == step.sqrt_price_next && next_tick_info.is_some() {
-                    accrual
-                        .crossed_ticks
-                        .push((step.tick_next, accrual.fee_growth));
-                }
             }
             if state.sqrt_price == step.sqrt_price_next {
                 if let Some(info) = next_tick_info {
+                    if let Some(accrual) = fee_accrual.as_deref_mut() {
+                        accrual
+                            .crossed_ticks
+                            .push((step.tick_next, accrual.fee_growth));
+                    }
                     let liquidity_raw = info.net_liquidity;
                     let liquidity_net = if zero_for_one { -liquidity_raw } else { liquidity_raw };
                     state.liquidity =
