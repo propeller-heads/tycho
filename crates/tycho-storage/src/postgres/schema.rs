@@ -364,7 +364,6 @@ diesel::table! {
 diesel::table! {
     token (id) {
         id -> Int8,
-        account_id -> Int8,
         #[max_length = 255]
         symbol -> Varchar,
         decimals -> Int4,
@@ -373,7 +372,7 @@ diesel::table! {
         inserted_ts -> Timestamptz,
         modified_ts -> Timestamptz,
         quality -> Int4,
-        address -> Nullable<Bytea>,
+        address -> Bytea,
     }
 }
 
@@ -436,7 +435,6 @@ diesel::joinable!(protocol_component_holds_token -> protocol_component (protocol
 diesel::joinable!(protocol_component_holds_token -> token (token_id));
 diesel::joinable!(protocol_component_uses_entry_point -> entry_point (entry_point_id));
 diesel::joinable!(protocol_component_uses_entry_point -> protocol_component (protocol_component_id));
-diesel::joinable!(token -> account (account_id));
 diesel::joinable!(token_price -> token (token_id));
 diesel::joinable!(transaction -> block (block_id));
 
