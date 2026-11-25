@@ -1163,7 +1163,7 @@ mod tests {
         );
         // No server listens there. The handlers are registered before the builder connects, so
         // the outcome of the connection does not matter.
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), builder.build()).await;
+        drop(tokio::time::timeout(std::time::Duration::from_millis(200), builder.build()).await);
 
         let mut attributes = robinhood_module_attributes();
         attributes.insert(
