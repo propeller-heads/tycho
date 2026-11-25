@@ -39,7 +39,8 @@ impl PostgresGatewayNew {
     ///   instance.
     ///
     /// Components without balances are absent. `modify_tx` is always 32 zero bytes. `NotFound` for
-    /// an unknown chain.
+    /// an unknown chain. `Unexpected` when two rows of one component and token are valid at the
+    /// version.
     pub async fn get_component_balances(
         &self,
         chain: &Chain,
@@ -92,7 +93,8 @@ impl PostgresGatewayNew {
     /// - `pagination_params`: `Unsupported` when set. Page the component ids instead.
     ///
     /// A component without state attributes is absent, even with balances. `NotFound` for an
-    /// unknown chain.
+    /// unknown chain. `Unexpected` when two rows of one attribute, or of one balance, are valid at
+    /// the version.
     #[expect(clippy::too_many_arguments, reason = "one argument per query filter")]
     pub async fn get_protocol_states(
         &self,
