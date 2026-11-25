@@ -712,6 +712,42 @@ mod tests {
         assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
     }
 
+    #[tokio::test]
+    async fn test_balances_at_a_past_version_see_the_last_update_of_a_block() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(2), Some(recent(2))).await;
+        balance_version(&mut conn, &s, a, "0x30", recent(2), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        for (ts, expected) in [(recent(2), "0x30"), (recent(1), "0x10")] {
+            let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(ts)))
+                .await
+                .unwrap();
+
+            assert_eq!(result["a"].len(), 1, "{ts}");
+            assert_eq!(result["a"][&b("0x01")].balance, b(expected), "{ts}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_balances_before_head_read_a_row_replaced_at_the_head() {
+        let mut conn = instance_test_connection().await;
+        let s = setup(&mut conn).await;
+        let a = db_fixtures::insert_instance_component(&mut conn, s.curve, "a", &[b("0x01")]).await;
+        balance_version(&mut conn, &s, a, "0x10", recent(1), Some(recent(5))).await;
+        balance_version(&mut conn, &s, a, "0x20", recent(5), None).await;
+        db_fixtures::set_instance_head(&mut conn, s.curve, recent(5)).await;
+
+        let result = balances(&s.gateway, &mut conn, "vm:curve", Some(&at(recent(4))))
+            .await
+            .unwrap();
+
+        assert_eq!(result["a"][&b("0x01")].balance, b("0x10"));
+    }
+
     async fn states(
         gateway: &PostgresGatewayNew,
         conn: &mut AsyncPgConnection,
