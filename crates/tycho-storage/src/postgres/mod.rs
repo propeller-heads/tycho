@@ -144,6 +144,7 @@ use tycho_common::{
     storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     Bytes,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 pub mod builder;
 pub mod cache;
@@ -391,7 +392,7 @@ fn is_transaction_conflict(message: &str) -> bool {
     message.contains("deadlock detected") || message.contains("could not serialize access")
 }
 
-#[cfg(old_gateway)]
+/// Cuts `input` to at most `limit` bytes, at a boundary between graphemes.
 fn truncate_to_byte_limit(input: &str, limit: usize) -> String {
     let mut result = String::new();
     let mut byte_count = 0;
@@ -791,62 +792,34 @@ async fn ensure_chain(chain: Chain, conn: &mut AsyncPgConnection) -> Result<(), 
         .await
         .map_err(|e| StorageError::Unexpected(e.to_string()))?;
 
-    let chain_id: i64 = schema::chain::table
-        .select(schema::chain::id)
-        .filter(schema::chain::name.eq(&chain_name))
-        .first(conn)
-        .await
-        .map_err(|e| StorageError::Unexpected(e.to_string()))?;
-
     let native_asset = chain.native_asset();
     for token in native_asset.representations() {
-        ensure_token_with_price(chain_id, token, conn).await;
+        ensure_token_with_price(token, conn).await;
     }
 
     debug!("Ensured chain enum and native token presence for: {:?}", chain);
     Ok(())
 }
 
-pub(crate) async fn ensure_token_with_price(
-    chain_id: i64,
-    token: &Token,
-    conn: &mut AsyncPgConnection,
-) {
-    diesel::insert_into(schema::account::table)
-        .values((
-            schema::account::chain_id.eq(chain_id),
-            schema::account::title.eq(format!("{}_{}", token.symbol, token.address)),
-            schema::account::address.eq(token.address.as_ref()),
-        ))
-        .on_conflict_do_nothing()
-        .execute(conn)
-        .await
-        .expect("Could not ensure token account in database");
-
-    let account_id: i64 = schema::account::table
-        .select(schema::account::id)
-        .filter(schema::account::chain_id.eq(chain_id))
-        .filter(schema::account::address.eq(token.address.as_ref()))
-        .first(conn)
-        .await
-        .expect("Account must exist after insert");
-
+/// Stores the token, found by its address, and sets its price to one unit of the token.
+pub(crate) async fn ensure_token_with_price(token: &Token, conn: &mut AsyncPgConnection) {
     diesel::insert_into(schema::token::table)
         .values((
-            schema::token::account_id.eq(account_id),
+            schema::token::address.eq(token.address.as_ref()),
             schema::token::symbol.eq(&token.symbol),
             schema::token::decimals.eq(i32::try_from(token.decimals).unwrap()),
             schema::token::gas.eq(Vec::<Option<i64>>::new()),
             schema::token::quality.eq(100),
         ))
-        .on_conflict_do_nothing()
+        .on_conflict(schema::token::address)
+        .do_nothing()
         .execute(conn)
         .await
         .expect("Could not ensure token in database");
 
     let token_id: i64 = schema::token::table
         .select(schema::token::id)
-        .filter(schema::token::account_id.eq(account_id))
+        .filter(schema::token::address.eq(token.address.as_ref()))
         .first(conn)
         .await
         .expect("Token must exist after insert");
@@ -1923,36 +1896,27 @@ pub mod db_fixtures {
             .expect("protocol state insert ok");
     }
 
+    /// Inserts a token with tax 10 and gas `[10]`, and returns its id.
     pub async fn insert_token(
         conn: &mut AsyncPgConnection,
-        chain_id: i64,
         address: &str,
         symbol: &str,
         decimals: i32,
         quality: Option<i32>,
-    ) -> (i64, i64) {
-        let title = format!("token_{symbol}");
-        let account_id = insert_account(conn, address, &title, chain_id, None).await;
-
-        let quality = quality.unwrap_or(0);
-
-        let query = diesel::insert_into(schema::token::table).values((
-            schema::token::account_id.eq(account_id),
-            schema::token::symbol.eq(symbol),
-            schema::token::decimals.eq(decimals),
-            schema::token::tax.eq(10),
-            schema::token::gas.eq(vec![10]),
-            schema::token::quality.eq(quality),
-            schema::token::address.eq(hex::decode(address).unwrap()),
-        ));
-        (
-            account_id,
-            query
-                .returning(schema::token::id)
-                .get_result(conn)
-                .await
-                .unwrap(),
-        )
+    ) -> i64 {
+        diesel::insert_into(schema::token::table)
+            .values((
+                schema::token::address.eq(hex::decode(address).unwrap()),
+                schema::token::symbol.eq(symbol),
+                schema::token::decimals.eq(decimals),
+                schema::token::tax.eq(10),
+                schema::token::gas.eq(vec![10]),
+                schema::token::quality.eq(quality.unwrap_or(0)),
+            ))
+            .returning(schema::token::id)
+            .get_result(conn)
+            .await
+            .unwrap()
     }
 
     pub async fn get_token_by_symbol(conn: &mut AsyncPgConnection, symbol: String) -> orm::Token {
@@ -2034,9 +1998,9 @@ mod tests_transaction_conflict {
 mod tests_ensure_chain {
     use diesel::prelude::*;
     use diesel_async::{AsyncConnection, RunQueryDsl};
-    use tycho_common::models::Chain;
+    use tycho_common::{models::Chain, Bytes};
 
-    use super::{ensure_chain, schema};
+    use super::{ensure_chain, ensure_token_with_price, schema};
 
     async fn setup_conn() -> diesel_async::AsyncPgConnection {
         let db_url = std::env::var("DATABASE_URL").unwrap();
@@ -2068,6 +2032,66 @@ mod tests_ensure_chain {
             .unwrap();
     }
 
+    /// The id, decimals and price of the token stored with this address.
+    async fn stored_token_with_price(
+        conn: &mut diesel_async::AsyncPgConnection,
+        address: &Bytes,
+    ) -> Vec<(i64, i32, f64)> {
+        schema::token::table
+            .inner_join(schema::token_price::table)
+            .filter(schema::token::address.eq(address.as_ref()))
+            .select((schema::token::id, schema::token::decimals, schema::token_price::price))
+            .load(conn)
+            .await
+            .unwrap()
+    }
+
+    async fn account_count(conn: &mut diesel_async::AsyncPgConnection) -> i64 {
+        schema::account::table
+            .count()
+            .get_result(conn)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price_stores_token_by_address() {
+        let mut conn = setup_conn().await;
+        let native = Chain::Ethereum.native_token();
+
+        ensure_chain(Chain::Ethereum, &mut conn)
+            .await
+            .unwrap();
+
+        let stored = stored_token_with_price(&mut conn, &native.address).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!((stored[0].1, stored[0].2), (18, 1e18));
+        let quality: i32 = schema::token::table
+            .filter(schema::token::address.eq(native.address.as_ref()))
+            .select(schema::token::quality)
+            .first(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(quality, 100);
+        assert_eq!(account_count(&mut conn).await, 0, "a token needs no account row");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_token_with_price_is_idempotent() {
+        let mut conn = setup_conn().await;
+        let native = Chain::Ethereum.native_token();
+
+        ensure_token_with_price(&native, &mut conn).await;
+        ensure_token_with_price(&native, &mut conn).await;
+
+        assert_eq!(
+            stored_token_with_price(&mut conn, &native.address)
+                .await
+                .len(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn test_arc_native_asset_bootstrap_is_idempotent_and_prices_both_representations() {
         let mut conn = setup_conn().await;
@@ -2078,41 +2102,25 @@ mod tests_ensure_chain {
             .await
             .unwrap();
 
-        let chain_id: i64 = schema::chain::table
-            .select(schema::chain::id)
-            .filter(schema::chain::name.eq("arc"))
-            .first(&mut conn)
-            .await
-            .unwrap();
-
-        let account_count: i64 = schema::account::table
-            .filter(schema::account::chain_id.eq(chain_id))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .unwrap();
-        let token_count: i64 = schema::token::table
-            .inner_join(schema::account::table)
-            .filter(schema::account::chain_id.eq(chain_id))
-            .count()
-            .get_result(&mut conn)
-            .await
-            .unwrap();
-        assert_eq!(account_count, 2);
-        assert_eq!(token_count, 2);
-
-        let rows: Vec<(Vec<u8>, i32, f64)> = schema::account::table
-            .inner_join(schema::token::table.inner_join(schema::token_price::table))
-            .filter(schema::account::chain_id.eq(chain_id))
-            .select((schema::account::address, schema::token::decimals, schema::token_price::price))
-            .order(schema::account::address.asc())
-            .load(&mut conn)
-            .await
-            .unwrap();
-
         let mut routable_address = vec![0u8; 20];
         routable_address[0] = 0x36;
-        assert_eq!(rows, vec![(vec![0u8; 20], 18, 1e18), (routable_address, 6, 1e6)]);
+        let native = stored_token_with_price(&mut conn, &Bytes::from(vec![0u8; 20])).await;
+        let routable = stored_token_with_price(&mut conn, &Bytes::from(routable_address)).await;
+        assert_eq!(
+            native
+                .iter()
+                .map(|row| (row.1, row.2))
+                .collect::<Vec<_>>(),
+            vec![(18, 1e18)]
+        );
+        assert_eq!(
+            routable
+                .iter()
+                .map(|row| (row.1, row.2))
+                .collect::<Vec<_>>(),
+            vec![(6, 1e6)]
+        );
+        assert_eq!(account_count(&mut conn).await, 0);
     }
 
     #[tokio::test]
