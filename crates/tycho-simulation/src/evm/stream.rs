@@ -207,21 +207,8 @@ impl StreamEndPolicy {
     }
 }
 
-/// Counter, no labels. Incremented once per round the stream skips for carrying no block, and
-/// registered at zero when the stream starts. A consumer that installs a `metrics` recorder
-/// receives it with no further setup.
 const ROUNDS_WITHOUT_BLOCK: &str = "protocol_stream_rounds_without_block_total";
 
-/// Whether `round` carries a block from at least one protocol.
-///
-/// tycho-client also sends a round when no protocol delivered a block before the round's wait
-/// ran out; that round carries only the protocols' sync states.
-fn carries_block(round: &FeedMessage<BlockHeader>) -> bool {
-    !round.state_msgs.is_empty()
-}
-
-/// Records that the stream skipped `round` for carrying no block: [`ROUNDS_WITHOUT_BLOCK`] and a
-/// DEBUG log with the round's sync states.
 fn record_round_without_block(round: &FeedMessage<BlockHeader>) {
     counter!(ROUNDS_WITHOUT_BLOCK).increment(1);
     debug!(sync_states = ?round.sync_states, "Skipped a round that carries no block");
@@ -765,7 +752,7 @@ impl ProtocolStreamBuilder {
                     );
                     break;
                 }
-                if !carries_block(&msg) {
+                if msg.state_msgs.is_empty() {
                     record_round_without_block(&msg);
                     continue;
                 }
@@ -794,7 +781,7 @@ impl ProtocolStreamBuilder {
                         if stream_end_policy.should_end(msg.sync_states.values()) {
                             break;
                         }
-                        if !carries_block(&msg) {
+                        if msg.state_msgs.is_empty() {
                             record_round_without_block(&msg);
                             continue;
                         }
@@ -819,10 +806,10 @@ impl ProtocolStreamBuilder {
         });
     }
 
-    /// The rounds the decoder receives from `rx`: every round that carries a block, up to the
-    /// first error or the first round `stream_end_policy` ends on. The policy sees every round,
-    /// including the ones skipped for carrying no block.
-    fn rounds_to_decode(
+    /// The messages from `rx` up to the first error or the first message `stream_end_policy`
+    /// ends on. Never yields a message with empty `state_msgs`: those are skipped after the
+    /// policy has seen them.
+    fn filtered_feed_message_stream(
         rx: tokio::sync::mpsc::Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>,
         stream_end_policy: StreamEndPolicy,
     ) -> Pin<Box<dyn Stream<Item = FeedMessage<BlockHeader>> + Send>> {
@@ -847,12 +834,12 @@ impl ProtocolStreamBuilder {
                 }
             })
             .map(|msg| msg.expect("Safe since stream ends if we receive an error"))
-            .filter(|round| {
-                let carries = carries_block(round);
-                if !carries {
-                    record_round_without_block(round);
+            .filter(|msg| {
+                let is_empty = msg.state_msgs.is_empty();
+                if is_empty {
+                    record_round_without_block(msg);
                 }
-                futures::future::ready(carries)
+                futures::future::ready(!is_empty)
             });
         Box::pin(rounds)
     }
@@ -951,7 +938,7 @@ impl ProtocolStreamBuilder {
                 Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
                 Box::new(ReceiverStream::new(gated_rx))
             } else {
-                Box::new(Self::rounds_to_decode(rx, stream_end_policy))
+                Box::new(Self::filtered_feed_message_stream(rx, stream_end_policy))
             };
 
         let stream = Box::pin(decode_stream.then({
@@ -998,7 +985,7 @@ impl ProtocolStreamBuilder {
                 Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
                 Box::new(ReceiverStream::new(gated_rx))
             } else {
-                Box::new(Self::rounds_to_decode(rx, stream_end_policy))
+                Box::new(Self::filtered_feed_message_stream(rx, stream_end_policy))
             };
 
         let stream = Box::pin(decode_stream.then({
@@ -1109,7 +1096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rounds_to_decode_skips_round_without_block() {
+    async fn test_filtered_feed_message_stream_skips_round_without_block() {
         let feed = feed_of(vec![
             round_with_block(1),
             round_without_block(delayed_at(1)),
@@ -1118,7 +1105,7 @@ mod tests {
         .await;
 
         let rounds: Vec<_> =
-            ProtocolStreamBuilder::rounds_to_decode(feed, StreamEndPolicy::default())
+            ProtocolStreamBuilder::filtered_feed_message_stream(feed, StreamEndPolicy::default())
                 .collect()
                 .await;
 
@@ -1126,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rounds_to_decode_counts_rounds_without_block() {
+    fn test_filtered_feed_message_stream_counts_rounds_without_block() {
         use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
         let recorder = DebuggingRecorder::new();
@@ -1145,9 +1132,12 @@ mod tests {
                     round_with_block(2),
                 ])
                 .await;
-                ProtocolStreamBuilder::rounds_to_decode(feed, StreamEndPolicy::default())
-                    .collect::<Vec<_>>()
-                    .await
+                ProtocolStreamBuilder::filtered_feed_message_stream(
+                    feed,
+                    StreamEndPolicy::default(),
+                )
+                .collect::<Vec<_>>()
+                .await
             })
         });
 
@@ -1162,14 +1152,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rounds_to_decode_ends_on_stale_round_without_block() {
+    async fn test_filtered_feed_message_stream_ends_on_stale_round_without_block() {
         let stale = SynchronizerState::Stale(BlockHeader { number: 1, ..Default::default() });
         let feed =
             feed_of(vec![round_with_block(1), round_without_block(stale), round_with_block(2)])
                 .await;
 
         let rounds: Vec<_> =
-            ProtocolStreamBuilder::rounds_to_decode(feed, StreamEndPolicy::AnyStale)
+            ProtocolStreamBuilder::filtered_feed_message_stream(feed, StreamEndPolicy::AnyStale)
                 .collect()
                 .await;
 
