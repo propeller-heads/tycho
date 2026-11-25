@@ -639,6 +639,11 @@ pub(super) struct FakeListing {
     /// From `.0` on the front's clock, ms, the bid's credit route fills every input above `.1`,
     /// in place of its own prefix.
     pub bid_prefix_from: Option<(u64, U256)>,
+    /// Where set, a word carried into the block after its landing fills only while the front's
+    /// clock reads at or before this, ms. The deployed front has no such rule (it counts a
+    /// carry in blocks alone): a test sets it to see each block asked at each second it may
+    /// land in.
+    pub carried_until_ms: Option<u64>,
 }
 
 /// Listing `id`'s own pool in the fixtures.
@@ -696,6 +701,7 @@ impl FakeListing {
             landed: None,
             bid_plan_lies: None,
             bid_prefix_from: None,
+            carried_until_ms: None,
         }
     }
 
@@ -1676,7 +1682,13 @@ impl FakeNode {
     /// epoch is empty), and it landed at `number`, or in the block before where the listing and
     /// the word carry and its fence is not NONE. `landings` are the words the call's state
     /// override sets at the pair's quote slot, which replace the chain's.
-    fn word_fresh(&self, listing: &FakeListing, number: u64, landings: &Landings) -> bool {
+    fn word_fresh(
+        &self,
+        listing: &FakeListing,
+        at: (u64, u64, Option<u64>),
+        landings: &Landings,
+    ) -> bool {
+        let number = at.0;
         let (epoch, stopped) = self.head(listing.desk);
         let slot = U256::from(QUOTE_BASE + u64::from(listing.word_index));
         let word = landings
@@ -1699,7 +1711,12 @@ impl FakeNode {
                 (number == stamp + 1 &&
                     listing.carry &&
                     word.bit(201) &&
-                    listing.fence != FENCE_NONE))
+                    listing.fence != FENCE_NONE &&
+                    listing
+                        .carried_until_ms
+                        .is_none_or(|until| {
+                            self.clock.ms_with(at.0, at.1, at.2) <= until
+                        })))
     }
 
     /// A desk's desk word at the latest block: its epoch and whether it is stopped.
@@ -1806,7 +1823,7 @@ impl FakeNode {
                 let listing = self.listing(call.listing)?;
                 assert_eq!(call.taker, self.door_address(listing.id), "the door is the taker");
                 assert_ne!(listing.credit_mode, 0, "the plan of a credit listing alone is asked");
-                if self.lands_in_block && !self.word_fresh(listing, at.0, landings) {
+                if self.lands_in_block && !self.word_fresh(listing, at, landings) {
                     return Some(U256::ZERO.abi_encode());
                 }
                 let ms = self.clock.ms_with(at.0, at.1, at.2);
@@ -1870,7 +1887,7 @@ impl FakeNode {
                 self.door_quotes
                     .fetch_add(1, Ordering::SeqCst);
                 let call = quoteCall::abi_decode(data).unwrap();
-                if self.lands_in_block && !self.word_fresh(listing, at.0, landings) {
+                if self.lands_in_block && !self.word_fresh(listing, at, landings) {
                     return None;
                 }
                 listing

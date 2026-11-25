@@ -3568,6 +3568,135 @@ mod tests {
         assert_eq!(books.len(), 2);
     }
 
+    /// On Base too, a custody fill paying into its pool a token the pool holds none of is charged
+    /// the first write of the pool's balance on top of its named figure: each door's pool is
+    /// asked its two balances at the read's block.
+    #[rstest]
+    #[case::holding_both((false, false), 0, 0)]
+    #[case::no_base((true, false), 16_964, 0)]
+    #[case::no_quote((false, true), 0, 16_964)]
+    #[tokio::test]
+    async fn a_fill_into_a_pool_holding_none_of_its_token_is_charged_the_first_write_on_base(
+        #[case] pool_lacks: (bool, bool),
+        #[case] custody_sell: u64,
+        #[case] custody_buy: u64,
+    ) {
+        let mut listing = FakeListing::weth_usdc(1);
+        listing.credit_mode = 2;
+        listing.bid = FakeSide::credit_weth_bid();
+        listing.pool_lacks = pool_lacks;
+        let node = FakeNode::new(vec![listing.clone()]);
+
+        let books = base_books_naming(node, &[(1, credit_gas())]).await;
+
+        let state = state_for(&books, &listing);
+        let first = |direction| state.side(direction).points()[0].0;
+        assert_eq!(
+            charged(state, SwapDirection::BaseToQuote, first(SwapDirection::BaseToQuote)).unwrap(),
+            BigUint::from(160_877 + custody_sell)
+        );
+        assert_eq!(
+            charged(state, SwapDirection::QuoteToBase, first(SwapDirection::QuoteToBase)).unwrap(),
+            BigUint::from(158_340 + custody_buy)
+        );
+    }
+
+    /// A book on Base carries what its fills cost beside each swap's charge, from the gas named
+    /// for its listing: the custody fill selling or buying base, the dearer, and a gas limit's
+    /// addition over it and its refund.
+    #[tokio::test]
+    async fn a_base_book_carries_its_gas_outlook() {
+        let node = FakeNode::new(vec![FakeListing::weth_usdc(1)]);
+
+        let books = base_books_naming(node, &[(1, named_gas())]).await;
+
+        assert_named_gas_outlook(books.values().next().unwrap());
+    }
+
+    /// Holds `book`, of a listing named [`named_gas`] in no credit mode, to the gas outlook it
+    /// carries: 96,239 gas expected, the dearer custody figure, and a limit's addition of that,
+    /// the custody fill's refund (19,900) and a quarter on top.
+    fn assert_named_gas_outlook(book: &Book) {
+        let attribute = |name: &str| {
+            book.component
+                .static_attributes
+                .get(name)
+                .cloned()
+        };
+        let gas = |gas: u64| Some(Bytes::from(U256::from(gas).to_be_bytes_trimmed_vec()));
+        assert_eq!(attribute(EXPECTED_GAS_ATTRIBUTE), gas(96_239));
+        assert_eq!(attribute(GAS_LIMIT_ADDITION_ATTRIBUTE), gas(145_174));
+    }
+
+    /// A credit listing's bid on Base whose door reports nothing fillable, its pool holding none
+    /// of the quote token and its route filling less than the maker's depth, is still served as
+    /// far as its route reaches: its door is asked across the token's scale at the read's block,
+    /// and the bid's sizes run from what its route reaches. Every sample is the door's own
+    /// answer, charged the route's gas.
+    #[tokio::test]
+    async fn a_credit_bid_reporting_nothing_fillable_is_served_as_far_as_its_route_reaches_on_base()
+    {
+        let most = U256::from(600_000_000_000_000_000u64);
+        let mut listing = FakeListing::weth_usdc(1);
+        listing.credit_mode = 2;
+        listing.bid = FakeSide {
+            credit_route: Some((U256::ZERO, U256::from(2_700_000_000u64))),
+            custody_most: Some(U256::ZERO),
+            max_in: most,
+            ..FakeSide::weth_bid()
+        };
+        let node = FakeNode::new(vec![listing.clone()]);
+
+        let books = base_books_naming(node, &[(1, credit_gas())]).await;
+
+        let state = state_for(&books, &listing);
+        let bid = state
+            .side(SwapDirection::BaseToQuote)
+            .points()
+            .to_vec();
+        let reach = U256::from(10u8).pow(U256::from(30u8)) >> 42usize;
+        assert!(
+            bid.iter()
+                .any(|&(amount, _)| amount == reach),
+            "{bid:?}"
+        );
+        for &(amount, output) in &bid {
+            assert_eq!(Some(output), listing.bid.quote(amount), "the door's own answer");
+            assert_eq!(
+                charged(state, SwapDirection::BaseToQuote, amount).unwrap(),
+                BigUint::from(610_501u64)
+            );
+        }
+    }
+
+    /// A credit listing on Base reading a print that lapses within the book's life is asked its
+    /// print's life by its smallest and its largest size's door quotes, never by the front's plan
+    /// of either, which answers zero where the door refuses: the side is cut where the print
+    /// lapses, as a listing with no credit mode is. Here the print lapses 3.1 s after the read.
+    #[tokio::test]
+    async fn a_credit_listing_reading_a_lapsing_print_is_cut_with_it_on_base() {
+        let mut node = FakeNode::new(Vec::new());
+        node.clock = FakeClock::counted(0);
+        let mut listing = print_listing_on(&mut node, FENCE_PRINT, 3_100, None);
+        listing.credit_mode = 2;
+        listing.bid = FakeSide::credit_weth_bid();
+        node.listings = vec![listing.clone()];
+        let now = node.timestamp * 1000;
+
+        let books = base_books_naming(node, &[(1, credit_gas())]).await;
+
+        let state = state_for(&books, &listing);
+        for direction in [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase] {
+            assert_eq!(
+                state
+                    .side_until(direction)
+                    .map(|until| until.unix_ms),
+                Some(now + 3_001 - LANDING_MS),
+                "{direction:?}"
+            );
+        }
+    }
+
     /// On depth whose rungs walk further off the price, the book quotes each sample exactly and
     /// never more than the door between them.
     #[tokio::test]
@@ -9418,6 +9547,94 @@ mod tests {
                 let books = source.fetch().await.unwrap().books;
 
                 assert_eq!(books.len(), usize::from(served));
+            }
+
+            /// A node's latest block may be a second (its next two blocks' reach) plus the lag
+            /// allowance behind a poll's start before the poll fails: up to there a poll with no
+            /// map for the block after it serves nothing without failing. A second later it fails
+            /// as lagging.
+            #[rstest]
+            #[case::at_a_second_and_the_allowance(0, true)]
+            #[case::a_second_past_it(1, false)]
+            #[tokio::test]
+            async fn a_bnb_node_fails_as_lagging_only_a_second_and_the_allowance_behind(
+                #[case] past: u64,
+                #[case] serves_nothing: bool,
+            ) {
+                let now = (ETHEREUM_NEXT_TIME + 1 + MAX_READ_LAG_SECS + past) * 1000 + 999;
+                // A map for a block past the one after the latest: none is for that one.
+                let mut later = state_map(ETHEREUM_BLOCK + 2, ETHEREUM_SLOT, &[(1, false)]);
+                later
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("slot");
+
+                let books =
+                    bnb_fetch(FakeNode::bnb(vec![FakeListing::ethereum(1)]), vec![later], now)
+                        .await;
+
+                match books {
+                    Ok(books) => {
+                        assert!(serves_nothing, "a poll {past} s past the allowance did not fail");
+                        assert!(books.is_empty());
+                    }
+                    Err(error) => {
+                        assert!(!serves_nothing, "{error}");
+                        assert!(error.to_string().contains("behind"), "{error}");
+                    }
+                }
+            }
+
+            /// The block after the next lands 900 ms after the head, in the head's second or the
+            /// one after, and a carrying side is asked there at both. Were a carried word to fill
+            /// only within the head's second (a rule the fake front adds here; the deployed one
+            /// counts a carry in blocks alone), the carry would end at the next block.
+            #[rstest]
+            #[case::carried_through_both_seconds(None, HEAD_MS + 900 + 1 - 100)]
+            #[case::carried_in_the_heads_second_alone(
+                Some((ETHEREUM_NEXT_TIME + 1) * 1000 - 1),
+                HEAD_MS + 450 + 1 - 100
+            )]
+            #[tokio::test]
+            async fn a_bnb_carry_is_asked_at_each_second_the_block_after_may_land_in(
+                #[case] carried_until_ms: Option<u64>,
+                #[case] until_ms: u64,
+            ) {
+                let listing =
+                    FakeListing { carry: true, carried_until_ms, ..FakeListing::ethereum(1) };
+
+                let books = bnb_fetch(
+                    FakeNode::bnb(vec![listing.clone()]),
+                    vec![bnb_map(&[(1, true)])],
+                    NOW_MS,
+                )
+                .await
+                .unwrap();
+
+                let state = state_for(&books, &listing);
+                assert_eq!(
+                    state
+                        .side_until(SwapDirection::BaseToQuote)
+                        .unwrap()
+                        .unix_ms,
+                    until_ms
+                );
+            }
+
+            /// A book on BNB Chain carries what its fills cost beside each swap's charge, from the
+            /// gas named for its listing: the custody fill selling or buying base, the dearer, and
+            /// a gas limit's addition over it and its refund.
+            #[tokio::test]
+            async fn a_bnb_book_carries_its_gas_outlook() {
+                let books = bnb_fetch(
+                    FakeNode::bnb(vec![FakeListing::ethereum(1)]),
+                    vec![bnb_map(&[(1, false)])],
+                    NOW_MS,
+                )
+                .await
+                .unwrap();
+
+                assert_named_gas_outlook(books.values().next().unwrap());
             }
 
             /// A credit listing named with its gas is served on BNB Chain as on Ethereum: its

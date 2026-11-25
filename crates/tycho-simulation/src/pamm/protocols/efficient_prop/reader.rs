@@ -4209,6 +4209,39 @@ mod tests {
         assert_eq!(refuses_the_form(&TransportError::ErrorResp(payload.unwrap())), refuses);
     }
 
+    /// A BNB Chain header's milliseconds: its `milliTimestamp` where that falls in the header's
+    /// second, else the low eight bytes of its `mixHash` where they are under a second. A header
+    /// naming neither names none, nor does one whose `mixHash` holds no milliseconds there, as
+    /// another chain's randomness does: its life would be timed from a moment that is not its own.
+    #[rstest]
+    #[case::its_milli_timestamp(Some(1_000_450), None, Some(1_000_450))]
+    #[case::a_milli_timestamp_of_another_second(Some(1_001_450), None, None)]
+    #[case::then_its_mix_hash(Some(1_001_450), Some(450), Some(1_000_450))]
+    #[case::its_mix_hash(None, Some(999), Some(1_000_999))]
+    #[case::a_mix_hash_of_a_second(None, Some(1_000), None)]
+    #[case::a_mix_hash_of_randomness(None, Some(0xabab_abab_abab_abab), None)]
+    #[case::neither(None, None, None)]
+    fn a_header_names_its_milliseconds_within_its_second(
+        #[case] milli_timestamp: Option<u64>,
+        #[case] mix_low: Option<u64>,
+        #[case] ms: Option<u64>,
+    ) {
+        let header = Header {
+            hash: B256::ZERO,
+            parent_hash: None,
+            number: U64::from(1u8),
+            timestamp: Some(U64::from(1_000u16)),
+            milli_timestamp: milli_timestamp.map(U64::from),
+            mix_hash: mix_low.map(|low| {
+                let mut hash = B256::repeat_byte(0xab);
+                hash.0[24..].copy_from_slice(&low.to_be_bytes());
+                hash
+            }),
+        };
+
+        assert_eq!(header.ms(), ms);
+    }
+
     /// Nor does a failure that is no answer of the node's at all, as a timeout.
     #[test]
     fn a_transport_failure_refuses_no_form() {
