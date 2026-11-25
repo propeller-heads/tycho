@@ -170,7 +170,7 @@ mod tests {
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::{resolve_version, unique_by_id, unique_by_key, ReadAt};
+    use super::{resolve_version, unique_by_id, unique_by_key_nested, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -230,8 +230,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_by_key_collects_rows() {
-        let map = unique_by_key(
+    fn test_unique_by_key_nested_collects_rows() {
+        let map = unique_by_key_nested(
             "protocol_state",
             InstanceId(7),
             ReadAt::Current(None),
@@ -252,8 +252,11 @@ mod tests {
     #[case::latest(ReadAt::Current(None), "the latest version")]
     #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
-    fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
-        let result = unique_by_key(
+    fn test_unique_by_key_nested_fails_on_a_repeated_key(
+        #[case] read: ReadAt,
+        #[case] version: &str,
+    ) {
+        let result = unique_by_key_nested(
             "protocol_state",
             InstanceId(7),
             read,
