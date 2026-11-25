@@ -1,5 +1,5 @@
 //! Component balances of an instance: one balance per component and token, versioned.
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
@@ -7,7 +7,7 @@ use diesel::{
     sql_query,
     sql_types::{Array, BigInt, Binary, Int4},
     upsert::excluded,
-    ExpressionMethods, QueryDsl,
+    ExpressionMethods,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{models::protocol, storage::StorageError, Bytes};
@@ -18,10 +18,12 @@ use crate::postgres::{
         origins::BatchOrigins,
         orm::{NewComponentBalance, NewComponentBalanceHistory},
         schema::tycho::{component_balance, component_balance_history},
-        write::versioning::{VersionedChange, VersionedRowNew},
+        write::{
+            token::check_tokens_stored,
+            versioning::{VersionedChange, VersionedRowNew},
+        },
         InstanceId,
     },
-    schema::token,
     storage_error_from_diesel,
 };
 
@@ -50,24 +52,11 @@ impl PostgresGatewayNew {
         let component_ids = self
             .component_ids(instance, &external_ids, conn)
             .await?;
-        let addresses: HashSet<&Bytes> = balances
+        let tokens: Vec<&Bytes> = balances
             .iter()
             .map(|balance| &balance.token)
             .collect();
-        let stored_tokens: HashSet<Bytes> = token::table
-            .filter(token::address.eq_any(&addresses))
-            .select(token::address)
-            .load::<Bytes>(conn)
-            .await
-            .map_err(|err| storage_error_from_diesel(err, "Token", "batch", None))?
-            .into_iter()
-            .collect();
-        if let Some(missing) = balances
-            .iter()
-            .find(|balance| !stored_tokens.contains(&balance.token))
-        {
-            return Err(StorageError::NotFound("Token".to_string(), missing.token.to_string()));
-        }
+        check_tokens_stored(&tokens, conn).await?;
 
         let changes = balances
             .iter()

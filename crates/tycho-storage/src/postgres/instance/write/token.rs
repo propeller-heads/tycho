@@ -1,6 +1,9 @@
 //! Tokens: shared by all instances and found by address.
+use std::collections::HashSet;
+
+use diesel::{ExpressionMethods, QueryDsl};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::{models::token::Token, storage::StorageError};
+use tycho_common::{models::token::Token, storage::StorageError, Bytes};
 
 use crate::postgres::{
     instance::gateway::PostgresGatewayNew, orm::NewToken, schema::token, storage_error_from_diesel,
@@ -29,6 +32,31 @@ impl PostgresGatewayNew {
         }
         Ok(())
     }
+}
+
+/// Fails with `NotFound` for the first of `addresses` that is not a stored token.
+///
+/// Instance rows refer to tokens by address, with no foreign key, so a writer checks them first.
+pub(super) async fn check_tokens_stored(
+    addresses: &[&Bytes],
+    conn: &mut AsyncPgConnection,
+) -> Result<(), StorageError> {
+    let unique: HashSet<&Bytes> = addresses.iter().copied().collect();
+    let stored: HashSet<Bytes> = token::table
+        .filter(token::address.eq_any(&unique))
+        .select(token::address)
+        .load::<Bytes>(conn)
+        .await
+        .map_err(|err| storage_error_from_diesel(err, "Token", "batch", None))?
+        .into_iter()
+        .collect();
+    if let Some(missing) = addresses
+        .iter()
+        .find(|address| !stored.contains(**address))
+    {
+        return Err(StorageError::NotFound("Token".to_string(), missing.to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
