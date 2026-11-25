@@ -5483,7 +5483,8 @@ mod test {
 ///
 /// Note that it is ok to use higher level db methods here as there is a layer of abstraction
 /// between this component and the actual db interactions
-#[cfg(test)]
+// Runs extractors on the storage gateway of the old tables, which is off on this branch.
+#[cfg(all(test, old_gateway))]
 mod test_serial_db {
     use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
     use mockall::mock;

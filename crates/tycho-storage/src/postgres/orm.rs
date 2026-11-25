@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+#[cfg(old_gateway)]
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel::{
@@ -12,16 +13,21 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
+#[cfg(old_gateway)]
+use tycho_common::models::{
+    blockchain::TracingParams as EntryPointTracingParamsCommon, EntryPointId,
+};
 use tycho_common::{
     models::{
-        self, blockchain::TracingParams as EntryPointTracingParamsCommon, Address, AttrStoreKey,
-        Balance, BlockHash, Code, CodeHash, ComponentId, ContractId, EntryPointId,
+        self, Address, AttrStoreKey, Balance, BlockHash, Code, CodeHash, ComponentId, ContractId,
         PaginationParams, StoreVal, TxHash,
     },
     storage::{BlockIdentifier, StorageError, WithTotal},
     Bytes,
 };
 
+#[cfg(old_gateway)]
+use super::versioning::{PartitionedVersionedRow, StoredVersionedRow, VersionedRow};
 use super::{
     convert_int,
     schema::{
@@ -33,10 +39,8 @@ use super::{
         protocol_component_holds_token, protocol_component_uses_entry_point, protocol_state,
         protocol_state_default, protocol_system, protocol_type, token, transaction,
     },
-    versioning::{StoredVersionedRow, VersionedRow},
-    InstanceId, PostgresError, MAX_TS, MAX_VERSION_TS,
+    truncate_to_byte_limit, InstanceId, PostgresError, MAX_TS, MAX_VERSION_TS,
 };
-use crate::postgres::versioning::PartitionedVersionedRow;
 
 #[derive(Identifiable, Queryable, Selectable)]
 #[diesel(table_name = chain)]
@@ -459,6 +463,7 @@ impl From<ComponentBalance> for NewComponentBalance {
     }
 }
 
+#[cfg(old_gateway)]
 impl PartitionedVersionedRow for NewComponentBalance {
     type EntityId = (i64, i64);
 
@@ -1141,6 +1146,7 @@ impl From<ProtocolState> for NewProtocolState {
     }
 }
 
+#[cfg(old_gateway)]
 impl PartitionedVersionedRow for NewProtocolState {
     type EntityId = (i64, String);
 
@@ -1367,13 +1373,11 @@ impl<'a> NewAccount<'a> {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
-#[derive(Identifiable, Queryable, Associations, Selectable, Debug, PartialEq)]
-#[diesel(belongs_to(Account))]
+#[derive(Identifiable, Queryable, Selectable, Debug, PartialEq)]
 #[diesel(table_name = token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Token {
     pub id: i64,
-    pub account_id: i64,
     pub symbol: String,
     pub decimals: i32,
     pub tax: i64,
@@ -1381,14 +1385,14 @@ pub struct Token {
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
     pub quality: i32,
-    pub address: Option<Bytes>,
+    pub address: Bytes,
 }
 
 #[derive(AsChangeset, Insertable, Debug)]
 #[diesel(table_name = token)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewToken {
-    pub account_id: i64,
+    pub address: Bytes,
     pub symbol: String,
     pub decimals: i32,
     pub tax: i64,
@@ -1406,10 +1410,11 @@ impl NewToken {
     /// PostgreSQL wire protocol uses i16 for parameter count (max 32767).
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 
-    pub fn from_token(account_id: i64, token: &models::token::Token) -> Result<Self, StorageError> {
+    pub fn from_token(token: &models::token::Token) -> Result<Self, StorageError> {
         Ok(Self {
-            account_id,
-            symbol: token.symbol.clone(),
+            address: token.address.clone(),
+            // The column holds at most 255 characters, so a cut at 255 bytes always fits.
+            symbol: truncate_to_byte_limit(&token.symbol, 255),
             decimals: convert_int(token.decimals, "token decimals")?,
             tax: convert_int(token.tax, "token tax")?,
             gas: token
@@ -1427,11 +1432,7 @@ impl NewToken {
 
 impl Token {
     /// Builds the domain token of this row, failing when a column holds a negative value.
-    pub fn to_model(
-        &self,
-        address: &Address,
-        chain: models::Chain,
-    ) -> Result<models::token::Token, StorageError> {
+    pub fn to_model(&self, chain: models::Chain) -> Result<models::token::Token, StorageError> {
         let gas_usage = self
             .gas
             .iter()
@@ -1441,7 +1442,7 @@ impl Token {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(models::token::Token::new(
-            address,
+            &self.address,
             self.symbol.as_str(),
             convert_int(self.decimals, "token decimals")?,
             convert_int(self.tax, "token tax")?,
@@ -1483,6 +1484,7 @@ impl AccountBalance {
     }
 }
 
+#[cfg(old_gateway)]
 #[async_trait]
 impl StoredVersionedRow for AccountBalance {
     type EntityId = (i64, i64);
@@ -1559,6 +1561,7 @@ impl NewAccountBalance {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
+#[cfg(old_gateway)]
 impl VersionedRow for NewAccountBalance {
     type SortKey = (i64, NaiveDateTime, i64);
     type EntityId = (i64, i64);
@@ -1608,6 +1611,7 @@ impl ContractCode {
     }
 }
 
+#[cfg(old_gateway)]
 #[async_trait]
 impl StoredVersionedRow for ContractCode {
     type EntityId = i64;
@@ -1662,6 +1666,7 @@ pub struct NewContractCode<'a> {
     pub valid_to: Option<NaiveDateTime>,
 }
 
+#[cfg(old_gateway)]
 impl<'a> VersionedRow for NewContractCode<'a> {
     type SortKey = (i64, NaiveDateTime, i64);
     type EntityId = i64;
@@ -1684,6 +1689,7 @@ impl<'a> VersionedRow for NewContractCode<'a> {
 // Unfortunately that really doesn't play nicely with async_trait on the Gateway
 // and makes the types a lot more complicted. Once the system is up and running
 // this could be improved though.
+#[cfg(old_gateway)]
 pub struct NewContract {
     pub title: String,
     pub address: Address,
@@ -1692,6 +1698,7 @@ pub struct NewContract {
     pub created_at: Option<NaiveDateTime>,
 }
 
+#[cfg(old_gateway)]
 impl NewContract {
     pub fn new_account(&self) -> NewAccount<'_> {
         NewAccount {
@@ -1737,6 +1744,7 @@ pub struct NewSlot {
     pub valid_to: NaiveDateTime,
 }
 
+#[cfg(old_gateway)]
 impl PartitionedVersionedRow for NewSlot {
     type EntityId = (i64, Bytes);
 
@@ -1925,6 +1933,7 @@ impl NewComponentPause<'_> {
 }
 
 /// An open `component_pause` row joined with its protocol system name.
+#[cfg(old_gateway)]
 #[derive(Queryable, Debug)]
 pub struct OpenComponentPause {
     pub protocol_system: String,
@@ -1973,6 +1982,7 @@ impl From<EntryPoint> for models::blockchain::EntryPoint {
 
 impl EntryPoint {
     /// Retrieves the database ids of entry points from a list of external ids.
+    #[cfg(old_gateway)]
     pub(crate) async fn ids_by_external_ids(
         external_ids: &[String],
         conn: &mut AsyncPgConnection,
@@ -2043,6 +2053,7 @@ impl TryFrom<&EntryPointTracingParams> for models::blockchain::TracingParams {
 impl EntryPointTracingParams {
     // Retrieves the database ids of an entry point tracing params (linked to the entrypoint id)
     // from a list of entry points ids and tracing params.
+    #[cfg(old_gateway)]
     pub(crate) async fn ids_by_entry_point_with_tracing_params(
         entry_points_with_tracing_params: &[(EntryPointId, EntryPointTracingParamsCommon)],
         conn: &mut AsyncPgConnection,

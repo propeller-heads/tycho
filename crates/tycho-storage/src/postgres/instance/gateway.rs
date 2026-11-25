@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::NaiveDateTime;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use tycho_common::{models::Chain, storage::StorageError};
 
@@ -17,27 +18,26 @@ use crate::postgres::{ChainEnumCache, FromConnection, ProtocolSystemEnumCache};
 pub struct PostgresGatewayNew {
     pub(super) chain_id_cache: Arc<ChainEnumCache>,
     pub(super) protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
+    /// The start of the retention period. History keeps only versions that end after this time,
+    /// so `write_versions` does not archive a version that ends at or before it.
+    pub(super) retention_horizon: NaiveDateTime,
 }
 
 impl PostgresGatewayNew {
     /// Loads the chain and protocol system names from the database.
     ///
     /// A name added to the database later is unknown to this gateway.
-    pub async fn new(pool: Pool<AsyncPgConnection>) -> Result<Self, StorageError> {
+    pub async fn new(
+        pool: Pool<AsyncPgConnection>,
+        retention_horizon: NaiveDateTime,
+    ) -> Result<Self, StorageError> {
         let chain_id_cache = ChainEnumCache::from_pool(pool.clone()).await?;
         let protocol_system_id_cache = ProtocolSystemEnumCache::from_pool(pool).await?;
         Ok(Self {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
+            retention_horizon,
         })
-    }
-
-    /// Uses the given name caches instead of loading them from the database.
-    pub(crate) fn with_caches(
-        chain_id_cache: Arc<ChainEnumCache>,
-        protocol_system_id_cache: Arc<ProtocolSystemEnumCache>,
-    ) -> Self {
-        Self { chain_id_cache, protocol_system_id_cache }
     }
 
     #[cfg(test)]
@@ -51,6 +51,7 @@ impl PostgresGatewayNew {
         Self {
             chain_id_cache: Arc::new(chain_id_cache),
             protocol_system_id_cache: Arc::new(protocol_system_id_cache),
+            retention_horizon: NaiveDateTime::default(),
         }
     }
 
@@ -83,7 +84,7 @@ mod tests {
                 db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
             }
 
-            let gateway = PostgresGatewayNew::new(pool)
+            let gateway = PostgresGatewayNew::new(pool, NaiveDateTime::default())
                 .await
                 .expect("creating the gateway failed");
 

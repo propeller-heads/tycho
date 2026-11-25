@@ -112,33 +112,47 @@ pub(super) async fn resolve_version(
     Ok(ReadAt::Past { ts, head })
 }
 
-/// Collects `rows` into a map by key. `Unexpected` if two rows have the same key: two rows of
-/// `entity` are then valid at one version, which the writer must prevent. The error names the
-/// `instance` and the version of `read`, and `storage_overlapping_versions{entity}` counts it.
-pub(super) fn unique_by_key<K: Eq + Hash + Debug, V>(
+/// Collects `rows` into a map by outer key, then by inner key. `Unexpected` if two rows have the
+/// same outer and inner key: two rows of `entity` are then valid at one version, which the writer
+/// must prevent. The error names the `instance` and the version of `read`, and
+/// `storage_overlapping_versions{entity}` counts it.
+pub(super) fn unique_by_key<O, I, V>(
     entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
-    rows: impl IntoIterator<Item = (K, V)>,
-) -> Result<HashMap<K, V>, StorageError> {
-    rows.into_iter()
-        .try_fold(HashMap::new(), |mut map, (key, value)| match map.entry(key) {
-            Entry::Occupied(e) => {
-                counter!("storage_overlapping_versions", "entity" => entity).increment(1);
-                let version = match read {
-                    ReadAt::Current(None) => "the latest version".to_string(),
-                    ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => format!("version {ts}"),
-                };
-                Err(StorageError::Unexpected(format!(
-                    "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
-                    e.key()
-                )))
+    rows: impl IntoIterator<Item = ((O, I), V)>,
+) -> Result<HashMap<O, HashMap<I, V>>, StorageError>
+where
+    O: Eq + Hash + Debug,
+    I: Eq + Hash + Debug,
+{
+    rows.into_iter().try_fold(
+        HashMap::new(),
+        |mut map: HashMap<O, HashMap<I, V>>, ((outer, inner), value)| {
+            match map.entry(outer) {
+                Entry::Vacant(e) => {
+                    e.insert(HashMap::from([(inner, value)]));
+                }
+                Entry::Occupied(mut e) if !e.get().contains_key(&inner) => {
+                    e.get_mut().insert(inner, value);
+                }
+                Entry::Occupied(e) => {
+                    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
+                    let version = match read {
+                        ReadAt::Current(None) => "the latest version".to_string(),
+                        ReadAt::Current(Some(ts)) | ReadAt::Past { ts, .. } => {
+                            format!("version {ts}")
+                        }
+                    };
+                    return Err(StorageError::Unexpected(format!(
+                        "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
+                        (e.key(), &inner)
+                    )));
+                }
             }
-            Entry::Vacant(e) => {
-                e.insert(value);
-                Ok(map)
-            }
-        })
+            Ok(map)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -281,11 +295,17 @@ mod tests {
             "protocol_state",
             InstanceId(7),
             ReadAt::Current(None),
-            [(1, "a"), (2, "b"), (3, "c")],
+            [((1, "x"), "a"), ((1, "y"), "b"), ((2, "x"), "c")],
         )
         .unwrap();
 
-        assert_eq!(map, HashMap::from([(1, "a"), (2, "b"), (3, "c")]));
+        assert_eq!(
+            map,
+            HashMap::from([
+                (1, HashMap::from([("x", "a"), ("y", "b")])),
+                (2, HashMap::from([("x", "c")])),
+            ])
+        );
     }
 
     #[rstest]
@@ -293,14 +313,19 @@ mod tests {
     #[case::current_at(ReadAt::Current(Some(day(6))), "version 2020-01-06 00:00:00")]
     #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
     fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
-        let result = unique_by_key("protocol_state", InstanceId(7), read, [(42, "a"), (42, "b")]);
+        let result = unique_by_key(
+            "protocol_state",
+            InstanceId(7),
+            read,
+            [((42, "x"), "a"), ((42, "x"), "b")],
+        );
 
         let Err(StorageError::Unexpected(msg)) = result else {
             panic!("expected Unexpected, got {result:?}");
         };
         assert_eq!(
             msg,
-            format!("protocol_state of instance 7 at {version}: two rows of 42 are valid")
+            format!("protocol_state of instance 7 at {version}: two rows of (42, \"x\") are valid")
         );
     }
 }

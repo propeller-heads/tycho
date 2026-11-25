@@ -251,20 +251,17 @@ async fn round_trip_catalog_and_components(
         .expect("reading protocol state failed");
     assert_eq!((attribute.attribute_value, attribute.tx_index), (bytes(2), 3));
 
-    let archived = ProtocolStateHistory {
-        instance_id,
-        protocol_component_id: component_id,
-        attribute_name: "reserve0".to_string(),
-        attribute_value: bytes(1),
-        previous_value: None,
-        valid_from: ts - Duration::seconds(12),
-        valid_to: ts,
-        tx_index: 1,
-        inserted_ts: ts,
-        modified_ts: ts,
-    };
     diesel::insert_into(tycho::protocol_state_history::table)
-        .values(&archived)
+        .values(NewProtocolStateHistory {
+            instance_id,
+            protocol_component_id: component_id,
+            attribute_name: "reserve0".to_string(),
+            attribute_value: bytes(1),
+            previous_value: None,
+            valid_from: ts - Duration::seconds(12),
+            valid_to: ts,
+            tx_index: 1,
+        })
         .execute(conn)
         .await
         .expect("inserting protocol state history failed");
@@ -297,7 +294,7 @@ async fn round_trip_catalog_and_components(
     assert_eq!(balance.new_balance, bytes(5));
 
     diesel::insert_into(tycho::component_balance_history::table)
-        .values(ComponentBalanceHistory {
+        .values(NewComponentBalanceHistory {
             instance_id,
             protocol_component_id: component_id,
             token: bytes(0xee),
@@ -307,7 +304,6 @@ async fn round_trip_catalog_and_components(
             valid_from: ts - Duration::seconds(12),
             valid_to: ts,
             tx_index: 1,
-            inserted_ts: ts,
         })
         .execute(conn)
         .await
@@ -684,8 +680,8 @@ async fn test_leaf_check_rejects_rows_of_another_instance() {
     assert_eq!(database_error_kind(result), DatabaseErrorKind::CheckViolation);
 }
 
-fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> ProtocolStateHistory {
-    ProtocolStateHistory {
+fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> NewProtocolStateHistory {
+    NewProtocolStateHistory {
         instance_id,
         protocol_component_id: 1,
         attribute_name: "reserve0".to_string(),
@@ -694,8 +690,6 @@ fn history_row(instance_id: InstanceId, valid_to: NaiveDateTime) -> ProtocolStat
         valid_from: valid_to - Duration::seconds(12),
         valid_to,
         tx_index: 0,
-        inserted_ts: now(),
-        modified_ts: now(),
     }
 }
 
@@ -808,4 +802,41 @@ async fn test_premake_makes_days_for_empty_history_tables() {
         .present;
         assert!(present, "{table}: the day 7 days ahead must be made again");
     }
+}
+
+#[tokio::test]
+async fn test_token_is_keyed_by_address() {
+    let mut conn = instance_test_connection().await;
+
+    let has_account_link = sql_query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'token' AND column_name = 'account_id') \
+         AS present",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token columns failed")
+    .present;
+    let address_is_nullable = sql_query(
+        "SELECT is_nullable = 'YES' AS present FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'token' AND column_name = 'address'",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token address column failed")
+    .present;
+    let address_is_unique = sql_query(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint c \
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
+         WHERE c.conrelid = 'public.token'::regclass AND c.contype = 'u' \
+         AND cardinality(c.conkey) = 1 AND a.attname = 'address') AS present",
+    )
+    .get_result::<Presence>(&mut conn)
+    .await
+    .expect("reading the token constraints failed")
+    .present;
+
+    assert!(!has_account_link, "a token has no account");
+    assert!(!address_is_nullable, "every token has an address");
+    assert!(address_is_unique, "the address is the key of a token");
 }

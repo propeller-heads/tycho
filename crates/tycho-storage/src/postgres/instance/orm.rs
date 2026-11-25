@@ -2,8 +2,11 @@
 //!
 //! Each table has a row struct for reads. Tables whose rows get database-filled columns (a
 //! sequence id, `inserted_ts`, `modified_ts`) also have a `New*` struct for inserts that leaves
-//! those columns out. History tables and the link tables without such columns use one struct for
-//! both.
+//! those columns out. Link tables without such columns use one struct for both. So do the history
+//! tables that no writer fills: only tests insert into them.
+//!
+//! A writer also loads rows into a `New*` struct when it writes them again. `QueryableByName`
+//! reads the columns of the struct by name and ignores the other columns.
 //!
 //! Field order follows the column order of `schema.rs`, which `Queryable` relies on.
 use chrono::NaiveDateTime;
@@ -168,7 +171,7 @@ pub struct ProtocolState {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::protocol_state)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewProtocolState {
@@ -181,7 +184,17 @@ pub struct NewProtocolState {
     pub tx_index: i32,
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable)]
+impl NewProtocolState {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 7;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
+#[expect(dead_code, reason = "only tests read history rows, and only some fields")]
+#[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = tycho::protocol_state_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ProtocolStateHistory {
@@ -195,6 +208,29 @@ pub struct ProtocolStateHistory {
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::protocol_state_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewProtocolStateHistory {
+    pub instance_id: InstanceId,
+    pub protocol_component_id: i64,
+    pub attribute_name: String,
+    pub attribute_value: Bytes,
+    pub previous_value: Option<Bytes>,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
+}
+
+impl NewProtocolStateHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
@@ -214,7 +250,7 @@ pub struct ComponentBalance {
     pub inserted_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::component_balance)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewComponentBalance {
@@ -228,7 +264,17 @@ pub struct NewComponentBalance {
     pub tx_index: i32,
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable)]
+impl NewComponentBalance {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 8;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
+#[expect(dead_code, reason = "only tests read history rows, and only some fields")]
+#[derive(Debug, Queryable, Selectable)]
 #[diesel(table_name = tycho::component_balance_history)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct ComponentBalanceHistory {
@@ -242,6 +288,30 @@ pub struct ComponentBalanceHistory {
     pub valid_to: NaiveDateTime,
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::component_balance_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewComponentBalanceHistory {
+    pub instance_id: InstanceId,
+    pub protocol_component_id: i64,
+    pub token: Bytes,
+    pub new_balance: Bytes,
+    pub previous_value: Bytes,
+    pub balance_float: f64,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
+}
+
+impl NewComponentBalanceHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 9;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
