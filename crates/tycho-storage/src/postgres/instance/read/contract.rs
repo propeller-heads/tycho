@@ -13,7 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{resolve_version, unique_by_key, ReadAt};
+use super::version::{resolve_version, unique_by_id, unique_by_key, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
@@ -291,15 +291,18 @@ async fn load_account_balances(
             .map(|(address, token, balance)| ((address, token), balance)),
     )?
     .into_iter()
-    .fold(HashMap::new(), |mut balances, ((address, token), balance)| {
-        let account_balance =
-            AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
-        balances
-            .entry(address)
-            .or_default()
-            .insert(token, account_balance);
-        balances
-    }))
+    .map(|(address, balances)| {
+        let balances = balances
+            .into_iter()
+            .map(|(token, balance)| {
+                let balance =
+                    AccountBalance::new(address.clone(), token.clone(), balance, Bytes::zero(32));
+                (token, balance)
+            })
+            .collect();
+        (address, balances)
+    })
+    .collect())
 }
 
 /// A code row: account id, and code, code hash and the hash of the transaction that set it.
@@ -324,7 +327,7 @@ async fn codes_at(
             rows
         }
     };
-    unique_by_key("contract_code", instance, read, rows)
+    unique_by_id("contract_code", instance, read, rows)
 }
 
 /// Loads the current code rows of the accounts `ids` of `instance`.
@@ -402,21 +405,13 @@ async fn slots_at(
             rows
         }
     };
-    Ok(unique_by_key(
+    unique_by_key(
         "contract_storage",
         instance,
         read,
         rows.into_iter()
-            .map(|(account_id, slot, value)| ((account_id, slot), value)),
-    )?
-    .into_iter()
-    .fold(HashMap::new(), |mut slots, ((account_id, slot), value)| {
-        slots
-            .entry(account_id)
-            .or_default()
-            .insert(slot, value.unwrap_or_default());
-        slots
-    }))
+            .map(|(account_id, slot, value)| ((account_id, slot), value.unwrap_or_default())),
+    )
 }
 
 /// Loads the current slot rows of the accounts `ids` of `instance`.
