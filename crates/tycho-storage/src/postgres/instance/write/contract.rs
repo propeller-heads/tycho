@@ -266,7 +266,7 @@ mod tests {
         keccak256,
         models::{
             blockchain::{Block, Transaction},
-            contract::{Account as DomainAccount, AccountDelta},
+            contract::{Account as DomainAccount, AccountBalance as DomainBalance, AccountDelta},
             Chain, ChangeType,
         },
         storage::StorageError,
@@ -664,5 +664,63 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_insert_account_balances_writes_token_balances() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_token(&mut conn, &hex::encode(address(9)), "USDC", 6, Some(100)).await;
+        let id = db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let balances = [DomainBalance::new(address(1), address(9), Bytes::from(5u64), tx(0xa1))];
+
+        gateway
+            .insert_account_balances(instance, &origins(), &balances, &mut conn)
+            .await
+            .unwrap();
+
+        let stored: Vec<AccountBalance> = account_balance::table
+            .filter(account_balance::instance_id.eq(instance))
+            .select(AccountBalance::as_select())
+            .load(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            (stored[0].account_id, &stored[0].token, &stored[0].balance),
+            (id, &address(9), &Bytes::from(5u64))
+        );
+        assert_eq!((stored[0].valid_from, stored[0].tx_index), (ts(10), 1));
+    }
+
+    #[tokio::test]
+    async fn test_insert_account_balances_fails_for_a_missing_token() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_instance_account(&mut conn, instance, address(1)).await;
+        let balances = [DomainBalance::new(address(1), address(9), Bytes::from(5u64), tx(0xa1))];
+
+        let result = gateway
+            .insert_account_balances(instance, &origins(), &balances, &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Token".to_string(), address(9).to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_account_balances_fails_for_an_account_not_in_the_instance() {
+        let (mut conn, gateway, instance) = setup().await;
+        db_fixtures::insert_token(&mut conn, &hex::encode(address(9)), "USDC", 6, Some(100)).await;
+        let balances = [DomainBalance::new(address(1), address(9), Bytes::from(5u64), tx(0xa1))];
+
+        let result = gateway
+            .insert_account_balances(instance, &origins(), &balances, &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Account".to_string(), address(1).to_string()))
+        );
     }
 }
