@@ -6,6 +6,8 @@ mod copies;
 mod limits;
 mod quotes;
 mod spot_prices;
+#[cfg(test)]
+mod tests;
 
 use std::{
     marker::PhantomData,

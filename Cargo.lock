@@ -10193,6 +10193,7 @@ dependencies = [
  "num-traits",
  "regex",
  "reqwest 0.13.2",
+ "rstest 0.24.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -10203,6 +10204,7 @@ dependencies = [
  "tycho-ethereum",
  "tycho-execution",
  "tycho-simulation",
+ "typetag",
  "urlencoding",
 ]
 
