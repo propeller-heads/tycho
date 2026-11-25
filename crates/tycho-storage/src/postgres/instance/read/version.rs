@@ -94,7 +94,7 @@ pub(super) async fn resolve_version(
 /// same outer and inner key: two rows of `entity` are then valid at one version, which the writer
 /// must prevent. The error names the `instance` and the version of `read`, and
 /// `storage_overlapping_versions{entity}` counts it.
-pub(super) fn unique_by_key<O, I, V>(
+pub(super) fn unique_by_key_nested<O, I, V>(
     entity: &'static str,
     instance: InstanceId,
     read: ReadAt,
@@ -124,7 +124,7 @@ where
 }
 
 /// Collects `rows` into a map by key. `Unexpected` if two rows have the same key, as for
-/// [`unique_by_key`].
+/// [`unique_by_key_nested`].
 pub(super) fn unique_by_id<K: Eq + Hash + Debug, V>(
     entity: &'static str,
     instance: InstanceId,

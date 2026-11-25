@@ -13,7 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{resolve_version, unique_by_id, unique_by_key, ReadAt};
+use super::version::{resolve_version, unique_by_id, unique_by_key_nested, ReadAt};
 use crate::postgres::{
     count_to_i64,
     instance::{
@@ -275,7 +275,7 @@ async fn load_account_balances(
     if let ReadAt::Past { ts, head } = read {
         rows.extend(history_account_balance_rows(instance, accounts, skip, ts, head, conn).await?);
     }
-    Ok(unique_by_key(
+    Ok(unique_by_key_nested(
         "account_balance",
         instance,
         read,
@@ -389,7 +389,7 @@ async fn slots_at(
     if let ReadAt::Past { ts, head } = read {
         rows.extend(history_slot_rows(instance, ids, ts, head, conn).await?);
     }
-    unique_by_key(
+    unique_by_key_nested(
         "contract_storage",
         instance,
         read,

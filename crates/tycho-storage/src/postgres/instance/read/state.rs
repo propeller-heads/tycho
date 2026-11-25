@@ -12,7 +12,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::version::{resolve_version, unique_by_key, ReadAt};
+use super::version::{resolve_version, unique_by_key_nested, ReadAt};
 use crate::postgres::{
     instance::{
         active::active_instance_limits,
@@ -141,7 +141,7 @@ async fn states_of(
     if let ReadAt::Past { ts, head } = read {
         rows.extend(history_state_rows(instance, ids, ts, head, conn).await?);
     }
-    let attributes = unique_by_key(
+    let attributes = unique_by_key_nested(
         "protocol_state",
         instance,
         read,
@@ -341,7 +341,7 @@ async fn component_balances_at(
     if let ReadAt::Past { ts, head } = read {
         rows.extend(history_balance_rows(instance, ids, ts, head, conn).await?);
     }
-    unique_by_key(
+    unique_by_key_nested(
         "component_balance",
         instance,
         read,
