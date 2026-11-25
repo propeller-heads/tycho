@@ -149,3 +149,140 @@ impl VersionedRowNew for NewAccountBalance {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+    use diesel::prelude::*;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use tycho_common::Bytes;
+
+    use crate::postgres::{
+        db_fixtures,
+        instance::{
+            gateway::PostgresGatewayNew,
+            orm::{AccountBalance, AccountBalanceHistory, NewAccountBalance},
+            schema::tycho::{account_balance, account_balance_history},
+            write::versioning::VersionedChange,
+            InstanceId,
+        },
+        testing::instance_test_connection,
+    };
+
+    struct Setup {
+        conn: AsyncPgConnection,
+        gateway: PostgresGatewayNew,
+        instance: InstanceId,
+        account: i64,
+    }
+
+    /// An instance with one account, whose balance of token `0x01` is 1 since 2020-01-01.
+    async fn setup() -> Setup {
+        let mut conn = instance_test_connection().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
+        let instance = db_fixtures::insert_instance(&mut conn, system, "0.0.2").await;
+        let account =
+            db_fixtures::insert_instance_account(&mut conn, instance, Bytes::from([1u8; 20])).await;
+        db_fixtures::insert_instance_account_balance(
+            &mut conn,
+            instance,
+            account,
+            Bytes::from("0x01"),
+            Bytes::from(1u64),
+        )
+        .await;
+        let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
+        Setup { conn, gateway, instance, account }
+    }
+
+    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
+    fn minutes_ago(minutes: i64) -> NaiveDateTime {
+        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
+        ts.with_nanosecond(0)
+            .expect("zero nanoseconds is valid")
+    }
+
+    fn stored_since() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2020, 1, 1)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .expect("a valid date")
+    }
+
+    fn update(
+        setup: &Setup,
+        token: &str,
+        balance: u64,
+        valid_from: NaiveDateTime,
+    ) -> VersionedChange<NewAccountBalance> {
+        VersionedChange::Update(NewAccountBalance {
+            instance_id: setup.instance,
+            account_id: setup.account,
+            token: Bytes::from(token),
+            balance: Bytes::from(balance),
+            valid_from,
+            tx_index: 0,
+        })
+    }
+
+    async fn write(setup: &mut Setup, changes: Vec<VersionedChange<NewAccountBalance>>) {
+        setup
+            .gateway
+            .write_versions(setup.instance, changes, &mut setup.conn)
+            .await
+            .expect("writing the balances failed");
+    }
+
+    async fn current(setup: &mut Setup) -> Vec<AccountBalance> {
+        account_balance::table
+            .filter(account_balance::instance_id.eq(setup.instance))
+            .order_by(account_balance::token)
+            .select(AccountBalance::as_select())
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the current balances failed")
+    }
+
+    async fn history(setup: &mut Setup) -> Vec<AccountBalanceHistory> {
+        account_balance_history::table
+            .filter(account_balance_history::instance_id.eq(setup.instance))
+            .select(AccountBalanceHistory::as_select())
+            .load(&mut setup.conn)
+            .await
+            .expect("reading the balance history failed")
+    }
+
+    #[tokio::test]
+    async fn test_new_balance_is_current_without_history() {
+        let mut setup = setup().await;
+        let at = minutes_ago(1);
+
+        let change = update(&setup, "0x02", 5, at);
+        write(&mut setup, vec![change]).await;
+
+        let current = current(&mut setup).await;
+        assert_eq!(current.len(), 2);
+        assert_eq!(
+            (&current[1].token, &current[1].balance, current[1].valid_from),
+            (&Bytes::from("0x02"), &Bytes::from(5u64), at)
+        );
+        assert!(history(&mut setup).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_moves_the_stored_balance_to_history() {
+        let mut setup = setup().await;
+        let at = minutes_ago(1);
+
+        let change = update(&setup, "0x01", 2, at);
+        write(&mut setup, vec![change]).await;
+
+        let current = current(&mut setup).await;
+        assert_eq!((&current[0].balance, current[0].valid_from), (&Bytes::from(2u64), at));
+        let history = history(&mut setup).await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            (&history[0].balance, history[0].valid_from, history[0].valid_to),
+            (&Bytes::from(1u64), stored_since(), at)
+        );
+    }
+}
