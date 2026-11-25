@@ -170,7 +170,7 @@ mod tests {
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::{resolve_version, unique_by_id, unique_by_key_nested, ReadAt};
+    use super::{resolve_version, unique_by_key, unique_by_key_nested, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -273,8 +273,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_by_id_collects_rows() {
-        let map = unique_by_id(
+    fn test_unique_by_key_collects_rows() {
+        let map = unique_by_key(
             "contract_code",
             InstanceId(7),
             ReadAt::Current(None),
@@ -286,9 +286,9 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_by_id_fails_on_a_repeated_key() {
+    fn test_unique_by_key_fails_on_a_repeated_key() {
         let read = ReadAt::Past { ts: day(3), head: day(5) };
-        let result = unique_by_id("contract_code", InstanceId(7), read, [(42, "a"), (42, "b")]);
+        let result = unique_by_key("contract_code", InstanceId(7), read, [(42, "a"), (42, "b")]);
 
         let Err(StorageError::Unexpected(msg)) = result else {
             panic!("expected Unexpected, got {result:?}");
