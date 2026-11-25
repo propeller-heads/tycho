@@ -182,7 +182,8 @@ for any protocol indexed by Tycho.
     measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas `credit_listing` names
     for it (required for a credit listing, a stock listing and any other pair); a listing with
     neither is left out (`has_gas`). `with_fallback_router()` charges the cheaper branch
-    (`FALLBACK_SWAP_GAS`)
+    (`FALLBACK_SWAP_GAS`). The charge stays that floor: what a fill is expected to cost and the
+    gas to allow it go out as data beside it (`expected_gas`, `gas_limit`, `GasOutlook`)
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
     `ask_valid_until_ms`

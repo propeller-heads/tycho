@@ -29,8 +29,9 @@ use crate::{
         reader::{lagging, DoorRead, DoorsRead, DoorsReader, Hold, Samples},
         state::{CreditGas, Deadline, EfficientPropState, GasChain},
         EfficientPropDeployment, ASK_VALID_UNTIL_MS_ATTRIBUTE, BID_VALID_UNTIL_MS_ATTRIBUTE,
-        FALLBACK_PROTOCOL_SYSTEM, PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
-        QUOTE_LAYOUT_BUILDER, TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
+        EXPECTED_GAS_ATTRIBUTE, FALLBACK_PROTOCOL_SYSTEM, GAS_LIMIT_ATTRIBUTE,
+        PAMM_ADDRESS_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_LAYOUT_BUILDER,
+        TIP_CAP_WEI_ATTRIBUTE, VALID_FROM_BLOCK_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -786,11 +787,13 @@ impl EfficientPropBookAssembler {
                 continue;
             }
             let door = state.door.clone();
-            let tip_cap_wei = read
+            let door_read = read
                 .doors
                 .iter()
-                .find(|read| read.door.as_slice() == door.as_ref())
-                .and_then(|read| read.tip_cap_wei);
+                .find(|read| read.door.as_slice() == door.as_ref());
+            let tip_cap_wei = door_read.and_then(|read| read.tip_cap_wei);
+            // What its fills are measured to cost, beside each swap's charge.
+            let outlook = state.gas_outlook(door_read.is_some_and(|read| read.credit.is_some()));
             let mut book = pair_book(
                 self.protocol_system,
                 PROTOCOL_TYPE,
@@ -824,6 +827,16 @@ impl EfficientPropBookAssembler {
                     book.component
                         .static_attributes
                         .insert(attribute.to_string(), number(until.unix_ms));
+                }
+            }
+            for (attribute, gas) in [
+                (EXPECTED_GAS_ATTRIBUTE, outlook.map(|outlook| outlook.expected)),
+                (GAS_LIMIT_ATTRIBUTE, outlook.and_then(|outlook| outlook.limit)),
+            ] {
+                if let Some(gas) = gas {
+                    book.component
+                        .static_attributes
+                        .insert(attribute.to_string(), number(gas));
                 }
             }
             books.insert(book);
@@ -4536,6 +4549,42 @@ mod tests {
                     .gas;
                 assert_eq!(gas, BigUint::from(50_445u64));
             }
+            // Beside that floor the book names what a fill at the door is measured to cost at
+            // the least, 154,693 less the estimator's 40,000, and no limit: the listing has no
+            // figure of its own to size one from.
+            let attributes = &book.component.static_attributes;
+            assert_eq!(
+                attributes["expected_gas"],
+                Bytes::from(U256::from(114_693u64).to_be_bytes_trimmed_vec())
+            );
+            assert!(!attributes.contains_key("gas_limit"));
+        }
+
+        /// A book sent direct names beside its swaps' charges what a fill is measured to cost,
+        /// the dearer direction's custody figure, and the gas to allow its call: that figure, the
+        /// custody fill's refund of 19,900 and a quarter on top. A credit listing's limit is its
+        /// routed fill's instead, with the largest refund measured on a route, 99,500.
+        #[rstest]
+        #[case::a_listing_in_no_credit_mode(FakeListing::ethereum(1), 96_239, 145_174)]
+        // The fixtures name one figure for both paths: (96,239 + 99,500) and a quarter on top.
+        #[case::a_credit_listing(FakeListing::ethereum_credit(1), 96_239, 244_674)]
+        #[tokio::test]
+        async fn a_book_names_its_expected_gas_and_its_gas_limit(
+            #[case] listing: FakeListing,
+            #[case] expected_gas: u64,
+            #[case] gas_limit: u64,
+        ) {
+            let books = ethereum_books(vec![listing], vec![next_map(&[(1, false)])]).await;
+
+            let attributes = &books
+                .values()
+                .next()
+                .unwrap()
+                .component
+                .static_attributes;
+            let number = |number: u64| Bytes::from(U256::from(number).to_be_bytes_trimmed_vec());
+            assert_eq!(attributes["expected_gas"], number(expected_gas));
+            assert_eq!(attributes["gas_limit"], number(gas_limit));
         }
 
         /// The books of two polls of listings 1 and 2, each with its update in the map, by a feed

@@ -373,7 +373,57 @@ pub(super) const LAST_CUSTODY_FILL_REFUND: u64 = 9_600;
 /// it lands in, and the pool is the solver's: a swap that fills at the door costs about 64,000 to
 /// 121,000 more than it is charged, one that falls back to a dearer pool what that pool costs. A
 /// door refusing sooner than for a missing update (a stopped desk) was not measured.
-pub(super) const FALLBACK_SWAP_GAS: u64 = 90_445 - 40_000;
+pub(super) const FALLBACK_SWAP_GAS: u64 = 90_445 - FALLBACK_ROUTER_OVERHEAD_GAS;
+
+/// What tycho-execution's gas estimator adds for every `fallback:` component, the router's own
+/// work: [`FALLBACK_SWAP_GAS`] and [`GasOutlook::expected`] are stated less it.
+pub(super) const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
+
+/// The least a fill at the door cost its transaction through the fallback router: the wstETH/WETH
+/// sale, its direct fill and the least of the router's additions (see [`FALLBACK_SWAP_GAS`]).
+pub(super) const FALLBACK_DOOR_FILL_LEAST_GAS: u64 =
+    ETHEREUM_SELL_BASE_PRINT_SWAP_GAS + FALLBACK_DOOR_FILL_EXTRA_GAS.0;
+
+/// What a fill at the door spends more through the fallback router than sent direct, the least
+/// and the most measured: the router's quotes of the door and of the pool, and its own work (see
+/// [`FALLBACK_SWAP_GAS`]).
+pub(super) const FALLBACK_DOOR_FILL_EXTRA_GAS: (u64, u64) = (48_794, 74_415);
+
+/// What a custody fill's call uses before its transaction ends beyond what it costs it: the
+/// refund counter of every custody fill traced (see [`ETHEREUM_SELL_BASE_PRINT_SWAP_GAS`]).
+pub(super) const CUSTODY_FILL_REFUND: u64 = 19_900;
+
+/// The same for a routed fill: the largest refund measured on the first pool's route, 84,400 to
+/// 99,500 (see [`CreditGas`]). Another pool's route refunds what its own lender's storage clears.
+pub(super) const ROUTE_FILL_REFUND_MOST: u64 = 99_500;
+
+/// What a listing's fills were measured to cost beside the charge of each swap, published with
+/// its book (`expected_gas`, `gas_limit`). A charge is a floor: never above what the fill costs
+/// its transaction, so on the fallback path it is the cheaper branch's. These two say what to
+/// rank and to size by. Ethereum's alone: Base's path is not served.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GasOutlook {
+    /// What a fill at the door is measured to cost its transaction, in the charge's own terms
+    /// (beside what tycho-execution's estimator adds): the dearer direction's fill inside
+    /// custody. Sent direct that is the charge of that direction. Through the fallback router it
+    /// is that fill and the least of the router's additions, less the estimator's own
+    /// ([`FALLBACK_ROUTER_OVERHEAD_GAS`]); for a listing with no figure of its own, the least
+    /// door fill measured there ([`FALLBACK_DOOR_FILL_LEAST_GAS`]).
+    pub expected: u64,
+    /// The gas to allow the swap's call: the dearest fill the listing has a figure for, before
+    /// refunds, and a quarter on top, the headroom the calls' forwarding needs (see the module
+    /// doc of `efficient_prop`, Gas). Sent direct: the custody fill and its refund, or on a
+    /// listing with a credit route the routed fill and the largest refund measured on a route,
+    /// whatever the size. Through the fallback router: the custody fill, the most of the router's
+    /// additions and the refund. `None` there for a listing with no figure of its own, and
+    /// nothing in it for the pool a solver names to fall back on.
+    pub limit: Option<u64>,
+}
+
+/// `gas` and a quarter on top, rounded up.
+const fn with_headroom(gas: u64) -> u64 {
+    gas + gas.div_ceil(4)
+}
 
 /// The gas a credit listing's fills are charged, measured on that listing's own pool: one figure
 /// for a fill its pool's custody fills, and one for a fill through the pool's credit route, each
@@ -651,32 +701,15 @@ impl EfficientPropState {
         if self.through_fallback {
             return Ok(BigUint::from(FALLBACK_SWAP_GAS));
         }
-        let gas =
-            match (self.credit, path) {
-                (Some(credit), FillPath::Custody) => credit.custody.of(direction),
-                (Some(credit), FillPath::Route) => credit.route.of(direction),
-                (None, FillPath::Custody) => match (self.measured_gas(), direction) {
-                    (Some((sell_gas, _)), SwapDirection::BaseToQuote) => sell_gas,
-                    (Some((_, buy_gas)), SwapDirection::QuoteToBase) => buy_gas,
-                    (None, _) => return Err(SimulationError::FatalError(
-                        "an Efficient PropAMM listing's pair was not measured on its chain, and \
-                         its state has no gas named to charge it"
-                            .into(),
-                    )),
-                },
-                (None, FillPath::Route) => return Err(SimulationError::FatalError(
-                    "an Efficient PropAMM side fills through a credit route, but its state has no \
-                     credit gas to charge it"
-                        .into(),
-                )),
-            };
-        // A fill inside custody pays its input into the pool, where it stays. A routed one moves
-        // its tokens through the pool: a balance written from zero is cleared again and most of
-        // the write is refunded, so nothing is added.
-        let first_writes = match (path, direction) {
-            (FillPath::Custody, SwapDirection::BaseToQuote) => u64::from(self.pool_lacks_base),
-            (FillPath::Custody, SwapDirection::QuoteToBase) => u64::from(self.pool_lacks_quote),
-            (FillPath::Route, _) => 0,
+        let Some(gas) = self.door_fill_gas(direction, path) else {
+            return Err(SimulationError::FatalError(match path {
+                FillPath::Custody => "an Efficient PropAMM listing's pair was not measured on its \
+                                      chain, and its state has no gas named to charge it"
+                    .into(),
+                FillPath::Route => "an Efficient PropAMM side fills through a credit route, but \
+                                    its state has no credit gas to charge it"
+                    .into(),
+            }));
         };
         // The largest size custody fills may take the pool's whole balance of the output, which
         // clears it and earns the transaction more back (Ethereum's figures are net of refunds).
@@ -689,7 +722,68 @@ impl EfficientPropState {
         } else {
             0
         };
-        Ok(BigUint::from((gas + first_writes * FIRST_BALANCE_WRITE_GAS).saturating_sub(cleared)))
+        Ok(BigUint::from(gas.saturating_sub(cleared)))
+    }
+
+    /// What a fill at the door in `direction` taking `path` costs its transaction sent direct:
+    /// the listing's configured figure for that path, else its pair's measured figure
+    /// ([`swap_gas`]), and [`FIRST_BALANCE_WRITE_GAS`] where a custody fill pays into a pool
+    /// holding none of its input. `None` for a fill with no figure.
+    fn door_fill_gas(&self, direction: SwapDirection, path: FillPath) -> Option<u64> {
+        let gas = match (self.credit, path) {
+            (Some(credit), FillPath::Custody) => credit.custody.of(direction),
+            (Some(credit), FillPath::Route) => credit.route.of(direction),
+            (None, FillPath::Custody) => {
+                let (sell_gas, buy_gas) = self.measured_gas()?;
+                match direction {
+                    SwapDirection::BaseToQuote => sell_gas,
+                    SwapDirection::QuoteToBase => buy_gas,
+                }
+            }
+            (None, FillPath::Route) => return None,
+        };
+        // A fill inside custody pays its input into the pool, where it stays. A routed one moves
+        // its tokens through the pool: a balance written from zero is cleared again and most of
+        // the write is refunded, so nothing is added.
+        let first_writes = match (path, direction) {
+            (FillPath::Custody, SwapDirection::BaseToQuote) => u64::from(self.pool_lacks_base),
+            (FillPath::Custody, SwapDirection::QuoteToBase) => u64::from(self.pool_lacks_quote),
+            (FillPath::Route, _) => 0,
+        };
+        Some(gas + first_writes * FIRST_BALANCE_WRITE_GAS)
+    }
+
+    /// What the listing's fills were measured to cost beside each swap's charge
+    /// ([`GasOutlook`]), on a listing whose larger sizes fill through a credit route where
+    /// `routes`. `None` on Base, and for a listing sent direct with no figure, which no feed
+    /// serves.
+    pub(super) fn gas_outlook(&self, routes: bool) -> Option<GasOutlook> {
+        if self.gas_chain != GasChain::Ethereum {
+            return None;
+        }
+        let dearer = |path: FillPath| {
+            [SwapDirection::BaseToQuote, SwapDirection::QuoteToBase]
+                .into_iter()
+                .filter_map(|direction| self.door_fill_gas(direction, path))
+                .max()
+        };
+        let custody = dearer(FillPath::Custody);
+        if self.through_fallback {
+            let (least, most) = FALLBACK_DOOR_FILL_EXTRA_GAS;
+            let door_fill = custody.map_or(FALLBACK_DOOR_FILL_LEAST_GAS, |custody| custody + least);
+            return Some(GasOutlook {
+                expected: door_fill - FALLBACK_ROUTER_OVERHEAD_GAS,
+                limit: custody.map(|custody| with_headroom(custody + most + CUSTODY_FILL_REFUND)),
+            });
+        }
+        let custody = custody?;
+        let route = dearer(FillPath::Route)
+            .filter(|_| routes)
+            .map_or(0, |route| route + ROUTE_FILL_REFUND_MOST);
+        Some(GasOutlook {
+            expected: custody,
+            limit: Some(with_headroom(route.max(custody + CUSTODY_FILL_REFUND))),
+        })
     }
 
     /// The state after a fill: the same pair, quoting nothing.
@@ -861,7 +955,7 @@ mod tests {
 
     use super::*;
     use crate::pamm::protocols::efficient_prop::test_support::{
-        credit_gas, token, usdc, weth, weth_usdc_credit_state, weth_usdc_state,
+        credit_gas, direction_gas, token, usdc, weth, weth_usdc_credit_state, weth_usdc_state,
     };
 
     fn amount(value: u64) -> BigUint {
@@ -1088,6 +1182,128 @@ mod tests {
                 .gas,
             amount(50_445)
         );
+    }
+
+    /// A wstETH/WETH state on Ethereum's hook pair, reading a source: 105,899 selling the base
+    /// and 106,520 buying it.
+    fn wsteth_weth_state() -> EfficientPropState {
+        let mut state = weth_usdc_state();
+        (state.base_token, state.quote_token) = (token(ETHEREUM_WSTETH), token(ETHEREUM_WETH));
+        state.reads = FillReads::Source;
+        state.gas_chain = GasChain::Ethereum;
+        state
+    }
+
+    /// The first pool's wstETH/WETH listing in credit mode 2, as measured (see [`CreditGas`]).
+    fn first_pool_state() -> EfficientPropState {
+        let mut state = wsteth_weth_state();
+        state.credit = Some(CreditGas {
+            custody: direction_gas(117_990, 113_508),
+            route: direction_gas(824_095, 932_904),
+        });
+        state
+    }
+
+    /// What a listing's book names beside its swaps' charges, from the figures measured: the
+    /// dearer direction's custody fill, and the dearest fill before refunds with a quarter on
+    /// top. A listing with a route sizes its limit from the routed fill whatever the size; a
+    /// pool holding none of a fill's input adds that write; through the fallback router the
+    /// door's branch is the fill and the router's additions, the least of them expected (less
+    /// the estimator's 40,000) and the most of them allowed for.
+    #[rstest]
+    // 106,520; (106,520 + 19,900) * 1.25.
+    #[case::a_measured_pair(wsteth_weth_state(), false, Some((106_520, Some(158_025))))]
+    // 106,520 + 16,964 buying into a pool with no WETH; (123,484 + 19,900) * 1.25.
+    #[case::a_pool_holding_none_of_the_quote(
+        wsteth_weth_state().with_pool_lacking(false, true),
+        false,
+        Some((123_484, Some(179_230)))
+    )]
+    // 117,990; (932,904 + 99,500) * 1.25.
+    #[case::a_credit_listing(
+        first_pool_state(),
+        true,
+        Some((117_990, Some(1_290_505)))
+    )]
+    // 117,990; (117,990 + 19,900) * 1.25, rounded up.
+    #[case::a_listing_named_its_gas_with_no_route(
+        first_pool_state(),
+        false,
+        Some((117_990, Some(172_363)))
+    )]
+    // 106,520 + 48,794 - 40,000; (106,520 + 74,415 + 19,900) * 1.25, rounded up.
+    #[case::a_measured_pair_through_the_fallback_router(
+        wsteth_weth_state().with_fallback_router(true),
+        false,
+        Some((115_314, Some(251_044)))
+    )]
+    // 154,693 - 40,000, and no limit.
+    #[case::a_pair_with_no_figure_through_the_fallback_router(
+        {
+            let mut state = wsteth_weth_state().with_fallback_router(true);
+            state.reads = FillReads::Word;
+            state
+        },
+        false,
+        Some((114_693, None))
+    )]
+    #[case::a_pair_with_no_figure_sent_direct(
+        {
+            let mut state = wsteth_weth_state();
+            state.reads = FillReads::Word;
+            state
+        },
+        false,
+        None
+    )]
+    #[case::on_base(weth_usdc_state(), false, None)]
+    fn a_listings_gas_outlook_follows_its_measured_figures(
+        #[case] state: EfficientPropState,
+        #[case] routes: bool,
+        #[case] outlook: Option<(u64, Option<u64>)>,
+    ) {
+        assert_eq!(
+            state
+                .gas_outlook(routes)
+                .map(|outlook| (outlook.expected, outlook.limit)),
+            outlook
+        );
+    }
+
+    /// The charge stays the floor: what a book names as expected is never under the charge of
+    /// any swap of either side, and the limit is over it.
+    #[rstest]
+    #[case::sent_direct(wsteth_weth_state())]
+    #[case::through_the_fallback_router(wsteth_weth_state().with_fallback_router(true))]
+    #[case::a_credit_listing(weth_usdc_credit_state())]
+    fn no_swap_is_charged_above_what_its_book_expects(#[case] state: EfficientPropState) {
+        let outlook = state
+            .gas_outlook(state.bid.routes() || state.ask.routes())
+            .unwrap();
+        let (base, quote) = (state.base_token.clone(), state.quote_token.clone());
+
+        for (direction, token_in, token_out) in [
+            (SwapDirection::BaseToQuote, &base, &quote),
+            (SwapDirection::QuoteToBase, &quote, &base),
+        ] {
+            let custody: Vec<_> = state
+                .side(direction)
+                .points()
+                .iter()
+                .filter(|(amount, _)| {
+                    matches!(state.side(direction).quote(*amount), Ok((_, FillPath::Custody)))
+                })
+                .collect();
+            assert!(!custody.is_empty());
+            for (amount, _) in custody {
+                let charged = state
+                    .get_amount_out(u256_to_biguint(*amount), token_in, token_out)
+                    .unwrap()
+                    .gas;
+                assert!(charged <= BigUint::from(outlook.expected), "{charged} at {amount}");
+            }
+        }
+        assert!(outlook.limit.unwrap() > outlook.expected);
     }
 
     /// A pair's place from `doorView`'s indices: the hook pair is base 0 and quote 1; past it, a

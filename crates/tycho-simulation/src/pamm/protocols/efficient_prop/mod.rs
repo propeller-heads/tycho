@@ -279,6 +279,20 @@
 //! refunds, measured through Ethereum's `PropAMMExecutor` on the first pool's four listings. Size
 //! a limit from that sum with at least 25% on top, or the fill runs out of gas and reverts.
 //!
+//! Each Ethereum book carries both figures beside its swaps' charges, as static attributes. A
+//! charge is a floor, never above what its fill costs, so it is not what a fill is expected to
+//! cost wherever the fill has a dearer branch. [`EXPECTED_GAS_ATTRIBUTE`] is what a fill at the
+//! door is measured to cost, in the charge's own terms: the dearer direction's custody fill sent
+//! direct (its charge), and through the fallback router that fill and the least of the router's
+//! additions (48,794), less the 40,000 the estimator adds itself, or 114,693 for a listing with
+//! no figure of its own (the least door fill measured there, 154,693, less the same).
+//! [`GAS_LIMIT_ATTRIBUTE`] is the limit this section asks for: the dearest fill the listing has
+//! a figure for, its refund (19,900 inside custody; on a listing with a credit route the routed
+//! fill and 99,500, the first pool's largest, whatever the size) and 25% on top; through the
+//! fallback router the custody fill, the most of the router's additions (74,415), the refund and
+//! 25% on top, and nothing for a listing with no figure of its own. Neither figure counts the
+//! pool a solver names to fall back on, and the headroom was measured sent direct.
+//!
 //! # The tip cap: a limit no book can enforce
 //!
 //! A door's quote and fill read the transaction's priority fee (gas price less basefee). The feed
@@ -634,6 +648,20 @@ pub const BID_VALID_UNTIL_MS_ATTRIBUTE: &str = "bid_valid_until_ms";
 
 /// The same for the ask (a purchase of the base): see [`BID_VALID_UNTIL_MS_ATTRIBUTE`].
 pub const ASK_VALID_UNTIL_MS_ATTRIBUTE: &str = "ask_valid_until_ms";
+
+/// Static attribute holding, on Ethereum, what a fill at the listing's door is measured to cost
+/// its transaction, big-endian, in the terms of a swap's charge (beside what tycho-execution's
+/// gas estimator adds): the dearer direction's fill from the pool's custody. Sent direct it is
+/// that direction's charge; through the fallback router it is the door's branch, which the charge
+/// there, the cheaper branch's, is 64,000 to 121,000 under. See the module doc, Gas.
+pub const EXPECTED_GAS_ATTRIBUTE: &str = "expected_gas";
+
+/// Static attribute holding, on Ethereum, the gas to allow the swap's call, big-endian: the
+/// dearest fill the listing has a figure for, before refunds, and 25% on top; on a listing with
+/// a credit route the routed fill's, whatever the size. Absent through the fallback router for a
+/// listing with no figure of its own, and it never covers the pool a solver falls back on. See
+/// the module doc, Gas.
+pub const GAS_LIMIT_ATTRIBUTE: &str = "gas_limit";
 
 /// The one quote contract layout this integration reads: see
 /// [`EfficientPropDeployment::quote_layout`].
