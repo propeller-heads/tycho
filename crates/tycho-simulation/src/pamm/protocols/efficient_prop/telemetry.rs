@@ -27,7 +27,8 @@ pub(super) const LISTINGS_COVERED: &str = "efficient_prop_listings_covered_total
 /// and could not be used), then `not_opened`. Each is counted where the read finds it, so a poll
 /// that fails later has counted those it found, and a poll that finds no state map for the next
 /// block (see `no_state_map` on [`POLLS`]) counts what its first request rules out and no more.
-/// Every reason starts at zero.
+/// Every reason starts at zero, and `credit_mode` stays there on the deployed front (see
+/// [`NotCovered::CreditMode`]).
 pub(super) const LISTINGS_NOT_COVERED: &str = "efficient_prop_listings_not_covered_total";
 /// Counter, label `reason`, one of [`NotKept`]. Incremented once per poll, on a chain whose
 /// builders land makers' updates, that asked its doors and whose read is not kept, so the next
@@ -90,7 +91,12 @@ pub(super) enum NotCovered {
     DeskNotApproved,
     /// It has a credit mode, or trades a stock token, and the caller named no gas for it.
     NoGas,
-    /// Its credit mode is one the feed does not serve.
+    /// Its credit mode is one the feed does not serve: above the three the front knows. The
+    /// deployed front keeps the mode in two bits, so no listing of it has one and this reason
+    /// stays at zero there. It stays a reason because `doorView` returns the mode as a whole
+    /// byte and the read refuses what it does not know by that byte, not by the front's layout:
+    /// a front that ever names a fourth mode has its listings left out, and counted here, not
+    /// dropped from both counts.
     CreditMode,
     /// It caps the taker's tip under the feed's floor.
     TipCapUnderFloor,

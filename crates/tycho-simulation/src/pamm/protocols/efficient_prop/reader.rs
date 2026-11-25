@@ -1906,6 +1906,9 @@ impl DoorsReader {
                     };
                     Some(*gas)
                 }
+                // A mode above the front's three, which the deployed front's two bits cannot
+                // hold and `doorView`'s byte can: left out and counted, so a front naming one
+                // shows in the count. On a chain with no next block read, any credit mode.
                 mode => {
                     debug!(listing = id, credit_mode = mode, "skipping credit listing");
                     left_out(NotCovered::CreditMode);

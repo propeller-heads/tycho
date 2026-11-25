@@ -7927,6 +7927,32 @@ mod tests {
             assert_eq!(counter(HASH_FORM_SET_ASIDE, None), 0);
         }
 
+        /// The feed counts by its own reason a listing whose `doorView` names a credit mode above
+        /// the front's three. The deployed front keeps the mode in two bits, so the reason stays
+        /// at zero there; the view's field is a whole byte, and a listing left out by it is
+        /// counted, not dropped from both counts.
+        #[test]
+        fn the_feed_counts_a_listing_of_a_credit_mode_the_front_does_not_know() {
+            use crate::pamm::protocols::efficient_prop::telemetry::{
+                LISTINGS_COVERED, LISTINGS_NOT_COVERED,
+            };
+
+            let counter = counted(async {
+                let unknown = FakeListing { credit_mode: 4, ..FakeListing::ethereum_credit(1) };
+                let books = credit_books(
+                    vec![unknown, FakeListing::ethereum(2)],
+                    vec![next_map(&[(1, false), (2, false)])],
+                    &[1],
+                )
+                .await;
+                assert_eq!(books.len(), 1);
+            });
+
+            assert_eq!(counter(LISTINGS_NOT_COVERED, Some(("reason", "credit_mode"))), 1);
+            assert_eq!(counter(LISTINGS_NOT_COVERED, Some(("reason", "no_gas"))), 0);
+            assert_eq!(counter(LISTINGS_COVERED, None), 1);
+        }
+
         /// What a node leaves unanswered of one read of the doors, which fails no poll.
         #[derive(Debug, Clone, Copy)]
         enum Unanswered {
