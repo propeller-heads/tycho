@@ -37,7 +37,13 @@ pub struct ActiveInstance {
     /// The block timestamp of the base block of an imported or migrated instance. `None` for an
     /// instance synced in place. The instance has no history before it.
     pub base: Option<NaiveDateTime>,
-    /// The oldest version whose history is complete: `now()` minus `partition_retention()`.
+    /// The oldest version whose history is complete: `now()` minus `partition_retention()`. Older
+    /// history days are dropped.
+    ///
+    /// This holds only when the writer archived every version that ends after this point, so when
+    /// its `--retention-horizon` is not later than this point. With a later `--retention-horizon`,
+    /// a past read between the two leaves out every key that changed after the version, with no
+    /// error.
     pub retention_horizon: NaiveDateTime,
 }
 

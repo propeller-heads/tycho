@@ -48,11 +48,18 @@ pub(super) async fn check_current(
 /// Which rows answer a read at a version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadAt {
-    /// The current tables answer: every current row is valid at this version. `None` for the
-    /// latest version, else the timestamp of the version.
+    /// The current tables answer: every current row is valid at this version, so the read takes
+    /// them all, unfiltered. No current row is newer than the head, because the writer saves the
+    /// extraction state in the same transaction as the rows. `None` for the latest version, else
+    /// the timestamp of the version.
     Current(Option<NaiveDateTime>),
     /// A version before the head: current rows with `valid_from <= ts`, and history rows with
     /// `valid_from <= ts < valid_to` and `valid_to <= head`.
+    ///
+    /// When the head and the rows come from one snapshot, `valid_to <= head` removes no row: it
+    /// lets Postgres skip the history days that pg_partman makes in advance. Read the head in the
+    /// same snapshot as the rows. Outside one snapshot, the filter drops a key that the writer
+    /// moves between the head lookup and the row queries.
     Past { ts: NaiveDateTime, head: NaiveDateTime },
 }
 
