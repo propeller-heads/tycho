@@ -1017,10 +1017,15 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(&db_url.to_string())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let instance = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1048,11 +1053,16 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(db_url.as_str())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let instance = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1078,14 +1088,19 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(db_url.as_str())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let instance = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
             let accounts =
                 vec![Address::from_str("0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC").unwrap()];
-            initialize_accounts(accounts, 20378315, &RPC, chain, &cached_gw).await;
+            initialize_accounts(instance, accounts, 20378315, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1117,7 +1132,7 @@ mod test_serial_db {
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &rpc, chain, &cached_gw).await;
+            initialize_accounts(InstanceId(1), accounts, block_id, &rpc, chain, &cached_gw).await;
         })
         .await;
     }
