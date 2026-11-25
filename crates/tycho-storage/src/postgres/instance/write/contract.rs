@@ -9,7 +9,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     keccak256,
     models::{
-        contract::{Account, AccountDelta},
+        contract::{Account, AccountBalance, AccountDelta},
         ChangeType, TxHash,
     },
     storage::StorageError,
@@ -169,6 +169,52 @@ impl PostgresGatewayNew {
         self.write_versions(instance, storage, conn)
             .await?;
         self.write_versions(instance, balances, conn)
+            .await
+    }
+
+    /// Writes the token balances of accounts as new versions, at the block timestamp and index of
+    /// their transaction from `origins`.
+    ///
+    /// `NotFound` for an account that is not in the instance, a token that is not stored, or a
+    /// transaction that is not in the batch. `Unexpected` for a balance that does not start after
+    /// the stored version of its key.
+    pub(crate) async fn insert_account_balances(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        balances: &[AccountBalance],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        let addresses: Vec<&Bytes> = balances
+            .iter()
+            .map(|balance| &balance.account)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let account_ids = self
+            .account_ids(instance, &addresses, conn)
+            .await?;
+        let tokens: Vec<&Bytes> = balances
+            .iter()
+            .map(|balance| &balance.token)
+            .collect();
+        check_tokens_stored(&tokens, conn).await?;
+
+        let changes = balances
+            .iter()
+            .map(|balance| {
+                let origin = origins.change(&balance.modify_tx)?;
+                Ok(VersionedChange::Update(NewAccountBalance {
+                    instance_id: instance,
+                    account_id: account_ids[&balance.account],
+                    token: balance.token.clone(),
+                    balance: balance.balance.clone(),
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        self.write_versions(instance, changes, conn)
             .await
     }
 
