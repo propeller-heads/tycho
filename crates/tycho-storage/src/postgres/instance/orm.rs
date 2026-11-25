@@ -570,7 +570,7 @@ pub struct AccountBalance {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::account_balance)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewAccountBalance {
@@ -580,6 +580,15 @@ pub struct NewAccountBalance {
     pub balance: Bytes,
     pub valid_from: NaiveDateTime,
     pub tx_index: i32,
+}
+
+impl NewAccountBalance {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 6;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Queryable, Selectable, Insertable)]
@@ -595,6 +604,28 @@ pub struct AccountBalanceHistory {
     pub tx_index: i32,
     pub inserted_ts: NaiveDateTime,
     pub modified_ts: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = tycho::account_balance_history)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewAccountBalanceHistory {
+    pub instance_id: InstanceId,
+    pub account_id: i64,
+    pub token: Bytes,
+    pub balance: Bytes,
+    pub valid_from: NaiveDateTime,
+    pub valid_to: NaiveDateTime,
+    pub tx_index: i32,
+}
+
+impl NewAccountBalanceHistory {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 7;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 // Entry points (DCI)
