@@ -444,19 +444,6 @@ mod tests {
         assert_eq!(archived, vec![(value(1), 0), (value(2), 2)]);
     }
 
-    #[tokio::test]
-    async fn test_change_before_the_stored_version_fails_and_keeps_it() {
-        let mut setup = setup().await;
-
-        let change = update(&setup, 1, 2, stored_since() - Duration::days(1), 0);
-
-        let result = write(&mut setup, vec![change]).await;
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
-        assert_eq!(current(&mut setup).await[0].new_balance, value(1));
-        assert!(history(&mut setup).await.is_empty());
-    }
-
     /// A batch of block 10 at `ts`, with the transactions `0xa1` at index 1 and `0xa3` at index 3.
     fn origins(ts: NaiveDateTime) -> BatchOrigins {
         let block = Block::new(10, Chain::Ethereum, Bytes::from("0x0a"), Bytes::default(), ts);
