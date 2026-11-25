@@ -25,10 +25,13 @@ use crate::{
 /// had a router since.
 const AFTER_SWAP_GAS: u64 = 9_000;
 /// `afterSwap` with a router set whose backrun check finds nothing. Measured at 44.3k on the
-/// registered Base implementation `0xd1dfA0…a642`: 47.1k for the hook in 8 of 9 swaps of pool
+/// Base implementation `0xd1dfA0…a642`: 47.1k for the hook in 8 of 9 swaps of pool
 /// `0x0E8AF367…7237` between blocks 61560000 and 61622000, less the 2.8k its farming incentive
 /// takes there. Swaps of Base pool `0x337bEA70…B122` ranged from 36k to 63k. See the module docs
 /// for the backrun itself.
+///
+/// The build that follows it, `0x1DEc40…cF2E`, spends 138 gas less in `afterSwap`: 8 of 8 swaps
+/// of that pool around block 62.1M, replayed under both builds.
 ///
 /// Re-measure both when the plugin implementation or the router changes.
 const AFTER_SWAP_ROUTER_GAS: u64 = 44_000;

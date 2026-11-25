@@ -26,12 +26,30 @@ use crate::{
     protocol::errors::InvalidSnapshotError,
 };
 
-// Implementations the beacons pointed at on 2026-11-19, read on chain. A beacon upgrade needs an
-// entry here before it happens.
-const PLUGIN_ETHEREUM: Address = address!("7360C8207AdD8B8dd0332831A19c20bba6e3CABD");
-const PLUGIN_BASE: Address = address!("d1dfA0aEDE1dd17153457d8D8C7C042B8e37a642");
-const ANTI_SNIPER_PLUGIN_BASE: Address = address!("9c5D328a1bDdb841E889d1976670F3C0C153D037");
-const PLUGIN_ROBINHOOD: Address = address!("1a2898f77957B9C5B7bAfD29a2dAFBA4404b6874");
+// Every implementation a beacon has pointed at since 2026-11-19, read on chain, oldest first. A
+// beacon upgrade needs an entry here before it happens, and the one it replaces stays: a sync
+// from an earlier block still meets it.
+//
+// The second of each list is the build of 2026-11-25, which adds a list of pool callers the MEVX
+// module does not back-run. `beforeSwap` and the module storage layout are unchanged: on one
+// pool per list, `beforeSwap` called from the pool returned the same fee in both directions with
+// the beacon pointed at either build.
+const PLUGINS_ETHEREUM: [Address; 2] = [
+    address!("7360C8207AdD8B8dd0332831A19c20bba6e3CABD"),
+    address!("5312F83B99f0055A9DF784Cab0D9a31D7f919d9E"),
+];
+const PLUGINS_BASE: [Address; 2] = [
+    address!("d1dfA0aEDE1dd17153457d8D8C7C042B8e37a642"),
+    address!("1DEc404fD7431B2a05b9c57600E44f2969A8cF2E"),
+];
+const ANTI_SNIPER_PLUGINS_BASE: [Address; 2] = [
+    address!("9c5D328a1bDdb841E889d1976670F3C0C153D037"),
+    address!("5438F824dAFCD2436020c880A9e0222617E29F80"),
+];
+const PLUGINS_ROBINHOOD: [Address; 2] = [
+    address!("1a2898f77957B9C5B7bAfD29a2dAFBA4404b6874"),
+    address!("62930C50B0bB7f9942f6f448083340cFa265964C"),
+];
 
 // The fee source contracts a pool's `fee_override/source` can name. A new source contract needs
 // an entry here before a pool is pointed at it, even when its code is unchanged.
@@ -79,28 +97,28 @@ impl PluginHandlerCreator for NamiPluginCreator {
 /// Nami's plugins on one chain.
 struct Deployment {
     chain: Chain,
-    plugin: Address,
-    anti_sniper_plugin: Option<Address>,
+    plugins: &'static [Address],
+    anti_sniper_plugins: &'static [Address],
     sources: &'static [(Address, FeeSource)],
 }
 
 const DEPLOYMENTS: [Deployment; 3] = [
     Deployment {
         chain: Chain::Ethereum,
-        plugin: PLUGIN_ETHEREUM,
-        anti_sniper_plugin: None,
+        plugins: &PLUGINS_ETHEREUM,
+        anti_sniper_plugins: &[],
         sources: &FEE_SOURCES_ETHEREUM,
     },
     Deployment {
         chain: Chain::Base,
-        plugin: PLUGIN_BASE,
-        anti_sniper_plugin: Some(ANTI_SNIPER_PLUGIN_BASE),
+        plugins: &PLUGINS_BASE,
+        anti_sniper_plugins: &ANTI_SNIPER_PLUGINS_BASE,
         sources: &FEE_SOURCES_BASE,
     },
     Deployment {
         chain: Chain::Robinhood,
-        plugin: PLUGIN_ROBINHOOD,
-        anti_sniper_plugin: None,
+        plugins: &PLUGINS_ROBINHOOD,
+        anti_sniper_plugins: &[],
         sources: &FEE_SOURCES_ROBINHOOD,
     },
 ];
@@ -108,18 +126,70 @@ const DEPLOYMENTS: [Deployment; 3] = [
 /// Registers the handler of every Nami plugin implementation.
 pub(super) fn register_plugin_handlers() -> Result<(), SimulationError> {
     for deployment in &DEPLOYMENTS {
-        register_plugin_handler(
-            deployment.chain,
-            deployment.plugin,
-            Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper: false }),
-        )?;
-        if let Some(anti_sniper_plugin) = deployment.anti_sniper_plugin {
+        let implementations = deployment
+            .plugins
+            .iter()
+            .map(|plugin| (plugin, false))
+            .chain(
+                deployment
+                    .anti_sniper_plugins
+                    .iter()
+                    .map(|plugin| (plugin, true)),
+            );
+        for (plugin, anti_sniper) in implementations {
             register_plugin_handler(
                 deployment.chain,
-                anti_sniper_plugin,
-                Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper: true }),
+                *plugin,
+                Box::new(NamiPluginCreator { sources: deployment.sources, anti_sniper }),
             )?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use tycho_common::Bytes;
+
+    use super::*;
+    use crate::evm::protocol::algebra_integral::{
+        plugin::{registry::instantiate_plugin_handler, BlockContext},
+        state::test_support::{robinhood_module_attributes, NAMI_PLUGIN_CONFIG, PLUGIN, SESSION},
+    };
+
+    /// Base and Robinhood have no VM fallback, so a handler is built there only for a
+    /// registered implementation.
+    #[rstest]
+    #[case::robinhood(Chain::Robinhood, &PLUGINS_ROBINHOOD)]
+    #[case::base(Chain::Base, &PLUGINS_BASE)]
+    #[case::base_anti_sniper(Chain::Base, &ANTI_SNIPER_PLUGINS_BASE)]
+    fn every_build_a_beacon_has_pointed_at_has_a_handler(
+        #[case] chain: Chain,
+        #[case] implementations: &[Address],
+    ) {
+        register_plugin_handlers().expect("the handlers should register");
+        let mut attributes = robinhood_module_attributes();
+        attributes
+            .insert(PLUGIN_CONFIG_ATTRIBUTE.to_string(), Bytes::from(vec![NAMI_PLUGIN_CONFIG]));
+        // The fee source of the recorded attributes is Robinhood's.
+        attributes.insert("fee_override/source_enabled".to_string(), Bytes::from(vec![0]));
+        attributes.insert("fee_override/source".to_string(), Bytes::from(vec![0; 20]));
+        attributes.insert("anti_sniper/start_timestamp".to_string(), Bytes::from(vec![0; 8]));
+
+        assert_eq!(implementations.len(), 2);
+        for implementation in implementations {
+            let handler = instantiate_plugin_handler(
+                chain,
+                Some(*implementation),
+                PluginCreationParams {
+                    pool: PLUGIN,
+                    plugin: PLUGIN,
+                    attributes: &attributes,
+                    block: BlockContext::new(100, SESSION),
+                },
+            );
+            assert!(handler.is_ok(), "{implementation}: {:?}", handler.err());
+        }
+    }
 }
