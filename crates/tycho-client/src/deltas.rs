@@ -1759,6 +1759,51 @@ mod tests {
         assert!(elapsed < Duration::from_millis(500), "Took too long: {:?}", elapsed);
     }
 
+    /// A subscription whose buffer overflows ends as soon as the server confirms the
+    /// unsubscribe. The confirmation arrives through the read loop, so the loop must not wait
+    /// for it.
+    #[test_log::test(tokio::test)]
+    async fn test_overflowing_subscription_ends_promptly() {
+        let exp_comm = [
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+            // The first block fills the one-message buffer, the second overflows it.
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(block_deltas())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(block_deltas())),
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(unsubscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_ended())),
+        ];
+        let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
+        let jh = client
+            .connect()
+            .await
+            .expect("connect failed");
+
+        let (_sub_id, mut rx) = timeout(
+            Duration::from_millis(100),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        timeout(Duration::from_secs(1), async { while rx.recv().await.is_some() {} })
+            .await
+            .expect("subscription did not end within 1 s of overflowing");
+
+        jh.abort();
+        server_thread
+            .await
+            .expect("mock server failed");
+    }
+
     #[test_log::test(tokio::test)]
     async fn test_stream_builder_buffer_size_limits_subscription_channel() {
         // Expected communication sequence for buffer full scenario
