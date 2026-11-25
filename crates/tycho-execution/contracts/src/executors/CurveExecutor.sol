@@ -11,6 +11,8 @@ import {
     ICurveCryptoPool,
     ICurveCryptoPoolETH,
     ICurveStablePool,
+    ICurveFyndPolicy,
+    ITwocryptoPolicyPool,
     isCurveStablePool
 } from "@interfaces/ICurvePool.sol";
 
@@ -18,9 +20,19 @@ error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
 error CurveExecutor__NotAContract(address addr);
+error CurveExecutor__InvalidTaker(address taker);
 
+/// @notice Swap data: tokenIn(20) | tokenOut(20) | pool(20) | poolType(1) |
+/// i(1) | j(1), optionally followed by a grant for a pool whose policy is
+/// `ICurveFyndPolicy`: taker(20) | minAmountIn(32) | maxAmountIn(32) |
+/// fee(32) | nonce(8) | deadline(4) | signature(65). The executor submits the
+/// grant to the pool's policy before the swap. The grant's input coin is `i`,
+/// so the swap data does not carry it.
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
+
+    uint256 private constant _SWAP_DATA_LENGTH = 63;
+    uint256 private constant _GRANT_LENGTH = 193;
 
     address public immutable nativeToken;
     address public immutable stEthAddress;
@@ -55,7 +67,10 @@ contract CurveExecutor is IExecutor {
         external
         payable
     {
-        if (data.length != 63) {
+        if (
+            data.length != _SWAP_DATA_LENGTH
+                && data.length != _SWAP_DATA_LENGTH + _GRANT_LENGTH
+        ) {
             revert CurveExecutor__InvalidDataLength();
         }
         address tokenIn;
@@ -65,6 +80,10 @@ contract CurveExecutor is IExecutor {
         uint8 i;
         uint8 j;
         (tokenIn, tokenOut, pool, poolType, i, j) = _decodeData(data);
+
+        if (data.length == _SWAP_DATA_LENGTH + _GRANT_LENGTH) {
+            _submitGrant(pool, i, data[_SWAP_DATA_LENGTH:]);
+        }
 
         uint256 ethAmount = 0;
         if (tokenIn == nativeToken) {
@@ -87,6 +106,33 @@ contract CurveExecutor is IExecutor {
                 ICurveCryptoPool(pool).exchange(i, j, amountIn, 0);
             }
         }
+    }
+
+    /// @dev The taker must be the router's caller (`msg.sender` under
+    /// delegatecall) or `tx.origin`, as for a subsidy's `boundTo`. We can
+    /// narrow this to one of them if signatures get reused.
+    function _submitGrant(address pool, uint8 coinIn, bytes calldata grant)
+        internal
+    {
+        address taker = address(bytes20(grant[0:20]));
+        // forge-lint: disable-next-line(tx-origin) tx.origin only decides who may use the grant; it guards no funds.
+        if (taker != msg.sender && taker != tx.origin) {
+            revert CurveExecutor__InvalidTaker(taker);
+        }
+        ICurveFyndPolicy(ITwocryptoPolicyPool(pool).POLICY())
+            .submit_grant(
+                ICurveFyndPolicy.Grant({
+                    taker: taker,
+                    coin_in: coinIn,
+                    min_amount_in: uint256(bytes32(grant[20:52])),
+                    max_amount_in: uint256(bytes32(grant[52:84])),
+                    fee: uint256(bytes32(grant[84:116])),
+                    nonce: uint64(bytes8(grant[116:124])),
+                    deadline: uint32(bytes4(grant[124:128]))
+                }),
+                grant[128:_GRANT_LENGTH],
+                taker
+            );
     }
 
     function _decodeData(bytes calldata data)
