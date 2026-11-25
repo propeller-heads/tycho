@@ -763,6 +763,127 @@ fn test_single_encoding_strategy_curve() {
     write_calldata_to_file("test_single_encoding_strategy_curve", hex_calldata.as_str());
 }
 
+alloy::sol! {
+    struct Grant {
+        address taker;
+        uint8 coin_in;
+        uint256 min_amount_in;
+        uint256 max_amount_in;
+        uint256 fee;
+        uint64 nonce;
+        uint32 deadline;
+    }
+}
+
+#[test]
+fn test_single_encoding_strategy_curve_fynd_grant() {
+    //   USDC ──(curve twocrypto pool with FyndPolicy, granted fee)──> WETH
+    use alloy::{
+        primitives::{Address, U256},
+        signers::{local::PrivateKeySigner, SignerSync as _},
+        sol_types::{eip712_domain, SolStruct as _},
+    };
+
+    // The pool and policy that CurveFyndGrant.t.sol deploys at fork block 26408000, and its
+    // controller key.
+    let pool = "0x7258667ECB50273151d04C8932181F7c5fa2e31c";
+    let policy = Address::from_str("0xF1Fd000000000000000000000000000000C0FFEE").unwrap();
+    let controller = PrivateKeySigner::from_str(
+        "0x1b6f2b1f4a8f0c1e5d3a7b9c2e4f6a8b0c1d3e5f7a9b2c4d6e8f0a1b3c5d7e9f",
+    )
+    .unwrap();
+    let amount_in = U256::from(3_000_000_000_u64);
+    // Timestamp of fork block 26408000, plus 60 s.
+    let deadline = 1_794_596_519_u32;
+
+    let grant = Grant {
+        taker: Address::from_str("0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2").unwrap(),
+        coin_in: 0,
+        min_amount_in: amount_in,
+        max_amount_in: amount_in,
+        fee: U256::from(100_000_u64),
+        nonce: 1,
+        deadline,
+    };
+    let domain = eip712_domain! {
+        name: "FyndPolicy",
+        version: "1",
+        chain_id: 1,
+        verifying_contract: policy,
+    };
+    let signature = controller
+        .sign_hash_sync(&grant.eip712_signing_hash(&domain))
+        .unwrap();
+
+    let mut user_data = Vec::with_capacity(193);
+    user_data.extend_from_slice(grant.taker.as_slice());
+    user_data.extend_from_slice(&grant.min_amount_in.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.max_amount_in.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.fee.to_be_bytes::<32>());
+    user_data.extend_from_slice(&grant.nonce.to_be_bytes());
+    user_data.extend_from_slice(&grant.deadline.to_be_bytes());
+    user_data.extend_from_slice(&signature.as_bytes());
+
+    let token_in = usdc();
+    let token_out = weth();
+    let coins = r#"["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"]"#;
+    let static_attributes = HashMap::from([
+        (
+            "factory".to_string(),
+            Bytes::from(
+                "0x98ee851a00abee0d95d08cf4ca2bdce32aeaaf7f"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+        ),
+        ("coins".to_string(), Bytes::from(coins.as_bytes().to_vec())),
+    ]);
+    let component = ProtocolComponent {
+        id: String::from(pool),
+        protocol_system: String::from("vm:curve"),
+        static_attributes,
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_user_data(Bytes::from(user_data));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from(3_000_000_000_u64),
+        BigUint::from_str("1").unwrap(),
+        // Dummy 1-wei quote with a matching minAmountOut, so any output is accepted
+        BigUint::from_str("1").unwrap(),
+        vec![swap],
+    );
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+
+    write_calldata_to_file("test_single_encoding_strategy_curve_fynd_grant", &encode(&calldata));
+}
+
 #[test]
 fn test_single_encoding_strategy_curve_st_eth() {
     //   ETH ──(curve stETH pool)──> STETH
@@ -1741,9 +1862,9 @@ fn test_sequential_encoding_strategy_uniswap_v2_ring_swap_v2() {
 }
 
 #[test]
-fn test_single_encoding_strategy_fermiswap_weth_usdc() {
-    // WETH -> (FermiSwap) -> USDC
-    let token_in = weth();
+fn test_single_encoding_strategy_fermiswap_usdt_usdc() {
+    // USDT -> (FermiSwap) -> USDC
+    let token_in = usdt();
     let token_out = usdc();
 
     let swap = Swap::new(
@@ -1763,9 +1884,9 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
         alice_address(),
         token_in,
         token_out,
-        BigUint::from_str("1_000000000000000000").unwrap(),
-        BigUint::from(2_114_000_000_u64),
-        BigUint::from(2071720000u64),
+        BigUint::from_str("168_143_666_903").unwrap(),
+        BigUint::from(167_996_000_000_u64),
+        BigUint::from(167_000_000_000_u64),
         vec![swap],
     );
 
@@ -1788,7 +1909,7 @@ fn test_single_encoding_strategy_fermiswap_weth_usdc() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file(
-        "test_single_encoding_strategy_fermiswap_weth_usdc",
+        "test_single_encoding_strategy_fermiswap_usdt_usdc",
         hex_calldata.as_str(),
     );
 }
@@ -4663,5 +4784,98 @@ fn test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin() {
     write_calldata_to_file(
         "test_sequential_encoding_strategy_pancakeswap_infinity_cl_to_bin",
         hex_calldata.as_str(),
+    );
+}
+
+/// A quote recorded from Euclid's gateway: 0.003 WETH for USDC, requested for the TychoRouter
+/// the Forge setup deploys as sender and receiver, so the order admits that router and pays to
+/// it. `TychoRouterForEuclidTest` fills the calldata written here on a fork pinned at the block
+/// the quote was recorded at.
+const EUCLID_QUOTE_AMOUNT_IN: &str = "3000000000000000";
+const EUCLID_QUOTE_AMOUNT_OUT: &str = "6241692";
+const EUCLID_QUOTE_CALLDATA: &str = "0x5a09984300000000000000000000000000000000000000006af30923b32dc5212b477b5c000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc20000000000000000000000002e5c8ab45381393443cbb18542b7f4c38c5604920000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c6600000000000000000000000000000000000000000000000000000000005f3d9c000000000000000000000000000000000000000000000000000aa87bee5380000000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000aa87bee5380000000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c660000000000000000000000000000000000000000000000000000000000000041ce99310be418235a75297ac077298e92cb69e95d755e1b1d2546362acbfb574f0736ad242f5662c0dfb0becda5b0cb4b6afc88ffb23897c7996a6ed6303510e31b00000000000000000000000000000000000000000000000000000000000000";
+
+/// Encodes a swap of `given_amount` WETH through the recorded Euclid quote and writes the router
+/// calldata under `test_identifier`. The quote covers 0.003 WETH; the executor lowers the fill
+/// to what the route delivers, and the router pays the order's amount pro rata, rounded down.
+fn write_euclid_calldata(given_amount: BigUint, test_identifier: &str) {
+    let user = Bytes::from_str("0xd2068e04cf586f76eece7ba5beb779d7bb1474a1").unwrap();
+    let token_in = weth();
+    let token_out = usdc();
+    let quote_amount_in = BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap();
+    let quote_amount_out = BigUint::from_str(EUCLID_QUOTE_AMOUNT_OUT).unwrap();
+
+    let euclid_state = MockRFQState {
+        quote_amount_in: Some(quote_amount_in.clone()),
+        quote_amount_out: quote_amount_out.clone(),
+        quote_data: HashMap::from([(
+            "calldata".to_string(),
+            Bytes::from_str(EUCLID_QUOTE_CALLDATA).unwrap(),
+        )]),
+        ..Default::default()
+    };
+    let euclid_component = ProtocolComponent {
+        id: String::from("euclid-rfq"),
+        protocol_system: String::from("rfq:euclid"),
+        ..Default::default()
+    };
+    let swap = Swap::new(
+        euclid_component,
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    )
+    .with_estimated_amount_in(quote_amount_in.clone())
+    .with_protocol_state(Arc::new(euclid_state));
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+
+    let expected_amount_out = &quote_amount_out * &given_amount / &quote_amount_in;
+    let solution = Solution::new(
+        user.clone(),
+        user,
+        token_in,
+        token_out,
+        given_amount,
+        expected_amount_out.clone(),
+        // 2% below the quote
+        &expected_amount_out * BigUint::from(9800u64) / BigUint::from(10_000u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file(test_identifier, hex::encode(&calldata).as_str());
+}
+
+#[test]
+fn test_single_encoding_strategy_euclid() {
+    write_euclid_calldata(
+        BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap(),
+        "test_single_encoding_strategy_euclid",
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_euclid_partial_fill() {
+    // Half of what the quote was signed for reaches the executor.
+    write_euclid_calldata(
+        BigUint::from_str(EUCLID_QUOTE_AMOUNT_IN).unwrap() / BigUint::from(2u64),
+        "test_single_encoding_strategy_euclid_partial_fill",
     );
 }

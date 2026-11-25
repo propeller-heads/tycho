@@ -57,6 +57,10 @@ for any protocol indexed by Tycho.
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
+  - `ProtocolStreamBuilder::via_fallback_router(name)` publishes a registered exchange's
+    components as `fallback:{name}` (id, attributes and decoder unchanged), so a natively indexed
+    `IPropAMM` venue executes through the PropAMM fallback router. A stream publishes each venue
+    on one path only; `build` fails when `name` is not a registered exchange.
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the
   error.
   - `SnapshotFeed` is the contract: `run(publisher)` consumes the source and publishes through a
@@ -91,7 +95,7 @@ for any protocol indexed by Tycho.
   complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
   set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
   another `A`), and a `Book` is one book's simulate-ready component + state, plus the provider's
-  `updated_at` where it reports one: a pair for Bebop, Native, Metric and BaiBai, a pair and one
+  `updated_at` where it reports one: a pair for Bebop, Euclid, Native, Metric and BaiBai, a pair and one
   market maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
   provider's `*Feed` implements `SnapshotFeed` directly, with a `run` that calls one of the two
   loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
@@ -108,7 +112,7 @@ for any protocol indexed by Tycho.
     has levels on, which a component carries as its `swap_directions` static attribute
     (`book::{SWAP_DIRECTIONS_ATTRIBUTE, decode_swap_directions}`) wherever its token list does not
     already read as them — one side of a book, or neither, and every all-pairs component.
-    `all_pairs` is the opt-in layout (`all_pairs()` on the four RFQ builders, taking the `QuoteRule`
+    `all_pairs` is the opt-in layout (`all_pairs()` on the five RFQ builders, taking the `QuoteRule`
     on the two that name their makers) that publishes a venue as one component for every pair it
     prices: `AllPairs<P, T>` holds the per-pair states the other layout would publish, picks the
     best book still allowed to quote under the component's `QuoteRule` (`once_per_maker`,
@@ -122,10 +126,10 @@ for any protocol indexed by Tycho.
     the maker behind each book, `SignedByVenue` where it signs its own quotes and so has no rule
     to pick, which is why only the first pair of builders takes one. A venue's `<Venue>AllPairsState` is a newtype over `AllPairs<P, T>`,
     because `#[typetag::serde]` registers concrete types; the `all_pairs_state!` macro declares it
-    from those two types, so the four differ only in them and in what a venue refuses before a
+    from those two types, so the five differ only in them and in what a venue refuses before a
     book is picked (`RefusesQuote::check_amount`). A book reporting no direction is left out of
     the state, so its tokens and its directions agree
-  - **Prices feed and book assembler (Bebop, Hashflow, Metric)**: `<Venue>PricesFeed` in
+  - **Prices feed and book assembler (Bebop, Euclid, Hashflow, Metric)**: `<Venue>PricesFeed` in
     `feed.rs`, built by `<Venue>PricesFeedBuilder`, streams or polls the venue and publishes
     `<Venue>Prices` (`models.rs`, serde), needing only the chain and credentials.
     `<Venue>BookAssembler::books(prices)` in `source.rs` turns prices into the books the `*Feed`
@@ -149,7 +153,7 @@ for any protocol indexed by Tycho.
     off their own levels also take the USD quote-token set
     (`book::quote_tokens::usd_stablecoins_for_chain` is the curated default); how a venue's books
     are oriented and deduplicated is that provider's business, decided in its `source.rs`
-- **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Hashflow,
+- **`rfq/`**: the book feeds that need binding quotes at execution time (Bebop, Euclid, Hashflow,
   Liquorice, Native) — their clients are shared via `Arc` by the emitted states, which request
   signed quotes through `IndicativelyPriced`; the crate-private `RFQError` covers the quoting layer
   and never reaches a public signature. Credentials are constructor arguments of the feed builders;

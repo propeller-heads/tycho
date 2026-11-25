@@ -25,10 +25,11 @@ pub fn map_cowpool_creations(params: String, block: Block) -> Result<CowPoolCrea
                     Some(COWAMM_POOL_CREATED_TOPIC.to_string())
         })
         .filter_map(|log| {
+            // we get the last 20 bytes which is BCowPool address
             let address = &log
                 .topics()
                 .get(1)
-                .map(|topic| topic.as_slice()[12..].to_vec())?; // we get the last 20 bytes which is BCowPool address
+                .map(|topic| topic.as_slice()[12..].to_vec())?;
             let tx_hash = log.receipt.transaction.hash.clone();
             Some(CowPoolCreation {
                 address: address.clone(),

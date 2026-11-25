@@ -44,7 +44,7 @@ pub fn decode_warm_path_user_cmd_call(
                     .ok_or_else(|| {
                         anyhow!(
                         "Failed to convert base token to address for WarmPath userCmd call: {:?}",
-                        &liquidity_change_calldata[1]
+                        liquidity_change_calldata[1]
                     )
                     })?
                     .to_fixed_bytes()
@@ -55,7 +55,7 @@ pub fn decode_warm_path_user_cmd_call(
                     .ok_or_else(|| {
                         anyhow!(
                         "Failed to convert quote token to address for WarmPath userCmd call: {:?}",
-                        &liquidity_change_calldata[2]
+                        liquidity_change_calldata[2]
                     )
                     })?
                     .to_fixed_bytes()

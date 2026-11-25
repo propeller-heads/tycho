@@ -50,7 +50,7 @@ class TychoStream:
             logs_directory: Directory to store log files. If not specified, a default directory based on the OS is used.
             tycho_client_path: Path to the Tycho client binary. If not specified, the binary is searched for in the system's PATH.
             use_tls: Whether to use TLS connections with `tycho_url` or not. Defaults to `True`.
-            partial_blocks: Whether to enable partial block updates (flash blocks) for sub-block latency. Defaults to `False`.
+            partial_blocks: Whether to receive partial block updates on chains that have them. Defaults to `False`.
             include_tvl: Whether to include TVL estimates in messages. Increases startup latency
                 due to additional network requests. Defaults to `False`.
             disable_compression: Whether to disable zstd compression for WebSocket messages.

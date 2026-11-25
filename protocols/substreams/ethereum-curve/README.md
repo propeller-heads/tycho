@@ -49,3 +49,17 @@ To handle these tokens properly, we will likely need to use the dynamic contract
 | factory      | bytes | The address of the factory that created the pool. "0x000..." if the pool was manually created.              |
 | lp_token     | bytes | The pool lp token, set if the lp token is not the pool itself                                               |
 | base_pool    | bytes | The base pool related to this pool, set only for metapools.                                                 |
+
+## State Attributes
+
+| name              | type    | description                                                                                         |
+| ----------------- | ------- | --------------------------------------------------------------------------------------------------- |
+| policy            | address | The pool's policy contract, or the zero address if it has none. Set on every `SetPolicyContract`.  |
+| policy_version    | uint    | The version of the policy's grant rules, from its `FyndPolicyCreated` event. 0 for other policies. |
+| policy_controller | address | The key that signs grants. Follows `SetController`. Zero for other policies.                       |
+| policy_router     | address | The only caller that can submit a grant. Follows `SetRouter`. Zero for other policies.             |
+| policy_killed     | uint    | 1 while the policy refuses grants. Follows `SetKilled`.                                            |
+| policy_min_fee    | uint    | The lowest fee of a granted swap, in units of 1e-10. Follows `SetMinFee`. 0 for other policies.    |
+
+A grant policy is a contract that emits `FyndPolicyCreated(pool, version)` in its constructor. The
+pool gets its version and grant terms only if the policy was created for that pool.

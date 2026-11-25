@@ -1,21 +1,29 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    oneshot, Mutex,
+use tokio::{
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        oneshot, watch, Mutex,
+    },
+    task::JoinError,
 };
 use tokio_retry::strategy::ExponentialBackoff;
 use tracing::{error, info, warn};
-use tycho_common::models::ExtractorIdentity;
+use tycho_common::{models::ExtractorIdentity, storage::StorageError};
 
 pub use crate::extractor::factory::{DCIType, ExtractorConfig, ProtocolTypeConfig};
-use crate::extractor::{
-    factory::ExtractorFactory,
-    runner::{
-        slow_client_removals, ControlMessage, Delivery, ExtractorHandle, Subscriber,
-        SubscriberKind, SubscriptionsMap,
+use crate::{
+    extractor::{
+        factory::ExtractorFactory,
+        protocol_extractor::ResumeFrom,
+        runner::{
+            drop_in_background, slow_client_removals, ControlMessage, Delivery, ExtractorHandle,
+            StreamState, Subscriber, SubscriberKind, SubscriptionsMap,
+        },
+        writer_status::WriterStatus,
+        DeltaCommand, ExtractionError,
     },
-    DeltaCommand, ExtractionError,
+    services::CacheCatchUp,
 };
 
 /// Buffer size of the control channel between `ExtractorHandle`s and the supervisor.
@@ -25,6 +33,120 @@ const MAX_RESTART_BACKOFF: Duration = Duration::from_secs(4 * 60 * 60);
 /// Minimum run duration after which a failure is treated as a fresh incident rather than a
 /// continuation of the previous one, resetting the restart count and backoff.
 const HEALTHY_RUN_THRESHOLD: Duration = Duration::from_secs(10 * 60);
+
+/// How often a supervisor that does not need its extractor's stream checks again.
+#[cfg(not(test))]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const STREAM_NEED_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How often a follower that waits for the leader to sync an extractor's history catches the
+/// entity cache up for that extractor's system. The catch-up at the end of the wait then reads
+/// at most this interval of leader commits.
+#[cfg(not(test))]
+const WAITING_CATCH_UP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+#[cfg(test)]
+const WAITING_CATCH_UP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// What [`ExtractorSupervisor::wait_until_stream_is_needed`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamNeed {
+    /// The stream was needed at once.
+    Now,
+    /// The stream is needed after a wait for the leader to sync history.
+    AfterWait,
+    /// A `Stop` arrived first.
+    Stopped,
+}
+
+/// Returns whether the entity cache must catch up before a build.
+///
+/// The first build resumes from the startup snapshot the cache was built from. A first build that
+/// waited for the leader cannot, because the snapshot is old by then. Every later build resumes
+/// from a catch-up.
+fn needs_catch_up(first_build: bool, need: StreamNeed) -> bool {
+    !first_build || need == StreamNeed::AfterWait
+}
+
+/// What ended [`wait_for_stream_need`].
+#[derive(Debug)]
+enum StreamWait {
+    /// This process needs the extractor's stream now.
+    Needed,
+    /// A `Stop` arrived first.
+    Stopped,
+}
+
+/// Waits until `writer` says that this process needs the stream of `extractor`, or until a
+/// `Stop` arrives on `control_rx`.
+///
+/// With `cache_catch_up`, catches the entity cache up for the extractor's system every
+/// [`WAITING_CATCH_UP_INTERVAL`] meanwhile, so the catch-up at the end of the wait is small. A
+/// failed catch-up is logged and tried again at the next interval.
+///
+/// Drops every subscription that arrives meanwhile, which closes its receiver. The stream is
+/// closed, so a subscriber would receive nothing until the leader gets near the head. Only a
+/// request queued before the caller published [`StreamState::WaitingForLeader`] gets here.
+async fn wait_for_stream_need(
+    writer: &WriterStatus,
+    extractor: &str,
+    control_rx: &mut Receiver<ControlMessage>,
+    cache_catch_up: Option<&CacheCatchUp>,
+) -> StreamWait {
+    let mut next_catch_up = tokio::time::Instant::now() + WAITING_CATCH_UP_INTERVAL;
+    loop {
+        if writer.needs_stream(extractor, chrono::Utc::now().naive_utc()) {
+            return StreamWait::Needed;
+        }
+        let due = cache_catch_up.filter(|_| tokio::time::Instant::now() >= next_catch_up);
+        let work = async {
+            let Some(cache_catch_up) = due else {
+                tokio::time::sleep(STREAM_NEED_POLL_INTERVAL).await;
+                return false;
+            };
+            if let Err(err) = cache_catch_up.catch_up(extractor).await {
+                warn!(extractor, error = %err, "Scheduled entity cache catch-up failed");
+            }
+            true
+        };
+        let Some(caught_up) = reject_subscriptions_until(extractor, control_rx, work).await else {
+            return StreamWait::Stopped;
+        };
+        if caught_up {
+            next_catch_up = tokio::time::Instant::now() + WAITING_CATCH_UP_INTERVAL;
+        }
+    }
+}
+
+/// Drives `work` to its end while it drops every subscription that arrives on `control_rx`.
+/// Returns the output of `work`, or `None` when a `Stop` arrives first.
+async fn reject_subscriptions_until<F: Future>(
+    extractor: &str,
+    control_rx: &mut Receiver<ControlMessage>,
+    work: F,
+) -> Option<F::Output> {
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            output = &mut work => return Some(output),
+            Some(ctrl) = control_rx.recv() => match ctrl {
+                ControlMessage::Stop => return None,
+                ControlMessage::Subscribe { subscription_id, .. } => {
+                    reject_subscription(extractor, subscription_id);
+                }
+            },
+        }
+    }
+}
+
+/// Logs a subscription dropped because the stream is closed while the leader syncs history.
+fn reject_subscription(extractor: &str, subscription_id: impl std::fmt::Display) {
+    info!(
+        extractor,
+        %subscription_id,
+        "SubscriptionRejected: the leader syncs history, the stream is closed"
+    );
+}
 
 /// Exponential backoff for restarts: 60s, 120s, 240s, ... capped at [`MAX_RESTART_BACKOFF`].
 fn restart_backoff() -> ExponentialBackoff {
@@ -45,25 +167,60 @@ fn restart_counter(id: &ExtractorIdentity) -> metrics::Counter {
     restarts
 }
 
+/// Returns the error to end supervision with when `err` must not lead to a restart.
+///
+/// A fenced writer means another process took over writing to the database. A rebuilt extractor
+/// would be fenced again on its first commit, so restarting cannot help.
+fn unrecoverable(err: &ExtractionError) -> Option<ExtractionError> {
+    let ExtractionError::Storage(StorageError::Fenced { claimed, current }) = err else {
+        return None;
+    };
+    Some(ExtractionError::Storage(StorageError::Fenced { claimed: *claimed, current: *current }))
+}
+
+/// Returns whether `result` asks to build the extractor again at once, without a failure.
+///
+/// An extractor with a DCI plugin stops with [`ExtractionError::RestartToTakeOver`] when this
+/// process becomes the leader. The rebuild reads its state back from the database. It is not a
+/// failure, so it waits for no backoff and does not count toward `max_restarts`.
+fn is_restart_to_take_over(result: &Result<Result<(), ExtractionError>, JoinError>) -> bool {
+    let Ok(Err(ExtractionError::RestartToTakeOver(_))) = result else {
+        return false;
+    };
+    true
+}
+
 /// Long-lived per-extractor task that owns the factory and manages restart lifecycle.
 ///
 /// The supervisor:
+/// - On a follower, waits to build the extractor while the leader syncs its history, so only the
+///   leader pays for that stream.
 /// - Builds an extractor and runner via its factory.
 /// - Runs the runner and waits for it to exit.
 /// - On failure: sends `DeltaCommand::ExtractorRestarted` to all subscribers, applies exponential
 ///   backoff, then rebuilds from scratch. Each subscriber decides how to handle the restart.
+/// - When the process becomes the leader and the extractor asks to restart to take over, sends
+///   `DeltaCommand::ExtractorRestarted` and rebuilds at once, without a backoff and without a count
+///   toward `max_restarts`.
 /// - Counts every rebuild in `extractor_restarts_total`, registered at zero when supervision
 ///   starts.
 /// - Forwards `ControlMessage::Subscribe` from the `ExtractorHandle` to the subscription map.
+/// - Publishes its [`StreamState`] to its `ExtractorHandle`s, which reject subscriptions while a
+///   follower waits for the leader to sync the extractor's history.
 /// - Forwards `ControlMessage::Stop` by signalling the runner's stop channel.
 pub struct ExtractorSupervisor {
     factory: ExtractorFactory,
+    writer_status: WriterStatus,
     ctrl_tx: Sender<ControlMessage>,
     control_rx: Receiver<ControlMessage>,
+    stream_state: watch::Sender<StreamState>,
     subscriptions: Arc<Mutex<SubscriptionsMap>>,
     id: ExtractorIdentity,
     max_restarts: Option<u32>,
     next_subscriber_id: u64,
+    /// Brings the entity cache up to date before the builds that [`needs_catch_up`] selects.
+    /// `None` without an entity cache.
+    cache_catch_up: Option<Arc<CacheCatchUp>>,
 }
 
 impl ExtractorSupervisor {
@@ -71,15 +228,31 @@ impl ExtractorSupervisor {
         let id = factory.extractor_id();
         let max_restarts: Option<u32> = factory.config.max_restarts;
         let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let writer_status = factory.writer_status().clone();
+        let stream_state = if writer_status.needs_stream(&id.name, chrono::Utc::now().naive_utc()) {
+            StreamState::Open
+        } else {
+            StreamState::WaitingForLeader
+        };
+        let (stream_state, _) = watch::channel(stream_state);
         Self {
             factory,
+            writer_status,
             ctrl_tx,
             control_rx,
+            stream_state,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             id,
             max_restarts,
             next_subscriber_id: 0,
+            cache_catch_up: None,
         }
+    }
+
+    /// Makes the supervisor catch the entity cache up for this extractor with `catch_up` before
+    /// each build after the first, and before a first build that waited for the leader.
+    pub fn set_cache_catch_up(&mut self, catch_up: Arc<CacheCatchUp>) {
+        self.cache_catch_up = Some(catch_up);
     }
 
     /// Registers an in-process subscriber.
@@ -103,9 +276,129 @@ impl ExtractorSupervisor {
             .insert(subscriber_id, Subscriber { sender, kind });
     }
 
+    /// Drives `work` to its end while it serves control messages.
+    ///
+    /// Registers each subscription that arrives, and gives up `work` when a `Stop` arrives.
+    /// Returns the output of `work`, or `None` after a `Stop`. Once the control channel is
+    /// closed, only `work` is awaited.
+    async fn serve_control_until<F: Future>(&mut self, work: F) -> Option<F::Output> {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                output = &mut work => return Some(output),
+                Some(ctrl) = self.control_rx.recv() => match ctrl {
+                    ControlMessage::Stop => return None,
+                    ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
+                        self.insert_subscriber(
+                            sender,
+                            SubscriberKind::Client { subscription_id, user_identity },
+                        )
+                        .await;
+                    }
+                },
+            }
+        }
+    }
+
+    /// Waits until this process needs the extractor's stream, and rejects subscriptions
+    /// meanwhile.
+    ///
+    /// Publishes [`StreamState::WaitingForLeader`] for the time of the wait. Returns whether it
+    /// had to wait, or [`StreamNeed::Stopped`] when a `Stop` arrived first.
+    async fn wait_until_stream_is_needed(&mut self) -> StreamNeed {
+        let now = chrono::Utc::now().naive_utc();
+        if self
+            .writer_status
+            .needs_stream(&self.id.name, now)
+        {
+            return StreamNeed::Now;
+        }
+        info!(
+            extractor = %self.id,
+            leader_committed_height = ?self.writer_status.committed_height(&self.id.name),
+            "FollowerWaitsForLeaderSync: the leader syncs history; not opening the stream"
+        );
+        self.stream_state
+            .send_replace(StreamState::WaitingForLeader);
+        let wait = wait_for_stream_need(
+            &self.writer_status,
+            &self.id.name,
+            &mut self.control_rx,
+            self.cache_catch_up.as_deref(),
+        )
+        .await;
+        self.stream_state
+            .send_replace(StreamState::Open);
+        match wait {
+            StreamWait::Needed => {
+                info!(
+                    extractor = %self.id,
+                    role = ?self.writer_status.role(),
+                    leader_committed_height = ?self.writer_status.committed_height(&self.id.name),
+                    "FollowerStreamStarts"
+                );
+                StreamNeed::AfterWait
+            }
+            StreamWait::Stopped => {
+                info!(extractor = %self.id, "Stop signal received while waiting for the leader to sync");
+                StreamNeed::Stopped
+            }
+        }
+    }
+
+    /// Brings the entity cache up to date for this extractor's system before a build, and makes
+    /// the build resume from the cursor read with it.
+    ///
+    /// Reads the writer role before the catch-up, as for the startup snapshot. A role only
+    /// changes from follower to leader, so a leader role read first means that the cursor is
+    /// final. Serves control messages meanwhile. Does nothing without an entity cache.
+    ///
+    /// Returns `Ok(false)` when a `Stop` arrives first, and an error when the catch-up fails.
+    async fn catch_up_entity_cache(&mut self) -> Result<bool, ExtractionError> {
+        let Some(cache_catch_up) = self.cache_catch_up.clone() else {
+            return Ok(true);
+        };
+        let role = self.writer_status.role();
+        let system = self.id.name.clone();
+        let Some(result) = self
+            .serve_control_until(cache_catch_up.catch_up(&system))
+            .await
+        else {
+            info!(extractor = %self.id, "Stop signal received during the entity cache catch-up");
+            return Ok(false);
+        };
+        let cursor = result.map_err(|err| {
+            error!(extractor = %self.id, error = %err, "Entity cache catch-up failed");
+            ExtractionError::Storage(err)
+        })?;
+        self.factory
+            .resume_next_build_from(ResumeFrom::Snapshot { role, cursor });
+        Ok(true)
+    }
+
+    /// Waits `backoff` before a restart. Returns `false` when a `Stop` arrives first.
+    ///
+    /// Serves control messages while it waits. A `Stop` must not have to sit out a backoff of up
+    /// to [`MAX_RESTART_BACKOFF`], and new subscribers registered now take effect on the next run.
+    async fn wait_for_restart_backoff(&mut self, backoff: Duration) -> bool {
+        let waited = self
+            .serve_control_until(tokio::time::sleep(backoff))
+            .await
+            .is_some();
+        if !waited {
+            info!(extractor = %self.id, "Stop signal received during restart backoff");
+        }
+        waited
+    }
+
     /// Returns an [`ExtractorHandle`] that can be used to subscribe or stop this extractor.
     pub fn handle(&self) -> ExtractorHandle {
-        ExtractorHandle::new(self.id.clone(), self.ctrl_tx.clone())
+        ExtractorHandle::new(
+            self.id.clone(),
+            self.ctrl_tx.clone(),
+            self.stream_state.subscribe(),
+            self.factory.partial_blocks,
+        )
     }
 
     /// Runs the supervision loop. Returns `Ok` when the extractor exited gracefully or was
@@ -123,12 +416,35 @@ impl ExtractorSupervisor {
     /// slate, and it avoids indefinitely serving the dead extractor's stale pending deltas
     /// over RPC. A future improvement could instead retry transient build failures in place
     /// and reserve `Err` for deterministic configuration errors.
+    ///
+    /// Once supervision ends, [`ExtractorHandle::stopped`] resolves at once. The supervisor's
+    /// state, which can hold the chain-wide protocol cache, is freed afterwards on the blocking
+    /// thread pool.
     pub async fn run(mut self) -> Result<(), ExtractionError> {
+        let result = self.supervise().await;
+        // A shutdown waits for `stopped` before it releases the leader lock. No write is left at
+        // this point, so the lock need not wait the seconds that freeing a large protocol cache
+        // takes.
+        self.control_rx.close();
+        drop_in_background(self.id.clone(), "supervisor", self);
+        result
+    }
+
+    async fn supervise(&mut self) -> Result<(), ExtractionError> {
         let mut restart_count: u32 = 0;
         let mut backoff_strategy = restart_backoff();
         let restarts = restart_counter(&self.id);
 
+        let mut first_build = true;
         loop {
+            let need = self.wait_until_stream_is_needed().await;
+            if need == StreamNeed::Stopped {
+                return Ok(());
+            }
+            if needs_catch_up(first_build, need) && !self.catch_up_entity_cache().await? {
+                return Ok(());
+            }
+            first_build = false;
             let (stop_tx, stop_rx) = oneshot::channel();
             let runner = match self
                 .factory
@@ -151,42 +467,33 @@ impl ExtractorSupervisor {
             let mut run_handle = runner.run();
 
             // Drive the runner, handling control messages in parallel.
-            let runner_result = loop {
-                tokio::select! {
-                    result = &mut run_handle => {
-                        break result;
+            let Some(runner_result) = self
+                .serve_control_until(&mut run_handle)
+                .await
+            else {
+                info!(extractor = %self.id, "Stop signal received by supervisor");
+                let stop_received = tokio::time::Instant::now();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the runner drops its stop receiver once it has finished on its own; awaiting its result below reports that outcome"
+                )]
+                let _ = stop_tx.send(());
+                let result = run_handle.await;
+                info!(
+                    extractor = %self.id,
+                    elapsed = ?stop_received.elapsed(),
+                    "ExtractorStopped"
+                );
+                return match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(join_err) => {
+                        Err(ExtractionError::Unknown(format!("Runner panicked: {join_err}")))
                     }
-                    Some(ctrl) = self.control_rx.recv() => {
-                        match ctrl {
-                            ControlMessage::Stop => {
-                                info!(extractor = %self.id, "Stop signal received by supervisor");
-                                #[expect(
-                                    clippy::let_underscore_must_use,
-                                    reason = "the runner drops its stop receiver once it has finished on its own; awaiting its result below reports that outcome"
-                                )]
-                                let _ = stop_tx.send(());
-                                let result = run_handle.await;
-                                return match result {
-                                    Ok(Ok(())) => Ok(()),
-                                    Ok(Err(e)) => Err(e),
-                                    Err(join_err) => Err(ExtractionError::Unknown(
-                                        format!("Runner panicked: {join_err}")
-                                    )),
-                                };
-                            }
-                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
-                                self
-                                    .insert_subscriber(
-                                        sender,
-                                        SubscriberKind::Client { subscription_id, user_identity },
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                }
+                };
             };
 
+            let restart_to_take_over = is_restart_to_take_over(&runner_result);
             // Runner exited — classify the result.
             match runner_result {
                 Ok(Ok(())) => {
@@ -198,6 +505,19 @@ impl ExtractorSupervisor {
                     )
                     .increment(1);
                     return Ok(());
+                }
+                Ok(Err(ref err)) if restart_to_take_over => {
+                    info!(
+                        extractor = %self.id,
+                        error = %err,
+                        "RestartToTakeOver: building the extractor again from the database cursor"
+                    );
+                    metrics::counter!(
+                        "extractor_stopped",
+                        "extractor" => self.id.name.clone(),
+                        "reason" => err.variant_name()
+                    )
+                    .increment(1);
                 }
                 Ok(Err(ref err)) => {
                     error!(
@@ -212,6 +532,9 @@ impl ExtractorSupervisor {
                         "reason" => err.variant_name()
                     )
                     .increment(1);
+                    if let Some(fatal) = unrecoverable(err) {
+                        return Err(fatal);
+                    }
                 }
                 Err(ref join_err) => {
                     error!(
@@ -232,7 +555,7 @@ impl ExtractorSupervisor {
             // consecutive, so the failure counting starts afresh. Without this, sporadic
             // failures accumulate over the process lifetime: the backoff ratchets up to its
             // cap and `max_restarts` eventually stops a healthy extractor for good.
-            if run_started.elapsed() >= HEALTHY_RUN_THRESHOLD {
+            if !restart_to_take_over && run_started.elapsed() >= HEALTHY_RUN_THRESHOLD {
                 info!(
                     extractor = %self.id,
                     run_duration = ?run_started.elapsed(),
@@ -243,9 +566,9 @@ impl ExtractorSupervisor {
                 backoff_strategy = restart_backoff();
             }
 
-            if self
-                .max_restarts
-                .is_some_and(|max| restart_count >= max)
+            if !restart_to_take_over &&
+                self.max_restarts
+                    .is_some_and(|max| restart_count >= max)
             {
                 error!(
                     extractor = %self.id,
@@ -301,50 +624,30 @@ impl ExtractorSupervisor {
                 }
             }
 
-            let backoff = backoff_strategy
-                .next()
-                .expect("backoff strategy is infinite");
-            warn!(
-                extractor = %self.id,
-                ?backoff,
-                restart_count,
-                "Waiting for backoff before restarting extractor"
-            );
-            // Keep servicing control messages while waiting: a `Stop` must not have to sit
-            // out a backoff of up to `MAX_RESTART_BACKOFF`, and new subscribers registered
-            // now take effect on the next run.
-            let deadline = tokio::time::Instant::now() + backoff;
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep_until(deadline) => break,
-                    Some(ctrl) = self.control_rx.recv() => {
-                        match ctrl {
-                            ControlMessage::Stop => {
-                                info!(
-                                    extractor = %self.id,
-                                    "Stop signal received during restart backoff"
-                                );
-                                return Ok(());
-                            }
-                            ControlMessage::Subscribe { sender, subscription_id, user_identity } => {
-                                self
-                                    .insert_subscriber(
-                                        sender,
-                                        SubscriberKind::Client { subscription_id, user_identity },
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
+            if !restart_to_take_over {
+                let backoff = backoff_strategy
+                    .next()
+                    .expect("backoff strategy is infinite");
+                warn!(
+                    extractor = %self.id,
+                    ?backoff,
+                    restart_count,
+                    "Waiting for backoff before restarting extractor"
+                );
+                if !self
+                    .wait_for_restart_backoff(backoff)
+                    .await
+                {
+                    return Ok(());
                 }
+                warn!(
+                    extractor = %self.id,
+                    ?backoff,
+                    restart_count,
+                    "Restarting extractor after backoff"
+                );
+                restart_count += 1;
             }
-            warn!(
-                extractor = %self.id,
-                ?backoff,
-                restart_count,
-                "Restarting extractor after backoff"
-            );
-            restart_count += 1;
             restarts.increment(1);
         }
     }
@@ -358,9 +661,22 @@ mod tests {
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},
         MetricKind,
     };
-    use tycho_common::models::Chain;
+    use tokio::sync::watch;
+    use tycho_common::{
+        models::Chain,
+        storage::{CatchUpRead, CommitWatermark, StateSnapshot, StateSnapshotGateway},
+    };
+    use tycho_storage::postgres::cache::CommittedBlock;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::{
+        extractor::{
+            runner::{MessageSender, SubscribeError},
+            writer_status::Role,
+        },
+        services::EntityCache,
+    };
 
     fn restarts_series(snapshotter: &Snapshotter) -> Vec<(BTreeMap<String, String>, u64)> {
         snapshotter
@@ -382,6 +698,20 @@ mod tests {
                 (labels, count)
             })
             .collect()
+    }
+
+    #[test]
+    fn fenced_writer_is_unrecoverable() {
+        let fenced = ExtractionError::Storage(StorageError::Fenced { claimed: 3, current: 4 });
+
+        assert_eq!(unrecoverable(&fenced), Some(fenced));
+    }
+
+    #[test]
+    fn other_storage_errors_are_restarted() {
+        let err = ExtractionError::Storage(StorageError::Unexpected("connection reset".into()));
+
+        assert_eq!(unrecoverable(&err), None);
     }
 
     #[test]
@@ -407,5 +737,319 @@ mod tests {
         });
 
         assert_eq!(restarts_series(&snapshotter), vec![(labels, 2)]);
+    }
+
+    /// Long enough for many polls of a waiting supervisor.
+    const STILL_WAITING: Duration = Duration::from_millis(200);
+    const EXTRACTOR: &str = "uniswap_v2";
+
+    struct WriterChannels {
+        role: watch::Sender<Role>,
+        committed: watch::Sender<HashMap<String, CommittedBlock>>,
+    }
+
+    impl WriterChannels {
+        fn follower() -> (Self, WriterStatus) {
+            let (role, role_rx) = watch::channel(Role::Follower);
+            let (committed, committed_rx) = watch::channel(HashMap::new());
+            let (_, confirmed_rx) = watch::channel(tokio::time::Instant::now());
+            (Self { role, committed }, WriterStatus::new(role_rx, committed_rx, confirmed_rx))
+        }
+
+        fn leader_committed_block_of_age(&self, age: chrono::Duration) {
+            let ts = chrono::Utc::now().naive_utc() - age;
+            self.committed
+                .send(HashMap::from([(EXTRACTOR.to_string(), CommittedBlock { number: 100, ts })]))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_leader_needs_the_stream_at_once() {
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+
+        let wait = tokio::time::timeout(
+            STILL_WAITING,
+            wait_for_stream_need(&WriterStatus::leader(), EXTRACTOR, &mut control_rx, None),
+        )
+        .await;
+
+        assert!(matches!(wait, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_follower_waits_until_the_leader_is_near_the_head() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
+
+        let syncing = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
+        let near_head = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(syncing.is_err(), "a follower must not stream while the leader syncs");
+        assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    /// Answers every `catch_up_read` call with an empty read, or with an error, and counts the
+    /// calls. A read waits for a permit of `gate`.
+    struct CountingGateway {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+        gate: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl StateSnapshotGateway for CountingGateway {
+        async fn state_snapshot(&self, _chain: &Chain) -> Result<StateSnapshot, StorageError> {
+            Err(StorageError::Unexpected("not used".to_string()))
+        }
+
+        async fn catch_up_read(
+            &self,
+            _chain: &Chain,
+            since: CommitWatermark,
+            _system: &str,
+        ) -> Result<CatchUpRead, StorageError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.gate
+                .acquire()
+                .await
+                .unwrap()
+                .forget();
+            if self.fail {
+                return Err(StorageError::Unexpected("read failed".to_string()));
+            }
+            Ok(CatchUpRead {
+                accounts: vec![],
+                changes: HashMap::new(),
+                components: vec![],
+                cursors: HashMap::new(),
+                watermark: since,
+            })
+        }
+    }
+
+    fn catch_up_reading_from(gateway: Arc<CountingGateway>) -> CacheCatchUp {
+        let cache = Arc::new(EntityCache::from_snapshot(StateSnapshot {
+            accounts: vec![],
+            components: vec![],
+            cursors: HashMap::new(),
+            watermark: CommitWatermark::new(1),
+        }));
+        CacheCatchUp::new(cache, gateway, Chain::Ethereum, CommitWatermark::new(1))
+    }
+
+    fn counting_gateway(fail: bool, permits: usize) -> Arc<CountingGateway> {
+        Arc::new(CountingGateway {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail,
+            gate: tokio::sync::Semaphore::new(permits),
+        })
+    }
+
+    #[rstest::rstest]
+    #[case::successful_reads(false)]
+    #[case::failed_reads(true)]
+    #[tokio::test]
+    async fn test_waiting_follower_catches_the_cache_up_on_a_schedule(#[case] fail: bool) {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let gateway = counting_gateway(fail, 100);
+        let cache_catch_up = catch_up_reading_from(gateway.clone());
+        let mut wait = std::pin::pin!(wait_for_stream_need(
+            &writer,
+            EXTRACTOR,
+            &mut control_rx,
+            Some(&cache_catch_up)
+        ));
+
+        let syncing = tokio::time::timeout(WAITING_CATCH_UP_INTERVAL * 5, &mut wait).await;
+        channels.leader_committed_block_of_age(chrono::Duration::minutes(15));
+        let near_head = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(syncing.is_err(), "the follower keeps waiting, also after a failed catch-up");
+        assert!(
+            gateway
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst) >=
+                2
+        );
+        assert!(matches!(near_head, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_stop_ends_the_wait_during_a_scheduled_catch_up() {
+        let (channels, writer) = WriterChannels::follower();
+        let (ctrl_tx, mut control_rx) = mpsc::channel(1);
+        channels.leader_committed_block_of_age(chrono::Duration::days(30));
+        let gateway = counting_gateway(false, 0);
+        let cache_catch_up = catch_up_reading_from(gateway.clone());
+        let mut wait = std::pin::pin!(wait_for_stream_need(
+            &writer,
+            EXTRACTOR,
+            &mut control_rx,
+            Some(&cache_catch_up)
+        ));
+
+        let reading =
+            tokio::time::timeout(WAITING_CATCH_UP_INTERVAL + STILL_WAITING, &mut wait).await;
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        let stopped = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(reading.is_err());
+        assert_eq!(
+            gateway
+                .calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the catch-up read is held open"
+        );
+        assert!(matches!(stopped, Ok(StreamWait::Stopped)));
+    }
+
+    #[rstest::rstest]
+    #[case::first_build_at_once(true, StreamNeed::Now, false)]
+    #[case::first_build_after_a_wait(true, StreamNeed::AfterWait, true)]
+    #[case::rebuild(false, StreamNeed::Now, true)]
+    #[case::rebuild_after_a_wait(false, StreamNeed::AfterWait, true)]
+    fn test_every_build_but_an_immediate_first_one_catches_up(
+        #[case] first_build: bool,
+        #[case] need: StreamNeed,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(needs_catch_up(first_build, need), expected);
+    }
+
+    #[test]
+    fn test_only_a_restart_to_take_over_skips_the_backoff() {
+        let take_over = Ok(Err(ExtractionError::RestartToTakeOver(EXTRACTOR.to_string())));
+        let failure = Ok(Err(ExtractionError::SubstreamsError("stream ended".to_string())));
+
+        assert!(is_restart_to_take_over(&take_over));
+        assert!(!is_restart_to_take_over(&failure));
+        assert!(!is_restart_to_take_over(&Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn test_follower_needs_the_stream_once_promoted() {
+        let (channels, writer) = WriterChannels::follower();
+        let (_ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
+
+        let first_sync = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        channels
+            .role
+            .send(Role::Leader)
+            .unwrap();
+        let promoted = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(first_sync.is_err(), "a follower must not stream before the first commit");
+        assert!(matches!(promoted, Ok(StreamWait::Needed)));
+    }
+
+    #[tokio::test]
+    async fn test_waiting_follower_drops_queued_subscriptions_and_stops_on_stop() {
+        let (_channels, writer) = WriterChannels::follower();
+        let (ctrl_tx, mut control_rx) = mpsc::channel(1);
+        let (sender, mut subscriber_rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(ControlMessage::Subscribe {
+                sender,
+                subscription_id: Uuid::new_v4(),
+                user_identity: None,
+            })
+            .await
+            .unwrap();
+        let mut wait =
+            std::pin::pin!(wait_for_stream_need(&writer, EXTRACTOR, &mut control_rx, None));
+
+        let still_waiting = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+        let subscriber_message = subscriber_rx.recv().await;
+        ctrl_tx
+            .send(ControlMessage::Stop)
+            .await
+            .unwrap();
+        let stop = tokio::time::timeout(STILL_WAITING, &mut wait).await;
+
+        assert!(still_waiting.is_err(), "a subscription must not end the wait");
+        assert!(subscriber_message.is_none(), "the dropped subscription must be closed");
+        assert!(matches!(stop, Ok(StreamWait::Stopped)));
+    }
+
+    fn handle_with_state(
+        state: StreamState,
+    ) -> (ExtractorHandle, Receiver<ControlMessage>, watch::Sender<StreamState>) {
+        let (ctrl_tx, control_rx) = mpsc::channel(CONTROL_CHANNEL_SIZE);
+        let (state_tx, state_rx) = watch::channel(state);
+        let id = ExtractorIdentity::new(Chain::Ethereum, EXTRACTOR);
+        (ExtractorHandle::new(id, ctrl_tx, state_rx, false), control_rx, state_tx)
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_returns_at_once_while_the_supervisor_is_busy() {
+        let (handle, mut control_rx, _state_tx) = handle_with_state(StreamState::Open);
+
+        let subscription =
+            tokio::time::timeout(STILL_WAITING, handle.subscribe(Uuid::new_v4(), None)).await;
+
+        assert!(
+            matches!(subscription, Ok(Ok(_))),
+            "a subscription must not wait for the supervisor to read it"
+        );
+        assert!(matches!(control_rx.try_recv(), Ok(ControlMessage::Subscribe { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_is_rejected_while_waiting_for_the_leader() {
+        let (handle, mut control_rx, state_tx) = handle_with_state(StreamState::WaitingForLeader);
+
+        let waiting = handle
+            .subscribe(Uuid::new_v4(), None)
+            .await;
+        state_tx.send_replace(StreamState::Open);
+        let open = handle
+            .subscribe(Uuid::new_v4(), None)
+            .await;
+
+        assert!(matches!(waiting, Err(SubscribeError::NotStreaming)));
+        assert!(open.is_ok());
+        assert!(
+            matches!(control_rx.try_recv(), Ok(ControlMessage::Subscribe { .. })),
+            "only the subscription after the stream opened reaches the supervisor"
+        );
+        assert!(control_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stopped_resolves_once_the_control_channel_is_closed() {
+        let (handle, mut control_rx, _state) = handle_with_state(StreamState::Open);
+
+        control_rx.close();
+
+        tokio::time::timeout(Duration::from_secs(1), handle.stopped())
+            .await
+            .expect("stopped waits for the receiver to be dropped");
+        drop(control_rx);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_fails_when_the_supervisor_is_gone() {
+        let (handle, control_rx, _state_tx) = handle_with_state(StreamState::Open);
+        drop(control_rx);
+
+        let subscription = handle
+            .subscribe(Uuid::new_v4(), None)
+            .await;
+
+        assert!(matches!(subscription, Err(SubscribeError::ControlChannelClosed)));
     }
 }

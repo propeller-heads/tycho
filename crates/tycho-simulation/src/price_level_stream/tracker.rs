@@ -2301,6 +2301,7 @@ mod tests {
                 address: canonical_pamm_address(&config.address),
                 ..config
             })
+            .chain([recorded_fermiswap()])
             .collect();
         FreshnessTracker::new(TrackerSettings { tokens: captured_tokens(), ..settings(known) })
     }

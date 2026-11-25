@@ -9,6 +9,7 @@ on:
       - opened
       - edited
       - synchronize
+  merge_group:
 
 permissions:
   contents: read
@@ -16,7 +17,18 @@ permissions:
 
 jobs:
   validate-pr:
+    if: github.event_name == 'pull_request_target'
     uses: propeller-heads/ci-cd-templates/.github/workflows/validate-pr.yaml@main
     secrets:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+  # "validate-pr / main" is a required check, and a required check must also
+  # report on the merge queue group's commit. The title was validated on the PR
+  # before it could enter the queue.
+  validate-pr-merge-group:
+    name: validate-pr / main
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR title validated on the pull request"

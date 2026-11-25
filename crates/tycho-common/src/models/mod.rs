@@ -667,7 +667,8 @@ impl Chain {
             Chain::Starknet => 2,
             Chain::ZkSync => 3,
             Chain::Arbitrum => 1,
-            Chain::Base => 2,
+            // Base produces 200 ms blocks; same integer-second ceiling.
+            Chain::Base => 1,
             Chain::Bsc => 1,
             Chain::Unichain => 1,
             Chain::Polygon => 2,
@@ -1075,6 +1076,11 @@ mod tests {
     #[test]
     fn test_robinhood_block_time_secs() {
         assert_eq!(Chain::Robinhood.block_time_secs(), 1);
+    }
+
+    #[test]
+    fn test_base_block_time_secs() {
+        assert_eq!(Chain::Base.block_time_secs(), 1);
     }
 
     #[test]

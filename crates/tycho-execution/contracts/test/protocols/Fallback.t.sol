@@ -4,6 +4,7 @@ import "../TychoRouterTestSetup.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {MockPropAMM} from "./PropAMM.t.sol";
+import {IPropAMM} from "@interfaces/IPropAMM.sol";
 import {AerodromeV1TestBase} from "./AerodromeV1.t.sol";
 import {IAerodromeV1Pool} from "@interfaces/IAerodromeV1Pool.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
@@ -1745,5 +1746,96 @@ contract PropAMMFallbackExecutorTest is TychoRouterTestSetup {
             address(pamm),
             FallbackSwaps.uniswapV3(USDC_WETH_USV3)
         );
+    }
+}
+
+/// @notice A natively indexed IPropAMM venue on the fallback router (`fallback:biconomy` on
+/// Base): the deployed router quotes the Biconomy venue and the fallback pool and runs the
+/// better one, and falls through to the pool when the venue cannot fill.
+contract NativePropAMMFallbackBaseForkTest is TestUtils, Constants {
+    address constant VENUE = 0x0000009E5F98cDB4dd1E1d2E15B220217c88B3b8;
+    // Tycho's PropAMM fallback router on Base, behind the `fallback` executor.
+    PropAMMFallbackRouter constant ROUTER =
+        PropAMMFallbackRouter(0xd38142E88f3d1011D8258737f257c709Dd0e2204);
+    // Uniswap V3 WETH/USDC 0.05% on Base.
+    address constant WETH_USDC_USV3 =
+        0xd0b53D9277642d899DF5C87A3966A349A798F224;
+    uint256 constant FORK_BLOCK = 52549180;
+    address RECEIVER = makeAddr("biconomy-fallback-receiver");
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("base"), FORK_BLOCK);
+    }
+
+    function testRunsTheBetterOfVenueAndPool() public {
+        uint256 amountIn = 0.0005 ether;
+        TychoFallbackRouter.Swap memory swap_ =
+            _swap(BASE_WETH, BASE_USDC, amountIn);
+        bytes memory fallbackSwap = _uniswapV3(WETH_USDC_USV3);
+        uint256 venueOut = IPropAMM(VENUE).quote(BASE_WETH, BASE_USDC, amountIn);
+        vm.prank(address(ROUTER));
+        uint256 poolOut = ROUTER.quoteFallback(swap_, fallbackSwap);
+        assertGt(venueOut, 0);
+
+        uint256 received = _run(swap_, fallbackSwap);
+
+        assertEq(received, venueOut > poolOut ? venueOut : poolOut);
+        _assertRouterDrained();
+    }
+
+    function testFallsThroughWhenTheVenueCannotFill() public {
+        // Far beyond the venue's live depth at this block.
+        uint256 amountIn = 1 ether;
+        TychoFallbackRouter.Swap memory swap_ =
+            _swap(BASE_WETH, BASE_USDC, amountIn);
+        bytes memory fallbackSwap = _uniswapV3(WETH_USDC_USV3);
+        vm.expectRevert();
+        IPropAMM(VENUE).quote(BASE_WETH, BASE_USDC, amountIn);
+        vm.prank(address(ROUTER));
+        uint256 poolOut = ROUTER.quoteFallback(swap_, fallbackSwap);
+
+        uint256 received = _run(swap_, fallbackSwap);
+
+        assertEq(received, poolOut);
+        _assertRouterDrained();
+    }
+
+    function _run(
+        TychoFallbackRouter.Swap memory swap_,
+        bytes memory fallbackSwap
+    ) internal returns (uint256 received) {
+        // Push-funded: the fallback executor transfers amountIn to the router first.
+        deal(
+            swap_.tokenIn,
+            address(ROUTER),
+            IERC20(swap_.tokenIn).balanceOf(address(ROUTER)) + swap_.amountIn
+        );
+        uint256 before = IERC20(swap_.tokenOut).balanceOf(RECEIVER);
+        ROUTER.swap(swap_, VENUE, fallbackSwap);
+        received = IERC20(swap_.tokenOut).balanceOf(RECEIVER) - before;
+    }
+
+    function _swap(address tokenIn, address tokenOut, uint256 amountIn)
+        internal
+        view
+        returns (TychoFallbackRouter.Swap memory)
+    {
+        return TychoFallbackRouter.Swap({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            amountIn: amountIn,
+            receiver: RECEIVER
+        });
+    }
+
+    function _uniswapV3(address pool) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            uint8(TychoFallbackRouter.FallbackProtocol.UniswapV3), pool
+        );
+    }
+
+    function _assertRouterDrained() internal view {
+        assertEq(IERC20(BASE_WETH).balanceOf(address(ROUTER)), 0);
+        assertEq(IERC20(BASE_USDC).balanceOf(address(ROUTER)), 0);
     }
 }

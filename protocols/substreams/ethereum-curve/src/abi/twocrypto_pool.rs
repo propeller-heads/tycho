@@ -172,4 +172,82 @@ pub mod functions {
 #[allow(dead_code, unused_imports, unused_variables)]
 pub mod events {
     use super::INTERNAL_ERR;
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct SetPolicyContract {
+        pub policy: Vec<u8>,
+    }
+    impl SetPolicyContract {
+        const TOPIC_ID: [u8; 32] = [
+            120u8,
+            232u8,
+            18u8,
+            6u8,
+            56u8,
+            138u8,
+            179u8,
+            238u8,
+            94u8,
+            115u8,
+            198u8,
+            139u8,
+            135u8,
+            218u8,
+            22u8,
+            248u8,
+            204u8,
+            137u8,
+            104u8,
+            200u8,
+            49u8,
+            213u8,
+            23u8,
+            173u8,
+            236u8,
+            104u8,
+            165u8,
+            22u8,
+            199u8,
+            93u8,
+            9u8,
+            176u8,
+        ];
+        pub fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            if log.topics.len() != 1usize {
+                return false;
+            }
+            if log.data.len() != 32usize {
+                return false;
+            }
+            return log.topics.get(0).expect("bounds already checked").as_ref()
+                == Self::TOPIC_ID;
+        }
+        pub fn decode(
+            log: &substreams_ethereum::pb::eth::v2::Log,
+        ) -> Result<Self, String> {
+            let mut values = ethabi::decode(
+                    &[ethabi::ParamType::Address],
+                    log.data.as_ref(),
+                )
+                .map_err(|e| format!("unable to decode log.data: {:?}", e))?;
+            values.reverse();
+            Ok(Self {
+                policy: values
+                    .pop()
+                    .expect(INTERNAL_ERR)
+                    .into_address()
+                    .expect(INTERNAL_ERR)
+                    .as_bytes()
+                    .to_vec(),
+            })
+        }
+    }
+    impl substreams_ethereum::Event for SetPolicyContract {
+        const NAME: &'static str = "SetPolicyContract";
+        fn match_log(log: &substreams_ethereum::pb::eth::v2::Log) -> bool {
+            Self::match_log(log)
+        }
+        fn decode(log: &substreams_ethereum::pb::eth::v2::Log) -> Result<Self, String> {
+            Self::decode(log)
+        }
+    }
 }

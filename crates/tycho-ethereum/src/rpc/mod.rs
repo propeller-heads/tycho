@@ -27,14 +27,19 @@ use alloy::{
 };
 use async_trait::async_trait;
 use backoff::backoff::Backoff;
+use chrono::DateTime;
 use futures::future::join_all;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{debug, info, instrument, trace, Span};
-use tycho_common::{traits::FeePriceGetter, Bytes};
+use tycho_common::{
+    models::{blockchain::Block as TychoBlock, Chain},
+    traits::FeePriceGetter,
+    Bytes,
+};
 
-use crate::{gas::BlockGasPrice, RPCError, RequestError};
+use crate::{gas::BlockGasPrice, BytesCodec, RPCError, RequestError};
 
 pub mod config;
 pub mod errors;
@@ -211,6 +216,28 @@ impl EthereumRpcClient {
             })
             .await
             .map_err(|e| RPCError::from_alloy("Failed to get max priority fee per gas", e))
+    }
+
+    /// Returns the header of block `number` as a tycho block on `chain`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn get_block(&self, number: u64, chain: Chain) -> Result<TychoBlock, RPCError> {
+        let block = self
+            .eth_get_block_by_number(BlockId::from(number))
+            .await?;
+
+        Ok(TychoBlock {
+            number: block.header.number,
+            hash: block.header.hash.to_bytes(),
+            parent_hash: block.header.parent_hash.to_bytes(),
+            chain,
+            ts: i64::try_from(block.header.timestamp)
+                .ok()
+                .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+                .ok_or_else(|| {
+                    RPCError::RequestError(RequestError::Other("Invalid timestamp in block".into()))
+                })?
+                .naive_utc(),
+        })
     }
 
     #[instrument(level = "debug", skip(self))]

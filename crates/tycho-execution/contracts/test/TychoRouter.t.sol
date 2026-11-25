@@ -445,4 +445,32 @@ contract TychoRouterTest is TychoRouterTestSetup {
         );
         _deployRouterWithExecutors(executors);
     }
+
+    /// tycho-test plants this router for protocol-testing and writes these two
+    /// slots: `ROUTER_EXECUTORS_ACTIVATION_SLOT` and
+    /// `ROUTER_FEE_CALCULATOR_SLOT` in
+    /// crates/tycho-test/src/execution/encoding.rs. A storage layout change
+    /// moves them, and every execution the harness simulates then reverts, so
+    /// change both together.
+    function testStorageSlotsOfTychoTestOverrides() public view {
+        uint256 executorsActivationSlot = 7;
+        uint256 feeCalculatorSlot = 10;
+        address executor = address(usv2Executor);
+
+        uint256 activation = tychoRouter.executorsActivationTimestamp(executor);
+        assertGt(activation, 0);
+        assertEq(
+            uint256(
+                vm.load(
+                    tychoRouterAddr,
+                    keccak256(abi.encode(executor, executorsActivationSlot))
+                )
+            ),
+            activation
+        );
+        assertEq(
+            vm.load(tychoRouterAddr, bytes32(feeCalculatorSlot)),
+            bytes32(uint256(uint160(tychoRouter.getFeeCalculator())))
+        );
+    }
 }

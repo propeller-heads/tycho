@@ -93,6 +93,7 @@ contract SubsidyPayerTest is Test {
     address TO = makeAddr("to");
     address SIGNER_SETTER = makeAddr("signerSetter");
     address BUDGET_MANAGER = makeAddr("budgetManager");
+    address ROUTER_SETTER = makeAddr("routerSetter");
     address PAUSER_ADMIN = makeAddr("pauserAdmin");
     address UNPAUSER = makeAddr("unpauser");
     address PAUSER_1 = makeAddr("pauser1");
@@ -129,6 +130,7 @@ contract SubsidyPayerTest is Test {
         return SubsidyPayer.Roles({
             signerSetter: SIGNER_SETTER,
             budgetManager: BUDGET_MANAGER,
+            routerSetter: ROUTER_SETTER,
             pauserAdmin: PAUSER_ADMIN,
             unpauser: UNPAUSER,
             pausers: pausers
@@ -317,6 +319,44 @@ contract SubsidyPayerTest is Test {
         assertTrue(_pay(s, _sign(s, newPk)));
     }
 
+    function testSetRouter() public {
+        address newRouter = makeAddr("newRouter");
+        Subsidy memory s = _subsidy(1);
+        bytes memory sig = _sign(s);
+
+        vm.expectEmit(address(payer));
+        emit SubsidyPayer.RouterUpdated(ROUTER, newRouter);
+        vm.prank(ROUTER_SETTER);
+        payer.setRouter(newRouter);
+        assertEq(payer.router(), newRouter);
+
+        vm.prank(ROUTER);
+        vm.expectRevert(SubsidyPayer__NotRouter.selector);
+        payer.pay(s, MIN_AMOUNT_IN, CALLER, TO, sig);
+
+        vm.prank(newRouter, ORIGIN);
+        assertTrue(payer.pay(s, MIN_AMOUNT_IN, CALLER, TO, sig));
+    }
+
+    function testSetRouterZero() public {
+        vm.prank(ROUTER_SETTER);
+        vm.expectRevert(SubsidyPayer__AddressZero.selector);
+        payer.setRouter(address(0));
+    }
+
+    function testSetRouterUnauthorized() public {
+        bytes32 role = payer.ROUTER_SETTER_ROLE();
+        vm.prank(SIGNER_SETTER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector,
+                SIGNER_SETTER,
+                role
+            )
+        );
+        payer.setRouter(makeAddr("newRouter"));
+    }
+
     function testSetSignerZero() public {
         vm.prank(SIGNER_SETTER);
         vm.expectRevert(SubsidyPayer__AddressZero.selector);
@@ -425,12 +465,13 @@ contract SubsidyPayerTest is Test {
 
     function testRoleAdmins() public view {
         bytes32 defaultAdmin = payer.DEFAULT_ADMIN_ROLE();
-        address[8] memory accounts = [
+        address[9] memory accounts = [
             address(this),
             ROUTER,
             SIGNER,
             SIGNER_SETTER,
             BUDGET_MANAGER,
+            ROUTER_SETTER,
             PAUSER_ADMIN,
             UNPAUSER,
             PAUSER_1
@@ -444,6 +485,10 @@ contract SubsidyPayerTest is Test {
         );
         assertEq(payer.getRoleAdmin(payer.BUDGET_ROLE()), payer.BUDGET_ROLE());
         assertEq(
+            payer.getRoleAdmin(payer.ROUTER_SETTER_ROLE()),
+            payer.ROUTER_SETTER_ROLE()
+        );
+        assertEq(
             payer.getRoleAdmin(payer.UNPAUSER_ROLE()), payer.UNPAUSER_ROLE()
         );
         assertEq(
@@ -456,7 +501,7 @@ contract SubsidyPayerTest is Test {
     }
 
     function testConstructorZeroAddress() public {
-        for (uint256 i = 0; i < 7; i++) {
+        for (uint256 i = 0; i < 8; i++) {
             address router = ROUTER;
             address signer = SIGNER;
             SubsidyPayer.Roles memory roles = _roles();
@@ -467,6 +512,7 @@ contract SubsidyPayerTest is Test {
             if (i == 4) roles.pauserAdmin = address(0);
             if (i == 5) roles.unpauser = address(0);
             if (i == 6) roles.pausers[1] = address(0);
+            if (i == 7) roles.routerSetter = address(0);
 
             vm.expectRevert(SubsidyPayer__AddressZero.selector);
             new SubsidyPayer(router, signer, roles);

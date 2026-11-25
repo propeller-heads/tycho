@@ -17,12 +17,13 @@ use crate::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
-        Address, BlockHash, Chain, ComponentId, ContractId, EntryPointId, ExtractionState,
-        PaginationParams, ProtocolSystem, ProtocolType, StoreKey, TxHash,
+        Address, Balance, BlockHash, Chain, Code, CodeHash, ComponentId, ContractId, EntryPointId,
+        ExtractionState, PaginationParams, ProtocolSystem, ProtocolType, StoreKey, StoreVal,
+        TxHash,
     },
     Bytes,
 };
@@ -74,6 +75,11 @@ pub enum StorageError {
     WriteCacheGoneAway(),
     #[error("Invalid block range encountered")]
     InvalidBlockRange(),
+    #[error(
+        "Write rejected: this process claimed writer epoch {claimed} but the database is at \
+         epoch {current}, so another process took over writing"
+    )]
+    Fenced { claimed: i64, current: i64 },
 }
 
 /// Storage methods for chain specific objects.
@@ -507,6 +513,62 @@ pub trait ProtocolGateway {
     ) -> Result<WithTotal<HashMap<String, f64>>, StorageError>;
 }
 
+/// Store and retrieve admin pauses of protocol components.
+#[async_trait]
+pub trait ComponentPauseGateway {
+    /// Records admin pauses of components.
+    ///
+    /// A component that is already paused keeps its existing pause and audit details. A
+    /// component can be paused before it is indexed. The call records every pause or none, so a
+    /// failed call can be retried as a whole.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `system` The protocol system the components belong to.
+    /// - `pauses` The pauses to record. A repeated id keeps its first pause.
+    ///
+    /// # Returns
+    /// The ids of the components this call paused. Err if the protocol system is unknown or
+    /// storage access failed.
+    async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+    ) -> Result<Vec<ComponentId>, StorageError>;
+
+    /// Ends admin pauses of components.
+    ///
+    /// Ended pauses stay stored as history. Ids that are not paused are ignored.
+    ///
+    /// # Parameters
+    /// - `chain` The chain of the components.
+    /// - `component_ids` The external ids of the components to unpause.
+    /// - `unpause` Who ended the pauses and why, stored on every pause this call ends.
+    ///
+    /// # Returns
+    /// The ids of the components whose pause this call ended. Err if storage access failed.
+    async fn unpause_components(
+        &self,
+        chain: &Chain,
+        component_ids: &[&str],
+        unpause: &UnpauseRecord,
+    ) -> Result<Vec<ComponentId>, StorageError>;
+
+    /// Reads the admin pauses that are in effect.
+    ///
+    /// # Parameters
+    /// - `chain` The chain to read pauses for.
+    ///
+    /// # Returns
+    /// Every pause in effect on the chain, across all protocol systems. Err if storage access
+    /// failed.
+    async fn get_component_pauses(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<ComponentPause>, StorageError>;
+}
+
 /// Filters for entry points queries in the database.
 // Shalow but can be used to add more filters without breaking backwards compatibility in the future
 #[derive(Debug, Clone)]
@@ -878,21 +940,121 @@ pub struct ComponentSnapshot {
     pub updated_at: WriteTimestamp,
 }
 
-/// All live contracts and components of one chain, read from one database snapshot.
+/// The stream cursor an extractor saved last, and the block that cursor points to. The extractor
+/// resumes after that block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractorCursor {
+    pub cursor: Vec<u8>,
+    pub block: Block,
+}
+
+/// A point in the database's commit order, taken when a read starts. Every row version that the
+/// read cannot see carries this transaction id or a newer one.
+///
+/// "Snapshot" here is the Postgres transaction snapshot, the set of transactions a read can see
+/// (`pg_current_snapshot()`), not a [`StateSnapshot`]. The watermark is the `xmin` of that
+/// transaction snapshot, the oldest transaction that was still running when the read started, as
+/// a 64-bit transaction id.
+///
+/// The watermark also holds the block each extractor had committed in the same read. A later
+/// catch-up uses these blocks to find the oldest rows it must read through an index, instead of
+/// a scan of every row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitWatermark {
+    transaction_id: u64,
+    committed_blocks: HashMap<String, u64>,
+}
+
+impl CommitWatermark {
+    /// A watermark without committed blocks. A catch-up from it scans every row.
+    pub fn new(transaction_id: u64) -> Self {
+        Self { transaction_id, committed_blocks: HashMap::new() }
+    }
+
+    /// Sets the number of the block each extractor had committed when the read started, by
+    /// extractor name.
+    pub fn with_committed_blocks(mut self, committed_blocks: HashMap<String, u64>) -> Self {
+        self.committed_blocks = committed_blocks;
+        self
+    }
+
+    pub fn transaction_id(&self) -> u64 {
+        self.transaction_id
+    }
+
+    /// The number of the block each extractor had committed when the read started, keyed by
+    /// extractor name. An extractor that had committed nothing has no entry.
+    pub fn committed_blocks(&self) -> &HashMap<String, u64> {
+        &self.committed_blocks
+    }
+}
+
+/// All live contracts and components of one chain, and the cursor of each extractor, read from
+/// one transaction snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub components: Vec<ComponentSnapshot>,
+    /// The cursor of each extractor, keyed by extractor name. An extractor that has committed
+    /// nothing has no entry. The snapshot holds the data of every block of an extractor up to the
+    /// block of its cursor, and of no later block.
+    pub cursors: HashMap<String, ExtractorCursor>,
+    /// Every row written after the snapshot is at or after this watermark.
+    pub watermark: CommitWatermark,
 }
 
-/// Reads all live contracts and components of a chain from one database snapshot.
+/// The values of one account written after a watermark, each timestamped with the block that
+/// wrote its row. A deleted slot has an empty value.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AccountChanges {
+    pub slots: HashMap<StoreKey, (StoreVal, WriteTimestamp)>,
+    pub native_balance: Option<(Balance, WriteTimestamp)>,
+    pub token_balances: HashMap<Address, (AccountBalance, WriteTimestamp)>,
+    pub code: Option<(Code, CodeHash, WriteTimestamp)>,
+}
+
+/// What a catch-up of the entity cache reads in one transaction. It holds the account rows of a
+/// chain written after a watermark, and the full current state of the components of one protocol
+/// system.
+///
+/// The account part can hold more than was written after the watermark, never less.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchUpRead {
+    /// The full state of each account whose own row was written after the watermark, which is
+    /// each contract created since. Later changes to a contract go to its value rows, not to its
+    /// account row. Deleted accounts and accounts without code are left out, as in a
+    /// [`StateSnapshot`].
+    pub accounts: Vec<AccountSnapshot>,
+    /// The live values written after the watermark, keyed by account address. Covers every
+    /// account of the chain, including the accounts in `accounts`.
+    pub changes: HashMap<Address, AccountChanges>,
+    /// Every live component of the requested protocol system with its full state, whether it
+    /// changed after the watermark or not.
+    pub components: Vec<ComponentSnapshot>,
+    /// The cursor of each extractor, as in [`StateSnapshot::cursors`].
+    pub cursors: HashMap<String, ExtractorCursor>,
+    /// Every row written after this read is at or after this watermark.
+    pub watermark: CommitWatermark,
+}
+
+/// Reads the live contracts and components of a chain, each call from one transaction snapshot.
 #[async_trait]
 pub trait StateSnapshotGateway {
     /// All live accounts and components of `chain`, every value timestamped with the block
-    /// that wrote its row.
+    /// that wrote its row, and the cursor of each extractor of `chain`.
     ///
-    /// Implementations must read everything from one database snapshot: a row committed after
+    /// Implementations must read everything from one transaction snapshot: a row committed after
     /// the read starts is invisible to every part of the result. In SQL terms, a read-only
     /// `REPEATABLE READ` transaction or stricter.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError>;
+
+    /// The account rows of `chain` written at or after `since`, every live component of
+    /// `system`, and the cursor of each extractor of `chain`. Read from one transaction snapshot,
+    /// as [`Self::state_snapshot`].
+    async fn catch_up_read(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        system: &str,
+    ) -> Result<CatchUpRead, StorageError>;
 }

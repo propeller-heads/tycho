@@ -103,16 +103,13 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
         "0xba9ed8ae94c70ef9aa2cd1045ed473aaa405c6c7",
     ];
 
-    if PAUSED_POOLS.contains(
+    !PAUSED_POOLS.contains(
         &component
             .component
             .id
             .to_lowercase()
             .as_str(),
-    ) {
-        return false;
-    }
-    true
+    )
 }
 
 /// Filters `vm:curve` components to those the hybrid `CurveState` can quote correctly.
@@ -301,16 +298,13 @@ pub fn erc4626_filter(component: &ComponentWithState) -> bool {
         "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
         "0xe2e7a17dff93280dec073c995595155283e3c372",
     ];
-    if UNSUPPORTED_POOLS.contains(
+    !UNSUPPORTED_POOLS.contains(
         &component
             .component
             .id
             .to_lowercase()
             .as_str(),
-    ) {
-        return false;
-    }
-    true
+    )
 }
 
 #[cfg(test)]
