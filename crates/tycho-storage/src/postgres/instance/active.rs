@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_active_instance_head_has_the_retention_horizon() {
+    async fn test_active_instance_head_has_the_history_horizon() {
         let mut conn = instance_test_connection().await;
         let setup = setup_protocols(&mut conn).await;
         diesel::sql_query("UPDATE partition_retention_config SET retention = '7 days'")
@@ -315,6 +315,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(found.id, setup.curve);
-        assert_eq!(found.retention_horizon, expected);
+        assert_eq!(found.history_horizon, expected);
     }
 }

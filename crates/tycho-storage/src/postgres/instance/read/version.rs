@@ -156,9 +156,9 @@ mod tests {
     fn instance(
         head: Option<NaiveDateTime>,
         base: Option<NaiveDateTime>,
-        retention_horizon: NaiveDateTime,
+        history_horizon: NaiveDateTime,
     ) -> ActiveInstance {
-        ActiveInstance { id: InstanceId(1), head, base, retention_horizon }
+        ActiveInstance { id: InstanceId(1), head, base, history_horizon }
     }
 
     #[tokio::test]
@@ -324,7 +324,7 @@ mod tests {
         let Err(StorageError::Unsupported(msg)) = result else {
             panic!("expected Unsupported, got {result:?}");
         };
-        assert!(msg.contains("retention horizon"), "{msg}");
+        assert!(msg.contains("history horizon"), "{msg}");
     }
 
     #[tokio::test]
