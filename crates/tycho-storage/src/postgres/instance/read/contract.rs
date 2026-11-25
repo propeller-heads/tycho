@@ -58,7 +58,7 @@ impl PostgresGatewayNew {
     ///   with a warning. Without addresses, all accounts with code.
     /// - `at`: the version. Before the head of the instance, the history tables answer too.
     ///   `Unsupported` for a version before the history horizon or before the base block of the
-    ///   instance. Accounts created after it or deleted at or before it are left out.
+    ///   instance. Accounts created after the version or deleted at or before it are left out.
     /// - `include_slots`: add the storage slots. A slot without a value has empty bytes.
     /// - `pagination_params`: the page of accounts to return, in account id order. The total is
     ///   then the number of matching accounts on all pages. With `addresses`, accounts without code
