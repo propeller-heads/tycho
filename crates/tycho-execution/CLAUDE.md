@@ -252,7 +252,8 @@ The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there
 A natively indexed `IPropAMM` venue uses the same pAMM lane: tycho-simulation publishes its
 components as `fallback:{protocol}` (`via_fallback_router`), the family `fallback` entry resolves
 the executor, and the encoder reads the component's `pamm_address`. The Efficient PropAMM listing
-doors take it as `fallback:efficient_prop` where their feed is built `with_fallback_router()`
+doors take it as `fallback:efficient_prop` on Ethereum by default, all but a listing with a credit
+mode, which stays on `efficient_prop`
 (`contracts/test/protocols/EfficientPropFallbackEthereum.t.sol`).
 
 `FallbackExecutor` is the abstract executor for a fallback router: it declares `TransferType.Transfer` with the

@@ -118,7 +118,7 @@ pub struct EfficientPropFeedBuilder {
     state_urls: Vec<String>,
     usd_quote_tokens: HashSet<Bytes>,
     feed_config: HttpFeedConfig,
-    protocol_system: &'static str,
+    fallback_router: Option<bool>,
 }
 
 impl EfficientPropFeedBuilder {
@@ -133,7 +133,8 @@ impl EfficientPropFeedBuilder {
     /// these four were read for it at the deployment. A caller that judges otherwise replaces the
     /// set, or starts from [`Self::new`]. A credit listing, the first pool's wstETH/WETH among
     /// them, is served only where [`Self::credit_listing`] names its gas, which is its pool's
-    /// settings' and no constant.
+    /// settings' and no constant. Every listing but one with a credit mode settles through the
+    /// fallback router unless [`Self::without_fallback_router`] says otherwise.
     ///
     /// The preset is Ethereum's alone: it fails to build for any other chain, and pins the code
     /// hash of Ethereum's implementation ([`Self::with_implementation_code_hashes`]). The front,
@@ -208,7 +209,7 @@ impl EfficientPropFeedBuilder {
             state_urls: Vec::new(),
             usd_quote_tokens,
             feed_config: Self::default_feed_config(),
-            protocol_system: PROTOCOL_SYSTEM,
+            fallback_router: None,
         }
     }
 
@@ -361,19 +362,30 @@ impl EfficientPropFeedBuilder {
         self
     }
 
-    /// Settles the listings' swaps through Tycho's `PropAMMFallbackRouter`, which quotes the door
-    /// in the block the swap lands in and runs a solver-named fallback pool where the door quotes
-    /// less or cannot fill, as in a block without the maker's update, where the direct path
-    /// reverts the route. Components then carry
-    /// [`FALLBACK_PROTOCOL_SYSTEM`](super::FALLBACK_PROTOCOL_SYSTEM) rather than
-    /// [`PROTOCOL_SYSTEM`](super::PROTOCOL_SYSTEM), which is what selects the fallback encoder.
-    /// Off by default, and on Ethereum only: its figures were measured through Ethereum's router.
+    /// Settles the listings' swaps through Tycho's `PropAMMFallbackRouter`, the default on
+    /// Ethereum: the router quotes the door in the block the swap lands in and runs the pool the
+    /// solver names in the swap's `user_data` where the door quotes less or cannot fill, as in a
+    /// block without the maker's update, where the direct path reverts the route. Components then
+    /// carry [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects
+    /// the fallback encoder, and every swap is charged the cheaper of the router's two branches.
+    /// On Ethereum only: its figures were measured through Ethereum's router, so a feed on another
+    /// chain given it does not build.
     ///
-    /// The books and their gas are the direct path's, and tycho-execution adds the router's own
-    /// work to a `fallback:` swap. A credit listing is refused with it: the router's quote runs
-    /// the listing's route once more, which no figure named for the direct path covers.
+    /// The books are the direct path's, and tycho-execution adds the router's own work to a
+    /// `fallback:` swap. A listing with a credit mode is published direct whatever this says,
+    /// under [`PROTOCOL_SYSTEM`] and charged the gas [`Self::credit_listing`] names: the router's
+    /// quote runs the listing's route once more, which no figure named for the direct path covers.
     pub fn with_fallback_router(mut self) -> Self {
-        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self.fallback_router = Some(true);
+        self
+    }
+
+    /// Sends every listing's swaps direct to its door under [`PROTOCOL_SYSTEM`], as on Base and BNB
+    /// Chain, where it is the default: a route that lands in a block without the maker's update
+    /// reverts whole. For a caller that names no fallback pool in a swap's `user_data`, which the
+    /// fallback encoder requires.
+    pub fn without_fallback_router(mut self) -> Self {
+        self.fallback_router = Some(false);
         self
     }
 
@@ -589,21 +601,17 @@ impl EfficientPropFeedBuilder {
                 Some(NextBlockReader::new_in(urls, self.feed_config.request_timeout / 2, cadence)?)
             }
         };
-        if self.protocol_system == FALLBACK_PROTOCOL_SYSTEM && gas_chain != GasChain::Ethereum {
+        if self.fallback_router == Some(true) && gas_chain != GasChain::Ethereum {
             return Err(FeedError::InvalidInput(format!(
                 "Efficient PropAMM through the fallback router is served on Ethereum only, where \
                  its gas was measured, not {chain}"
             )));
         }
+        let through_fallback = self
+            .fallback_router
+            .unwrap_or(gas_chain == GasChain::Ethereum);
         let mut credit = BTreeMap::new();
         for (listing, gas) in self.credit_listings {
-            if self.protocol_system == FALLBACK_PROTOCOL_SYSTEM {
-                return Err(FeedError::InvalidInput(format!(
-                    "Efficient PropAMM credit listing {listing} is not served through the fallback \
-                     router, whose quote of the door runs the listing's route once more: its gas \
-                     is measured on the direct path"
-                )));
-            }
             if !(1..=MAX_LISTING).contains(&listing) {
                 return Err(FeedError::InvalidInput(format!(
                     "Efficient PropAMM credit listing {listing} is not an id the front hands out"
@@ -746,7 +754,7 @@ impl EfficientPropFeedBuilder {
             source: EfficientPropBookSource {
                 reader,
                 assembler: EfficientPropBookAssembler {
-                    protocol_system: self.protocol_system,
+                    through_fallback,
                     book_config: self.book_config,
                     usd_quote_tokens: Arc::new(self.usd_quote_tokens),
                     landing_ms: millis(landing_allowance),
@@ -953,9 +961,9 @@ fn unix_now_ms() -> u64 {
 /// one side and clears the TVL floor.
 #[derive(Debug, Clone)]
 pub(super) struct EfficientPropBookAssembler {
-    /// The protocol system stamped on the components: the listings' own, or the fallback-router
-    /// one for a feed built with `with_fallback_router()`.
-    pub(super) protocol_system: &'static str,
+    /// Whether the listings settle through the fallback router: the default on Ethereum. A
+    /// listing with a credit mode is published direct whatever this says.
+    pub(super) through_fallback: bool,
     pub(super) book_config: BookFeedConfig,
     pub(super) usd_quote_tokens: Arc<HashSet<Bytes>>,
     /// The landing allowance, ms: how long a route sent takes to land.
@@ -986,7 +994,8 @@ impl EfficientPropBookAssembler {
         let mut books = Books::new();
         for state in &states {
             let (base, quote) = (&state.base_token.address, &state.quote_token.address);
-            let component_id = component_id(self.protocol_system, base, quote, &state.door);
+            let system = protocol_system(state);
+            let component_id = component_id(system, base, quote, &state.door);
             let Some(usd_per_quote) = self
                 .usd_per_token(quote, &states)
                 .or_else(|| self.usd_per_quote_through_base(state, &states))
@@ -1018,7 +1027,7 @@ impl EfficientPropBookAssembler {
             // its pool) still fills through the route where custody falls short at the fill.
             let outlook = state.gas_outlook(door_read.is_some_and(|read| read.credit.is_some()));
             let mut book = pair_book(
-                self.protocol_system,
+                system,
                 PROTOCOL_TYPE,
                 self.book_config.chain,
                 component_id,
@@ -1176,7 +1185,9 @@ impl EfficientPropBookAssembler {
                 .or(door.named_gas),
         )
         .with_pool_lacking(door.pool_lacks.0, door.pool_lacks.1)
-        .with_fallback_router(self.protocol_system == FALLBACK_PROTOCOL_SYSTEM)
+        // A listing with a credit mode is sent direct: the router's quote of its door would run
+        // its route once more, which the gas named for it does not count.
+        .with_fallback_router(self.through_fallback && credit.is_none())
         .with_deadlines(bid_until, ask_until);
         if !state.has_gas() {
             debug!(
@@ -1233,8 +1244,18 @@ impl EfficientPropBookAssembler {
     }
 }
 
-/// The id of a listing door's book: the protocol system its feed stamps on its components, the
-/// pair's base and quote, then the door, since two listings may trade one pair.
+/// The protocol system a listing's book is published under: the fallback router's where its
+/// state is charged as settling through it, the listings' own where it is sent direct.
+fn protocol_system(state: &EfficientPropState) -> &'static str {
+    if state.through_fallback {
+        FALLBACK_PROTOCOL_SYSTEM
+    } else {
+        PROTOCOL_SYSTEM
+    }
+}
+
+/// The id of a listing door's book: the protocol system it is published under, the pair's base
+/// and quote, then the door, since two listings may trade one pair.
 fn component_id(protocol_system: &str, base: &Bytes, quote: &Bytes, door: &Bytes) -> Bytes {
     let pair = pair_component_id(protocol_system, base, quote);
     Bytes::from([pair.as_ref(), door.as_ref()].concat())
@@ -4964,7 +4985,9 @@ mod tests {
             ethereum_source_of(node_url, state_urls, now_ms, ethereum_deployment())
         }
 
-        /// As [`ethereum_source`], of the front `deployment` names.
+        /// As [`ethereum_source`], of the front `deployment` names. Its listings are sent direct,
+        /// whose figures these tests check: the fallback router's default is checked on its own
+        /// ([`an_ethereum_feed_sends_a_credit_listing_direct_and_the_rest_through_the_router`]).
         fn ethereum_source_of(
             node_url: &str,
             state_urls: Vec<String>,
@@ -4973,6 +4996,7 @@ mod tests {
         ) -> EfficientPropBookSource {
             let source =
                 EfficientPropFeedBuilder::new(ethereum_config(), node_url.to_string(), deployment)
+                    .without_fallback_router()
                     .approved_price_sources([APPROVED_SOURCE])
                     .with_approved_desks(approved_desks())
                     .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
@@ -5235,25 +5259,28 @@ mod tests {
             assert_eq!(attributes["ask_valid_until_ms"], number(deadline));
         }
 
-        /// Through the fallback router every swap is charged that path's one figure, the least
-        /// either of the router's branches costs less the estimator's own overhead: a listing of
-        /// a pair no figure was measured for is served without its gas named.
+        /// Through the fallback router, an Ethereum feed's default, every swap is charged that
+        /// path's one figure, the least either of the router's branches costs less the
+        /// estimator's own overhead: a listing of a pair no figure was measured for is served
+        /// without its gas named.
+        #[rstest]
+        #[case::by_default(|builder| builder)]
+        #[case::named(EfficientPropFeedBuilder::with_fallback_router)]
         #[tokio::test]
-        async fn a_fallback_feed_charges_the_fallback_paths_gas() {
+        async fn a_fallback_feed_charges_the_fallback_paths_gas(
+            #[case] path: fn(EfficientPropFeedBuilder) -> EfficientPropFeedBuilder,
+        ) {
             let listing = FakeListing::ethereum(1);
             let node = FakeNode::ethereum(vec![listing.clone()])
                 .spawn()
                 .await;
             let state = spawn_state_server(next_map(&[(1, false)])).await;
-            let mut source =
+            let builder =
                 EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
                     .with_approved_desks(approved_desks())
-                    .with_fallback_router()
                     .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
-                    .state_urls([state.url()])
-                    .build()
-                    .unwrap()
-                    .source;
+                    .state_urls([state.url()]);
+            let mut source = path(builder).build().unwrap().source;
             source.clock = Arc::new(|| NOW_MS);
 
             let books = source.fetch().await.unwrap().books;
@@ -6286,25 +6313,76 @@ mod tests {
             );
         }
 
-        /// The fallback router's quote runs a credit listing's route once more than the direct
-        /// path its gas is named for, so the builder serves no credit listing through it.
-        #[test]
-        fn the_builder_refuses_a_credit_listing_through_the_fallback_router() {
-            let error = EfficientPropFeedBuilder::new(
-                BookFeedConfig { chain: Chain::Ethereum, ..book_config() },
-                "http://node".to_string(),
-                ethereum_deployment(),
-            )
-            .credit_listing(1, credit_gas())
-            .with_fallback_router()
-            .state_urls(vec!["http://state".to_string()])
-            .build_path()
-            .unwrap_err();
+        /// On Ethereum every listing settles through the fallback router unless the builder is
+        /// told otherwise, and a listing with a credit mode is sent direct whatever it is told:
+        /// the router's quote of its door would run its route once more, which the gas named for
+        /// it does not count. Each book carries its path's protocol system, in its id too, and
+        /// each swap is charged its path's figure: the router's cheaper branch, else the gas
+        /// named for the listing.
+        #[rstest]
+        #[case::by_default(|builder| builder, true)]
+        #[case::with_the_router(EfficientPropFeedBuilder::with_fallback_router, true)]
+        #[case::without_it(EfficientPropFeedBuilder::without_fallback_router, false)]
+        #[tokio::test]
+        async fn an_ethereum_feed_sends_a_credit_listing_direct_and_the_rest_through_the_router(
+            #[case] path: fn(EfficientPropFeedBuilder) -> EfficientPropFeedBuilder,
+            #[case] through_the_router: bool,
+        ) {
+            let listings = vec![FakeListing::ethereum(1), FakeListing::ethereum_credit(2)];
+            let node = FakeNode::ethereum(listings.clone())
+                .spawn()
+                .await;
+            let state = spawn_state_server(next_map(&[(1, false), (2, false)])).await;
+            let builder =
+                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
+                    .with_approved_desks(approved_desks())
+                    .credit_listing(1, named_gas())
+                    .credit_listing(2, credit_gas())
+                    .usd_quote_tokens(HashSet::from([bytes(usdc_address())]))
+                    .state_urls([state.url()]);
+            let mut source = path(builder).build().unwrap().source;
+            source.clock = Arc::new(|| NOW_MS);
 
-            assert!(
-                matches!(&error, FeedError::InvalidInput(m) if m.contains("fallback router")),
-                "{error}"
-            );
+            let books = source.fetch().await.unwrap().books;
+
+            assert_eq!(books.len(), 2);
+            for listing in &listings {
+                let direct = listing.credit_mode != 0 || !through_the_router;
+                let system = if direct { PROTOCOL_SYSTEM } else { FALLBACK_PROTOCOL_SYSTEM };
+                let id = component_id(
+                    system,
+                    &bytes(listing.base),
+                    &bytes(listing.quote),
+                    &bytes(door_of(listing.id)),
+                );
+                let book = books
+                    .get(&id.to_string())
+                    .unwrap_or_else(|| {
+                        panic!("listing {} is not published as {system}", listing.id)
+                    });
+                assert_eq!(book.component.protocol_system, system);
+                let state = book
+                    .state
+                    .as_any()
+                    .downcast_ref::<EfficientPropState>()
+                    .unwrap();
+                assert_eq!(state.through_fallback, !direct);
+                // The smallest ask, inside custody: the router's figure less its overhead, else
+                // the named gas buying base (96,239 the listing in no credit mode, 158,340 the
+                // credit listing).
+                let ask = samples(state, SwapDirection::QuoteToBase);
+                let gas = match (direct, listing.credit_mode) {
+                    (false, _) => 50_445u64,
+                    (true, 0) => 96_239,
+                    (true, _) => 158_340,
+                };
+                assert_eq!(
+                    charged(state, SwapDirection::QuoteToBase, ask[0].0).unwrap(),
+                    BigUint::from(gas),
+                    "listing {}",
+                    listing.id
+                );
+            }
         }
 
         /// The books one poll of an Ethereum node of `listings` publishes, its maps from
@@ -6330,7 +6408,8 @@ mod tests {
             books_naming(listings, maps, &named).await
         }
 
-        /// The books one poll publishes with each of `named` configured with its gas.
+        /// The books one poll publishes with each of `named` configured with its gas, every
+        /// listing sent direct.
         async fn books_naming(
             listings: Vec<FakeListing>,
             maps: Vec<serde_json::Value>,
@@ -6344,7 +6423,8 @@ mod tests {
                 servers.push(spawn_state_server(map).await);
             }
             let builder = named.iter().fold(
-                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment()),
+                EfficientPropFeedBuilder::new(ethereum_config(), node.url(), ethereum_deployment())
+                    .without_fallback_router(),
                 |builder, &(listing, gas)| builder.credit_listing(listing, gas),
             );
             let mut source = builder
@@ -7643,8 +7723,10 @@ mod tests {
 
             // The poll, through a proxy recording every call it sends the node.
             let (proxy, log) = spawn_recording_proxy(rpc.clone()).await;
+            // Sent direct: the recording holds the gas each sample is charged on that path.
             let mut builder =
                 EfficientPropFeedBuilder::new(config.clone(), proxy.url(), deployment)
+                    .without_fallback_router()
                     .approved_price_sources(price_sources.clone())
                     .with_approved_desks(
                         list(&env("EFFICIENT_PROP_ETH_APPROVED_DESKS").unwrap_or_default())
@@ -9365,7 +9447,8 @@ mod tests {
 
         /// The source a recorded Ethereum read was made by, polling `node_url` and the state
         /// `servers`: the recording's tokens, front, credit listings, price sources and desks,
-        /// its wall clock stopped where the recording's was.
+        /// every listing sent direct as the recording was charged, its wall clock stopped where
+        /// the recording's was.
         fn recorded_source(
             poll: &RecordedEthereumPoll,
             node_url: &str,
@@ -9394,7 +9477,8 @@ mod tests {
                 min_tvl_usd: 0.0,
             };
             let builder = poll.credit.iter().fold(
-                EfficientPropFeedBuilder::new(config, node_url.to_string(), poll.deployment()),
+                EfficientPropFeedBuilder::new(config, node_url.to_string(), poll.deployment())
+                    .without_fallback_router(),
                 |builder, &(listing, gas)| builder.credit_listing(listing, gas),
             );
             let mut source = builder
@@ -9606,7 +9690,8 @@ mod tests {
             /// The next block lands 450 ms after the latest, in its second or the one after: each
             /// side is sampled at both and quotes the least, valid for the next block, until that
             /// block's 450 ms less the 100 ms landing allowance, or where the listing and the
-            /// word carry, the block after's too.
+            /// word carry, the block after's too. Sent direct, BNB Chain's default: the fallback
+            /// router's figures are Ethereum's.
             #[rstest]
             #[case::the_next_block(false, HEAD_MS + 450 + 1 - 100)]
             #[case::through_the_block_after(true, HEAD_MS + 900 + 1 - 100)]
@@ -9642,7 +9727,9 @@ mod tests {
                     until_ms
                 );
                 assert_eq!(state.gas_chain, GasChain::Bnb);
+                assert!(!state.through_fallback);
                 let book = books.values().next().unwrap();
+                assert_eq!(book.component.protocol_system, PROTOCOL_SYSTEM);
                 assert_eq!(
                     book.component.static_attributes[VALID_FROM_BLOCK_ATTRIBUTE],
                     Bytes::from(U256::from(ETHEREUM_BLOCK + 1).to_be_bytes_trimmed_vec())

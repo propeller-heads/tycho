@@ -16,11 +16,13 @@
 //! feed does not model the front: it reads each door's own `quote` over JSON-RPC every poll, at
 //! a ladder of input sizes, and publishes one book per door priced from those samples. Each
 //! component carries the door in its `pamm_address` static attribute, which tycho-execution's
-//! generic `PropAMMSwapEncoder` packs for `PropAMMExecutor`: the router sends the input to the
-//! door, then calls `swap(tokenIn, tokenOut, amountIn, 0, receiver, block.timestamp)`. The door
-//! takes push payment (the front pulls the input from the door under a standing grant the door
-//! set at its creation), a `minAmountOut` of zero is accepted (the router enforces the user's),
-//! and a fill is all or nothing.
+//! generic `PropAMMSwapEncoder` packs for `PropAMMExecutor` (by default on Ethereum, its fallback
+//! encoder for `PropAMMFallbackRouter`, which quotes the door first: see On Ethereum): the router
+//! sends the input to the door, then calls
+//! `swap(tokenIn, tokenOut, amountIn, 0, receiver, block.timestamp)`. The door takes push payment
+//! (the front pulls the input from the door under a standing grant the door set at its creation),
+//! a `minAmountOut` of zero is accepted (the router enforces the user's), and a fill is all or
+//! nothing.
 //!
 //! # Finding the doors
 //!
@@ -387,9 +389,10 @@
 //! poll's time, not the time its samples were asked, and how long each book holds is in its
 //! validity attributes, which follow the target block.
 //!
-//! A route through a door therefore reverts whole where it lands in a block without the update.
-//! [`EfficientPropFeedBuilder::with_fallback_router`] (off by default) publishes the same books as
-//! [`FALLBACK_PROTOCOL_SYSTEM`] instead, which tycho-execution settles through Tycho's
+//! A route sent direct to a door therefore reverts whole where it lands in a block without the
+//! update. So on Ethereum the feed publishes its books as [`FALLBACK_PROTOCOL_SYSTEM`] by default
+//! ([`EfficientPropFeedBuilder::without_fallback_router`] sends every one direct, as
+//! [`PROTOCOL_SYSTEM`]), which tycho-execution settles through Tycho's
 //! `PropAMMFallbackRouter`: it asks the door's `quote` in the block the swap lands in, fills there
 //! unless the pool the solver names quotes more, and swaps on that pool where the door quotes
 //! nothing. Which of the two fills is not known when the book is read, so every swap of such a
@@ -401,8 +404,11 @@
 //! the door cost 154,693 at the least (the door's fill and its quote, the pool's quote and the
 //! router's work), so a door fill spends about 64,000 to 121,000 more than it is charged. The
 //! router's other fallback protocols, and a door refusing sooner than `NoWord`, were not
-//! measured. On this path a listing needs no measured or named figure. A credit listing is not
-//! served this way: the router's quote runs its route a second time.
+//! measured. On this path a listing needs no measured or named figure. A listing with a credit
+//! mode is published direct, as [`PROTOCOL_SYSTEM`], whatever the builder says, and charged the
+//! gas named for it: the router's quote would run its route a second time, which that gas does
+//! not count. The fallback encoder needs the swap's `user_data` to name the pool to fall back on,
+//! so a caller that names none builds the feed `without_fallback_router()`.
 //!
 //! Each poll reads, at once, the listings at the node's latest block (the first request, as on
 //! Base, less BaseTime: that predeploy is Base's and has no code on Ethereum) and the next block's
@@ -626,8 +632,9 @@
 //!   update's price.
 //!
 //! The doors are filled only through their push swap: tycho-execution's `PropAMMExecutor` on
-//! Ethereum, as on Base the one the chain's other `IPropAMM` venues use, sends the input to the
-//! door and calls `swap(…, block.timestamp)`. A book is never filled any other way.
+//! Ethereum, as on Base the one the chain's other `IPropAMM` venues use, and Ethereum's
+//! `PropAMMFallbackRouter` after its quote of the door, each send the input to the door and call
+//! `swap(…, block.timestamp)`. A book is never filled any other way.
 //!
 //! A book holds no route to the block it was read for. A route priced from it that lands in a
 //! block without the maker's update ahead of it (a block of a builder that does not carry the
@@ -644,9 +651,10 @@
 //! block's state map, by the slot rule above, and the rules of On Ethereum on which listings are
 //! served, credit and stock listings among them, hold there too. No fill was measured on BNB
 //! Chain: as on Base, a listing is served only where its gas is named
-//! ([`EfficientPropFeedBuilder::credit_listing`]). The fallback router is refused. The chain's
-//! base fee is zero, so a swap's whole gas price is its tip: a listing whose tip cap is under the
-//! node's gas price, read at every poll, refuses every swap sent at that price and is not served
+//! ([`EfficientPropFeedBuilder::credit_listing`]). Its listings are sent direct, and the fallback
+//! router is refused: its figures are Ethereum's. The chain's base fee is zero, so a swap's whole
+//! gas price is its tip: a listing whose tip cap is under the node's gas price, read at every
+//! poll, refuses every swap sent at that price and is not served
 //! ([`EfficientPropFeedBuilder::min_tip_cap_wei`]). What differs most is the clock.
 //!
 //! A block lands every 450 ms. Its header names its milliseconds (`milliTimestamp`, or the low
@@ -738,14 +746,15 @@ mod telemetry;
 pub use feed::{EfficientPropFeed, EfficientPropFeedBuilder};
 pub use state::{CreditGas, DirectionGas, EfficientPropState};
 
-/// Protocol system stamped on every component this integration emits; tycho-execution keys the
-/// generic pAMM encoder on it.
+/// Protocol system of the components sent direct to their doors, which tycho-execution keys the
+/// generic pAMM encoder on: every listing on Base and BNB Chain, a listing with a credit mode on
+/// Ethereum, and every listing of a feed built `without_fallback_router()`.
 pub const PROTOCOL_SYSTEM: &str = "efficient_prop";
 
 /// The protocol system of components whose swaps settle through Tycho's `PropAMMFallbackRouter`,
 /// which quotes the listing door in the block the swap lands in and runs a solver-named fallback
-/// pool where the door quotes less or cannot fill. A feed carries it instead of
-/// [`PROTOCOL_SYSTEM`] when its builder was given `with_fallback_router()`.
+/// pool where the door quotes less or cannot fill. An Ethereum feed carries it instead of
+/// [`PROTOCOL_SYSTEM`] by default, on every listing but one with a credit mode.
 pub const FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:efficient_prop";
 
 /// Component type stamped on every listing this integration emits.

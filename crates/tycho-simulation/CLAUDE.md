@@ -167,7 +167,8 @@ for any protocol indexed by Tycho.
   `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum, Base and BNB Chain (Base
   samples the doors at the head, Ethereum and BNB Chain at the next block): one `IPropAMM` door per
   listing and one book per door (the door in `pamm_address`, the listing's tip cap in
-  `tip_cap_wei`), filled by the generic `PropAMMSwapEncoder` and `PropAMMExecutor`. Nothing of the
+  `tip_cap_wei`), filled by the generic `PropAMMSwapEncoder` and `PropAMMExecutor`, or on Ethereum
+  by default through `PropAMMFallbackRouter` (`fallback:efficient_prop`). Nothing of the
   venue's pricing is ported: `reader.rs` finds the doors (the front's `doorView` scan, each door the
   factory's CREATE2 child) and samples each door's own `quote`; `overrides.rs` reads the next
   block's state maps (`titan_getPammStateOverrides`), since a maker's update lands only in a
@@ -180,16 +181,21 @@ for any protocol indexed by Tycho.
     or the list at `with_approved_desks_url` while its last read is fresh; neither: nothing is
     served, and a read that fails brings no desk in), its price sources are in
     `approved_price_sources`, and the front runs an allow-listed implementation
-  - a swap is never charged above what its fill costs its transaction: on Ethereum only figures
-    measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas `credit_listing` names for
-    it (required for a credit listing, a stock listing and any other pair); on Base and BNB Chain
-    only the gas `credit_listing` names; a listing with neither is left out (`has_gas`).
-    `with_fallback_router()` charges the cheaper branch (`FALLBACK_SWAP_GAS`). The charge stays that
-    floor: what a fill is expected to cost and what its call adds to a gas limit go out as data
-    beside it (`expected_gas`, `gas_limit_addition`, `GasOutlook`), each only where a figure
-    measured on the listing states it, never under and never over: a listing with a credit mode
-    names no expected gas, and an addition only from the dearest fill `credit_listing` names
-    (`CreditGas::most_before_refunds`), not from a charge
+  - a swap is never charged above what its fill costs its transaction: sent direct, on Ethereum
+    only figures measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas
+    `credit_listing` names for it (required for a credit listing, a stock listing and any other
+    pair); on Base and BNB Chain only the gas `credit_listing` names; a listing with neither is
+    left out (`has_gas`). On Ethereum every listing settles through the fallback router by
+    default and is charged its cheaper branch (`FALLBACK_SWAP_GAS`), needing no figure of its own
+    but a stock listing's named gas; a listing with a credit mode is always sent direct
+    (`efficient_prop`, its named gas), since the router's quote runs its route again;
+    `without_fallback_router()` sends every listing direct, and Base and BNB Chain refuse the
+    router (its figures are Ethereum's). The charge stays that floor: what a fill is expected to
+    cost and what its call adds to a gas limit go out as data beside it (`expected_gas`,
+    `gas_limit_addition`, `GasOutlook`), each only where a figure measured on the listing states
+    it, never under and never over: a listing with a credit mode names no expected gas, and an
+    addition only from the dearest fill `credit_listing` names (`CreditGas::most_before_refunds`),
+    not from a charge
   - a size is quoted only where the door answered it at the read, in every block of the book's
     life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
     `ask_valid_until_ms`. A side on a depth post is also asked at each rung boundary its walk

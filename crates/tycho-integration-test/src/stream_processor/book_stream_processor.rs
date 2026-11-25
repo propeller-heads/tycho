@@ -625,11 +625,16 @@ fn add_pamm_feeds(
                 }),
             PammVenue::EfficientProp => efficient_prop_deployment(&secret).and_then(|deployment| {
                 let sources = efficient_prop_price_sources(&secret)?;
+                // The doors are called directly rather than through `PropAMMFallbackRouter`, the
+                // feed's default on Ethereum: the router needs `user_data` naming a fallback pool
+                // for the pair, which the test has none to name, and a fill on that pool would
+                // measure the pool rather than the door's quote.
                 let mut builder = EfficientPropFeedBuilder::new(
                     book_config.clone(),
                     rpc_url.to_string(),
                     deployment,
                 )
+                .without_fallback_router()
                 .approved_price_sources(sources)
                 .with_approved_desks(efficient_prop_approved_desks(&secret)?);
                 if let Some(url) = secret("EFFICIENT_PROP_APPROVED_DESKS_URL") {
