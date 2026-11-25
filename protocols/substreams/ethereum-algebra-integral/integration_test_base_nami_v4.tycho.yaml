@@ -6,24 +6,23 @@ module_name: "map_protocol_changes"
 skip_balance_check: false
 initialized_accounts:
 tests:
-  # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
-  # 0x0c534dD0…05D1. Its fee is made flat at block 52987571 and its beacon is upgraded to
-  # implementation 0xd1dfA0…a642 at block 53237911, after which it is quoted. Every Nami pool but
-  # three was created in the 100 blocks around the start block, so no range that crosses the
-  # upgrade is shorter.
-  - name: test_weth_usdc_pool_after_flat_fee_and_beacon_upgrade
-    start_block: 52483471
-    stop_block: 53238000
+  # A pool created under the current implementation 0xd1dfA0…a642 with no fee override. Its
+  # full-range liquidity at creation is replaced by a concentrated position at block 59613656
+  # and its first regular swap is at block 59618306. A range that stops earlier quotes every
+  # trade as draining the pool.
+  - name: test_usdc_antc_pool
+    start_block: 59604941
+    stop_block: 59618400
     expected_components:
-      - id: "0x0e8af367dba0c9cb4674d38539ef3465a25a7237"
+      - id: "0x46a365ffdbd4247d12f77b0b6b8f354131f91055"
         tokens:
-          - "0x4200000000000000000000000000000000000006" # WETH
           - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+          - "0xb20000000000000000000016e38FD364d271Ba28" # ANTc
         static_attributes: {}
-        creation_tx: "0xea2187c16033f3119597c4d3c9b7e26220013b2884b62b9d1f2504c33f234d9d"
+        creation_tx: "0xfec248615afc815f28ee273c38744bb0b616f9aca3dfb700d336d47646d00df0"
         skip_simulation: false
-  # A pool created under the current implementation with no fee override. At block 60044639 its
-  # plugin is given the NYSE fee source 0x146669E5…E5d2, a fee per market segment, a floor and a
+  # The same pool, followed until its plugin has a fee source. At block 60044639 the plugin is
+  # given the NYSE fee source 0x146669E5…E5d2, a fee per market segment, a floor and a
   # cap, so the fee quoted at the stop block comes from the fee source.
   - name: test_usdc_antc_pool_after_fee_source_is_set
     start_block: 59604941

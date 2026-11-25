@@ -22,18 +22,16 @@ tests:
         creation_tx: "0x624ca7d5a1f20e9be93425489b09139d9359bf68e8e3be8476e725a75595f2ea"
         skip_simulation: true
         skip_execution: true
-  # The last pool created before the beacon is upgraded to implementation 0x1a2898f7…6874 at
-  # block 100790474. Its fee is made flat before that, so it is quoted at the stop block. Every
-  # other pool is 11.7M blocks older, so no range that ends on the registered implementation is
-  # shorter.
-  - name: test_usdg_crcl_pool_after_flat_fee_and_beacon_upgrade
-    start_block: 97919351
-    stop_block: 100790600
+  # The pool is created, named its plugin and given its first liquidity in block 119164470, under
+  # an implementation the registry knows, so it is quoted from its first block.
+  - name: test_usdg_ant_pool
+    start_block: 119164470
+    stop_block: 119164570
     expected_components:
-      - id: "0x449cb99b17cc8747887d85fff6fce60e39166fb6"
+      - id: "0xf688bc00518722cf5baab35dd201b0d053c35d78"
         tokens:
           - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
-          - "0xdF0992E440dD0be65BD8439b609d6D4366bf1CB5" # CRCL
+          - "0xbbB6c29bCc3a1028A2B54310DF73F4F7A3bcB373" # ANT
         static_attributes: {}
-        creation_tx: "0x96918a0c01822cf423875d80a23e8094aae94c3cfff8cf83d1213a5cb7ba6e62"
+        creation_tx: "0x5f8e35390689894df496fa50561a86b1d9e6dfcc745825712556e438dee727d3"
         skip_simulation: false
