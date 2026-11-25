@@ -397,4 +397,25 @@ mod tests {
             Some("https://arb-one.streamingfast.io:443")
         );
     }
+
+    #[test]
+    fn initialized_accounts_are_read_one_block_before_the_start() {
+        assert_eq!(initialization_block(100), 99);
+        assert_eq!(initialization_block(0), 0);
+    }
+
+    #[test]
+    fn index_config_initializes_accounts_one_block_before_the_start() {
+        let runner = TychoRunner::new(
+            Chain::Ethereum,
+            "postgres://localhost/test".to_string(),
+            4242,
+            vec!["0x01".to_string()],
+        );
+
+        let config = runner.create_extractors_config("test.spkg", 100, &[], "vm:test", None);
+
+        assert!(config.contains("    start_block: 100\n"), "{config}");
+        assert!(config.contains("    initialized_accounts_block: 99\n"), "{config}");
+    }
 }
