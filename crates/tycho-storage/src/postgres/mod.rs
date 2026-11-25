@@ -1733,7 +1733,7 @@ pub mod db_fixtures {
         .await
         .expect("creating the history partition failed");
         diesel::insert_into(instance::schema::tycho::component_balance_history::table)
-            .values(instance::orm::ComponentBalanceHistory {
+            .values(instance::orm::NewComponentBalanceHistory {
                 instance_id,
                 protocol_component_id: component_id,
                 token,
@@ -1743,7 +1743,6 @@ pub mod db_fixtures {
                 valid_from,
                 valid_to,
                 tx_index: 0,
-                inserted_ts: valid_from,
             })
             .execute(conn)
             .await
@@ -1817,7 +1816,7 @@ pub mod db_fixtures {
         .await
         .expect("creating the history partition failed");
         diesel::insert_into(instance::schema::tycho::protocol_state_history::table)
-            .values(instance::orm::ProtocolStateHistory {
+            .values(instance::orm::NewProtocolStateHistory {
                 instance_id,
                 protocol_component_id: component_id,
                 attribute_name: attribute_name.to_string(),
@@ -1826,8 +1825,6 @@ pub mod db_fixtures {
                 valid_from,
                 valid_to,
                 tx_index: 0,
-                inserted_ts: valid_from,
-                modified_ts: valid_from,
             })
             .execute(conn)
             .await
