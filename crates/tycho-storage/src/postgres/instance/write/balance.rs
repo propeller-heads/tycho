@@ -16,7 +16,7 @@ use crate::postgres::{
     instance::{
         gateway::PostgresGatewayNew,
         origins::BatchOrigins,
-        orm::{ComponentBalance, NewComponentBalance, NewComponentBalanceHistory},
+        orm::{NewComponentBalance, NewComponentBalanceHistory},
         schema::tycho::{component_balance, component_balance_history},
         write::{
             versioning::{VersionedChange, VersionedRowNew},
@@ -143,7 +143,7 @@ impl VersionedRowNew for NewComponentBalance {
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Self>, StorageError> {
         let (component_ids, tokens): (Vec<i64>, Vec<Bytes>) = keys.iter().cloned().unzip();
-        let rows: Vec<ComponentBalance> = sql_query(
+        sql_query(
             "SELECT cb.* FROM tycho.component_balance cb \
              JOIN unnest($2::int8[], $3::bytea[]) AS k(component_id, token) \
              ON cb.protocol_component_id = k.component_id AND cb.token = k.token \
@@ -154,20 +154,9 @@ impl VersionedRowNew for NewComponentBalance {
         .bind::<Array<Binary>, _>(tokens)
         .load(conn)
         .await
-        .map_err(|err| storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None))?;
-        Ok(rows
-            .into_iter()
-            .map(|row| NewComponentBalance {
-                instance_id: row.instance_id,
-                protocol_component_id: row.protocol_component_id,
-                token: row.token,
-                new_balance: row.new_balance,
-                previous_value: row.previous_value,
-                balance_float: row.balance_float,
-                valid_from: row.valid_from,
-                tx_index: row.tx_index,
-            })
-            .collect())
+        .map_err(|err| {
+            storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None).into()
+        })
     }
 
     async fn upsert_current(

@@ -233,7 +233,7 @@ impl NewProtocolStateHistory {
     pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
-#[derive(Debug, Identifiable, Queryable, QueryableByName, Selectable)]
+#[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::component_balance)]
 #[diesel(primary_key(instance_id, protocol_component_id, token))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -250,7 +250,7 @@ pub struct ComponentBalance {
     pub inserted_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, QueryableByName)]
 #[diesel(table_name = tycho::component_balance)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewComponentBalance {
