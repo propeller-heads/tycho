@@ -693,8 +693,8 @@ fn step_fee(
 }
 
 /// Adds a step's fee to `accrual` as `Pool.swap` does: the protocol takes its share of the step's
-/// input first, and the rest grows the fee per unit of liquidity. `fee_pips` is (swap fee,
-/// protocol fee). The arithmetic wraps where `Pool.swap`'s is unchecked.
+/// input first, and the rest grows the fee per unit of liquidity. The swap fee and the protocol
+/// fee are in pips. The arithmetic wraps where `Pool.swap`'s is unchecked.
 fn accrue_step_fee(
     accrual: &mut SwapFeeAccrual,
     step: &StepComputation,
