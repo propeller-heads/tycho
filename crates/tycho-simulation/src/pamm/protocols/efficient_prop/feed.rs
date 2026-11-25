@@ -152,8 +152,8 @@ impl EfficientPropFeedBuilder {
     /// from ([`Self::state_urls`], required), whose listings to serve
     /// ([`Self::with_approved_desks`]), what each one's fills cost ([`Self::credit_listing`], as
     /// on Base), and which price sources to approve ([`Self::approved_price_sources`]): none is
-    /// approved here, since the front is not deployed there yet and anyone may register a source,
-    /// so an id names a price contract only once the deployment's record shows it.
+    /// approved here, since the deployment's record has not landed and anyone may register a
+    /// source, so an id names a price contract only once the deployment's record shows it.
     pub fn bnb(book_config: BookFeedConfig, rpc_url: String) -> Self {
         let mut builder = Self::new(book_config, rpc_url, EfficientPropDeployment::bnb());
         builder
@@ -9378,6 +9378,101 @@ mod tests {
                 let snapshot = source.fetch().await.unwrap();
                 println!("{} books served", snapshot.books.len());
                 tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+
+        /// Reads BNB Chain's front through a node and holds it to the preset: the implementation
+        /// the proxy runs, the front's `CELL_CODEHASH`, desk 1's contract where the preset places
+        /// it, and a clock reading the block's second (mode 3, with the millisecond precompile
+        /// answering nothing). Where the listing-door factory has code, its `FRONT` must be the
+        /// front. A poll needs a state URL serving chain 56, which none does yet, so this reads
+        /// the values directly. Set `EFFICIENT_PROP_BNB_RPC` to a BNB Chain node.
+        #[tokio::test]
+        #[ignore = "reads BNB Chain mainnet; set EFFICIENT_PROP_BNB_RPC"]
+        async fn live_bnb_front_is_the_preset() {
+            use alloy::{
+                primitives::Bytes as AlloyBytes,
+                providers::{Provider, RootProvider},
+                rpc::types::TransactionRequest,
+                sol_types::SolCall,
+            };
+
+            use crate::pamm::protocols::efficient_prop::reader::{
+                clockCall, deskCellOfCall, CELL_CODEHASHCall, FRONTCall, IMPLEMENTATION_SLOT,
+            };
+
+            let Ok(rpc) = std::env::var("EFFICIENT_PROP_BNB_RPC") else {
+                println!("skipped: EFFICIENT_PROP_BNB_RPC unset");
+                return;
+            };
+            let provider: RootProvider = RootProvider::new_http(rpc.parse().unwrap());
+            assert_eq!(provider.get_chain_id().await.unwrap(), 56);
+            let deployment = EfficientPropDeployment::bnb();
+            let front = Address::from_slice(&deployment.front);
+            let factory = Address::from_slice(&deployment.factory);
+            let cell_codehash = B256::from_slice(
+                deployment
+                    .cell_codehash
+                    .as_ref()
+                    .unwrap(),
+            );
+            let call = |to: Address, data: Vec<u8>| {
+                let provider = provider.clone();
+                async move {
+                    provider
+                        .call(
+                            TransactionRequest::default()
+                                .to(to)
+                                .input(AlloyBytes::from(data).into()),
+                        )
+                        .await
+                }
+            };
+
+            let slot = provider
+                .get_storage_at(front, U256::from_be_bytes(IMPLEMENTATION_SLOT.0))
+                .await
+                .unwrap();
+            let implementation = bytes(Address::from_word(slot.into()));
+            assert!(deployment
+                .implementations
+                .contains(&implementation));
+            let answer = call(front, CELL_CODEHASHCall {}.abi_encode())
+                .await
+                .unwrap();
+            assert_eq!(CELL_CODEHASHCall::abi_decode_returns(&answer).unwrap(), cell_codehash);
+            let answer = call(front, deskCellOfCall { desk: 1 }.abi_encode())
+                .await
+                .unwrap();
+            assert_eq!(
+                deskCellOfCall::abi_decode_returns(&answer).unwrap(),
+                SLOT_RULE.account(front, cell_codehash, 1)
+            );
+            let answer = call(front, clockCall {}.abi_encode())
+                .await
+                .unwrap();
+            assert_eq!(
+                clockCall::abi_decode_returns(&answer)
+                    .unwrap()
+                    .clockMode,
+                U256::from(3)
+            );
+            let precompile = call(address!("0000000000000000000000000000000000000070"), Vec::new())
+                .await
+                .unwrap();
+            assert!(precompile.is_empty(), "the millisecond precompile answers");
+            if provider
+                .get_code_at(factory)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                println!("the listing-door factory has no code yet");
+            } else {
+                let answer = call(factory, FRONTCall {}.abi_encode())
+                    .await
+                    .unwrap();
+                assert_eq!(FRONTCall::abi_decode_returns(&answer).unwrap(), front);
             }
         }
     }

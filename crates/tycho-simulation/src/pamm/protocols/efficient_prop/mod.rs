@@ -643,9 +643,10 @@
 //! alone only where it answers within about 300 ms of the head. A node whose latest block is more
 //! than a second and the lag allowance (4 s) behind the poll's start has stalled.
 //!
-//! Nothing is served on BNB Chain yet. The front is not deployed there
-//! ([`EfficientPropDeployment::bnb`] holds it as its rehearsal on a fork of the chain deployed
-//! it), no state URL serving chain 56 is known, and tycho-execution runs no `PropAMMExecutor`
+//! Nothing is served on BNB Chain yet. Its deployment's record has not landed
+//! ([`EfficientPropDeployment::bnb`] holds the front as its rehearsal on a fork of the chain
+//! deployed it, and an ignored test reads the front's values from a node), no listing exists
+//! there, no state URL serving chain 56 is known, and tycho-execution runs no `PropAMMExecutor`
 //! there: its pAMM encoder refuses the chain, so no book there could be encoded. The path runs in
 //! this module's offline tests.
 //!
@@ -845,9 +846,9 @@ impl EfficientPropDeployment {
     /// creation code hash: as there, each maker's quote reaches a block in an update ahead of the
     /// fills that read it.
     ///
-    /// None of these has code on BNB Chain yet. The feed checks each against the chain as for
-    /// [`Self::ethereum`], so until the deployment lands, and wherever it differs from its
-    /// rehearsal, a feed built from this ends at its first poll.
+    /// The deployment's record has not landed. The feed checks each value against the chain as
+    /// for [`Self::ethereum`], so wherever the deployment differs from its rehearsal, a feed built
+    /// from this ends at its first poll.
     pub fn bnb() -> Self {
         Self::ethereum()
     }

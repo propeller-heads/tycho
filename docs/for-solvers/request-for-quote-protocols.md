@@ -318,7 +318,7 @@ Anyone can reserve a listing and post quotes to it, so a feed serves a listing o
 
 `EfficientPropFeedBuilder::base` holds the front deployed on Base and the deployment's one price source, the USDe/USDC lane. Base needs no state URL: you set a Base node, your approved desks and each listing's gas (`credit_listing`). The front runs on Base, but it lists nothing there yet.
 
-`EfficientPropFeedBuilder::bnb` holds the front as its rehearsal on a fork of BNB Chain deployed it, and values books in USD1 beside the chain's curated stablecoins. It approves no price source until the deployment's record shows which contract each id names. BNB Chain serves nothing yet: the front has no code there, no state URL serves chain 56, and Tycho runs no `PropAMMExecutor` on BNB Chain, so its pAMM encoder refuses the chain.
+`EfficientPropFeedBuilder::bnb` holds the front as its rehearsal on a fork of BNB Chain deployed it, and values books in USD1 beside the chain's curated stablecoins. It approves no price source until the deployment's record shows which contract each id names. BNB Chain serves nothing yet: the front lists nothing there, no state URL serves chain 56, and Tycho runs no `PropAMMExecutor` on BNB Chain, so its pAMM encoder refuses the chain.
 
 On Ethereum the feed charges a swap only gas measured on its listing's own pair, never above what the fill costs its transaction: it holds figures for wstETH/WETH, wstETH/USDC, wstETH/USDT and USDT/USDC, and serves any other listing only where `credit_listing` names it with gas measured on it. On Base and BNB Chain the feed holds no figure of its own: it serves a listing only where `credit_listing` names its gas.
 {% endhint %}
