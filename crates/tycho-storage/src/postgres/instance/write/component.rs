@@ -80,6 +80,7 @@ mod tests {
     use diesel_async::RunQueryDsl;
     use tycho_common::storage::StorageError;
 
+    use super::check_protocol_types_stored;
     use crate::postgres::{
         db_fixtures,
         instance::{gateway::PostgresGatewayNew, schema::tycho::protocol_component},
@@ -146,5 +147,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(ids["pool"], pool);
+    }
+
+    #[tokio::test]
+    async fn test_check_protocol_types_stored_accepts_stored_names() {
+        let mut conn = instance_test_connection().await;
+        db_fixtures::insert_protocol_type(&mut conn, "pool", None, None, None).await;
+
+        let result = check_protocol_types_stored(&["pool", "pool"], &mut conn).await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn test_check_protocol_types_stored_fails_for_an_unknown_name() {
+        let mut conn = instance_test_connection().await;
+        db_fixtures::insert_protocol_type(&mut conn, "pool", None, None, None).await;
+
+        let result = check_protocol_types_stored(&["pool", "missing"], &mut conn).await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("ProtocolType".to_string(), "missing".to_string()))
+        );
     }
 }
