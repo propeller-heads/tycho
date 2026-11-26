@@ -3,9 +3,9 @@ use tycho_common::models::Chain;
 
 use super::{
     constants::{
-        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-        UNISWAP_V3_FORKS,
+        BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
+        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -159,6 +159,11 @@ fn quotes_fallback(protocol_system: &str) -> bool {
         !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
 }
 
+/// Gas for `BaibaiFallbackRouter`'s quotes before it picks a side: the entrypoint's `quoteFor`
+/// and the fallback quote, budgeted as `METRIC_FALLBACK_QUOTE_GAS`. On a Base fork `quoteFor`
+/// costs about 40k but warms the entrypoint, so the BaiBai swap after it costs about 30k less.
+pub const BAIBAI_FALLBACK_QUOTE_GAS: u64 = 10_000 + METRIC_FALLBACK_QUOTE_GAS;
+
 /// Extra gas of a subsidized swap.
 pub const SUBSIDY_GAS: u64 = 65_000;
 
@@ -223,6 +228,9 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
         // `MetricFallbackRouter` quotes the pool by running its swap.
         if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
             total_gas += &group.estimated_gas;
+        }
+        if group.protocol_system == BAIBAI_FALLBACK_PROTOCOL_SYSTEM {
+            total_gas += BigUint::from(BAIBAI_FALLBACK_QUOTE_GAS);
         }
     }
     if encoded_subsidy(solution).is_some() {
@@ -347,6 +355,11 @@ pub fn estimate_transfer_overhead(
     // fallback router — comes on top.
     if protocol_system.starts_with(FALLBACK_PREFIX) {
         overhead += BigUint::from(FALLBACK_ROUTER_OVERHEAD_GAS);
+    }
+
+    // `BaibaiFallbackRouter` approves the entrypoint itself, which pays the receiver directly.
+    if protocol_system == BAIBAI_FALLBACK_PROTOCOL_SYSTEM {
+        overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
     // The signed-quote routers approve the venue themselves and forward the output.
@@ -599,6 +612,20 @@ mod tests {
         let unknown = make_swap("fallback:fermiswap")
             .with_user_data(Bytes::from(br#"{"fallback_protocol":"balancer_v2"}"#.to_vec()));
         assert_eq!(fallback_quote_gas(&unknown), FALLBACK_SIMULATED_QUOTE_GAS);
+    }
+
+    #[test]
+    fn test_single_baibai_fallback_router() {
+        let solution = make_solution(vec![make_swap(BAIBAI_FALLBACK_PROTOCOL_SYSTEM)]);
+        let gas = estimate_gas_usage(&solution, Strategy::Single);
+
+        // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
+        // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // entrypoint approval                  25_000  ← TOKEN_APPROVAL_GAS
+        // quoteFor + fallback quote           110_000  ← BAIBAI_FALLBACK_QUOTE_GAS
+        // pool gas                            100_000
+        // fee output transfer                  60_000
+        assert_eq!(gas, BigUint::from(375_000u64));
     }
 
     #[test]

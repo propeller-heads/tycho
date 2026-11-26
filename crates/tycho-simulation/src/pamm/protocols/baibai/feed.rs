@@ -25,8 +25,8 @@ use crate::{
     pamm::protocols::baibai::{
         reader::{BaibaiReader, BookRead, PairRead},
         state::BaibaiState,
-        Deployment, BASE_ATTRIBUTE, BASE_DEPLOYMENT, BASE_LISTED_BASES, BASE_ROUTER,
-        PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_ATTRIBUTE,
+        Deployment, BASE_ATTRIBUTE, BASE_DEPLOYMENT, BASE_FALLBACK_ROUTER, BASE_LISTED_BASES,
+        BASE_ROUTER, FALLBACK_PROTOCOL_SYSTEM, PROTOCOL_SYSTEM, PROTOCOL_TYPE, QUOTE_ATTRIBUTE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -61,6 +61,7 @@ pub struct BaibaiFeedBuilder {
     rpc_url: String,
     bases: Vec<Bytes>,
     taker: Bytes,
+    protocol_system: &'static str,
     feed_config: HttpFeedConfig,
 }
 
@@ -74,6 +75,7 @@ impl BaibaiFeedBuilder {
                 .map(|base| Bytes::from(base.to_vec()))
                 .collect(),
             taker: Bytes::from(BASE_ROUTER.to_vec()),
+            protocol_system: PROTOCOL_SYSTEM,
             feed_config: Self::default_feed_config(),
         }
     }
@@ -91,6 +93,18 @@ impl BaibaiFeedBuilder {
     /// set it when swaps go through another router.
     pub fn taker(mut self, taker: Bytes) -> Self {
         self.taker = taker;
+        self
+    }
+
+    /// Settles this venue's swaps through Tycho's `BaibaiFallbackRouter`, which retries against a
+    /// solver-named fallback pool when the venue reverts. Components then carry
+    /// [`FALLBACK_PROTOCOL_SYSTEM`] rather than [`PROTOCOL_SYSTEM`], which is what selects the
+    /// fallback encoder, and the books are priced with the fee the entrypoint charges that
+    /// router, which calls it instead of Tycho's router. A later [`taker`](Self::taker)
+    /// overrides the taker. Off by default.
+    pub fn with_fallback_router(mut self) -> Self {
+        self.protocol_system = FALLBACK_PROTOCOL_SYSTEM;
+        self.taker = Bytes::from(BASE_FALLBACK_ROUTER.to_vec());
         self
     }
 
@@ -145,7 +159,11 @@ impl BaibaiFeedBuilder {
             feed_config: self.feed_config,
             source: BaibaiBookSource {
                 reader: BaibaiReader::new(rpc_url, deployment, bases, taker),
-                assembler: BaibaiBookAssembler { book_config: self.book_config, deployment },
+                assembler: BaibaiBookAssembler {
+                    book_config: self.book_config,
+                    deployment,
+                    protocol_system: self.protocol_system,
+                },
                 clock: Arc::new(unix_now),
                 last_block: Arc::new(AtomicU64::new(0)),
             },
@@ -227,6 +245,7 @@ fn unix_now() -> u64 {
 pub(super) struct BaibaiBookAssembler {
     pub(super) book_config: BookFeedConfig,
     pub(super) deployment: Deployment,
+    pub(super) protocol_system: &'static str,
 }
 
 impl BaibaiBookAssembler {
@@ -251,7 +270,7 @@ impl BaibaiBookAssembler {
                 .ok()
                 .and_then(|seconds| DateTime::from_timestamp(seconds, 0));
             let mut book = pair_book(
-                PROTOCOL_SYSTEM,
+                self.protocol_system,
                 PROTOCOL_TYPE,
                 self.book_config.chain,
                 component_id,
@@ -392,7 +411,7 @@ mod tests {
             let base = bytes(pair.base);
             let id = pair_component_id(PROTOCOL_SYSTEM, &base, &quote_token().address);
             let book = &books[&id.to_string()];
-            assert_eq!(book.component.protocol_system, "baibai");
+            assert_eq!(book.component.protocol_system, "pamm:baibai");
             assert_eq!(book.component.static_attributes["base"], base);
             assert_eq!(book.component.static_attributes["quote"], quote_token().address);
             let updated_at = book.updated_at.unwrap().timestamp();
@@ -439,6 +458,29 @@ mod tests {
 
         assert!(!books.is_empty());
         for book in books.values() {
+            assert_eq!(book.state.fee(), 0.00005);
+        }
+    }
+
+    /// Through the fallback router, books carry its label and the fee BaiBai charges it.
+    #[tokio::test]
+    async fn the_fallback_router_labels_and_prices_the_books() {
+        let mut node = FakeNode::new();
+        node.taker = BASE_FALLBACK_ROUTER;
+        let now = node.timestamp;
+        let server = node.spawn().await;
+        let mut source = BaibaiFeedBuilder::new(book_config(), server.url())
+            .with_fallback_router()
+            .build()
+            .unwrap()
+            .source;
+        source.clock = Arc::new(move || now);
+
+        let books = source.fetch().await.unwrap().books;
+
+        assert!(!books.is_empty());
+        for book in books.values() {
+            assert_eq!(book.component.protocol_system, FALLBACK_PROTOCOL_SYSTEM);
             assert_eq!(book.state.fee(), 0.00005);
         }
     }
