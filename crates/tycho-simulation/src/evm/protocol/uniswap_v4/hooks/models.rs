@@ -169,6 +169,27 @@ pub struct WithGasEstimate<T> {
     pub result: T,
 }
 
+/// The fees a hook charges a marginal exact-input swap in one direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookSpotFees {
+    /// The LP fee in pips the pool charges the swap, which `beforeSwap` would return as its
+    /// override. `None` leaves the pool's own LP fee in place.
+    pub lp_fee_override: Option<u32>,
+    /// The hook's own fee in pips (1_000_000 = 100%), charged on the input or on the output.
+    pub hook_fee_pips: u32,
+}
+
+/// What the pool's swap math did with a swap, as a hook's `afterSwap` can read it back from the
+/// pool manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwapOutcome {
+    /// The pool's square-root price after the swap, as a Q64.96.
+    pub sqrt_price_x96: U256,
+    /// The part of the specified amount the pool could not swap before reaching the swap's price
+    /// limit. Zero when the swap filled in full.
+    pub amount_unfilled: U256,
+}
+
 #[derive(Debug)]
 pub struct AmountRanges {
     pub amount_in_range: (U256, U256),

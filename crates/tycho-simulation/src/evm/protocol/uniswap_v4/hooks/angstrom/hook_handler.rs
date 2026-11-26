@@ -11,12 +11,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::uniswap_v4::hooks::{
-    hook_handler::HookHandler,
-    models::{
-        AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
-        BeforeSwapParameters, SwapParams, WithGasEstimate,
+use crate::evm::protocol::{
+    uniswap_v4::hooks::{
+        hook_handler::HookHandler,
+        models::{
+            AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
+            BeforeSwapParameters, SwapParams, WithGasEstimate,
+        },
     },
+    utils::uniswap::lp_fee::OVERRIDE_FEE_FLAG,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -81,12 +84,8 @@ impl HookHandler for AngstromHookHandler {
         // Gas for internal asset/pool lookup
         gas_estimate += 1000;
 
-        // Apply the unlock fee as an override.
-        // In Uniswap V4, bit 22 is the OVERRIDE_FEE_FLAG (0x400000) - see LPFeeLibrary.sol
-        //
-        // Replicate the behaviour of the Angstrom hook:
+        // Apply the unlock fee as an override, replicating the behaviour of the Angstrom hook:
         // swapFee = _unlockedFees[storeKey].unlockedFee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
-        const OVERRIDE_FEE_FLAG: u32 = 1 << 22;
         let swap_fee_override = U24::from(self.fees.unlock.to::<u32>() | OVERRIDE_FEE_FLAG);
 
         Ok(WithGasEstimate {
