@@ -1,6 +1,7 @@
 mod aerodrome_v1;
 mod angstrom;
 mod baibai;
+mod baibai_fallback;
 mod balancer_v2;
 mod balancer_v3;
 mod bebop;
