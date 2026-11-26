@@ -40,12 +40,19 @@ use crate::{
 const FEE_DENOMINATOR: f64 = 1e10;
 /// Representative gas cost of a StableSwap exchange.
 const STABLESWAP_GAS: u64 = 150_000;
-/// Representative gas cost of a CryptoSwap exchange (heavier math + price oracle update).
+/// Representative gas cost of a legacy CryptoSwap exchange (heavier math + price oracle update).
+/// Swaps through Curve executors on Ethereum cost up to 367k for TwoCrypto V1 pools and up to 263k
+/// for tricrypto2.
 const CRYPTOSWAP_GAS: u64 = 350_000;
+/// Representative gas cost of a TwoCrypto-NG or TriCrypto-NG factory pool exchange. Swaps through
+/// Curve executors on Ethereum cost 79k to 261k on TwoCrypto-NG pools, most of them 125k to 175k,
+/// and 67k to 164k on TriCrypto-NG pools.
+const CRYPTO_NG_GAS: u64 = 180_000;
 /// Policy version whose grant pricing [`CurveState::exclusive_view`] models.
 const SUPPORTED_POLICY_VERSION: u64 = 1;
-/// Gas a grant adds to a CryptoSwap exchange: the grant submission and the policy's fee hook.
-const GRANT_GAS: u64 = 176_000;
+/// Gas a grant adds to an exchange: the policy's `submit_grant` costs 45k on Ethereum. The policy's
+/// fee hook runs inside the exchange.
+const GRANT_GAS: u64 = 50_000;
 
 /// A single Curve pool quoted via `curve_math`.
 ///
@@ -195,7 +202,19 @@ impl CurveState {
     }
 
     fn gas_estimate(&self) -> u64 {
-        let gas = if self.is_crypto() { CRYPTOSWAP_GAS } else { STABLESWAP_GAS };
+        let gas = match self.variant {
+            CurveVariant::StableSwapV0 |
+            CurveVariant::StableSwapV1 |
+            CurveVariant::StableSwapV2 |
+            CurveVariant::StableSwapSTETH |
+            CurveVariant::StableSwapALend |
+            CurveVariant::StableSwapNG |
+            CurveVariant::StableSwapMeta => STABLESWAP_GAS,
+            CurveVariant::TwoCryptoNG |
+            CurveVariant::TwoCryptoStable |
+            CurveVariant::TriCryptoNG => CRYPTO_NG_GAS,
+            CurveVariant::TwoCryptoV1 | CurveVariant::TriCryptoV1 => CRYPTOSWAP_GAS,
+        };
         if self.is_exclusive_view() {
             gas + GRANT_GAS
         } else {
@@ -887,7 +906,7 @@ mod tests {
             scaled_lowest - scaled_one_percent
         };
         assert!(difference <= BigUint::from(200_000u64), "difference {difference}");
-        assert_eq!(one_percent.gas, BigUint::from(CRYPTOSWAP_GAS + GRANT_GAS));
+        assert_eq!(one_percent.gas, BigUint::from(230_000u64));
     }
 
     #[rstest]
