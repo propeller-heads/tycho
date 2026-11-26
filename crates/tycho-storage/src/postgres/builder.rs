@@ -83,6 +83,10 @@ impl GatewayBuilder {
         }
     }
 
+    /// Builds the gateway and starts its database write executor.
+    ///
+    /// The executor rejects every write until this process becomes the writer through
+    /// [`CachedGateway::increment_writer_epoch`].
     pub async fn build(self) -> Result<(CachedGateway, JoinHandle<()>), StorageError> {
         let chain = self.single_chain()?;
         let pool = postgres::connect(&self.database_url).await?;

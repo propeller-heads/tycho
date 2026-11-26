@@ -18,8 +18,8 @@ use crate::{
 /// The block a quote is expected to execute in.
 ///
 /// This is **not** the block a state was decoded from: a quote produced against block `N` is
-/// normally submitted for block `N + 1`, and a quote produced against a still-open (partial /
-/// flashblock) view of block `N` is submitted for block `N` itself. Protocols whose pricing
+/// normally submitted for block `N + 1`, and a quote produced against a still-open (partial)
+/// view of block `N` is submitted for block `N` itself. Protocols whose pricing
 /// depends on the execution block — Aerodrome Slipstream's initial-vs-dynamic fee branch, for
 /// instance — resolve it from this type rather than from the block they last observed.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -41,7 +41,7 @@ impl BlockContext {
 
     /// Unix timestamp of the block the quote is expected to execute in.
     ///
-    /// All flashblocks of one block share this value, matching `block.timestamp` on chain.
+    /// All partial blocks of one block share this value, matching `block.timestamp` on chain.
     pub fn timestamp(&self) -> u64 {
         self.timestamp
     }

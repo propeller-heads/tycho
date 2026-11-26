@@ -266,6 +266,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
 
     /// @dev Full amount the Vault owes this locker. address(this) is the router, not this
     /// contract: the Dispatcher delegatecalls, so the router is the recorded locker.
+    // slither-disable-next-line dead-code Called from _swap, which Slither cannot convert to IR while two libraries named SafeCast (OpenZeppelin's and v4-core's) are in the build.
     function _getFullCredit(address currency)
         internal
         view
@@ -281,6 +282,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
 
     /// @dev Pays the Vault. Native by value; ERC20 credited against the sync snapshot taken in
     /// swap, so the token must already have landed. No-op on 0.
+    // slither-disable-next-line dead-code Called from _swap, which Slither cannot convert to IR while two libraries named SafeCast (OpenZeppelin's and v4-core's) are in the build.
     function _settle(address currency, uint256 amount) internal {
         if (amount == 0) return;
         if (currency == address(0)) {
@@ -293,6 +295,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
     }
 
     /// @dev Infinity's native currency is address(0), the router's is ETH_ADDRESS.
+    // slither-disable-next-line dead-code Called from _swap, which Slither cannot convert to IR while two libraries named SafeCast (OpenZeppelin's and v4-core's) are in the build.
     function _toInfinityCurrency(address token)
         internal
         pure
@@ -301,6 +304,7 @@ contract PancakeswapInfinityRobinhoodExecutor is IExecutor, ICallback {
         return token == ETH_ADDRESS ? address(0) : token;
     }
 
+    // slither-disable-next-line dead-code Called from _swap, which Slither cannot convert to IR while two libraries named SafeCast (OpenZeppelin's and v4-core's) are in the build.
     function _take(address currency, address recipient, uint256 amount)
         internal
     {

@@ -11,7 +11,9 @@ for any protocol indexed by Tycho.
 - **`evm/engine_db/`**: Database backends (`SimulationDB` in-memory, `TychoDB` RPC-backed)
 - **`evm/decoder.rs`**: `TychoStreamDecoder` — turns feed snapshots into `ProtocolSim` instances.
   **A new protocol must be registered here** to be decodable
-- **`evm/stream.rs`**: Tycho feed integration — wires the decoder onto a live `FeedMessage` stream
+- **`evm/stream.rs`**: Tycho feed integration — wires the decoder onto a live `FeedMessage` stream.
+  Rounds that carry no block (empty `state_msgs`) are skipped after the `StreamEndPolicy` check
+  and never reach the decoder, which fails on them
 - **`evm/pending.rs`**: `TxDeltaIndexer` implementation — replays in-flight blocks to produce
   pending-state deltas
 - **`evm/protocol/filters.rs`**: Public pool filters consumers pass when registering protocols
@@ -47,6 +49,10 @@ for any protocol indexed by Tycho.
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
     protocols without a native implementation
+  - `ProtocolStreamBuilder::via_fallback_router(name)` publishes a registered exchange's
+    components as `fallback:{name}` (id, attributes and decoder unchanged), so a natively indexed
+    `IPropAMM` venue executes through the PropAMM fallback router. A stream publishes each venue
+    on one path only; `build` fails when `name` is not a registered exchange.
 - **`snapshot_feed/`**: latest-value snapshot feeds, both ends, generic in the snapshot and the
   error.
   - `SnapshotFeed` is the contract: `run(publisher)` consumes the source and publishes through a

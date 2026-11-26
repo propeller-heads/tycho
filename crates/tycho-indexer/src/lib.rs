@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod extractor;
+pub mod leadership;
 #[allow(
     clippy::all,
     clippy::pedantic,
