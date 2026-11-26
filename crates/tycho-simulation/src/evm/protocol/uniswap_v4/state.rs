@@ -318,6 +318,11 @@ impl UniswapV4State {
         })
     }
 
+    /// The pool's square-root price and current tick.
+    pub(crate) fn price_and_tick(&self) -> (U256, i32) {
+        (self.sqrt_price, self.tick.value())
+    }
+
     pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
         self.pending_overrides.as_deref()
     }
@@ -346,6 +351,9 @@ impl UniswapV4State {
         sqrt_price_limit: Option<U256>,
         lp_fee_override: Option<u32>,
     ) -> Result<SwapResults, SimulationError> {
+        // v4-core's `Pool.swap` returns the zero delta at once on a zero amount, before its price
+        // checks and its loop, which is what a hook that took the whole input leaves the pool leg
+        // with.
         if amount_specified == I256::ZERO {
             return Ok(SwapResults {
                 amount_calculated: I256::ZERO,
@@ -947,6 +955,8 @@ impl ProtocolSim for UniswapV4State {
             currency_1: if zero_for_one { token_out_address } else { token_in_address },
             fees: self.fees.clone(),
             tick_spacing: self.tick_spacing,
+            sqrt_price_x96: self.sqrt_price,
+            tick: self.tick.value(),
         };
 
         // The hooks must see the limit an executed swap sends: the full price range, like the
@@ -1029,6 +1039,16 @@ impl ProtocolSim for UniswapV4State {
             .map_err(|e| hook_call_error("CheckSwapOutcome", e))?;
         }
 
+        // A hook whose own storage the swap changed (an observation, a consumed inventory) prices
+        // the next swap of a route from the state it leaves. It is taken here, while the context
+        // and the swap's parameters are still ours, and a refusal further on drops it with the
+        // swap.
+        let next_hook = self
+            .hook
+            .as_ref()
+            .map_or(Ok(None), |hook| hook.handler_after_swap(&state_context, &swap_params))
+            .map_err(|e| hook_call_error("HandlerAfterSwap", e))?;
+
         // Create BalanceDelta from swap result using the proper constructor
         let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
 
@@ -1080,13 +1100,15 @@ impl ProtocolSim for UniswapV4State {
         };
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
-        let new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
+        let mut new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
+        if let Some(next_hook) = next_hook {
+            new_state.hook = Some(next_hook);
+        }
 
-        // Add hook gas costs to baseline swap cost.
-        // before_swap_gas / after_swap_gas capture the hook contract's internal
-        // logic. The hook's pool_manager_call_overhead accounts for the pool
-        // manager's dispatch wrapper that is not captured by either the native swap
-        // constants or the hook's own estimates.
+        // Add the hooks' estimates and the PoolManager's dispatch of each hook call to the pool
+        // leg's cost. A hook's estimates cover its own frames and, when it takes the whole input
+        // and leaves the pool leg the no-op of `swap`, the route around the swap too (see
+        // `HookHandler::before_swap`).
         let mut hook_overhead = before_swap_gas + after_swap_gas;
         if let Some(hook) = &self.hook {
             let hook_calls = u64::from(before_swap_gas > 0) + u64::from(after_swap_gas > 0);
@@ -1495,7 +1517,10 @@ mod tests {
                         WithGasEstimate,
                     },
                     pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
-                    test_hook::{ExtensionTestHook, SpotFeesAnswer},
+                    test_hook::{
+                        ExtensionTestHook, HandlerAfterSwapAnswer, OutcomeCheckAnswer,
+                        SpotFeesAnswer, WHOLE_INPUT_TEST_HOOK_GAS,
+                    },
                 },
                 utils::uniswap::{
                     lp_fee,
@@ -3369,7 +3394,7 @@ mod tests {
     ) {
         let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
         pool.set_hook_handler(Box::new(ExtensionTestHook {
-            refuse_outcome_below: Some(floor),
+            outcome_check: OutcomeCheckAnswer::RefusesBelow(floor),
             ..Default::default()
         }));
         let (token_in, token_out) = basic_v4_test_pool_tokens(true);
@@ -3393,7 +3418,7 @@ mod tests {
     fn test_get_amount_out_reports_a_failing_outcome_check_as_fatal() {
         let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
         pool.set_hook_handler(Box::new(ExtensionTestHook {
-            fail_outcome_check: true,
+            outcome_check: OutcomeCheckAnswer::Fails,
             ..Default::default()
         }));
         let (token_in, token_out) = basic_v4_test_pool_tokens(true);
@@ -3406,6 +3431,112 @@ mod tests {
                 if msg.starts_with("CheckSwapOutcome hook simulation failed")),
             "{result:?}"
         );
+    }
+
+    /// The address of the hook `handler_after_swap` installed in a quote's returned state.
+    fn hook_address_of(state: &dyn ProtocolSim) -> Address {
+        state
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .and_then(|state| state.hook.as_ref())
+            .expect("a hooked pool")
+            .address()
+    }
+
+    /// The hook `handler_after_swap` returns is the one the state a quote returns carries, the
+    /// quote is the hookless one, and the state quoted from keeps its own hook.
+    #[test]
+    fn test_get_amount_out_installs_the_hook_after_the_swap() {
+        let installed = Address::repeat_byte(7);
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let hookless = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY)
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .expect("the hookless swap");
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            handler_after_swap: HandlerAfterSwapAnswer::ReplaceWithAddress(installed),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(amount_in, &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(hook_address_of(quote.new_state.as_ref()), installed);
+        assert_eq!(hook_address_of(&pool), Address::ZERO);
+        assert_eq!(quote.amount, hookless.amount);
+        assert_eq!(quote.gas, hookless.gas);
+    }
+
+    /// A hook that answers `None` stays in the returned state.
+    #[test]
+    fn test_get_amount_out_keeps_the_hook_that_answers_none() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            address: Address::repeat_byte(3),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(hook_address_of(quote.new_state.as_ref()), Address::repeat_byte(3));
+    }
+
+    /// A hook that takes the whole input in `beforeSwap` leaves the pool leg a no-op: the quote's
+    /// gas is the no-op swap's 3,000, the hook's frame and the PoolManager's dispatch of the one
+    /// call, with no route charge on top.
+    #[test]
+    fn test_get_amount_out_of_a_hook_taking_the_whole_input_charges_the_noop_swap() {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            takes_whole_input: Some(WHOLE_INPUT_TEST_HOOK_GAS),
+            ..Default::default()
+        }));
+
+        let quote = pool
+            .get_amount_out(BigUint::from(1_000_000u64), &token_in, &token_out)
+            .expect("the swap");
+
+        assert_eq!(quote.amount, BigUint::from(1_000_000u64));
+        assert_eq!(
+            quote.gas,
+            BigUint::from(3_000 + WHOLE_INPUT_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
+        );
+    }
+
+    /// A refusal of `handler_after_swap` reaches the caller as `InvalidInput`, and any other
+    /// error as `FatalError`, as for the other hook calls.
+    #[rstest]
+    #[case::refusal_passes_through(HandlerAfterSwapAnswer::Refuses, true)]
+    #[case::other_failure_is_fatal(HandlerAfterSwapAnswer::Fails, false)]
+    fn test_get_amount_out_maps_a_handler_after_swap_error_by_kind(
+        #[case] answer: HandlerAfterSwapAnswer,
+        #[case] expect_invalid_input: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let mut pool = create_feeless_v4_test_pool(FEELESS_POOL_LIQUIDITY);
+        pool.set_hook_handler(Box::new(ExtensionTestHook {
+            handler_after_swap: answer,
+            ..Default::default()
+        }));
+
+        let result =
+            pool.get_amount_out(BigUint::from(1_000_000_000_000_000u64), &token_in, &token_out);
+
+        match result {
+            Err(SimulationError::InvalidInput(msg, None)) if expect_invalid_input => {
+                assert_eq!(msg, "the hook refuses the swap");
+            }
+            Err(SimulationError::FatalError(msg)) if !expect_invalid_input => {
+                assert!(msg.starts_with("HandlerAfterSwap hook simulation failed"), "{msg}");
+            }
+            other => panic!("expected the {answer:?} answer by kind, got {other:?}"),
+        }
     }
 
     fn pool_target_price_params() -> QueryPoolSwapParams {
@@ -4039,7 +4170,11 @@ mod tests {
         .unwrap();
         pool.set_hook_handler(Box::new(ExtensionTestHook {
             swaps_from_empty_range: true,
-            refuse_unfilled_input: refuse_unfilled,
+            outcome_check: if refuse_unfilled {
+                OutcomeCheckAnswer::RefusesUnfilledInput
+            } else {
+                OutcomeCheckAnswer::Accepts
+            },
             ..Default::default()
         }));
         // The position holds about 0.03 of token Y, so this input cannot fill.

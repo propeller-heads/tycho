@@ -1,4 +1,4 @@
-//! The storage writes a transaction made to the Montra hooks, netted per slot.
+//! The storage writes a transaction made to the launchpad hooks, netted per slot.
 //!
 //! [`storage_writes`] returns every slot a transaction wrote across a set of hooks, with the value
 //! before and after. It orders writes by ordinal and keeps the first old value and the last new
@@ -6,8 +6,8 @@
 //! ways:
 //!
 //! - It reads a set of contracts and lists every slot written, where `tx_storage_writes` reads one
-//!   contract and looks slots up by key. The Montra modules match a hook write to its pool through
-//!   `store_montra_slots` and cannot name the slots in advance.
+//!   contract and looks slots up by key. The launchpad modules match a hook write to its pool
+//!   through `store_launchpad_slots` and cannot name the slots in advance.
 //! - It returns the value before as well, which tells a changed word from a rewritten one.
 //! - It returns a slot whose last write restores its first value, where `tx_storage_writes` drops
 //!   it. The seed check (`PoolConfig` words 1 and 2 written) then holds whatever values `seed`
@@ -110,7 +110,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::montra::test_fixtures::{HOOK, POOL_MANAGER as OTHER};
+    use crate::launchpad::test_fixtures::{HOOK, POOL_MANAGER as OTHER};
 
     fn word(hex_str: &str) -> Word {
         pad32(&hex::decode(hex_str).unwrap()).unwrap()

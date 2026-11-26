@@ -23,17 +23,19 @@ binaries:
     type: wasm/rust-v1
     file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v4_with_hooks.wasm
 
-# The shared Uniswap V4 module graph with pool creation limited to the Montra hooks in
-# `montra_hooks` (map_montra_pools_created), a store that maps each watched hook slot to its pool
-# (store_montra_slots), and a terminal module that decodes the hook's per-pool state
-# (map_montra_enriched_block_changes). See Readme.md, "Montra on Elysium".
-# initialBlock 588510 is the block the Montra LaunchHook 0x6b1216a4... was deployed in. The
-# PoolManager is older (256083), but this manifest creates only pools of the listed hook, and no
-# such pool can be initialized before the hook has code, so the blocks before 588510 hold none.
+# The shared Uniswap V4 module graph with pool creation limited to the Montra and Ascend hooks in
+# `montra_hooks` and `ascend_hooks` (map_launchpad_pools_created), a store that maps each watched
+# hook slot to its pool (store_launchpad_slots), and a terminal module that decodes the hooks'
+# per-pool state (map_launchpad_enriched_block_changes). See Readme.md, "Montra on Elysium" and "Ascend on
+# Elysium".
+# initialBlock 423647 is the block the Ascend hook 0xe0def422... was deployed in (first launch at
+# 432934); the Montra LaunchHook 0x6b1216a4... came later, at 588510. The PoolManager is older
+# (256083), but this manifest creates only pools of the listed hooks, and no such pool can be
+# initialized before its hook has code, so the blocks before 423647 hold none.
 modules:
-  - name: map_montra_pools_created
+  - name: map_launchpad_pools_created
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -42,23 +44,24 @@ modules:
 
   - name: store_pools
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: set_if_not_exists
     valueType: proto:uniswap.v4.Pool
     inputs:
-      - map: map_montra_pools_created
+      - map: map_launchpad_pools_created
 
-  - name: store_montra_slots
+  - name: store_launchpad_slots
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: set_if_not_exists
     valueType: string
     inputs:
-      - map: map_montra_pools_created
+      - params: string
+      - map: map_launchpad_pools_created
 
   - name: map_events
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
@@ -67,7 +70,7 @@ modules:
 
   - name: store_pool_current_tick
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: set
     valueType: int64
     inputs:
@@ -75,7 +78,7 @@ modules:
 
   - name: store_pool_current_sqrt_price
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: set
     valueType: bigint
     inputs:
@@ -83,7 +86,7 @@ modules:
 
   - name: map_balance_changes
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - map: map_events
       - store: store_pool_current_sqrt_price
@@ -92,7 +95,7 @@ modules:
 
   - name: store_pools_balances
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -100,7 +103,7 @@ modules:
 
   - name: map_ticks_changes
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - map: map_events
     output:
@@ -108,7 +111,7 @@ modules:
 
   - name: store_ticks_liquidity
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -116,7 +119,7 @@ modules:
 
   - name: map_liquidity_changes
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - map: map_events
       - store: store_pool_current_tick
@@ -125,19 +128,19 @@ modules:
 
   - name: store_liquidity
     kind: store
-    initialBlock: 588510
+    initialBlock: 423647
     updatePolicy: set_sum
     valueType: bigint
     inputs:
       - map: map_liquidity_changes
 
-  - name: map_montra_enriched_block_changes
+  - name: map_launchpad_enriched_block_changes
     kind: map
-    initialBlock: 588510
+    initialBlock: 423647
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
-      - map: map_montra_pools_created
+      - map: map_launchpad_pools_created
       - map: map_events
       - map: map_balance_changes
       - store: store_pools_balances
@@ -148,13 +151,17 @@ modules:
       - map: map_liquidity_changes
       - store: store_liquidity
         mode: deltas
-      - store: store_montra_slots
+      - store: store_launchpad_slots
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  # The Elysium Uniswap V4 PoolManager, and the Montra LaunchHook: the only hook the
-  # LaunchpadRegistry lists (hooks() at block 6002000). map_montra_pools_created creates no pool
-  # of a hook this list omits. Readme.md ("Upgrade boundary") says what to check before adding one.
-  map_montra_pools_created: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
-  map_montra_enriched_block_changes: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+  # The Elysium Uniswap V4 PoolManager; the Montra LaunchHook, the only Montra hook the
+  # LaunchpadRegistry lists (hooks() at block 6002000); and the Ascend launchpad hook
+  # (AscendLaunchpadV5), which EscrowFactory 0x63f6a8a8... launches through. The modules create no
+  # pool of a hook these lists omit. The three modules take the same string, which a unit test
+  # checks. Readme.md ("Upgrade boundary" for Montra, "Upgrade boundary for Ascend") says what to
+  # check before adding a hook.
+  map_launchpad_pools_created: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"
+  store_launchpad_slots: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"
+  map_launchpad_enriched_block_changes: "pool_manager=e2e105d3f7209a9da11f83ccf3e7398a753823f1&montra_hooks=6b1216a40b65c83e9c9e18a562c446697b8cf8ec&ascend_hooks=e0def4221b9840a610d4e7d55812a79a6431a8ec"

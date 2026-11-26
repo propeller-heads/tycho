@@ -1,25 +1,38 @@
 //! The Elysium manifest's terminal module: the block changes the shared Uniswap V4 pipeline
-//! aggregates, plus the `montra_*` attributes and the pause state decoded from the Montra hook's
-//! storage writes.
+//! aggregates, plus each launchpad pool's hook state decoded from its hook's storage writes: the
+//! `montra_*` attributes and the pause state of a Montra pool, the `ascend_*` attributes of an
+//! Ascend pool.
 //!
-//! Every write to a pool's watched `PoolConfig` words (0 to 2) or `PoolKey` words counts, whatever
-//! the transaction, its caller or the function that made it: swaps (stage, LP-line hold,
-//! anti-snipe), launches, `lowerTotalFee`, `lockFee` and any path a `LaunchFactory` upgrade adds.
-//! This module does not use hook events as triggers, because the stage and the LP-line hold change
-//! with no event.
+//! Every write to a watched word of a pool counts, whatever the transaction, its caller or the
+//! function that made it. This module does not use hook events as triggers, because Montra's stage
+//! and LP-line hold and Ascend's observation change with no event.
 //!
-//! Deployment assumption: a launch registers the pool, initialises it on the `PoolManager` and
-//! places its seed in one transaction. Each of the 403 launch transactions checked, those in
-//! blocks 4963600-4987299 (356) and 5990000-6001999 (47), emits `PoolRegistered`, `Initialize`
-//! and `PoolSeeded` together. `Initialize` creates the component, and this module creates its
-//! `montra_*` attributes from the `PoolConfig` words written in that transaction, zero for a word
-//! it did not write. If a `LaunchFactory` upgrade ever registers a pool in an earlier transaction,
-//! this module never sees the words written then, and the pool would be quoted with a zero fee. So
-//! this module pauses a pool until a transaction places its seed (`PoolWrites::places_seed`), and
-//! unpauses it in that transaction: `seed` rewrites `PoolConfig` words 0, 1 and 2 in full, so it
-//! alone carries every value the attributes need.
+//! Ascend pools: the watched words are listed in [`crate::ascend`], and their writers are swaps
+//! (the observation, and on a fill the bid), the launch and `fundBid` (the hook's 30 `SSTORE`
+//! sites, mapped from its bytecode, cover exactly these writers). A pool is created with all eleven
+//! `ascend_*` attributes from the launch transaction's writes, a word it did not write read as zero
+//! (`Bid` words 0 and 1 start at zero). `fundBid` on a pool id the hook has not launched reverts
+//! `UnknownPool()`, so no `Bid` write precedes a pool's creation transaction; the Readme's
+//! "Deployment assumption for Ascend" paragraph has the evidence. No `paused` is emitted for Ascend
+//! pools: the hook's `setPaused` stops launches only, and the Readme says so.
 //!
-//! This module also pauses a pool when a `PoolKey` word changes after the pool's creation
+//! Montra pools: the watched words are `PoolConfig` words 0 to 2 and the `PoolKey` words, and their
+//! writers are swaps (stage, LP-line hold, anti-snipe), launches, `lowerTotalFee`, `lockFee` and
+//! any path a `LaunchFactory` upgrade adds.
+//!
+//! Deployment assumption for Montra pools: a launch registers the pool, initialises it on the
+//! `PoolManager` and places its seed in one transaction. Each of the 403 launch transactions
+//! checked, those in blocks 4963600-4987299 (356) and 5990000-6001999 (47), emits
+//! `PoolRegistered`, `Initialize` and `PoolSeeded` together. `Initialize` creates the component,
+//! and this module creates its `montra_*` attributes from the `PoolConfig` words written in that
+//! transaction, zero for a word it did not write. If a `LaunchFactory` upgrade ever registers a
+//! Montra pool in an earlier transaction, this module never sees the words written then, and the
+//! pool would be quoted with a zero fee. So this module pauses a Montra pool until a transaction
+//! places its seed (`MontraWrites::places_seed`), and unpauses it in that transaction: `seed`
+//! rewrites `PoolConfig` words 0, 1 and 2 in full, so it alone carries every value the attributes
+//! need.
+//!
+//! This module also pauses a Montra pool when a `PoolKey` word changes after the pool's creation
 //! transaction. `register` writes the key once and refuses a registered pool, so no known path
 //! does this. Only a placed seed unpauses a pool, and `seed` sets the `seeded` flag once: a pool
 //! whose key changes after its seed stays paused.
@@ -44,16 +57,22 @@ use substreams_ethereum::{pb::eth::v2 as eth, Event};
 use substreams_helper::hex::Hexable;
 use tycho_substreams::prelude::*;
 
-use crate::montra::{
-    params::Params,
-    pool_config::{sets_seeded_flag, slot_store_key, ConfigWord, HookWord, SlotOwner},
-    storage_writes::{storage_writes, SlotWrite},
+use crate::{
+    ascend::AscendWord,
+    launchpad::{
+        params::Params,
+        slots::{slot_store_key, HookWord, SlotOwner},
+        storage_writes::{storage_writes, SlotWrite},
+        Layout,
+    },
+    montra::pool_config::{sets_seeded_flag, ConfigWord},
+    storage::StateWord,
 };
 
 #[substreams::handlers::map]
 // One parameter per module input the manifest wires in; the handler macro takes them separately.
 #[allow(clippy::too_many_arguments)]
-pub fn map_montra_enriched_block_changes(
+pub fn map_launchpad_enriched_block_changes(
     params: String,
     block: eth::Block,
     created_pools: BlockEntityChanges,
@@ -64,11 +83,11 @@ pub fn map_montra_enriched_block_changes(
     ticks_store_deltas: StoreDeltas,
     pool_liquidity_changes: LiquidityChanges,
     pool_liquidity_store_deltas: StoreDeltas,
-    montra_slots: StoreGetString,
+    launchpad_slots: StoreGetString,
 ) -> Result<BlockChanges, substreams::errors::Error> {
     let params = Params::parse(&params)?;
-    let launches = created_launches(&created_pools)?;
-    let hook_writes = collect_hook_writes(&block, &params, &montra_slots, &launches)?;
+    let launches = created_launches(&params, &created_pools)?;
+    let hook_writes = collect_hook_writes(&block, &params, &launchpad_slots, &launches)?;
 
     let changes = collect_transaction_changes(
         created_pools,
@@ -85,66 +104,61 @@ pub fn map_montra_enriched_block_changes(
     Ok(BlockChanges { block: Some((&block).into()), changes, storage_changes: vec![] })
 }
 
-/// The creation transaction of every pool `map_montra_pools_created` created in this block, by
-/// component id. Fails when a change of `created_pools` has no transaction.
-fn created_launches(created_pools: &BlockEntityChanges) -> Result<HashMap<String, Transaction>> {
+/// A pool `map_launchpad_pools_created` created in this block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launch {
+    /// The creation transaction.
+    tx: Transaction,
+    /// The layout of the pool's hook.
+    layout: Layout,
+}
+
+/// The creation of every pool `map_launchpad_pools_created` created in this block, by component
+/// id. Fails when a change of `created_pools` has no transaction, and when a component's `hooks`
+/// is missing or in neither hook list: the creation module reads the same parameters and creates
+/// pools of listed hooks only.
+fn created_launches(
+    params: &Params,
+    created_pools: &BlockEntityChanges,
+) -> Result<HashMap<String, Launch>> {
     let mut launches = HashMap::new();
     for change in &created_pools.changes {
         let tx = change.tx.as_ref().ok_or_else(|| {
-            anyhow!("map_montra_pools_created emitted a change without a transaction")
+            anyhow!("map_launchpad_pools_created emitted a change without a transaction")
         })?;
         for component in &change.component_changes {
-            launches.insert(component.id.clone(), tx.clone());
+            let layout = component
+                .get_attribute_value("hooks")
+                .and_then(|hook| params.layout(&hook))
+                .ok_or_else(|| {
+                    anyhow!("created pool {} has no hook of a listed layout", component.id)
+                })?;
+            launches.insert(component.id.clone(), Launch { tx: tx.clone(), layout });
         }
     }
     Ok(launches)
 }
 
-/// One transaction's writes to the watched words of one pool.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct PoolWrites {
-    /// Indexed by [`ConfigWord`].
-    config: [Option<SlotWrite>; ConfigWord::ALL.len()],
-    /// Whether the transaction changed a `PoolKey` word.
-    changes_key: bool,
-    /// Whether the transaction placed this pool's seed: it made the seed's writes
-    /// ([`PoolWrites::writes_seed_words`]) and the hook added liquidity to this pool on the
-    /// `PoolManager` ([`hook_added_liquidity`]). `seed(poolId, startTick, supply)` takes no key:
-    /// the hook calls `PoolManager.modifyLiquidity` with the `PoolKey` it stored (launch tx
-    /// 0xe69565883dcf7ff890325eb1bf34bed5c281be88e89ffebdbdddd9837134a255, log 4), and the
-    /// `PoolManager` names the pool by that key's hash. So the liquidity lands on this pool only
-    /// while the stored key is the one the pool was initialised with.
-    places_seed: bool,
+/// One transaction's writes to the watched words of one layout's struct, by word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Writes<W: StateWord>(HashMap<W, SlotWrite>);
+
+impl<W: StateWord> Default for Writes<W> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
 }
 
-impl PoolWrites {
-    fn insert(&mut self, word: HookWord, write: SlotWrite) {
-        match word {
-            HookWord::Config(word) => self.config[word as usize] = Some(write),
-            HookWord::Key(_) => self.changes_key |= write.old_value != write.new_value,
-        }
-    }
-
-    /// Whether the transaction made the writes of `seed`: word 0's `seeded` flag went from clear
-    /// to set ([`sets_seeded_flag`]), and words 1 and 2, which `seed` rewrites in full, were
-    /// written.
-    fn writes_seed_words(&self) -> bool {
-        match &self.config {
-            [Some(word_0), Some(_), Some(_)] => {
-                sets_seeded_flag(&word_0.old_value, &word_0.new_value)
-            }
-            _ => false,
-        }
-    }
-
-    /// The `montra_*` attributes of `PoolConfig` words 0 to 2 as the transaction left them, a word
-    /// it did not write read as zero.
+impl<W: StateWord> Writes<W> {
+    /// Every attribute of the layout as the writes left it, a word they did not write read as
+    /// zero.
     fn final_attributes(&self, change: ChangeType) -> Vec<Attribute> {
-        ConfigWord::ALL
-            .into_iter()
+        W::ALL
+            .iter()
             .flat_map(|word| {
-                let value = self.config[word as usize]
-                    .as_ref()
+                let value = self
+                    .0
+                    .get(word)
                     .map_or([0u8; 32], |write| write.new_value);
                 word.attributes(&value)
             })
@@ -152,13 +166,13 @@ impl PoolWrites {
             .collect()
     }
 
-    /// The `montra_*` attributes whose decoded value the transaction changed.
+    /// The attributes whose decoded value the writes changed.
     fn changed_attributes(&self) -> Vec<Attribute> {
-        ConfigWord::ALL
-            .into_iter()
+        W::ALL
+            .iter()
             .filter_map(|word| {
-                self.config[word as usize]
-                    .as_ref()
+                self.0
+                    .get(word)
                     .map(|write| (word, write))
             })
             .flat_map(|(word, write)| {
@@ -170,29 +184,133 @@ impl PoolWrites {
             })
             .collect()
     }
+}
 
-    /// The pool's state in its creation transaction: every `montra_*` attribute, created. The pool
-    /// is created paused unless the transaction placed its seed.
-    fn launch_state(&self) -> HookStateChange {
-        HookStateChange {
-            attributes: self.final_attributes(ChangeType::Creation),
-            pause_change: (!self.places_seed).then_some(PauseChange::Pause),
+/// One transaction's writes to the watched words of one Montra pool.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct MontraWrites {
+    config: Writes<ConfigWord>,
+    /// Whether the transaction changed a `PoolKey` word.
+    changes_key: bool,
+    /// Whether the transaction placed this pool's seed: it made the seed's writes
+    /// ([`MontraWrites::writes_seed_words`]) and the hook added liquidity to this pool on the
+    /// `PoolManager` ([`hook_added_liquidity`]). `seed(poolId, startTick, supply)` takes no key:
+    /// the hook calls `PoolManager.modifyLiquidity` with the `PoolKey` it stored (launch tx
+    /// 0xe69565883dcf7ff890325eb1bf34bed5c281be88e89ffebdbdddd9837134a255, log 4), and the
+    /// `PoolManager` names the pool by that key's hash. So the liquidity lands on this pool only
+    /// while the stored key is the one the pool was initialised with.
+    places_seed: bool,
+}
+
+impl MontraWrites {
+    /// Whether the transaction made the writes of `seed`: word 0's `seeded` flag went from clear
+    /// to set ([`sets_seeded_flag`]), and words 1 and 2, which `seed` rewrites in full, were
+    /// written.
+    fn writes_seed_words(&self) -> bool {
+        let config = &self.config.0;
+        match (
+            config.get(&ConfigWord::Terms),
+            config.get(&ConfigWord::SeedRange),
+            config.get(&ConfigWord::EarlyBuyFee),
+        ) {
+            (Some(word_0), Some(_), Some(_)) => {
+                sets_seeded_flag(&word_0.old_value, &word_0.new_value)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One transaction's writes to the watched words of one pool, in the layout of its hook. The store
+/// keys a pool's slots in one layout, so a pool's writes are of that layout only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PoolWrites {
+    Montra(MontraWrites),
+    Ascend(Writes<AscendWord>),
+}
+
+impl PoolWrites {
+    fn new(layout: Layout) -> Self {
+        match layout {
+            Layout::Montra => Self::Montra(MontraWrites::default()),
+            Layout::Ascend => Self::Ascend(Writes::default()),
         }
     }
 
-    /// The state change of a pool created in an earlier transaction. A transaction that places
-    /// the seed of a pool created paused re-emits every attribute and unpauses it; it can do so
-    /// once, since nothing clears the `seeded` flag. Otherwise only the attributes whose decoded
-    /// value changed are updated, so `lockFee`, which writes a byte the simulation does not read,
-    /// emits nothing. A changed `PoolKey` word pauses the pool, also when the same transaction
-    /// places the seed.
+    /// The layout a write to `word` belongs to.
+    fn layout_of(word: HookWord) -> Layout {
+        match word {
+            HookWord::Config(_) | HookWord::Key(_) => Layout::Montra,
+            HookWord::Ascend(_) => Layout::Ascend,
+        }
+    }
+
+    /// Records `write` to `word`. Fails when `word` is of another layout than the pool's writes so
+    /// far, which the store's one layout per pool rules out.
+    fn insert(&mut self, word: HookWord, write: SlotWrite) -> Result<()> {
+        match (self, word) {
+            (Self::Montra(writes), HookWord::Config(word)) => {
+                writes.config.0.insert(word, write);
+            }
+            (Self::Montra(writes), HookWord::Key(_)) => {
+                writes.changes_key |= write.old_value != write.new_value;
+            }
+            (Self::Ascend(writes), HookWord::Ascend(word)) => {
+                writes.0.insert(word, write);
+            }
+            (_, word) => {
+                return Err(anyhow!("a write to {word:?} joins a pool of another hook layout"))
+            }
+        }
+        Ok(())
+    }
+
+    /// The pool's state in its creation transaction: every attribute of its hook's layout,
+    /// created. A Montra pool is created paused unless the transaction placed its seed; an Ascend
+    /// pool is never paused.
+    fn launch_state(&self) -> HookStateChange {
+        match self {
+            Self::Ascend(writes) => HookStateChange {
+                attributes: writes.final_attributes(ChangeType::Creation),
+                pause_change: None,
+            },
+            Self::Montra(writes) => HookStateChange {
+                attributes: writes
+                    .config
+                    .final_attributes(ChangeType::Creation),
+                pause_change: (!writes.places_seed).then_some(PauseChange::Pause),
+            },
+        }
+    }
+
+    /// The state change of a pool created in an earlier transaction: the attributes whose decoded
+    /// value changed. An Ascend pool never pauses.
+    ///
+    /// A transaction that places the seed of a Montra pool created paused re-emits every attribute
+    /// and unpauses it; it can do so once, since nothing clears the `seeded` flag. So `lockFee`,
+    /// which writes a byte the simulation does not read, emits nothing. A changed `PoolKey` word
+    /// pauses a Montra pool, also when the same transaction places the seed.
     fn update_state(&self) -> HookStateChange {
-        let (attributes, mut pause_change) = if self.places_seed {
-            (self.final_attributes(ChangeType::Update), Some(PauseChange::Unpause))
-        } else {
-            (self.changed_attributes(), None)
+        let writes = match self {
+            Self::Ascend(writes) => {
+                return HookStateChange {
+                    attributes: writes.changed_attributes(),
+                    pause_change: None,
+                }
+            }
+            Self::Montra(writes) => writes,
         };
-        if self.changes_key {
+        let (attributes, mut pause_change) = if writes.places_seed {
+            (
+                writes
+                    .config
+                    .final_attributes(ChangeType::Update),
+                Some(PauseChange::Unpause),
+            )
+        } else {
+            (writes.config.changed_attributes(), None)
+        };
+        if writes.changes_key {
             // On a pool already paused (unseeded, or by an earlier key change) this emits
             // `paused` [1] as a Creation a second time, and a revert of this block would then
             // delete the attribute. No known path changes a `PoolKey` (the module doc states why),
@@ -215,64 +333,69 @@ type HookWrites = BTreeMap<u64, (Transaction, BTreeMap<String, PoolWrites>)>;
 /// pool gets its attributes even when the hook wrote nothing.
 ///
 /// This skips a write by a contract other than the listed hooks, and a write to a slot
-/// `montra_slots` does not list for the hook that made it (another hook mapping: fee tabs,
+/// `launchpad_slots` does not list for the hook that made it (another hook mapping: fee tabs,
 /// ownership, or a slot of a pool of another listed hook). It also skips a write made in the
 /// creation block before the pool's creation transaction: the component does not exist yet.
 ///
 /// Fails when a transaction has a malformed storage change ([`storage_writes`]), when a
-/// `montra_slots` value does not parse ([`SlotOwner::from_store_value`]), and when the
+/// `launchpad_slots` value does not parse ([`SlotOwner::from_store_value`]) or names a word of
+/// another layout than the pool's other writes ([`PoolWrites::insert`]), and when the
 /// transaction that sets a pool's `seeded` flag has no receipt. Extended Firehose blocks carry a
 /// receipt for every transaction, so its absence means the block source cannot show whether the
 /// seed was placed.
 fn collect_hook_writes(
     block: &eth::Block,
     params: &Params,
-    montra_slots: &impl StoreGet<String>,
-    launches: &HashMap<String, Transaction>,
+    launchpad_slots: &impl StoreGet<String>,
+    launches: &HashMap<String, Launch>,
 ) -> Result<HookWrites> {
     let mut hook_writes = HookWrites::new();
+    let hooks = params.all_hooks();
     for trace in block.transactions() {
-        let writes = storage_writes(trace, &params.montra_hooks)?;
+        let writes = storage_writes(trace, &hooks)?;
         if writes.is_empty() {
             continue;
         }
         let tx_index: u64 = trace.index.into();
         let mut pools: BTreeMap<String, PoolWrites> = BTreeMap::new();
         for write in writes {
-            let Some(value) = montra_slots.get_last(slot_store_key(&write.contract, &write.slot))
+            let Some(value) =
+                launchpad_slots.get_last(slot_store_key(&write.contract, &write.slot))
             else {
                 continue;
             };
             let owner = SlotOwner::from_store_value(&value)?;
             if launches
                 .get(&owner.component_id)
-                .is_some_and(|launch| launch.index > tx_index)
+                .is_some_and(|launch| launch.tx.index > tx_index)
             {
                 continue;
             }
             pools
                 .entry(owner.component_id)
-                .or_default()
-                .insert(owner.word, write);
+                .or_insert_with(|| PoolWrites::new(PoolWrites::layout_of(owner.word)))
+                .insert(owner.word, write)?;
         }
         if pools.is_empty() {
             continue;
         }
         for (component_id, pool_writes) in &mut pools {
-            // The receipt is read only in the one transaction of a pool's life that sets the
-            // `seeded` flag.
-            pool_writes.places_seed = pool_writes.writes_seed_words() &&
-                hook_added_liquidity(trace, params, component_id)?;
+            if let PoolWrites::Montra(writes) = pool_writes {
+                // The receipt is read only in the one transaction of a pool's life that sets the
+                // `seeded` flag.
+                writes.places_seed = writes.writes_seed_words() &&
+                    hook_added_liquidity(trace, params, component_id)?;
+            }
         }
         hook_writes.insert(tx_index, (Transaction::from(trace), pools));
     }
     for (component_id, launch) in launches {
         hook_writes
-            .entry(launch.index)
-            .or_insert_with(|| (launch.clone(), BTreeMap::new()))
+            .entry(launch.tx.index)
+            .or_insert_with(|| (launch.tx.clone(), BTreeMap::new()))
             .1
             .entry(component_id.clone())
-            .or_default();
+            .or_insert_with(|| PoolWrites::new(launch.layout));
     }
     Ok(hook_writes)
 }
@@ -295,7 +418,7 @@ fn hook_added_liquidity(
     Ok(receipt
         .logs
         .iter()
-        .filter(|log| log.address == params.pool_manager)
+        .filter(|log| log.address == *params.pool_manager())
         .filter_map(ModifyLiquidity::match_and_decode)
         .any(|event| {
             let adds_liquidity = event.liquidity_delta > BigInt::zero();
@@ -343,7 +466,7 @@ struct HookStateChange {
 /// [`builder_with`] does not copy.
 fn with_hook_state(
     changes: Vec<TransactionChanges>,
-    launches: &HashMap<String, Transaction>,
+    launches: &HashMap<String, Launch>,
     hook_writes: HookWrites,
 ) -> Result<Vec<TransactionChanges>> {
     let mut by_index = BTreeMap::new();
@@ -367,7 +490,7 @@ fn with_hook_state(
         };
         for (component_id, pool_writes) in pools {
             let state = match launches.get(&component_id) {
-                Some(launch) if launch.index == index => pool_writes.launch_state(),
+                Some(launch) if launch.tx.index == index => pool_writes.launch_state(),
                 _ => pool_writes.update_state(),
             };
             if !state.attributes.is_empty() {
@@ -431,10 +554,14 @@ mod tests {
     use super::*;
     use crate::{
         address_list::Address,
-        montra::{
-            pool_config::{pool_slots, HookWord, KeyWord},
-            test_fixtures::{params, HOOK, POOL_ID, POOL_MANAGER, TOKEN},
+        launchpad::{
+            slots::pool_slots,
+            test_fixtures::{
+                params, params_with_montra_hooks, ASCEND_HOOK, ASCEND_LAUNCH_OBSERVATION_WORD,
+                ASCEND_POOL, ASCEND_POOL_ID, ASCEND_TERMS_WORD, HOOK, POOL_ID, POOL_MANAGER, TOKEN,
+            },
         },
+        montra::pool_config::KeyWord,
         storage::{pad32, Word},
     };
 
@@ -505,7 +632,7 @@ mod tests {
         }
     }
 
-    /// The store as `store_montra_slots` leaves it once the pool exists, written out literally.
+    /// The store as `store_launchpad_slots` leaves it once the pool exists, written out literally.
     fn store() -> FakeStore {
         let hook = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
         let config = format!(
@@ -593,7 +720,7 @@ mod tests {
         Transaction { hash: vec![index as u8; 32], index, ..Default::default() }
     }
 
-    /// The pool created in transaction `index`, as `map_montra_pools_created` emits it.
+    /// The pool created in transaction `index`, as `map_launchpad_pools_created` emits it.
     fn created_pools(index: u64) -> BlockEntityChanges {
         BlockEntityChanges {
             block: None,
@@ -680,9 +807,21 @@ mod tests {
             .map(|(_, value, change)| (value, change))
     }
 
+    /// The module's output for `block` with `launchpad_slots` as the store and `shared` as the
+    /// shared pipeline's changes.
+    fn run_with(
+        launchpad_slots: &FakeStore,
+        block: &eth::Block,
+        created_pools: &BlockEntityChanges,
+        shared: Vec<TransactionChanges>,
+    ) -> Vec<TransactionChanges> {
+        let launches = created_launches(&params(), created_pools).unwrap();
+        let hook_writes =
+            collect_hook_writes(block, &params(), launchpad_slots, &launches).unwrap();
+        with_hook_state(shared, &launches, hook_writes).unwrap()
+    }
+
     fn run(block: &eth::Block, created_pools: &BlockEntityChanges) -> Vec<TransactionChanges> {
-        let launches = created_launches(created_pools).unwrap();
-        let hook_writes = collect_hook_writes(block, &params(), &store(), &launches).unwrap();
         // The shared pipeline's changes for the creation, as `collect_transaction_changes` builds
         // them from `created_pools`.
         let shared = created_pools
@@ -697,12 +836,12 @@ mod tests {
                 builder.build().unwrap()
             })
             .collect();
-        with_hook_state(shared, &launches, hook_writes).unwrap()
+        run_with(&store(), block, created_pools, shared)
     }
 
     #[test]
-    fn test_store_fixture_lists_the_slots_store_montra_slots_writes() {
-        let slots: Vec<String> = pool_slots(&POOL_ID)
+    fn test_store_fixture_lists_the_slots_store_launchpad_slots_writes() {
+        let slots: Vec<String> = pool_slots(Layout::Montra, &POOL_ID)
             .into_iter()
             .map(|(_, slot)| slot_store_key(&HOOK, &slot))
             .collect();
@@ -839,11 +978,12 @@ mod tests {
         let mut created = created_pools(1);
         created.changes[0].tx = None;
 
-        let error = created_launches(&created).expect_err("a change without a transaction fails");
+        let error = created_launches(&params(), &created)
+            .expect_err("a change without a transaction fails");
 
         assert_eq!(
             error.to_string(),
-            "map_montra_pools_created emitted a change without a transaction"
+            "map_launchpad_pools_created emitted a change without a transaction"
         );
     }
 
@@ -874,10 +1014,10 @@ mod tests {
     fn test_builder_with_keeps_the_production_creation_shape() {
         let created = BlockEntityChanges {
             block: None,
-            changes: crate::variant_modules::map_montra_pools_created::pools_created(
+            changes: crate::variant_modules::map_launchpad_pools_created::pools_created(
                 &params(),
-                &crate::montra::test_fixtures::launch_block(vec![
-                    crate::montra::test_fixtures::initialize_log(&POOL_MANAGER, &HOOK),
+                &crate::launchpad::test_fixtures::launch_block(vec![
+                    crate::launchpad::test_fixtures::initialize_log(&POOL_MANAGER, &HOOK),
                 ]),
             ),
         };
@@ -959,7 +1099,7 @@ mod tests {
     fn test_seed_transaction_without_a_receipt_fails_the_block() {
         let mut launch = trace(1, launch_writes(), vec![seed_log(&POOL_MANAGER, &POOL_ID, &HOOK)]);
         launch.receipt = None;
-        let launches = created_launches(&created_pools(1)).unwrap();
+        let launches = created_launches(&params(), &created_pools(1)).unwrap();
 
         let error = collect_hook_writes(&block(vec![launch]), &params(), &store(), &launches)
             .expect_err("a seed transaction without a receipt fails");
@@ -1356,10 +1496,10 @@ mod tests {
         format!("0x{}", hex::encode(OTHER_POOL_ID))
     }
 
-    /// [`store`] with the slots of [`OTHER_POOL_ID`] too, as `store_montra_slots` writes them.
+    /// [`store`] with the slots of [`OTHER_POOL_ID`] too, as `store_launchpad_slots` writes them.
     fn store_with_other_pool() -> FakeStore {
         let mut store = store();
-        for (word, slot) in pool_slots(&OTHER_POOL_ID) {
+        for (word, slot) in pool_slots(Layout::Montra, &OTHER_POOL_ID) {
             let owner = SlotOwner { component_id: other_pool(), word };
             store
                 .0
@@ -1370,12 +1510,17 @@ mod tests {
 
     /// A write by the hook to `word` of [`OTHER_POOL_ID`]'s `PoolConfig`.
     fn other_config_write(word: ConfigWord, old: Word, new: Word, ordinal: u64) -> StorageChange {
-        let (_, slot) = pool_slots(&OTHER_POOL_ID)
+        let (_, slot) = pool_slots(Layout::Montra, &OTHER_POOL_ID)
             .into_iter()
             .find(|(hook_word, _)| *hook_word == HookWord::Config(word))
             .unwrap();
+        hook_write(&HOOK, slot, old, new, ordinal)
+    }
+
+    /// A write by `hook` to `slot`.
+    fn hook_write(hook: &Address, slot: Word, old: Word, new: Word, ordinal: u64) -> StorageChange {
         StorageChange {
-            address: HOOK.to_vec(),
+            address: hook.to_vec(),
             key: slot.to_vec(),
             old_value: old.to_vec(),
             new_value: new.to_vec(),
@@ -1429,8 +1574,7 @@ mod tests {
         let second_hook = hex!("0000000000000000000000000000000000000002");
         let mut write = config_write(ConfigWord::Terms, STAGE_3_WORD_0, STAGE_4_WORD_0, 1);
         write.address = second_hook.to_vec();
-        let mut params = params();
-        params.montra_hooks.insert(second_hook);
+        let params = params_with_montra_hooks(&[HOOK, second_hook]);
 
         let hook_writes = collect_hook_writes(
             &block(vec![trace(2, vec![write], vec![])]),
@@ -1441,5 +1585,354 @@ mod tests {
         .unwrap();
 
         assert_eq!(hook_writes, HookWrites::new());
+    }
+
+    // Ascend pools: pool 0xa138ea3b... of the hook 0xe0def422..., written with the layouts of
+    // `crate::ascend`.
+    const ASCEND_WORD_2: Word = ASCEND_TERMS_WORD;
+    const ASCEND_WORD_3: Word = ASCEND_LAUNCH_OBSERVATION_WORD;
+    // Bid word 2: windowStart 0, maxClip 0xa49e728e240f3a9d.
+    const ASCEND_BID_WORD_2: Word =
+        hex!("00000000000000000000000000000000000000a49e728e240f3a9d0000000000");
+
+    fn ascend_store() -> FakeStore {
+        let mut store = FakeStore(HashMap::new());
+        for (word, slot) in pool_slots(Layout::Ascend, &ASCEND_POOL_ID) {
+            let owner = SlotOwner { component_id: ASCEND_POOL.to_string(), word };
+            store
+                .0
+                .insert(slot_store_key(&ASCEND_HOOK, &slot), owner.to_store_value());
+        }
+        store
+    }
+
+    /// A write by the Ascend hook to `word` of the pool.
+    fn ascend_write(word: AscendWord, old: Word, new: Word, ordinal: u64) -> StorageChange {
+        let (_, slot) = pool_slots(Layout::Ascend, &ASCEND_POOL_ID)
+            .into_iter()
+            .find(|(pool_word, _)| *pool_word == HookWord::Ascend(word))
+            .unwrap();
+        hook_write(&ASCEND_HOOK, slot, old, new, ordinal)
+    }
+
+    fn created_ascend_pool(index: u64) -> BlockEntityChanges {
+        BlockEntityChanges {
+            block: None,
+            changes: vec![TransactionEntityChanges {
+                tx: Some(tx(index)),
+                component_changes: vec![ProtocolComponent::new(ASCEND_POOL)
+                    .with_tokens(&[TOKEN, [0xaa; 20]])
+                    .with_attributes(&[
+                        ("pool_id", ASCEND_POOL_ID.to_vec()),
+                        ("hooks", ASCEND_HOOK.to_vec()),
+                    ])],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn run_ascend(
+        block: &eth::Block,
+        created_pools: &BlockEntityChanges,
+    ) -> Vec<TransactionChanges> {
+        run_with(&ascend_store(), block, created_pools, vec![])
+    }
+
+    fn attributes_of_ascend(change: &TransactionChanges) -> Vec<(String, Vec<u8>, ChangeType)> {
+        attributes_of(change, ASCEND_POOL)
+    }
+
+    /// The launch writes `PoolData` words 2 and 3 and `Bid` word 2, and not `Bid`
+    /// words 0 and 1: every attribute is created, those two as zero, and the pool is not paused.
+    #[test]
+    fn test_ascend_launch_creates_every_attribute_from_its_final_words() {
+        let launch = vec![
+            ascend_write(AscendWord::Terms, [0; 32], ASCEND_WORD_2, 10),
+            ascend_write(AscendWord::Observation, [0; 32], ASCEND_WORD_3, 11),
+            ascend_write(AscendWord::Window, [0; 32], ASCEND_BID_WORD_2, 12),
+        ];
+
+        let changes = run_ascend(&block(vec![trace(1, launch, vec![])]), &created_ascend_pool(1));
+
+        assert_eq!(changes.len(), 1);
+        let created = ChangeType::Creation;
+        let zero_word = vec![0u8; 32];
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                ("ascend_bid_filled_in_window".to_string(), zero_word.clone(), created),
+                ("ascend_bid_inventory".to_string(), zero_word, created),
+                (
+                    "ascend_bid_max_clip".to_string(),
+                    hex!("0000000000000000a49e728e240f3a9d").to_vec(),
+                    created
+                ),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0), created),
+                ("ascend_discount".to_string(), u64_bytes(0), created),
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000883956ab34ccb0338ab12cd").to_vec(),
+                    created
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6afecd23), created),
+                ("ascend_fee_pips".to_string(), u64_bytes(10000), created),
+                ("ascend_observed_tick".to_string(), hex!("fff9e260").to_vec(), created),
+                ("ascend_start_tick".to_string(), hex!("fffd6d68").to_vec(), created),
+                ("ascend_token_is_currency0".to_string(), vec![0], created),
+            ]
+        );
+        assert_eq!(paused_of(&changes[0]), None);
+    }
+
+    /// A pool whose hook wrote nothing in the creation transaction still gets every attribute, as
+    /// zero, and no pause. The simulation refuses such a pool for its zero EMA.
+    #[test]
+    fn test_ascend_launch_whose_hook_wrote_nothing_is_created_with_zeros() {
+        let changes = run_ascend(&block(vec![]), &created_ascend_pool(1));
+
+        let created = ChangeType::Creation;
+        let zero_word = vec![0u8; 32];
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                ("ascend_bid_filled_in_window".to_string(), zero_word.clone(), created),
+                ("ascend_bid_inventory".to_string(), zero_word, created),
+                ("ascend_bid_max_clip".to_string(), vec![0; 16], created),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0), created),
+                ("ascend_discount".to_string(), u64_bytes(0), created),
+                ("ascend_ema_sqrt_price_x96".to_string(), vec![0; 20], created),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0), created),
+                ("ascend_fee_pips".to_string(), u64_bytes(0), created),
+                ("ascend_observed_tick".to_string(), vec![0; 4], created),
+                ("ascend_start_tick".to_string(), vec![0; 4], created),
+                ("ascend_token_is_currency0".to_string(), vec![0], created),
+            ]
+        );
+        assert_eq!(paused_of(&changes[0]), None);
+    }
+
+    /// A swap with dt > 0 rewrites word 3 only: the EMA and its timestamp change, the tick and the
+    /// discount do not, and only the changed attributes are updated.
+    #[test]
+    fn test_ascend_swap_updates_only_the_attributes_it_changed() {
+        let mut after = ASCEND_WORD_3;
+        after[12..32].copy_from_slice(&hex!("00000000000000000883956ab34ccb0338ab12ce"));
+        after[7..12].copy_from_slice(&hex!("006afecd24"));
+
+        let changes = run_ascend(
+            &block(vec![trace(
+                4,
+                vec![ascend_write(AscendWord::Observation, ASCEND_WORD_3, after, 3)],
+                vec![],
+            )]),
+            &BlockEntityChanges::default(),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tx, Some(tx(4)));
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000883956ab34ccb0338ab12ce").to_vec(),
+                    ChangeType::Update
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6afecd24), ChangeType::Update),
+            ]
+        );
+    }
+
+    /// A fill consumes the inventory, adds to the window's filled amount and moves the window:
+    /// `Bid` words 0, 1 and 2 in one transaction, word 0 written twice (the first old value and the
+    /// last new value net by ordinal).
+    #[test]
+    fn test_ascend_fill_updates_the_bid_words_netted_by_ordinal() {
+        let word = |value: u8| {
+            let mut word = [0u8; 32];
+            word[31] = value;
+            word
+        };
+        let mut window_after = ASCEND_BID_WORD_2;
+        window_after[27..32].copy_from_slice(&hex!("006b000000"));
+        let writes = vec![
+            ascend_write(AscendWord::Inventory, word(9), word(5), 1),
+            ascend_write(AscendWord::Inventory, word(5), word(4), 4),
+            ascend_write(AscendWord::Filled, word(0), word(3), 2),
+            ascend_write(AscendWord::Window, ASCEND_BID_WORD_2, window_after, 3),
+        ];
+
+        let changes =
+            run_ascend(&block(vec![trace(6, writes, vec![])]), &BlockEntityChanges::default());
+
+        let updated = ChangeType::Update;
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                ("ascend_bid_filled_in_window".to_string(), word(3).to_vec(), updated),
+                ("ascend_bid_inventory".to_string(), word(4).to_vec(), updated),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0x6b000000), updated),
+            ]
+        );
+    }
+
+    /// The word values of the fill tx 0xffd66b8f... in block 3527702 on pool 0x21e12450...: its
+    /// storage diff of the hook (debug_traceTransaction, prestateTracer in diff mode, on the
+    /// Elysium node) holds `PoolData` word 3 and `Bid` words 0, 1 and 2 with these old and new
+    /// values, except the old `Bid` word 2, which is this file's fixture. The test writes them to
+    /// the slots of the fixture pool, since decoding does not depend on the pool.
+    #[test]
+    fn test_ascend_fill_of_the_chain_updates_the_observation_and_the_bid() {
+        let writes = vec![
+            ascend_write(
+                AscendWord::Observation,
+                hex!("a6faee65fdd4eb006af2315200000000000000000035c99cb59808be1c46b249"),
+                hex!("9c77377cfdd4e0006af23cac00000000000000000035caf9bfe08f36589a8b9c"),
+                1,
+            ),
+            ascend_write(
+                AscendWord::Inventory,
+                hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb24"),
+                hex!("0000000000000000000000000000000000000000000000000000000000000001"),
+                2,
+            ),
+            ascend_write(
+                AscendWord::Filled,
+                [0; 32],
+                hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb23"),
+                3,
+            ),
+            ascend_write(
+                AscendWord::Window,
+                ASCEND_BID_WORD_2,
+                hex!("00000000000000000000000000000000000000a49e728e240f3a9d006af23cac"),
+                4,
+            ),
+        ];
+
+        let changes =
+            run_ascend(&block(vec![trace(5, writes, vec![])]), &BlockEntityChanges::default());
+
+        let updated = ChangeType::Update;
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![
+                (
+                    "ascend_bid_filled_in_window".to_string(),
+                    hex!("00000000000000000000000000000000000000000000000000006f5cd6b3fb23")
+                        .to_vec(),
+                    updated
+                ),
+                (
+                    "ascend_bid_inventory".to_string(),
+                    hex!("0000000000000000000000000000000000000000000000000000000000000001")
+                        .to_vec(),
+                    updated
+                ),
+                ("ascend_bid_window_start".to_string(), u64_bytes(0x6af23cac), updated),
+                ("ascend_discount".to_string(), u64_bytes(0x9c77377c), updated),
+                (
+                    "ascend_ema_sqrt_price_x96".to_string(),
+                    hex!("00000000000000000035caf9bfe08f36589a8b9c").to_vec(),
+                    updated
+                ),
+                ("ascend_ema_updated_at".to_string(), u64_bytes(0x6af23cac), updated),
+                ("ascend_observed_tick".to_string(), hex!("fffdd4e0").to_vec(), updated),
+            ]
+        );
+    }
+
+    /// `fundBid` writes `Bid` word 0 only.
+    #[test]
+    fn test_ascend_fund_bid_updates_the_inventory() {
+        let mut funded = [0u8; 32];
+        funded[24..].copy_from_slice(&1_000_000_000_000_000_000u64.to_be_bytes());
+
+        let changes = run_ascend(
+            &block(vec![trace(
+                2,
+                vec![ascend_write(AscendWord::Inventory, [0; 32], funded, 1)],
+                vec![],
+            )]),
+            &BlockEntityChanges::default(),
+        );
+
+        assert_eq!(
+            attributes_of_ascend(&changes[0]),
+            vec![("ascend_bid_inventory".to_string(), funded.to_vec(), ChangeType::Update)]
+        );
+    }
+
+    /// A write by another contract to a watched slot.
+    fn foreign_write() -> StorageChange {
+        let mut write = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 1);
+        write.address = POOL_MANAGER.to_vec();
+        write
+    }
+
+    /// A write to an unwatched slot of the hook (`accruedFees` at slot 6).
+    fn unwatched_write() -> StorageChange {
+        let mut write = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 1);
+        write.key = vec![0x06];
+        write
+    }
+
+    /// A write that changes no decoded value: the creator bytes of `PoolData` word 2.
+    fn undecoded_write() -> StorageChange {
+        let mut creator_changed = ASCEND_WORD_2;
+        creator_changed[31] ^= 1;
+        ascend_write(AscendWord::Terms, ASCEND_WORD_2, creator_changed, 1)
+    }
+
+    #[rstest]
+    #[case::foreign_contract(foreign_write())]
+    #[case::unwatched_slot(unwatched_write())]
+    #[case::undecoded_bytes(undecoded_write())]
+    fn test_ascend_write_that_changes_no_attribute_emits_nothing(#[case] write: StorageChange) {
+        let changes =
+            run_ascend(&block(vec![trace(2, vec![write], vec![])]), &BlockEntityChanges::default());
+
+        assert_eq!(changes, vec![]);
+    }
+
+    /// The Montra hook writing the Ascend pool's slot is not that pool's write: the store keys a
+    /// slot by the hook it belongs to.
+    #[test]
+    fn test_ascend_slot_written_by_the_montra_hook_is_ignored() {
+        let mut write = ascend_write(AscendWord::Terms, ASCEND_WORD_2, ASCEND_WORD_3, 1);
+        write.address = HOOK.to_vec();
+
+        let hook_writes = collect_hook_writes(
+            &block(vec![trace(2, vec![write], vec![])]),
+            &params(),
+            &ascend_store(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(hook_writes, HookWrites::new());
+    }
+
+    /// A write before the pool's creation transaction in the same block is skipped, as for Montra.
+    #[test]
+    fn test_ascend_writes_before_the_creation_transaction_are_skipped() {
+        let launch = vec![
+            ascend_write(AscendWord::Terms, [0; 32], ASCEND_WORD_2, 10),
+            ascend_write(AscendWord::Observation, [0; 32], ASCEND_WORD_3, 11),
+        ];
+        let early = vec![ascend_write(AscendWord::Inventory, [0; 32], ASCEND_WORD_2, 1)];
+
+        let changes = run_ascend(
+            &block(vec![trace(0, early, vec![]), trace(1, launch, vec![])]),
+            &created_ascend_pool(1),
+        );
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tx, Some(tx(1)));
+        assert!(attributes_of_ascend(&changes[0]).contains(&(
+            "ascend_bid_inventory".to_string(),
+            vec![0; 32],
+            ChangeType::Creation
+        )));
     }
 }

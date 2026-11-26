@@ -238,6 +238,8 @@ mod tests {
                 // Fees are irrelevant to the beforeSwap method.
                 fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
                 tick_spacing: 10,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Swap params and hook data taken from tenderly simulation: input to innermost
@@ -297,6 +299,8 @@ mod tests {
                 // Irrelevant: Fee is not used in afterSwap calculations.
                 fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0 },
                 tick_spacing: 10,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Taken from tenderly simulation: input to innermost afterSwap call (directly to hook,

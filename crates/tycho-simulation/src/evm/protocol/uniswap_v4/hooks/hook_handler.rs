@@ -16,7 +16,8 @@ use crate::evm::{
         hooks::{
             models::{
                 AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
-                BeforeSwapParameters, HookSpotFees, SwapOutcome, SwapParams, WithGasEstimate,
+                BeforeSwapParameters, HookSpotFees, StateContext, SwapOutcome, SwapParams,
+                WithGasEstimate,
             },
             utils::{has_permission, HookOptions},
         },
@@ -84,6 +85,17 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// An `InvalidInput` refuses this one swap, as a revert of the hook on this input would, and
     /// `get_amount_out` returns it to the caller unchanged; any other error means the hook
     /// cannot be simulated, and `get_amount_out` reports it as `FatalError`.
+    ///
+    /// `before_swap` leaves the handler unchanged. A hook whose swap writes its own storage must
+    /// also implement [`HookHandler::handler_after_swap`], or the next swap of a route reads the
+    /// old storage.
+    ///
+    /// The gas estimate covers the hook's `beforeSwap` frame. A hook whose delta takes the whole
+    /// input leaves the pool leg a no-op, which `get_amount_out` charges as the no-op `swap` alone,
+    /// so its estimate also covers the route around the swap (the router, the transfer in and the
+    /// settlement) wherever that is not already in it. The generic VM hook's estimate includes the
+    /// call's intrinsic gas, which traced whole-input swaps of Bunni and EulerSwap on Ethereum
+    /// match; the Ascend hook adds a measured route charge.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,
@@ -94,7 +106,9 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
     /// Simulates the afterSwap Solidity behaviour.
     ///
     /// Errors are classified as for [`HookHandler::before_swap`]: an `InvalidInput` refuses this
-    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`.
+    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`. Like
+    /// `before_swap`, it leaves the handler as it is; storage the swap writes belongs in
+    /// [`HookHandler::handler_after_swap`].
     fn after_swap(
         &self,
         params: AfterSwapParameters,
@@ -209,6 +223,29 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         Err(SimulationError::RecoverableError(
             "get_amount_ranges is not implemented for this hook".into(),
         ))
+    }
+
+    /// The hook as it stands after the swap `get_amount_out` just quoted, for a hook whose own
+    /// storage changes with the swap (an observation, a consumed inventory), so that the state the
+    /// quote returns prices the next swap of a route correctly.
+    ///
+    /// `context` and `swap_params` are the ones `before_swap` saw, so the pool's price and tick
+    /// are those from before the swap. It runs once the pool swapped and `check_swap_outcome`
+    /// accepted the result, before `after_swap`; a swap refused later returns its error and drops
+    /// the handler. `None` keeps the hook as it is, which is the default.
+    ///
+    /// Errors are classified as for [`HookHandler::before_swap`]: an `InvalidInput` refuses this
+    /// one swap and reaches the caller unchanged, and any other error becomes `FatalError`.
+    ///
+    /// The generic VM handler keeps the default although the hook bytecode it runs may write the
+    /// hook's storage on a swap: those writes reach `after_swap` of the same swap only, so the next
+    /// swap of a route through the same pool reads the hook's storage from before the route.
+    fn handler_after_swap(
+        &self,
+        _context: &StateContext,
+        _swap_params: &SwapParams,
+    ) -> Result<Option<Box<dyn HookHandler>>, SimulationError> {
+        Ok(None)
     }
 
     // Called on each state update to update the internal state of the HookHandler

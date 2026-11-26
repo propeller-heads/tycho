@@ -3,7 +3,7 @@ substreams_yaml_path: ./elysium-uniswap-v4-with-hooks.yaml
 protocol_system: "uniswap_v4_hooks"
 protocol_type_names:
   - "uniswap_v4_pool"
-module_name: "map_montra_enriched_block_changes"
+module_name: "map_launchpad_enriched_block_changes"
 # Every direction of every pool: the hook reverts any input past the bound get_limits reports. A
 # buy past the seed's extreme tick reverts PartialFillRejected; a sell past the opening price
 # reverts PastOpening or PartialFillRejected. The exception is the dust band near the opening,
@@ -13,6 +13,14 @@ module_name: "map_montra_enriched_block_changes"
 # simulation drops such a tick, so on a pool that has one the limit falls short by up to 2 raw
 # input units per such tick crossed. Only outside liquidity can create one. The third test's pools
 # hold outside liquidity, none with such a tick, so no rounding is declared.
+# The Ascend pools (the last two tests) are hard too, with no rounding: the launchpad's one position
+# per pool is never removed, so no tick has zero net liquidity. A buy past the curve end or a sell
+# past the position's start edge leaves input unconsumed, and the PoolManager reverts
+# CurrencyNotSettled on it. The Elysium PoolManager's runtime code at block 8365800 equals
+# v4-core's PoolManager's but for the 20-byte self-address immutable. Its unlock reverts
+# CurrencyNotSettled (0x5212cba1) on any nonzero delta at the end of the callback, a credit
+# included. On Elysium at 8365800 and 8660000, an unlock whose callback settles 1 wei of native it
+# does not owe reverts so.
 limits:
   kind: hard
 # The PoolManager holds every pool's tokens in one balance and accounts no per-pool amount; the
@@ -492,3 +500,120 @@ tests:
           key_lp_fee: "0x00800000"
         creation_tx: "0xc994ae487ce2ec3a4901c477777cab1629bef76f89b0d23c014c49ee70443c44"
         tvl_only: *montra_tvl_only
+  # Ascend launchpad pools (hook 0xe0def422...), whose hook state comes from the launch
+  # transaction's storage writes: every expected pool launches inside the range. Both token
+  # orientations, quotes USDC, WHYPE and KNTQ, fees 1-3%, one builder-fee pool, and pools with and
+  # without a dev buy.
+  - name: test_ascend_launches_in_both_orientations
+    start_block: 3255000
+    stop_block: 3275000
+    expected_components:
+      # USDC quote as currency1, 1.5% fee, with a dev buy; launched at block 3264034
+      - id: "0xea03c9c459b4457396aef2a54b563cfaf5c70bccf2c6babe09862f626ffb9998"
+        tokens:
+          - "0x660a22496a4ec7bcb5f6d6c0e3b8aa2550372a45"
+          - "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xea03c9c459b4457396aef2a54b563cfaf5c70bccf2c6babe09862f626ffb9998"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xbb63e0b09dfd0d1b506b5847b61291aeb82aeab42628b63819bbc8aa904e384a"
+        tvl_only: &ascend_tvl_only
+          bps: 0.01
+          wei: 1000
+          reason: "indexed balances are the summed Swap and ModifyLiquidity flows and sit above the UniswapV4Balances lens, which rounds down from the final price, by about one Q96 price step per swap, never below. Ascend swaps charge no LP fee. The measurements and their reproduction are in the package Readme, section Balances of Ascend pools."
+      # WHYPE quote as currency1, 2% fee; launched at block 3261205
+      - id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
+        tokens:
+          - "0x12ca80a21d7b779d65eb24da028377efda4c2a6d"
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xe0cfec6208b92b324ef7fa7c97f62354823b97ae1c4e074183bdc8a332949bb7"
+        tvl_only: *ascend_tvl_only
+      # WHYPE quote as currency0, 3% fee; launched at block 3258042
+      - id: "0x2af577e53577561bd0d0d7d46fa697b03a74a31aa999498d6f7271a3afaebc03"
+        tokens:
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+          - "0xd86f8bfd7fd7748009075037fcfe78c3013f4224"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x2af577e53577561bd0d0d7d46fa697b03a74a31aa999498d6f7271a3afaebc03"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xb9e481f26a78e7c32baa2d314a145cc058f0e93e61b36532b7c3853687d22de2"
+        tvl_only: *ascend_tvl_only
+      # KNTQ quote as currency1, 1% fee; launched at block 3268520
+      - id: "0x914d891afa8d95ee7ea5d3f255df4cccd12720a2b4448f914a8a262415c49f09"
+        tokens:
+          - "0x6a850ad1d445fa35d8e821acb773c261fa722e4b"
+          - "0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x914d891afa8d95ee7ea5d3f255df4cccd12720a2b4448f914a8a262415c49f09"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x194fccb73ff9dd1d0b71743a0cd59ad01c7b7620344ec1120a3e905f036bf15c"
+        tvl_only: *ascend_tvl_only
+      # USDC quote as currency0, 1.5% fee and a 0.5% builder fee; launched at block 3258830
+      - id: "0x723b1867f8a08a5ca91c53d256a66230c3d1bf3e65592327bbac2339d647dcf8"
+        tokens:
+          - "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65"
+          - "0xdc1a596852fa3c7b722e19c0feadaba3ab6998b5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x723b1867f8a08a5ca91c53d256a66230c3d1bf3e65592327bbac2339d647dcf8"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x8a12467a0ddff0859f72d17d41c7e3ddc242afde7ed9ecbd26247ae8b739846a"
+        tvl_only: *ascend_tvl_only
+      # WHYPE quote as currency0, 1% fee; launched at block 3266703
+      - id: "0x8ed85f008212d2ee1cb30d1fb241f77326d8597a8612ee14119ad69450094121"
+        tokens:
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+          - "0xd0a3b1ddcbc42e5e919a986a21c13b8dc9b10903"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x8ed85f008212d2ee1cb30d1fb241f77326d8597a8612ee14119ad69450094121"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x5aaa22676de68c3290909137ba58f68c6565f7ef83fdce05d7aa765643a660a3"
+        tvl_only: *ascend_tvl_only
+      # KNTQ quote as currency1, no dev buy; launched at block 3255759
+      - id: "0xd4916d4721c54d66ae4e594fb2ad2dbc12fd295cfd8e9a9359a7d0cfe271acd2"
+        tokens:
+          - "0xc19a4e7a028b3617b647997a22309a5233412154"
+          - "0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xd4916d4721c54d66ae4e594fb2ad2dbc12fd295cfd8e9a9359a7d0cfe271acd2"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x54927397bb63df048da4b39e7bb4fda890d3697afec41354b2b5c4bc2b44db5f"
+        tvl_only: *ascend_tvl_only
+  # The one fill whose pool launches inside a bounded range: pool 0x21e12450... launched at 3437284,
+  # its bid funded at 3527638 and filled at 3527702, so the range covers the indexing of the bid
+  # words through a fund and a fill. The fill leaves an inventory of 1, so the quotes at the stop
+  # block take no fill: the simulated fill path (sizing, fill delta, fill gas) is covered by the
+  # simulation's golden vectors, not by this file. The hook emitted 777 Filled events on 43 pools
+  # to block 8365800; this is the only pool of them that launches inside a range this short.
+  - name: test_ascend_bid_funded_and_filled
+    start_block: 3437200
+    stop_block: 3528400
+    expected_components:
+      # WHYPE quote as currency1, launched at block 3437284, funded at 3527638, filled at 3527702
+      - id: "0x21e12450a086d030c8122c49bd1bc7444ffeee115a0bd979ddacc84af7c05188"
+        tokens:
+          - "0x16fe32c25de383bfd0a99ed56a5274deab0d6c94"
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x21e12450a086d030c8122c49bd1bc7444ffeee115a0bd979ddacc84af7c05188"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x8e7e10b5e1c9b73d035d68bbb021c21bc56e241de3786d3f7ebff091d533f500"
+        tvl_only: *ascend_tvl_only

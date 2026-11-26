@@ -17,6 +17,10 @@ pub struct StateContext {
     pub currency_1: Address,
     pub fees: UniswapV4Fees,
     pub tick_spacing: i32,
+    /// The pool's square-root price before the swap, as a Q64.96.
+    pub sqrt_price_x96: U256,
+    /// The pool's current tick before the swap.
+    pub tick: i32,
 }
 
 #[derive(Debug, Clone)]
