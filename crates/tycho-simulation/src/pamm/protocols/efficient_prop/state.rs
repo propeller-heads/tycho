@@ -464,6 +464,41 @@ impl Deadline {
     }
 }
 
+/// A deadline already past, which a state read back from a payload without one is given: a side
+/// whose deadline is unknown refuses every quote.
+#[expect(clippy::unnecessary_wraps, reason = "the shape serde's `default` takes")]
+fn lapsed() -> Option<Deadline> {
+    Some(Deadline { at: Instant::now(), unix_ms: 0 })
+}
+
+/// A side's deadline on the wire: its Unix milliseconds, or null where it has none. The monotonic
+/// `Instant` is rebuilt from the wall clock at the read, so it stays this process's own.
+mod until_ms {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Deadline;
+
+    #[expect(clippy::ref_option, reason = "the shape serde's `with` takes")]
+    pub(super) fn serialize<S: Serializer>(
+        until: &Option<Deadline>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        until
+            .map(|until| until.unix_ms)
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Deadline>, D::Error> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(u64::MAX, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+        Ok(Option::<u64>::deserialize(deserializer)?
+            .map(|unix_ms| Deadline::at_unix_ms(unix_ms, now_ms)))
+    }
+}
+
 /// One listing door as the door quoted it at one block: its pair, and each side's quotes at the
 /// sizes sampled.
 ///
@@ -512,12 +547,13 @@ pub struct EfficientPropState {
     pub(super) through_fallback: bool,
     /// From when the bid refuses every quote: the last moment a route priced from it can be sent
     /// and still land while the price print it read lives, where that is sooner than the book's
-    /// life. `None` where the side quotes for as long as the book is served. Never serialized: a
-    /// state read back quotes without one.
-    #[serde(skip)]
+    /// life. `None` where the side quotes for as long as the book is served. Serialized as its
+    /// Unix milliseconds and read back against the wall clock, so a state read back refuses from
+    /// the same moment; a payload without the field reads as already lapsed, never as no deadline.
+    #[serde(default = "lapsed", with = "until_ms")]
     pub(super) bid_until: Option<Deadline>,
     /// The same for the ask.
-    #[serde(skip)]
+    #[serde(default = "lapsed", with = "until_ms")]
     pub(super) ask_until: Option<Deadline>,
 }
 
@@ -1397,7 +1433,7 @@ mod tests {
     }
 
     /// A side whose print lapses before the book's life ends stops quoting at its deadline: here
-    /// the bid's has passed and the ask's has not. A state read back quotes without one.
+    /// the bid's has passed and the ask's has not. A state read back keeps them.
     #[test]
     fn a_side_past_its_deadline_quotes_nothing() {
         let past = Deadline { at: Instant::now(), unix_ms: 1 };
@@ -1415,9 +1451,73 @@ mod tests {
             .spot_price(&weth(), &usdc())
             .is_err());
         assert_eq!(buy.unwrap().amount, amount(1_000_000_000_000_000_000));
+    }
+
+    /// A state read back enforces the deadlines it was written with: it quotes before them and
+    /// refuses after, and a side with none still has none.
+    #[test]
+    fn a_state_read_back_keeps_its_deadlines() {
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let bid_ms = now_ms + 60_000;
+        let state = named_state().with_deadlines(Some(Deadline::at_unix_ms(bid_ms, now_ms)), None);
+
         let back: EfficientPropState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!((back.bid_until, back.ask_until), (None, None));
+
+        assert_eq!(
+            back.bid_until
+                .map(|until| until.unix_ms),
+            Some(bid_ms)
+        );
+        assert_eq!(back.ask_until, None);
+        let sell = amount(500_000_000_000_000_000);
+        let before = back.bid_until.unwrap().at - std::time::Duration::from_secs(1);
+        assert!(back
+            .ensure_quotable(SwapDirection::BaseToQuote, before)
+            .is_ok());
+        let after = back.bid_until.unwrap().at + std::time::Duration::from_secs(1);
+        assert!(back
+            .ensure_quotable(SwapDirection::BaseToQuote, after)
+            .is_err());
+        assert!(back
+            .get_amount_out(sell, &weth(), &usdc())
+            .is_ok());
+    }
+
+    /// A state read back whose deadline had passed at the write still refuses.
+    #[test]
+    fn a_state_read_back_past_its_deadline_refuses() {
+        let state =
+            named_state().with_deadlines(Some(Deadline { at: Instant::now(), unix_ms: 1 }), None);
+
+        let back: EfficientPropState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+
+        let sell = back.get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc());
+        assert!(matches!(sell, Err(SimulationError::RecoverableError(_))), "{sell:?}");
+    }
+
+    /// A payload without the deadline fields, as an older writer made it, refuses both sides
+    /// rather than quoting for ever.
+    #[test]
+    fn a_payload_without_deadlines_refuses() {
+        let mut json = serde_json::to_value(named_state()).unwrap();
+        let object = json.as_object_mut().unwrap();
+        object.remove("bid_until");
+        object.remove("ask_until");
+
+        let back: EfficientPropState = serde_json::from_value(json).unwrap();
+
+        let sell = back.get_amount_out(amount(500_000_000_000_000_000), &weth(), &usdc());
+        let buy = back.get_amount_out(amount(3_010_000_000), &usdc(), &weth());
+        assert!(matches!(sell, Err(SimulationError::RecoverableError(_))), "{sell:?}");
+        assert!(matches!(buy, Err(SimulationError::RecoverableError(_))), "{buy:?}");
     }
 
     /// The door refuses a size it cannot fill whole: the state hands back the most it fills.
