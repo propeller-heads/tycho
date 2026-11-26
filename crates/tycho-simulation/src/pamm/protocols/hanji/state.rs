@@ -545,7 +545,8 @@ mod tests {
 
     /// Every recorded fill on the three markets, both directions, for both kinds of caller,
     /// priced wei for wei from the book that caller gets against what the caller's balance
-    /// gained; the recorded sizes past a side's depth, which the proxy fills in part, are refused.
+    /// gained; the recorded sizes past a side's depth, which the proxy fills in part, are refused,
+    /// and what the proxy paid for them is the limit's output.
     #[test]
     fn quotes_match_the_proxy_wei_for_wei() {
         let fixture = fixture();
@@ -554,10 +555,13 @@ mod tests {
             for case in &fixture.market(orderbook).cases {
                 let state = state(orderbook, case.caller);
                 let amount_in = case.amount_in;
-                let (limit, _) = limits(&state, case.sell_base);
+                let (limit, limit_out) = limits(&state, case.sell_base);
                 let result = quote(&state, amount_in, case.sell_base);
                 if amount_in > limit {
+                    // The proxy fills such an input only up to its book, which pays out exactly
+                    // what the limit says the whole side does.
                     assert!(result.is_err(), "{case:?} is past the book");
+                    assert_eq!(limit_out, case.amount_out, "{case:?}");
                     refused += 1;
                     continue;
                 }

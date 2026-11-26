@@ -723,8 +723,8 @@ mod tests {
     use crate::pamm::protocols::hanji::{
         state::Level,
         test_support::{
-            book_config, cbbtc, eth, fixture, levels, source, usdc, Caller, FakeNode, CBBTC_ETH,
-            CBBTC_USDC, ETH_USDC, NVDA_USDC, TEST_API_TIMEOUT,
+            book_config, cbbtc, eth, fixture, levels, source, state, usdc, Caller, FakeNode, Rates,
+            CBBTC_ETH, CBBTC_USDC, ETH_USDC, NVDA_USDC, TEST_API_TIMEOUT,
         },
     };
 
@@ -796,6 +796,40 @@ mod tests {
         }
         let eth_usdc = &snapshot.books[&expected[0].0].component;
         assert_eq!(eth_usdc.tokens, vec![eth(), usdc()]);
+    }
+
+    /// Each published state is the market's config and the book its proxy fills the taker
+    /// against, field for field: both scalings, the taker's rate (the aggressive commission plus
+    /// the passive payout, not the passive commission), and both sides from the same quoter.
+    #[rstest]
+    #[case::contract_taker(false, Caller::Contract)]
+    #[case::whitelisted_taker(true, Caller::Direct)]
+    #[tokio::test]
+    async fn a_published_state_is_the_config_and_the_takers_book(
+        #[case] whitelisted: bool,
+        #[case] book: Caller,
+    ) {
+        let node = FakeNode { rates: Some(Rates::DISTINCT), ..FakeNode::new() };
+        if whitelisted {
+            node.whitelist_the_router_everywhere();
+        }
+        let (_node, source, _server) = served(node, REFRESH).await;
+
+        let snapshot = source.fetch().await.unwrap();
+
+        for (base, quote, orderbook) in
+            [(eth(), usdc(), ETH_USDC), (cbbtc(), usdc(), CBBTC_USDC), (cbbtc(), eth(), CBBTC_ETH)]
+        {
+            let published = snapshot.books[&component_id(&base, &quote, orderbook)]
+                .state
+                .as_any()
+                .downcast_ref::<HanjiState>()
+                .unwrap()
+                .clone();
+            let mut expected = state(orderbook, book);
+            expected.fee_rate = Rates::DISTINCT.taker();
+            assert_eq!(published, expected, "{orderbook}");
+        }
     }
 
     /// The TVL floor applies in USD: cbBTC/ETH's depth, valued in ETH, is converted through
@@ -919,6 +953,46 @@ mod tests {
         assert!(!snapshot
             .books
             .contains_key(&component_id(&cbbtc(), &usdc(), CBBTC_USDC)));
+    }
+
+    /// A proxy whose config puts native ETH on the other side than the market list is left out.
+    #[tokio::test]
+    async fn a_market_whose_config_moves_the_native_side_is_left_out() {
+        let mut node = FakeNode::new();
+        node.native_flipped.insert(CBBTC_ETH);
+        let (_node, source, _server) = served(node, REFRESH).await;
+
+        let snapshot = source.fetch().await.unwrap();
+
+        assert_eq!(snapshot.books.len(), 2);
+        assert!(!snapshot
+            .books
+            .contains_key(&component_id(&cbbtc(), &eth(), CBBTC_ETH)));
+    }
+
+    /// A poll where no listed market is served, or none reads cleanly, fails instead of
+    /// publishing nothing.
+    #[tokio::test]
+    async fn a_poll_with_nothing_to_serve_fails() {
+        let node = FakeNode::new();
+        {
+            let mut rewired = node.rewired.lock().unwrap();
+            for market in &node.fixture.markets {
+                rewired.insert(market.market().orderbook, Address::ZERO);
+            }
+        }
+        let (_node, unserved, _server) = served(node, REFRESH).await;
+        let mut node = FakeNode::new();
+        node.reverting = node
+            .fixture
+            .markets
+            .iter()
+            .map(|market| market.market().orderbook)
+            .collect();
+        let (_other, unreadable, _other_server) = served(node, REFRESH).await;
+
+        assert!(matches!(unserved.fetch().await, Err(FeedError::Parsing(_))));
+        assert!(matches!(unreadable.fetch().await, Err(FeedError::Parsing(_))));
     }
 
     /// A proxy whose config names other tokens than the market list is left out.
@@ -1071,14 +1145,23 @@ mod tests {
             .contains_key(&component_id(&cbbtc(), &usdc(), CBBTC_USDC)));
     }
 
-    /// A market whose wiring does not resolve is not asked for it again on the next poll.
+    /// A market whose wiring does not resolve, whether a getter reverts or it names no contract
+    /// quoter, is not asked for it again on the next poll.
+    #[rstest]
+    #[case::getter_reverts(true)]
+    #[case::no_contract_quoter(false)]
     #[tokio::test]
-    async fn an_unresolved_market_is_not_asked_again_at_once() {
-        let (node, source, server) = served(FakeNode::new(), REFRESH).await;
-        node.rewired
-            .lock()
-            .unwrap()
-            .insert(CBBTC_USDC, Address::ZERO);
+    async fn an_unresolved_market_is_not_asked_again_at_once(#[case] reverts: bool) {
+        let mut node = FakeNode::new();
+        if reverts {
+            node.unwired.insert(CBBTC_USDC);
+        } else {
+            node.rewired
+                .get_mut()
+                .unwrap()
+                .insert(CBBTC_USDC, Address::ZERO);
+        }
+        let (node, source, server) = served(node, REFRESH).await;
 
         source.fetch().await.unwrap();
         let after_first = server.request_count();

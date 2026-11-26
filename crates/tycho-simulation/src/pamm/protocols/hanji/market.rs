@@ -173,9 +173,12 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::pamm::protocols::hanji::{
-        test_support::{fixture, CBBTC, USDC},
-        BASE_DEPLOYMENT,
+    use crate::{
+        pamm::protocols::hanji::{
+            test_support::{fixture, CBBTC, USDC},
+            BASE_DEPLOYMENT,
+        },
+        snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
     };
 
     const WETH: Address = BASE_DEPLOYMENT.wrapped_native;
@@ -242,6 +245,25 @@ mod tests {
         let entries = [entry(Address::repeat_byte(1), base, quote)];
 
         assert!(markets_from_api(&entries, WETH).is_empty());
+    }
+
+    /// A list in which no market can be traded is an error, not an empty list.
+    #[tokio::test]
+    async fn a_list_of_untradable_markets_is_an_error() {
+        let body = serde_json::json!([{
+            "orderbookAddress": Address::repeat_byte(1),
+            "baseToken": { "contractAddress": WETH, "isNative": true },
+            "quoteToken": { "contractAddress": WETH, "isNative": true },
+        }])
+        .to_string();
+        let server =
+            spawn_http_server(move |_| Some(MockResponse::from(("200 OK", body.clone())))).await;
+
+        let result =
+            fetch_markets(&reqwest::Client::new(), &server.url(), Duration::from_secs(2), WETH)
+                .await;
+
+        assert!(matches!(result, Err(FeedError::Parsing(_))), "{result:?}");
     }
 
     #[test]

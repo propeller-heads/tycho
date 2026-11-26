@@ -270,6 +270,12 @@ pub(super) struct FakeNode {
     pub reverting: HashSet<Address>,
     /// Proxies whose getConfig names their tokens the other way round.
     pub misreporting: HashSet<Address>,
+    /// Proxies whose CLOB getter reverts, so their wiring does not resolve.
+    pub unwired: HashSet<Address>,
+    /// Proxies whose getConfig puts native ETH on the other side of the market.
+    pub native_flipped: HashSet<Address>,
+    /// Rates every getConfig reports in place of the recorded ones.
+    pub rates: Option<Rates>,
     /// Proxies that are paused.
     pub paused: HashSet<Address>,
     /// Proxies that have whitelisted Tycho's router: those recorded so, unless a test adds one.
@@ -309,6 +315,9 @@ impl FakeNode {
             chain_id: 8453,
             reverting: HashSet::new(),
             misreporting: HashSet::new(),
+            native_flipped: HashSet::new(),
+            unwired: HashSet::new(),
+            rates: None,
             paused: HashSet::new(),
             whitelisting: Mutex::new(whitelisting),
             rewired: Mutex::new(HashMap::new()),
@@ -494,7 +503,11 @@ impl FakeNode {
         } else {
             Caller::Contract
         };
-        let probe = state(orderbook, caller)
+        let mut state = state(orderbook, caller);
+        if let Some(rates) = self.rates {
+            state.fee_rate = rates.taker();
+        }
+        let probe = state
             .probe(sell_base)
             .unwrap()
             .expect("a fill check of a side with levels");
@@ -579,6 +592,7 @@ impl FakeNode {
         }
         let market = self.market(target)?;
         match selector {
+            LOB_SELECTOR if self.unwired.contains(&target) => None,
             LOB_SELECTOR => Some(market.wiring.lob.abi_encode()),
             QUOTER_SELECTOR => Some(market.wiring.quoter.abi_encode()),
             CONTRACT_QUOTER_SELECTOR => Some(
@@ -606,9 +620,12 @@ impl FakeNode {
                     .abi_encode(),
             ),
             getConfigCall::SELECTOR if self.reverting.contains(&target) => None,
-            getConfigCall::SELECTOR => {
-                Some(config_answer(market, self.misreporting.contains(&target)))
-            }
+            getConfigCall::SELECTOR => Some(config_answer(
+                market,
+                self.misreporting.contains(&target),
+                self.native_flipped.contains(&target),
+                self.rates,
+            )),
             _ => panic!("the fake node does not answer {selector:?} on {target}"),
         }
     }
@@ -645,24 +662,57 @@ impl FakeNode {
     }
 }
 
-/// What a proxy answers `getConfig()` with, as recorded, or with its tokens swapped.
-fn config_answer(market: &FixtureMarket, swapped: bool) -> Vec<u8> {
+/// The commission rates a proxy's `getConfig()` reports, each per 1e18 of the executed value.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Rates {
+    pub aggressive: u64,
+    pub passive: u64,
+    pub passive_payout: u64,
+}
+
+impl Rates {
+    /// Distinct and non-zero, so that reading the wrong one shows.
+    pub(super) const DISTINCT: Rates = Rates {
+        aggressive: 100_000_000_000_007,
+        passive: 70_000_000_000_000,
+        passive_payout: 3_000,
+    };
+
+    /// The taker's rate the state charges.
+    pub(super) fn taker(self) -> u64 {
+        self.aggressive + self.passive_payout
+    }
+}
+
+/// What a proxy answers `getConfig()` with: as recorded, with its tokens swapped, with native ETH
+/// on the other side, or with other rates.
+fn config_answer(
+    market: &FixtureMarket,
+    swapped: bool,
+    native_flipped: bool,
+    rates: Option<Rates>,
+) -> Vec<u8> {
     let config = &market.config;
     let (token_x, token_y) =
         if swapped { (config.token_y, config.token_x) } else { (config.token_x, config.token_y) };
+    let rates = rates.unwrap_or_else(|| Rates {
+        aggressive: config.aggressive_commission_rate.to(),
+        passive: 0,
+        passive_payout: config.passive_order_payout_rate.to(),
+    });
     getConfigCall::abi_encode_returns(&getConfigReturn {
         scalingFactorTokenX: config.scaling_x,
         scalingFactorTokenY: config.scaling_y,
         tokenX: token_x,
         tokenY: token_y,
         supportsNativeEth: config.supports_native_eth,
-        isTokenXWeth: config.is_token_x_weth,
+        isTokenXWeth: config.is_token_x_weth != native_flipped,
         askTrie: Address::ZERO,
         bidTrie: Address::ZERO,
         adminCommissionRate: 0,
-        totalAggressiveCommissionRate: config.aggressive_commission_rate.to(),
-        totalPassiveCommissionRate: 0,
-        passiveOrderPayoutRate: config.passive_order_payout_rate.to(),
+        totalAggressiveCommissionRate: rates.aggressive,
+        totalPassiveCommissionRate: rates.passive,
+        passiveOrderPayoutRate: rates.passive_payout,
         shouldInvokeOnTrade: false,
     })
 }

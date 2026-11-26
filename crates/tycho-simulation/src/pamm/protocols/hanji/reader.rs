@@ -740,3 +740,96 @@ fn to_u64(value: U256, what: &str) -> Result<u64, FeedError> {
         .try_into()
         .map_err(|e| FeedError::Parsing(format!("Hanji {what} {value}: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn answer(success: bool, data: Vec<u8>) -> Call3Result {
+        Call3Result { success, returnData: data.into() }
+    }
+
+    fn address_answer(byte: u8) -> Call3Result {
+        answer(true, Address::repeat_byte(byte).abi_encode())
+    }
+
+    #[test]
+    fn wiring_names_the_clob_and_both_quoters() {
+        let wiring = decode_wiring(&address_answer(1), &address_answer(2), &address_answer(3));
+
+        assert_eq!(
+            wiring,
+            Ok(Some(Wiring {
+                lob: Address::repeat_byte(1),
+                quoter: Address::repeat_byte(2),
+                contract_quoter: Address::repeat_byte(3),
+            }))
+        );
+    }
+
+    #[test]
+    fn wiring_without_a_contract_quoter_is_not_served() {
+        let wiring = decode_wiring(&address_answer(1), &address_answer(2), &address_answer(0));
+
+        assert_eq!(wiring, Ok(None));
+    }
+
+    #[rstest]
+    #[case::clob_reverts(answer(false, Vec::new()), address_answer(2), "CLOB getter reverted")]
+    #[case::no_clob(address_answer(0), address_answer(2), "names no CLOB")]
+    #[case::quoter_reverts(address_answer(1), answer(false, Vec::new()), "quoter getter reverted")]
+    #[case::no_quoter(address_answer(1), address_answer(0), "names no quoter")]
+    #[case::no_code(address_answer(1), answer(true, Vec::new()), "quoter did not decode")]
+    fn wiring_that_names_no_book_is_refused(
+        #[case] lob: Call3Result,
+        #[case] quoter: Call3Result,
+        #[case] reason: &str,
+    ) {
+        let wiring = decode_wiring(&lob, &quoter, &address_answer(3));
+
+        let error = wiring.unwrap_err();
+        assert!(error.contains(reason), "{error}");
+    }
+
+    #[test]
+    fn a_side_with_more_prices_than_share_counts_is_refused() {
+        let side = assembleOrderbookFromOrdersCall::abi_encode_returns(
+            &assembleOrderbookFromOrdersReturn {
+                arrayPrices: vec![U72::from(2), U72::from(1)],
+                arrayShares: vec![5],
+            },
+        );
+
+        let error = decode_levels(&answer(true, side), "bids").unwrap_err();
+
+        assert!(error.contains("2 prices for 1 share counts"), "{error}");
+    }
+
+    #[test]
+    fn the_highest_price_is_the_executors() {
+        assert_eq!(MAX_PRICE, U72::from(999_999u128 * 10u128.pow(15)));
+    }
+
+    /// The funding writes land in the slots an ERC20 with balances at slot 9 and allowances at
+    /// slot 10 reads (`balanceOf(owner)`, `allowance(owner, spender)`), and an unlisted token is
+    /// not funded.
+    #[test]
+    fn an_erc20_input_is_funded_in_its_balance_and_allowance_slots() {
+        let usdc = TOKEN_SLOTS[0].0;
+        let (owner, spender) = (Address::repeat_byte(0xaa), Address::repeat_byte(0xbb));
+
+        let funding = erc20_funding(usdc, owner, spender, U256::from(7)).unwrap();
+
+        let balance = keccak256((owner.into_word(), U256::from(9)).abi_encode());
+        let allowance = keccak256(
+            (spender.into_word(), keccak256((owner.into_word(), U256::from(10)).abi_encode()))
+                .abi_encode(),
+        );
+        let writes = funding.state_diff.unwrap();
+        assert_eq!(writes[&balance], B256::from(U256::from(7)));
+        assert_eq!(writes[&allowance], B256::from(U256::MAX));
+        assert!(erc20_funding(Address::repeat_byte(1), owner, spender, U256::from(7)).is_none());
+    }
+}
