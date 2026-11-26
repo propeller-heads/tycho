@@ -812,13 +812,8 @@ impl CachedGateway {
         CachedGateway { instance: Some(instance), ..self.new_instance() }
     }
 
-    /// Returns the instance `label` of `protocol_system`, created when the database does not have
-    /// it yet, and makes it the active instance of the protocol. The flag is true when this call
-    /// created the instance.
-    ///
-    /// For the initialized accounts, until extractors create their instances. Fails with
-    /// `NotFound` when the protocol system is not stored, and with `Unexpected` when the instance
-    /// exists but is not ready.
+    /// Runs `instance::create::ensure_instance` on a connection from this gateway's pool. That
+    /// function's doc gives what it returns and when it fails.
     pub async fn ensure_instance(
         &self,
         protocol_system: &str,

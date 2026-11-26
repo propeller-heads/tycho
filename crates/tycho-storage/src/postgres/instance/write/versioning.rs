@@ -9,6 +9,11 @@
 //! Each block of an instance starts strictly later than the one before, and a transaction changes
 //! a key at most once. So every change of a key must start after the version it replaces. When a
 //! change starts at or before that version, `write_versions` fails the whole batch.
+//!
+//! An entity can say that a change only repeats the version it replaces
+//! ([`VersionedRowNew::repeats`]). A repeat adds no version: the replaced version stays the latest
+//! one and does not move to history, and a key with only repeats is not written again. A repeat
+//! still counts for the order: the next change of its key must start after the repeat.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,

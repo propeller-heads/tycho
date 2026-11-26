@@ -30,8 +30,9 @@ use crate::postgres::{
 
 impl PostgresGatewayNew {
     /// Stores the accounts that the instance does not store yet. A stored account keeps its row:
-    /// a later creation of the same address changes nothing. Code, storage and balances of a new
-    /// account are versions, written by [`Self::update_contracts`].
+    /// a later creation of the same address changes nothing, because Substreams and DCI can both
+    /// send a creation of the same contract. Code, storage and balances of a new account are
+    /// versions, written by [`Self::update_contracts`].
     ///
     /// Each account takes its creation block, timestamp and transaction from `origins`. `NotFound`
     /// for a creation transaction that is not in the batch, and `Unexpected` for an account with
@@ -90,8 +91,8 @@ impl PostgresGatewayNew {
     ///
     /// `NotFound` for an account that is not in the instance, a transaction that is not in the
     /// batch, or a native token that is not stored. `Unexpected` for an account deletion, two
-    /// deltas of one account in one transaction, or a change that does not start after the stored
-    /// version of its key.
+    /// changes of the same key in one transaction, or a change that does not start after the
+    /// stored version of its key.
     pub(crate) async fn update_contracts(
         &self,
         instance: InstanceId,

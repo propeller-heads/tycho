@@ -96,12 +96,10 @@ instances. No table has a DEFAULT partition.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
   `instance::write::versioning::VersionedRowNew` (protocol state, component balances, contract
   code, contract storage and account balances). The module doc of `write/versioning.rs` has the
-  rules. A row can say that it only repeats the version it replaces (`VersionedRowNew::repeats`;
-  only contract code does). Such a change adds no version, and a key with only repeats is not
-  written again. A change that does not start after the version it replaces fails the batch. The
-  old versioning (`postgres/versioning.rs`) compares a change only with the stored row. It skips a
-  change that is not after that row. It does not compare the changes of one key inside a batch, so
-  it applies two changes with the same start.
+  rules, repeats included. A change that does not start after the version it replaces fails the
+  batch. The old versioning (`postgres/versioning.rs`) compares a change only with the stored
+  row. It skips a change that is not after that row. It does not compare the changes of one key
+  inside a batch, so it applies two changes with the same start.
 
 ## Architecture
 
