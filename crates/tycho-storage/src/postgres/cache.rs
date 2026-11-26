@@ -2104,6 +2104,124 @@ mod test_serial_db {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_instance_batch_writes_components_and_state() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+            db_fixtures::insert_token(&mut connection, &hex::encode(&usdc), "USDC", 6, Some(100))
+                .await;
+            db_fixtures::insert_protocol_type(&mut connection, "pool", None, None, None).await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let address = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+            let creation = AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                HashMap::new(),
+                None,
+                Some(Bytes::from("0x6080")),
+                models::ChangeType::Creation,
+            );
+            let component = models::protocol::ProtocolComponent::new(
+                "pool",
+                "vm:test",
+                "pool",
+                Chain::Ethereum,
+                vec![usdc.clone()],
+                vec![address.clone()],
+                HashMap::new(),
+                models::ChangeType::Creation,
+                tx_1.hash.clone(),
+                block_1.ts,
+            );
+            let state = models::protocol::ProtocolComponentStateDelta::new(
+                "pool",
+                HashMap::from([("reserve".to_string(), Bytes::from(1_u64))]),
+                HashSet::new(),
+            );
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            // Staged before the component and the contract: the executor writes contracts, then
+            // components, then state.
+            cached_gw
+                .update_protocol_states(&[(tx_1.hash.clone(), state)])
+                .await
+                .expect("Staging protocol states ok");
+            cached_gw
+                .add_protocol_components(slice::from_ref(&component))
+                .await
+                .expect("Staging components ok");
+            cached_gw
+                .insert_contract(&creation.ref_into_account(&tx_1))
+                .await
+                .expect("Staging account ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let system: i64 = schema::protocol_system::table
+                .filter(schema::protocol_system::name.eq("vm:test"))
+                .select(schema::protocol_system::id)
+                .get_result(&mut connection)
+                .await
+                .expect("the protocol system is stored");
+            db_fixtures::set_active_instance(&mut connection, system, Some(instance)).await;
+            let gateway = PostgresGatewayNew::from_connection(&mut connection).await;
+            let components = gateway
+                .get_protocol_components(
+                    &Chain::Ethereum,
+                    Some("vm:test".to_string()),
+                    Some(&["pool"]),
+                    None,
+                    None,
+                    &mut connection,
+                )
+                .await
+                .expect("reading the components failed")
+                .entity;
+            assert_eq!(components.len(), 1);
+            assert_eq!(components[0].tokens, vec![usdc.clone()]);
+            assert_eq!(components[0].contract_addresses, vec![address.clone()]);
+            assert_eq!(components[0].creation_tx, tx_1.hash);
+            let states = gateway
+                .get_protocol_states(
+                    &Chain::Ethereum,
+                    None,
+                    Some("vm:test".to_string()),
+                    Some(&["pool"]),
+                    false,
+                    None,
+                    &mut connection,
+                )
+                .await
+                .expect("reading the state failed")
+                .entity;
+            assert_eq!(states.len(), 1);
+            assert_eq!(
+                states[0].attributes,
+                HashMap::from([("reserve".to_string(), Bytes::from(1_u64))])
+            );
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_fresh_gateway_keeps_instance() {
         run_against_db(|connection_pool| async move {
             let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
