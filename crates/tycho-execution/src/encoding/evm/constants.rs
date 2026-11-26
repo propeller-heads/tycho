@@ -183,7 +183,7 @@ pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
 pub const BAIBAI_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:pamm:baibai";
 
 /// Protocol system of Hanji components.
-pub const HANJI_PROTOCOL_SYSTEM: &str = "hanji";
+pub const HANJI_PROTOCOL_SYSTEM: &str = "pamm:hanji";
 /// Static attribute of a Hanji component holding the market's proxy orderbook.
 pub const HANJI_ORDERBOOK_ATTRIBUTE: &str = "orderbook";
 

@@ -108,7 +108,7 @@ pub use state::HanjiState;
 
 /// Protocol system stamped on every component this integration emits; tycho-execution keys
 /// Hanji's encoder on it.
-pub const PROTOCOL_SYSTEM: &str = "hanji";
+pub const PROTOCOL_SYSTEM: &str = "pamm:hanji";
 
 /// Component type stamped on every market this integration emits.
 pub(crate) const PROTOCOL_TYPE: &str = "hanji_orderbook";

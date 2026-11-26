@@ -188,7 +188,7 @@
       "contract": "BaibaiFallbackExecutor",
       "args": ["0x3A57167E95a00c31fa86D93aDa39484CaD590Fb4"]
     },
-    "hanji": { "contract": "HanjiExecutor", "args": [] },
+    "pamm:hanji": { "contract": "HanjiExecutor", "args": [] },
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
       "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
