@@ -1298,15 +1298,22 @@ fn register_db_path_counters() {
     }
 }
 
+const PROTOCOL_SYSTEM_REQUIRED: &str =
+    "protocol_system is required: use a name from /v1/protocol_systems";
+
+fn require_protocol_system(system: &str) -> Result<(), RpcError> {
+    if system.trim().is_empty() {
+        return Err(RpcError::Parse(PROTOCOL_SYSTEM_REQUIRED.to_string()));
+    }
+    Ok(())
+}
+
 /// Retrieve contract states
 ///
 /// This endpoint retrieves the state of contracts within a specific execution environment. If no
-/// contract ids are given, all contracts are returned. Note that `protocol_system` is not a filter;
-/// it's a way to specify the protocol system associated with the contracts requested and is used to
-/// ensure that the correct extractor's block status is used when querying the database. If omitted,
-/// the block status will be determined by a random extractor, which could be risky if the extractor
-/// is out of sync. Filtering by protocol system is not currently supported on this endpoint and
-/// should be done client side.
+/// contract ids are given, all contracts are returned. `protocol_system` is required. It selects
+/// the extractor whose block status applies. It does not filter the response. A missing, empty or
+/// blank value is a 400.
 #[utoipa::path(
     post,
     path = "/v1/contract_state",
@@ -1332,6 +1339,7 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     tracing::Span::current().record("page_size", body.pagination.page_size);
     tracing::Span::current().record("protocol_system", &body.protocol_system);
 
+    require_protocol_system(&body.protocol_system)?;
     body.validate_pagination(&req)?;
     if let Some(restrictions) = handler.resolve_plan_restrictions(&req) {
         body.version = handler
@@ -1789,6 +1797,7 @@ mod tests {
     async fn test_validate_version_priority() {
         let json_str = r#"
     {
+        "protocol_system": "uniswap_v2",
         "version": {
             "timestamp": "2069-01-01T04:20:00",
             "block": {
@@ -1816,6 +1825,7 @@ mod tests {
     async fn test_validate_version_with_block_number() {
         let json_str = r#"
     {
+        "protocol_system": "uniswap_v2",
         "version": {
             "block": {
                 "number": 213,
@@ -2827,6 +2837,75 @@ mod tests {
             vec![],
         )
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
+    }
+
+    async fn post_to_bare_handler(route: &str, body: serde_json::Value) -> (StatusCode, String) {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route(
+                    "/v1/contract_state",
+                    web::post().to(contract_state::<MockGateway, MockEntryPointTracer>),
+                )
+                .route(
+                    "/v1/protocol_state",
+                    web::post().to(protocol_state::<MockGateway, MockEntryPointTracer>),
+                )
+                .route(
+                    "/v1/component_tvl",
+                    web::post().to(component_tvl::<MockGateway, MockEntryPointTracer>),
+                ),
+        )
+        .await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(route)
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+
+        let status = response.status();
+        let body = test::read_body(response).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[rstest]
+    #[case::contract_state_missing(
+        "/v1/contract_state",
+        serde_json::json!({"contract_ids": []}),
+        "missing field `protocol_system`"
+    )]
+    #[case::contract_state_empty(
+        "/v1/contract_state",
+        serde_json::json!({"protocol_system": ""}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[case::contract_state_blank(
+        "/v1/contract_state",
+        serde_json::json!({"protocol_system": "  "}),
+        PROTOCOL_SYSTEM_REQUIRED
+    )]
+    #[actix_web::test]
+    async fn test_rejects_a_missing_or_blank_protocol_system(
+        #[case] route: &str,
+        #[case] body: serde_json::Value,
+        #[case] message: &str,
+    ) {
+        let (status, text) = post_to_bare_handler(route, body).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains(message), "{text}");
     }
 
     #[actix_web::test]

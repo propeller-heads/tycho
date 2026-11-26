@@ -58,7 +58,9 @@ protocol_state = client.get_protocol_state(
 
 # Query contract state
 contract_state = client.get_contract_state(
-    ContractStateParams(contract_ids=["contract_id_0"])
+    ContractStateParams(
+        contract_ids=["contract_id_0"], protocol_system="test_protocol"
+    )
 )
 
 # Query tokens

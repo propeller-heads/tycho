@@ -1,6 +1,8 @@
 import json
 
+import pytest
 from hexbytes import HexBytes
+from pydantic import ValidationError
 
 from tycho_indexer_client.dto import (
     Chain,
@@ -122,13 +124,20 @@ def test_decode_extractor_identity_custom_chain():
 
 
 def test_decode_contract_state_params_backward_compatibility():
-    data_new = {"contract_ids": ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d']}
+    data_new = {"protocol_system": "vm:balancer_v2", "contract_ids": ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d']}
     msg_new = ContractStateParams(**data_new)
     
-    data_old = {"contract_ids": [ContractId(chain=Chain.ethereum, address=HexBytes('0xba12222222228d8ba445958a75a0704d566bf2c8')), ContractId(chain=Chain.ethereum, address=HexBytes('0xe96a45f66bdda121b24f0a861372a72e8889523d'))]}
+    data_old = {"protocol_system": "vm:balancer_v2", "contract_ids": [ContractId(chain=Chain.ethereum, address=HexBytes('0xba12222222228d8ba445958a75a0704d566bf2c8')), ContractId(chain=Chain.ethereum, address=HexBytes('0xe96a45f66bdda121b24f0a861372a72e8889523d'))]}
     msg_old = ContractStateParams(**data_old)
 
     assert msg_new == ContractStateParams(
+        protocol_system="vm:balancer_v2",
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
     assert msg_old == ContractStateParams(
+        protocol_system="vm:balancer_v2",
         contract_ids = ['0xba12222222228d8ba445958a75a0704d566bf2c8', '0xe96a45f66bdda121b24f0a861372a72e8889523d'])
+
+
+def test_contract_state_params_require_protocol_system():
+    with pytest.raises(ValidationError):
+        ContractStateParams(contract_ids=["0xba12222222228d8ba445958a75a0704d566bf2c8"])

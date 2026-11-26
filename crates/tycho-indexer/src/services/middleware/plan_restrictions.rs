@@ -259,10 +259,7 @@ impl ValidateRestrictions for dto::ProtocolStateRequestBody {
 
 impl ValidateRestrictions for dto::StateRequestBody {
     fn validate_restrictions(&self, restrictions: &PlanRestrictions) -> Result<(), RpcError> {
-        // protocol_system defaults to "" via serde; skip check when not provided
-        if !self.protocol_system.is_empty() {
-            restrictions.check_protocol_system(&self.protocol_system)?;
-        }
+        restrictions.check_protocol_system(&self.protocol_system)?;
         restrictions.check_version_recency(&self.version)
     }
 }
@@ -598,7 +595,7 @@ plans:
     #[rstest]
     #[case::allowed_system("uniswap_v2", false)]
     #[case::blocked_system("sushiswap", true)]
-    #[case::empty_system_skips("", false)]
+    #[case::empty_system_is_blocked("", true)]
     #[tokio::test]
     async fn test_contract_state_restriction(
         #[case] protocol_system: &str,
