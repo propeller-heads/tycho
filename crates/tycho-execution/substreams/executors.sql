@@ -107,6 +107,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('ethereum', '0x2017ad7035d781c14699c8e44ed62d3083723a18', ARRAY['sushiswap_v2']),
     ('ethereum', '0x25b670a94a376254bac2b5f16b0dc040df44d1ec', ARRAY['ekubo_v2']),
     ('ethereum', '0x2605605cbbcfec01d15704db1a47a0ac48d1f729', ARRAY['rocketpool']),
+    ('ethereum', '0x315c10bb1456d2f437d6fafd67bca7b5cea6b3b7', ARRAY['vm:curve']),
     ('ethereum', '0x263dd7ad20983b5e0392bf1f09c4493500edb333', ARRAY['ekubo']),
     ('ethereum', '0x3067880b419209fc6e961f08e0cdffc1f21d2873', ARRAY['rfq:metric']),
     ('ethereum', '0x3201ea6b93731f30e55cb87660eed70b369fadc7', ARRAY['pancakeswap_v2']),
