@@ -29,7 +29,10 @@ CHAINS = {  # name: (chain id, RPC variables in the repo's spellings)
     "ethereum": (1, ["RPC_URL", "ETH_RPC_URL"]), "base": (8453, ["BASE_RPC_URL"]),
     "bsc": (56, ["BSC_RPC_URL"]), "arbitrum": (42161, ["ARBITRUM_RPC_URL", "ARB_RPC_URL"]),
     "polygon": (137, ["POLYGON_RPC_URL"]), "unichain": (130, ["UNICHAIN_RPC_URL"]),
-    "robinhood": (4663, ["ROBINHOOD_RPC_URL"]),
+    "robinhood": (4663, ["ROBINHOOD_RPC_URL"]), "elysium": (99901, ["ELYSIUM_RPC_URL"]),
+    "plasma": (9745, ["PLASMA_RPC_URL"]),
+    "arc": (5042, ["ARC_RPC_URL"]),
+    "zksync": (324, ["ZKSYNC_RPC_URL"]),
 }
 SLOTS = {  # EIP-1967
     "implementation": "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc",
