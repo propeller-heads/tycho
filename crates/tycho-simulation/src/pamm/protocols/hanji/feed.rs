@@ -39,12 +39,14 @@ use crate::{
     },
 };
 
-/// How many milliseconds a read's block timestamp may trail the wall clock. The quoters' books
-/// empty about 3 s after their keepers last pushed a price, and they push several times a second,
-/// so a read further behind than this comes from a node that is lagging and may show a book that
-/// is about to go. With the 2 s [`MAX_SNAPSHOT_AGE`], a book is served at most 3 s after its
-/// block's timestamp. Base block timestamps are whole seconds, shared by about five 200 ms blocks.
-const MAX_READ_LAG_MS: u64 = 1_000;
+/// How many milliseconds a read's block timestamp may trail the wall clock read just before the
+/// read is sent. Base block timestamps are whole seconds, shared by about five 200 ms blocks, so
+/// a synced node's latest block already trails the clock by up to a second; past that, the node
+/// is lagging. The quoters' books empty about 3 s after their keepers last pushed a price, and
+/// they push several times a second. With [`MAX_SNAPSHOT_AGE`], a book is withdrawn at most
+/// 3.5 s, plus the read's round trip, after its block's timestamp: up to about half a second past
+/// the point where a book whose keepers stopped at that block would have emptied.
+const MAX_READ_LAG_MS: u64 = 1_500;
 
 /// How long a book is served after the poll that read it, unless a later poll replaces it.
 const MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(2);
@@ -115,8 +117,9 @@ impl HanjiFeedBuilder {
     }
 
     /// The feed tuning a new builder starts from, set by the quoters' freshness: a poll every
-    /// second, given 2 s, and a book withdrawn 2 s after the poll that read it, so that with the
-    /// read lag allowed it is gone by the time the quoters stop quoting without a newer price.
+    /// second, given 2 s, and a book withdrawn [`MAX_SNAPSHOT_AGE`] after the poll that read it,
+    /// so that with the read lag allowed it is gone about when the quoters stop quoting without a
+    /// newer price (see [`MAX_READ_LAG_MS`]).
     pub fn default_feed_config() -> HttpFeedConfig {
         HttpFeedConfig {
             poll_interval: Duration::from_secs(1),
@@ -284,8 +287,9 @@ impl HttpSource for HanjiBookSource {
     /// quote.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let markets = self.markets.current().await?;
-        let read = self.reader.read(&markets).await?;
+        // Read before the call, so the lag measures the node and not the round trip.
         let now_ms = (self.clock)();
+        let read = self.reader.read(&markets).await?;
         let block_ms = read.timestamp.saturating_mul(1_000);
         if now_ms > block_ms.saturating_add(MAX_READ_LAG_MS) {
             return Err(FeedError::Connection(format!(
@@ -594,6 +598,23 @@ mod tests {
 
         assert_eq!(result.is_ok(), published);
         assert!(result.is_ok() || matches!(result, Err(FeedError::Connection(_))));
+    }
+
+    /// The lag is measured from before the read is sent, so a slow answer from a node that was
+    /// in time is not taken for a lagging node.
+    #[tokio::test]
+    async fn a_slow_answer_does_not_count_as_lag() {
+        let node = Arc::new(FakeNode::new());
+        *node.node_delay.lock().unwrap() = Duration::from_millis(300);
+        let server = Arc::clone(&node).serve().await;
+        let started = Instant::now();
+        let start_ms = node.fixture.timestamp * 1_000 + MAX_READ_LAG_MS - 100;
+        let mut source = source(&server, start_ms, REFRESH);
+        source.clock = Arc::new(move || start_ms + started.elapsed().as_millis() as u64);
+
+        let result = source.fetch().await;
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]

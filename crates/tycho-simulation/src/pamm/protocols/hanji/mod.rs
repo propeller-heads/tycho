@@ -46,13 +46,14 @@
 //!
 //! A fleet of keeper addresses pushes the quoters' prices several times a second (selector
 //! `0xae7e8d81`). The book is empty from about 3 s after the last push, measured at Base block
-//! 61,595,000 with `eth_call` time overrides. The feed publishes only reads from a block at most
-//! 1 s behind the wall clock and withdraws a book 2 s after the poll that read it, so no book is
-//! served more than 3 s after its block; a swap that lands after the book went empty fills
-//! nothing, and the executor reverts it. The quoters also price off four Base pools seen in their
-//! call traces (two Uniswap V3, one PancakeSwap V3 and one Aerodrome CL, whose TWAP they read), so
-//! a route that trades through one of those before Hanji meets a different Hanji book than the one
-//! simulated.
+//! 61,595,000 with `eth_call` time overrides. The feed publishes only reads whose block trails the
+//! wall clock by little more than Base's whole-second timestamps explain, and withdraws a book
+//! soon after the poll that read it, so a book is served about as long as the quoters keep it
+//! without a newer price (`feed.rs` has the bound). A swap that lands after the book went empty
+//! fills nothing, and the executor reverts it. The quoters also price off four Base pools seen in
+//! their call traces (two Uniswap V3, one PancakeSwap V3 and one Aerodrome CL, whose TWAP they
+//! read), so a route that trades through one of those before Hanji meets a different Hanji book
+//! than the one simulated.
 //!
 //! # How a market fills
 //!

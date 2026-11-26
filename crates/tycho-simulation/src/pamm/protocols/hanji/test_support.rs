@@ -278,6 +278,8 @@ pub(super) struct FakeNode {
     pub api_down: AtomicBool,
     /// How long the API takes to answer.
     pub api_delay: Mutex<Duration>,
+    /// How long the node takes to answer a call.
+    pub node_delay: Mutex<Duration>,
     /// How many requests reached the API.
     pub api_requests: AtomicUsize,
 }
@@ -302,6 +304,7 @@ impl FakeNode {
             rewired: Mutex::new(HashMap::new()),
             api_down: AtomicBool::new(false),
             api_delay: Mutex::new(Duration::ZERO),
+            node_delay: Mutex::new(Duration::ZERO),
             api_requests: AtomicUsize::new(0),
         }
     }
@@ -331,7 +334,11 @@ impl FakeNode {
         }
         let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(request["method"], "eth_call", "the reader only sends eth_call");
-        MockResponse::from(("200 OK", self.answer_call(&request).to_string()))
+        let delay = *self
+            .node_delay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        MockResponse { status: "200 OK", body: self.answer_call(&request).to_string(), delay }
     }
 
     fn answer_api(&self) -> MockResponse {
@@ -405,6 +412,10 @@ impl FakeNode {
                 _ => panic!("the fake node does not answer {selector:?} on Multicall3"),
             };
             return Some(U256::from(value).abi_encode());
+        }
+        if self.chain_id != Chain::Base.id() {
+            // On another chain the contracts have no code: a call succeeds and returns nothing.
+            return Some(Vec::new());
         }
         if selector == assembleOrderbookFromOrdersCall::SELECTOR {
             return self.book(target, data);

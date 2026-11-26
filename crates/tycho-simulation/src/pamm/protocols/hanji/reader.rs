@@ -265,11 +265,17 @@ impl HanjiReader {
         if unresolved.is_empty() {
             return Ok(());
         }
-        let calls = unresolved
-            .iter()
-            .flat_map(|orderbook| wiring_calls(*orderbook))
-            .collect();
+        // The chain id goes first: on another chain the proxies have no code, so their getters
+        // answer nothing and every market would look unserved rather than misconfigured.
+        let mut calls = vec![call(MULTICALL3_ADDRESS, getChainIdCall {}.abi_encode())];
+        calls.extend(
+            unresolved
+                .iter()
+                .flat_map(|orderbook| wiring_calls(*orderbook)),
+        );
         let answers = self.aggregate(calls).await?;
+        let (chain_id, answers) = answers.split_at(1);
+        self.check_chain(&chain_id[0])?;
         // `aggregate` checked the answer count, so the chunks are whole and one per market.
         let (answers, _) = answers.as_chunks::<WIRING_CALLS>();
         let unserved = Resolution::Unserved { retry_at: now + UNSERVED_RETRY };
@@ -320,14 +326,7 @@ impl HanjiReader {
         let [block_number, timestamp, chain_id] = head else {
             return Err(FeedError::Parsing("Hanji multicall answered too few calls".into()));
         };
-        let served = to_u64(decode::<getChainIdCall>(chain_id, "chain id")?, "chain id")?;
-        let chain = self.deployment.chain;
-        if served != chain.id() {
-            return Err(FeedError::Fatal(format!(
-                "Hanji: the RPC node serves chain {served}, not the deployment's chain {}",
-                chain.id()
-            )));
-        }
+        self.check_chain(chain_id)?;
         let block_number = decode::<getBlockNumberCall>(block_number, "block number")?;
         let timestamp = decode::<getCurrentBlockTimestampCall>(timestamp, "timestamp")?;
         Ok(BookRead {
@@ -335,6 +334,19 @@ impl HanjiReader {
             timestamp: to_u64(timestamp, "timestamp")?,
             markets: Vec::new(),
         })
+    }
+
+    /// Fails fatally when the node serves another chain than the deployment's.
+    fn check_chain(&self, answer: &Call3Result) -> Result<(), FeedError> {
+        let served = to_u64(decode::<getChainIdCall>(answer, "chain id")?, "chain id")?;
+        let chain = self.deployment.chain;
+        if served != chain.id() {
+            return Err(FeedError::Fatal(format!(
+                "Hanji: the RPC node serves chain {served}, not the deployment's chain {}",
+                chain.id()
+            )));
+        }
+        Ok(())
     }
 
     /// One market's answers: `Ok(None)`, logged, when the proxy is paused, `Err` when it cannot
