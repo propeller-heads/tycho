@@ -2120,9 +2120,9 @@ mod test_serial_db {
                 .await
                 .expect("Upsert block 1 ok");
             cached_gw
-                .update_protocol_states(&[])
+                .insert_entry_points(&HashMap::new())
                 .await
-                .expect("Staging protocol states ok");
+                .expect("Staging entry points ok");
             let res = cached_gw.commit_transaction(0).await;
             handle.abort();
 
