@@ -119,9 +119,9 @@ pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
 
 /// Gas for `BaibaiFallbackRouter`'s quotes before it picks a side: the entrypoint's `quoteFor`
-/// (about 45k, cold, on a Base fork) and the fallback quote, budgeted as
-/// `METRIC_FALLBACK_QUOTE_GAS`.
-pub const BAIBAI_FALLBACK_QUOTE_GAS: u64 = 45_000 + METRIC_FALLBACK_QUOTE_GAS;
+/// and the fallback quote, budgeted as `METRIC_FALLBACK_QUOTE_GAS`. On a Base fork `quoteFor`
+/// costs about 40k but warms the entrypoint, so the BaiBai swap after it costs about 30k less.
+pub const BAIBAI_FALLBACK_QUOTE_GAS: u64 = 10_000 + METRIC_FALLBACK_QUOTE_GAS;
 
 /// Extra gas of a subsidized swap.
 pub const SUBSIDY_GAS: u64 = 65_000;
@@ -493,10 +493,10 @@ mod tests {
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // entrypoint approval                  25_000  ← TOKEN_APPROVAL_GAS
-        // quoteFor + fallback quote           145_000  ← BAIBAI_FALLBACK_QUOTE_GAS
+        // quoteFor + fallback quote           110_000  ← BAIBAI_FALLBACK_QUOTE_GAS
         // pool gas                            100_000
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(410_000u64));
+        assert_eq!(gas, BigUint::from(375_000u64));
     }
 
     #[test]
