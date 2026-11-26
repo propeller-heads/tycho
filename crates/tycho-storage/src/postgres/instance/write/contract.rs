@@ -220,7 +220,7 @@ impl PostgresGatewayNew {
     /// Returns the id of each account of the instance, by address. Deleted accounts are found too.
     ///
     /// `NotFound` for the first address that has no account in the instance.
-    async fn account_ids(
+    pub(super) async fn account_ids(
         &self,
         instance: InstanceId,
         addresses: &[&Bytes],
