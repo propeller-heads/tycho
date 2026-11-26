@@ -3,7 +3,11 @@ name: Substreams Integration Tests
 env:
   # Secrets are intentionally NOT defined here to keep them out of detect-changes scope.
   # They are set at job level in test-protocols, the only job that needs them.
-  EXCLUDED_SUBSTREAMS: target|crates|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid
+  # Directories with no integration_test.tycho.yaml at their root, which the runner rejects:
+  # ethereum-ambient has no test config, ethereum-uniswap-v3-logs-only and ethereum-uniswap-v4 are
+  # tested only through their clones (CLONE_TO_BASE_PROTOCOL in protocols/testing/src/test_runner.rs),
+  # and tests holds the release script's tests.
+  EXCLUDED_SUBSTREAMS: target|crates|tests|ethereum-template-factory|ethereum-template-singleton|ethereum-fluid|ethereum-ambient|ethereum-uniswap-v3-logs-only|ethereum-uniswap-v4
 
 on:
   workflow_dispatch:
@@ -293,9 +297,14 @@ jobs:
           docker load -i /tmp/test-runner-image.tar
 
       - name: Run protocol test
-        uses: ./.github/actions/substreams-docker-single
-        with:
-          protocol: ${{ matrix.protocol }}
+        env:
+          PROTOCOLS: ${{ matrix.protocol }}
+        # Both images arrive preloaded from build-images, so --no-build turns a missing one into
+        # an immediate error rather than a silent 30-minute rebuild.
+        run: |
+          docker compose -f protocols/testing/docker-compose.yaml up \
+            --no-build \
+            --exit-code-from test-runner
 
   skip-tests:
     runs-on: ubuntu-latest
