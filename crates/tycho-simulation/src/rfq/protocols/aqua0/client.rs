@@ -210,8 +210,8 @@ impl Aqua0Client {
     }
 
     /// Requests a binding approval for one exact-input fill through `params.sender`, the Tycho
-    /// router. The backend reserves LP backing for it until its deadline, so only call this to
-    /// execute.
+    /// router. The quote can be filled for 45 seconds and the backend reserves LP backing for about
+    /// 60 seconds, so only call this to execute.
     pub(crate) async fn request_binding_quote(
         &self,
         params: &GetAmountOutParams,

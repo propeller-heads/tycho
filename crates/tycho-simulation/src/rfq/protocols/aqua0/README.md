@@ -54,13 +54,13 @@ and `/markets` agree with each other, not that the hook is Aqua0's.
 
 ## Binding quotes
 
-`POST /quote` returns signed `hookData` for one exact-input fill, valid for 45 seconds, and holds LP
-backing for it until 15 seconds after that deadline, so about 60 seconds. It is requested inside
-`encode_solutions`, so encode an Aqua0 route only to execute it. If anything in front of the API
-answers `429`, the client stops requesting approvals and publishes no Aqua0 markets until
-`Retry-After` has passed (at most five minutes), and an encode in the meantime fails with a
-recoverable error. There is no call to release a quote; its hold ends on its own, or at once if
-Aqua0 refuses the quote.
+`POST /quote` returns signed `hookData` for one exact-input fill. A quote can be filled for 45
+seconds. Its LP backing stays reserved for about 60 seconds, until 15 seconds after that deadline.
+It is requested inside `encode_solutions`, so encode an Aqua0 route only to execute it. If anything
+in front of the API answers `429`, the client stops requesting approvals and publishes no Aqua0
+markets until `Retry-After` has passed (at most five minutes), and an encode in the meantime fails
+with a recoverable error. There is no call to release a quote; its hold ends on its own, or at once
+if Aqua0 refuses the quote.
 
 Before it asks for the quote, the encoder prices the amount on the state (positive, within the
 backed sizes) and runs the V4 encoding once without hook data, so a swap that cannot be encoded

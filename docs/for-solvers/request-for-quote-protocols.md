@@ -243,7 +243,7 @@ After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution mu
 
 A route that breaks one of these still encodes and reserves Aqua0 liquidity, then reverts on chain.
 
-Aqua0's quote is valid for 45 seconds and holds Aqua0 liquidity until 15 seconds after that, so about 60 seconds. Encode an Aqua0 route only to execute it.
+An Aqua0 quote can be filled for 45 seconds. Its liquidity stays reserved for about 60 seconds, until 15 seconds after that deadline. Encode an Aqua0 route only to execute it.
 
 Several open quotes on one Aqua0 market are fine, from one `encode_solutions` call or several. Each new quote is priced as if the open quotes before it on that market fill, so a later quote in the same direction is priced past the earlier ones, and each can fill when they land in the order they were signed. Two cases still revert in the hook's `beforeSwap`: an earlier same-direction quote that lands after a later one, and a quote in the other direction that lands after a fill it was signed before. Quotes also compete for liquidity, also from the same caller, and Tycho encodes the solutions of one `encode_solutions` call in parallel. A quote that does not fit the liquidity the open quotes leave is refused, and then the whole call fails. A quote that reverts or goes unused keeps its liquidity held until its hold ends. The Aqua0 module's README lists the hook's errors, and `aqua0::revert::decode_revert` names the error in a failed fill's revert data.
 

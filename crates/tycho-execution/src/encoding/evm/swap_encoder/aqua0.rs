@@ -35,7 +35,7 @@ use crate::encoding::{
 /// - its `estimated_amount_in` equals the solution's `amount_in`.
 ///
 /// A route that breaks one of these is still encoded, and its binding quote reserves Aqua0 backing
-/// until the deadline, but the transaction reverts on chain instead of filling at another amount.
+/// for about 60 seconds, but the transaction reverts on chain instead of filling at another amount.
 #[derive(Clone)]
 pub struct Aqua0SwapEncoder {
     executor_address: Bytes,
