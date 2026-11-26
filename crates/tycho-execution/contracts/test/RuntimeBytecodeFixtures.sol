@@ -81,7 +81,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // Listed by fixture name.
         _executor("AeroBasic", "base", "aero_basic");
         // The constructor reads the entrypoint's quote token, deployed after Base's pinned block.
-        _executor("Baibai", "base", "baibai", 53_545_000);
+        _executor("Baibai", "base", "pamm:baibai", 53_545_000);
         _executor("BalancerV2", "ethereum", "vm:balancer_v2");
         _executor("BalancerV3", "ethereum", "vm:balancer_v3");
         _executor("Biconomy", "base", "biconomy");

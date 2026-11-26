@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publishes workspace crates to crates.io in the order given, which must be dependency order.
+# Publishes workspace crates to crates.io with one cargo call, which uploads them in dependency
+# order: every crate whose dependencies are already on crates.io goes up at once, and cargo waits
+# for those to appear in the index before uploading the crates that depend on them.
 #
-# A crate whose version is already on crates.io is skipped, so rerunning the release after a
-# partial publish uploads only the crates still missing. After each upload the script waits until
-# the version appears in the crates.io sparse index, the index cargo resolves the next crate's
-# dependencies from, instead of sleeping a fixed time. An upload that fails is retried, because
-# cargo refuses a crate whose dependency is uploaded but not yet indexed.
+# A crate whose version is already on crates.io is left out, so rerunning the release after a
+# partial publish uploads only the crates still missing. A failed publish is retried with the
+# crates still missing, because cargo can fail after uploading part of the set, or refuse a crate
+# whose dependency is uploaded but not yet indexed.
 #
 # Usage: publish-crates.sh <crate>...
 # Reads the token from CARGO_REGISTRY_TOKEN, as cargo publish does.
@@ -15,8 +16,6 @@ set -euo pipefail
 INDEX_URL="https://index.crates.io"
 PUBLISH_ATTEMPTS=5
 RETRY_DELAY_SECONDS=30
-INDEX_POLL_SECONDS=10
-INDEX_TIMEOUT_SECONDS=600
 
 if [[ $# -eq 0 ]]; then
     echo "Usage: publish-crates.sh <crate>..." >&2
@@ -69,44 +68,37 @@ is_indexed() {
     return $found
 }
 
-wait_until_indexed() {
-    local waited=0
-    until is_indexed "$1" "$2"; do
-        if ((waited >= INDEX_TIMEOUT_SECONDS)); then
-            echo "::error::$1 $2 is not in the crates.io index after ${INDEX_TIMEOUT_SECONDS}s" >&2
-            exit 1
-        fi
-        sleep "$INDEX_POLL_SECONDS"
-        waited=$((waited + INDEX_POLL_SECONDS))
-    done
-    echo "$1 $2 is in the crates.io index"
-}
-
-publish() {
-    local attempt
-    for ((attempt = 1; attempt <= PUBLISH_ATTEMPTS; attempt++)); do
-        if cargo publish -p "$1" --locked; then
-            return 0
-        fi
-        # An upload that went through but failed afterwards must not be retried.
-        if is_indexed "$1" "$2"; then
-            return 0
-        fi
-        echo "Publishing $1 $2 failed (attempt $attempt of $PUBLISH_ATTEMPTS)" >&2
-        if ((attempt < PUBLISH_ATTEMPTS)); then
-            sleep "$RETRY_DELAY_SECONDS"
+# Prints the given crates whose workspace version is not on crates.io yet.
+missing_crates() {
+    local crate version
+    for crate in "$@"; do
+        version=$(crate_version "$crate") || exit 1
+        if is_indexed "$crate" "$version"; then
+            echo "$crate $version is already on crates.io, skipping" >&2
+        else
+            echo "$crate"
         fi
     done
-    echo "::error::Could not publish $1 $2 after $PUBLISH_ATTEMPTS attempts" >&2
-    exit 1
 }
 
-for crate in "$@"; do
-    version=$(crate_version "$crate")
-    if is_indexed "$crate" "$version"; then
-        echo "$crate $version is already on crates.io, skipping"
-        continue
+for ((attempt = 1; attempt <= PUBLISH_ATTEMPTS; attempt++)); do
+    # An assignment, unlike a process substitution, fails the script when the check fails.
+    missing_list=$(missing_crates "$@")
+    if [[ -z $missing_list ]]; then
+        echo "All crates are on crates.io"
+        exit 0
     fi
-    publish "$crate" "$version"
-    wait_until_indexed "$crate" "$version"
+    packages=()
+    while IFS= read -r crate; do
+        packages+=("--package=$crate")
+    done <<<"$missing_list"
+    if cargo publish --locked "${packages[@]}"; then
+        exit 0
+    fi
+    echo "Publishing ${missing_list//$'\n'/ } failed (attempt $attempt of $PUBLISH_ATTEMPTS)" >&2
+    if ((attempt < PUBLISH_ATTEMPTS)); then
+        sleep "$RETRY_DELAY_SECONDS"
+    fi
 done
+echo "::error::Could not publish all of $* after $PUBLISH_ATTEMPTS attempts" >&2
+exit 1

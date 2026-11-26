@@ -394,6 +394,9 @@ where
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
     /// components
+    ///
+    /// Fails with [`StreamDecodeError::Fatal`] when `msg.state_msgs` is empty: the update takes its
+    /// block from them.
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
         // stores all states updated in this tick/msg
         let mut updated_states = HashMap::new();

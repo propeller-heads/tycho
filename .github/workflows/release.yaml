@@ -90,8 +90,8 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Publishes in dependency order, skips crates already on crates.io so a rerun resumes a
-      # partial release, and waits for each crate to be indexed before the next one.
+      # Publishes in dependency order, uploading crates that do not depend on each other together,
+      # and skips crates already on crates.io so a rerun resumes a partial release.
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_REGISTRY_TOKEN }}

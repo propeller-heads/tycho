@@ -190,12 +190,21 @@ Some protocols, such as Balancer V2 and Curve, require a pool filter to be defin
 
 The stream created emits `Update` messages which consist of:
 
-* `block number_or_timestamp`- the block this update message refers to
+* `block_number`- the block this update message refers to
 * `new_pairs`- new components witnessed (either recently created or newly meeting filter criteria)
 * `removed_pairs`- components no longer tracked (either deleted due to a reorg or no longer meeting filter criteria)
 * `states`- the updated `ProtocolSim` states for all components modified in this block
+* `sync_states`- the synchronization state of every protocol (see SynchronizerState in [Tycho Client](indexer/tycho-client/README.md))
 
 The first message received will contain states for all protocol components registered to. Thereafter, further block updates will only contain data for updated or new components.
+
+### When no block arrives
+
+The stream emits an `Update` only for rounds that carry a block. Each round waits up to the block time plus the latency buffer for the protocols' next block. When that wait runs out before any protocol delivers a block, the stream skips the round, so you receive nothing rather than an error. Chains that only produce a block when someone transacts reach this point whenever they go quiet for longer than the wait. The next `Update` carries the current `sync_states` of every protocol, including any that fell behind in the meantime.
+
+A quiet chain and a stalled upstream look the same from the stream: no `Update` arrives. To tell when your state has gone stale, track how long ago the last `Update` arrived, or compare the timestamp of the newest `Ready` header in `sync_states` with the clock, and stop quoting once it passes your limit.
+
+The stream counts every round it skips in the `protocol_stream_rounds_without_block_total` counter, which starts at zero. If your application installs a recorder for the <a href="https://docs.rs/metrics" target="_blank" rel="noopener noreferrer">metrics</a> crate, the counter reaches it with no further setup. At `DEBUG` level, `tycho_simulation::evm::stream` also logs each skipped round with its `sync_states`.
 
 If you want to restrict processing to specific tokens (for example USDC/WETH only), apply that filter in your own consumer logic when reading `new_pairs` and `states`.
 
