@@ -910,6 +910,31 @@ mod tests {
     }
 
     #[rstest]
+    #[case::stableswap(CurveVariant::StableSwapNG, 150_000)]
+    #[case::two_crypto_ng(CurveVariant::TwoCryptoNG, 180_000)]
+    #[case::two_crypto_stable(CurveVariant::TwoCryptoStable, 180_000)]
+    #[case::two_crypto_v1(CurveVariant::TwoCryptoV1, 350_000)]
+    #[case::tri_crypto_ng(CurveVariant::TriCryptoNG, 180_000)]
+    #[case::tri_crypto_v1(CurveVariant::TriCryptoV1, 350_000)]
+    fn test_gas_estimate_by_variant(#[case] variant: CurveVariant, #[case] expected: u64) {
+        let (mut state, _, _) = two_crypto_ng_state();
+        state.variant = variant;
+
+        assert_eq!(state.gas_estimate(), expected);
+    }
+
+    #[test]
+    fn test_gas_estimate_adds_the_grant_to_an_exclusive_view() {
+        let (state, _, _) = two_crypto_ng_state();
+        let exclusive = state
+            .with_policy(granted_policy(100_000))
+            .exclusive_view()
+            .expect("exclusive view");
+
+        assert_eq!(exclusive.gas_estimate(), 230_000);
+    }
+
+    #[rstest]
     #[case::no_policy(vec![0], vec![0], 100_000)]
     #[case::unknown_version(vec![2], vec![0], 100_000)]
     #[case::killed(vec![1], vec![1], 100_000)]
