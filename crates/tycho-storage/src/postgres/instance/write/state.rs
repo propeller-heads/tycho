@@ -1,4 +1,6 @@
 //! Protocol state of an instance: one value per component and attribute name, versioned.
+use std::collections::{BTreeMap, BTreeSet};
+
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel::{
@@ -9,17 +11,83 @@ use diesel::{
     upsert::excluded,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::storage::StorageError;
+use tycho_common::{
+    models::{protocol::ProtocolComponentStateDelta, TxHash},
+    storage::StorageError,
+};
 
 use crate::postgres::{
     instance::{
+        gateway::PostgresGatewayNew,
+        origins::BatchOrigins,
         orm::{NewProtocolState, NewProtocolStateHistory},
         schema::tycho::{protocol_state, protocol_state_history},
-        write::versioning::VersionedRowNew,
+        write::versioning::{VersionedChange, VersionedRowNew},
         InstanceId,
     },
     storage_error_from_diesel,
 };
+
+impl PostgresGatewayNew {
+    /// Writes the state deltas of a batch as new versions: an updated attribute starts a version,
+    /// a deleted attribute ends one. Each change takes the block timestamp and index of its
+    /// transaction from `origins`.
+    ///
+    /// `NotFound` for a component that is not in the instance or a transaction that is not in the
+    /// batch. `Unexpected` for a change that does not start after the stored version of its key,
+    /// and for a deleted attribute with no stored version.
+    pub(crate) async fn upsert_protocol_states(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        deltas: &[(TxHash, ProtocolComponentStateDelta)],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        // A batch spans many blocks, so the same components come back many times. Look up each
+        // one once.
+        let external_ids: Vec<&str> = deltas
+            .iter()
+            .map(|(_, delta)| delta.component_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let component_ids = self
+            .component_ids(instance, &external_ids, conn)
+            .await?;
+
+        let mut changes = Vec::new();
+        for (tx, delta) in deltas {
+            let origin = origins.change(tx)?;
+            let component = component_ids[&delta.component_id];
+            // Sorted, so that the key a failure names does not depend on the hash order.
+            let updated: BTreeMap<_, _> = delta
+                .updated_attributes
+                .iter()
+                .collect();
+            for (name, value) in updated {
+                changes.push(VersionedChange::Update(NewProtocolState {
+                    instance_id: instance,
+                    protocol_component_id: component,
+                    attribute_name: name.clone(),
+                    attribute_value: value.clone(),
+                    // write_versions links every later version to the one it replaces.
+                    previous_value: None,
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }));
+            }
+            let deleted: BTreeSet<_> = delta
+                .deleted_attributes
+                .iter()
+                .collect();
+            for name in deleted {
+                changes.push(VersionedChange::Delete { key: (component, name.clone()), origin });
+            }
+        }
+        self.write_versions(instance, changes, conn)
+            .await
+    }
+}
 
 #[async_trait]
 impl VersionedRowNew for NewProtocolState {
