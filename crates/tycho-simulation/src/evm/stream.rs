@@ -29,7 +29,9 @@
 //! Aggregating by block adds small latency, since the supervisor waits briefly for
 //! all workers to emit. This latency only applies to workers in `Ready` or `Delayed`.
 //!
-//! The stream ends only when **all** workers are `Stale` or `Ended`.
+//! With the default [`StreamEndPolicy`], the stream ends only when the supervisor gives up, for
+//! example once a worker has `Ended` and every other worker is `Stale` or `Ended`. While every
+//! worker is only `Stale`, for example during a reconnect, the stream waits for them to recover.
 //!
 //! ## Configuration
 //!
@@ -46,12 +48,24 @@
 //! automatically when their quality exceeds `min_token_quality`.
 //!
 //! ### StreamEndPolicy
-//! Control when the stream ends based on worker states. By default, it ends when all
-//! workers are `Stale` or `Ended`.
+//! Choose which worker states end the stream early. The default ends nothing early.
 //!
 //! ## Stream
-//! The stream emits one protocol state update every `block_time`. Each update
-//! reports protocol synchronization states and any changes.
+//! The supervisor works in rounds. Each round waits up to `block_time` plus `latency_buffer` for
+//! the workers' next block, then sends what arrived together with every worker's sync state. The
+//! stream emits one update for each round that carries a block. Each update reports every
+//! worker's synchronization state and the round's changes.
+//!
+//! A round in which no worker delivered a block carries only sync states, for example when the
+//! chain produced no block in that time. The [`StreamEndPolicy`] still sees it, and the stream
+//! then skips it, so a quiet chain yields no update rather than an error. Its sync states reach
+//! you with the next update, which carries the state of every worker. The stream counts skipped
+//! rounds in the `protocol_stream_rounds_without_block_total` counter of the `metrics` crate.
+//!
+//! The stream is therefore silent while nothing new arrives, whether the chain is quiet or the
+//! upstream stopped. To notice an upstream that stopped, track how long ago the last update
+//! arrived, or compare the timestamp of the newest `Ready` header in `sync_states` with the
+//! clock.
 //!
 //! The `new_components` field lists newly deployed components and their tokens.
 //!
@@ -103,11 +117,13 @@
 //! ```
 use std::{
     collections::{HashMap, HashSet},
+    pin::Pin,
     sync::Arc,
     time,
 };
 
 use futures::{future::Either, Stream, StreamExt};
+use metrics::counter;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, warn};
 use tycho_client::{
@@ -165,7 +181,8 @@ fn mandatory_filter_fn(name: &str) -> Option<fn(&ComponentWithState) -> bool> {
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum StreamEndPolicy {
-    /// End stream if all states are Stale or Ended (default)
+    /// Default. Ends nothing early: the stream runs until the supervisor gives up, for example
+    /// once a protocol has Ended and every other one is Stale or Ended.
     #[default]
     AllEndedOrStale,
     /// End stream if any protocol ended
@@ -188,6 +205,13 @@ impl StreamEndPolicy {
             }
         }
     }
+}
+
+const ROUNDS_WITHOUT_BLOCK: &str = "protocol_stream_rounds_without_block_total";
+
+fn record_round_without_block(round: &FeedMessage<BlockHeader>) {
+    counter!(ROUNDS_WITHOUT_BLOCK).increment(1);
+    debug!(sync_states = ?round.sync_states, "Skipped a round that carries no block");
 }
 
 /// Handle returned by [`ProtocolStreamBuilder::with_step_controller`] that gives external
@@ -695,10 +719,10 @@ impl ProtocolStreamBuilder {
     ///
     /// The task buffers each incoming message, publishes it to `peek_tx` so the
     /// [`BlockStepController`] can inspect it, waits for a trigger, then forwards the message to
-    /// `output_tx` for the decode pipeline. If `advance_tx` is `Some`, a clone of the message is
-    /// also forwarded there (used by the pending-processor path) before the decode step.
-    /// When the input channel closes or a terminal error is received according to
-    /// `stream_end_policy`, the task exits and all output channels are dropped.
+    /// `output_tx` for the decode pipeline. When the input channel closes or a terminal error is
+    /// received according to `stream_end_policy`, the task exits and all output channels are
+    /// dropped. A round that carries no block is skipped after the policy check: it is never
+    /// buffered, so it takes no trigger.
     fn run_gating_task(
         raw_rx: tokio::sync::mpsc::Receiver<
             Result<FeedMessage<BlockHeader>, BlockSynchronizerError>,
@@ -708,6 +732,7 @@ impl ProtocolStreamBuilder {
         output_tx: tokio::sync::mpsc::Sender<FeedMessage<BlockHeader>>,
         stream_end_policy: StreamEndPolicy,
     ) {
+        counter!(ROUNDS_WITHOUT_BLOCK).increment(0);
         tokio::spawn(async move {
             let mut raw_stream = ReceiverStream::new(raw_rx);
             loop {
@@ -726,6 +751,10 @@ impl ProtocolStreamBuilder {
                         stream_end_policy, msg.sync_states
                     );
                     break;
+                }
+                if msg.state_msgs.is_empty() {
+                    record_round_without_block(&msg);
+                    continue;
                 }
 
                 // Publish the buffered message so the caller can peek before triggering.
@@ -752,6 +781,10 @@ impl ProtocolStreamBuilder {
                         if stream_end_policy.should_end(msg.sync_states.values()) {
                             break;
                         }
+                        if msg.state_msgs.is_empty() {
+                            record_round_without_block(&msg);
+                            continue;
+                        }
                         if output_tx.send(msg).await.is_err() {
                             break;
                         }
@@ -771,6 +804,44 @@ impl ProtocolStreamBuilder {
                 }
             }
         });
+    }
+
+    /// The messages from `rx` up to the first error or the first message `stream_end_policy`
+    /// ends on. Never yields a message with empty `state_msgs`: those are skipped after the
+    /// policy has seen them.
+    fn filtered_feed_message_stream(
+        rx: tokio::sync::mpsc::Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>>,
+        stream_end_policy: StreamEndPolicy,
+    ) -> Pin<Box<dyn Stream<Item = FeedMessage<BlockHeader>> + Send>> {
+        counter!(ROUNDS_WITHOUT_BLOCK).increment(0);
+        let rounds = ReceiverStream::new(rx)
+            .take_while(move |msg| match msg {
+                Ok(msg) => {
+                    let states = msg.sync_states.values();
+                    if stream_end_policy.should_end(states) {
+                        error!(
+                            "Block stream ended due to {:?}: {:?}",
+                            stream_end_policy, msg.sync_states
+                        );
+                        futures::future::ready(false)
+                    } else {
+                        futures::future::ready(true)
+                    }
+                }
+                Err(e) => {
+                    error!("Block stream ended with terminal error: {e}");
+                    futures::future::ready(false)
+                }
+            })
+            .map(|msg| msg.expect("Safe since stream ends if we receive an error"))
+            .filter(|msg| {
+                let is_empty = msg.state_msgs.is_empty();
+                if is_empty {
+                    record_round_without_block(msg);
+                }
+                futures::future::ready(!is_empty)
+            });
+        Box::pin(rounds)
     }
 
     /// Registers `provider` as the live override source for `protocol_system`.
@@ -867,27 +938,7 @@ impl ProtocolStreamBuilder {
                 Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
                 Box::new(ReceiverStream::new(gated_rx))
             } else {
-                let normal = ReceiverStream::new(rx)
-                    .take_while(move |msg| match msg {
-                        Ok(msg) => {
-                            let states = msg.sync_states.values();
-                            if stream_end_policy.should_end(states) {
-                                error!(
-                                    "Block stream ended due to {:?}: {:?}",
-                                    stream_end_policy, msg.sync_states
-                                );
-                                futures::future::ready(false)
-                            } else {
-                                futures::future::ready(true)
-                            }
-                        }
-                        Err(e) => {
-                            error!("Block stream ended with terminal error: {e}");
-                            futures::future::ready(false)
-                        }
-                    })
-                    .map(|msg| msg.expect("Safe since stream ends if we receive an error"));
-                Box::new(Box::pin(normal))
+                Box::new(Self::filtered_feed_message_stream(rx, stream_end_policy))
             };
 
         let stream = Box::pin(decode_stream.then({
@@ -934,27 +985,7 @@ impl ProtocolStreamBuilder {
                 Self::run_gating_task(rx, trigger_rx, peek_tx, gated_tx, stream_end_policy);
                 Box::new(ReceiverStream::new(gated_rx))
             } else {
-                let normal = ReceiverStream::new(rx)
-                    .take_while(move |msg| match msg {
-                        Ok(msg) => {
-                            let states = msg.sync_states.values();
-                            if stream_end_policy.should_end(states) {
-                                error!(
-                                    "Block stream ended due to {:?}: {:?}",
-                                    stream_end_policy, msg.sync_states
-                                );
-                                futures::future::ready(false)
-                            } else {
-                                futures::future::ready(true)
-                            }
-                        }
-                        Err(e) => {
-                            error!("Block stream ended with terminal error: {e}");
-                            futures::future::ready(false)
-                        }
-                    })
-                    .map(|msg| msg.expect("Safe since stream ends if we receive an error"));
-                Box::new(Box::pin(normal))
+                Box::new(Self::filtered_feed_message_stream(rx, stream_end_policy))
             };
 
         let stream = Box::pin(decode_stream.then({
@@ -1019,6 +1050,189 @@ mod tests {
 
     fn empty_update(block: u64) -> Update {
         Update::new(block, HashMap::new(), HashMap::new())
+    }
+
+    /// A round in which `uniswap_v2` produced block `number`.
+    fn round_with_block(number: u64) -> FeedMessage<BlockHeader> {
+        let header = BlockHeader { number, ..Default::default() };
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "uniswap_v2".to_string(),
+                tycho_client::feed::synchronizer::StateSyncMessage {
+                    header: header.clone(),
+                    ..Default::default()
+                },
+            )]),
+            sync_states: HashMap::from([(
+                "uniswap_v2".to_string(),
+                SynchronizerState::Ready(header),
+            )]),
+        }
+    }
+
+    /// A round that timed out before `uniswap_v2` produced a block: it carries only the sync
+    /// state, as tycho-client sends it.
+    fn round_without_block(state: SynchronizerState) -> FeedMessage<BlockHeader> {
+        FeedMessage {
+            state_msgs: HashMap::new(),
+            sync_states: HashMap::from([("uniswap_v2".to_string(), state)]),
+        }
+    }
+
+    fn delayed_at(number: u64) -> SynchronizerState {
+        SynchronizerState::Delayed(BlockHeader { number, ..Default::default() })
+    }
+
+    async fn feed_of(
+        rounds: Vec<FeedMessage<BlockHeader>>,
+    ) -> tokio::sync::mpsc::Receiver<Result<FeedMessage<BlockHeader>, BlockSynchronizerError>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(rounds.len());
+        for round in rounds {
+            tx.send(Ok(round))
+                .await
+                .expect("the receiver is held by this function");
+        }
+        rx
+    }
+
+    #[tokio::test]
+    async fn test_filtered_feed_message_stream_skips_round_without_block() {
+        let feed = feed_of(vec![
+            round_with_block(1),
+            round_without_block(delayed_at(1)),
+            round_with_block(2),
+        ])
+        .await;
+
+        let rounds: Vec<_> =
+            ProtocolStreamBuilder::filtered_feed_message_stream(feed, StreamEndPolicy::default())
+                .collect()
+                .await;
+
+        assert_eq!(rounds, vec![round_with_block(1), round_with_block(2)]);
+    }
+
+    #[test]
+    fn test_filtered_feed_message_stream_counts_rounds_without_block() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        // `with_local_recorder` takes a sync closure, so the stream runs on a runtime inside it.
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let feed = feed_of(vec![
+                    round_with_block(1),
+                    round_without_block(delayed_at(1)),
+                    round_without_block(delayed_at(1)),
+                    round_with_block(2),
+                ])
+                .await;
+                ProtocolStreamBuilder::filtered_feed_message_stream(
+                    feed,
+                    StreamEndPolicy::default(),
+                )
+                .collect::<Vec<_>>()
+                .await
+            })
+        });
+
+        let counted: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "protocol_stream_rounds_without_block_total")
+            .map(|(.., value)| value)
+            .collect();
+        assert_eq!(counted, vec![DebugValue::Counter(2)]);
+    }
+
+    #[tokio::test]
+    async fn test_filtered_feed_message_stream_ends_on_stale_round_without_block() {
+        let stale = SynchronizerState::Stale(BlockHeader { number: 1, ..Default::default() });
+        let feed =
+            feed_of(vec![round_with_block(1), round_without_block(stale), round_with_block(2)])
+                .await;
+
+        let rounds: Vec<_> =
+            ProtocolStreamBuilder::filtered_feed_message_stream(feed, StreamEndPolicy::AnyStale)
+                .collect()
+                .await;
+
+        assert_eq!(rounds, vec![round_with_block(1)]);
+    }
+
+    #[tokio::test]
+    async fn test_step_controller_skips_round_without_block() {
+        let feed = feed_of(vec![
+            round_with_block(1),
+            round_without_block(delayed_at(1)),
+            round_with_block(2),
+        ])
+        .await;
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (peek_tx, peek_rx) = tokio::sync::watch::channel(None);
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(1);
+        ProtocolStreamBuilder::run_gating_task(
+            feed,
+            trigger_rx,
+            peek_tx,
+            output_tx,
+            StreamEndPolicy::default(),
+        );
+        let controller = BlockStepController { trigger_tx, peek_rx };
+
+        let steps = async {
+            assert_eq!(controller.peek_next_block().await, Some(round_with_block(1)));
+            controller
+                .trigger_next_block()
+                .expect("the gate is running");
+            assert_eq!(output_rx.recv().await, Some(round_with_block(1)));
+
+            assert_eq!(controller.peek_next_block().await, Some(round_with_block(2)));
+            controller
+                .trigger_next_block()
+                .expect("the gate is running");
+            assert_eq!(output_rx.recv().await, Some(round_with_block(2)));
+            assert_eq!(output_rx.recv().await, None);
+        };
+        tokio::time::timeout(time::Duration::from_secs(5), steps)
+            .await
+            .expect("the gate stopped releasing rounds");
+    }
+
+    #[tokio::test]
+    async fn test_dropped_step_controller_skips_round_without_block() {
+        let feed = feed_of(vec![
+            round_with_block(1),
+            round_without_block(delayed_at(1)),
+            round_with_block(2),
+        ])
+        .await;
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (peek_tx, _peek_rx) = tokio::sync::watch::channel(None);
+        let (output_tx, output_rx) = tokio::sync::mpsc::channel(1);
+        drop(trigger_tx);
+        ProtocolStreamBuilder::run_gating_task(
+            feed,
+            trigger_rx,
+            peek_tx,
+            output_tx,
+            StreamEndPolicy::default(),
+        );
+
+        let rounds: Vec<_> = tokio::time::timeout(
+            time::Duration::from_secs(5),
+            ReceiverStream::new(output_rx).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("the ungated stream stopped forwarding rounds");
+
+        assert_eq!(rounds, vec![round_with_block(1), round_with_block(2)]);
     }
 
     #[tokio::test]

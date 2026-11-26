@@ -51,7 +51,9 @@ TychoStreamBuilder (stream.rs)
    snapshot. Results of tasks spawned before the backoff started neither reset nor lengthen it.
    When `partial_blocks` is enabled, brand-new components are held in `Deferred` state until the
    first message of the next block, then promoted to `InFlight`, or to `Backoff` while one runs.
-3. `BlockSynchronizer` waits for all active synchronizers, then emits a `FeedMessage` per block
+3. `BlockSynchronizer` waits for all active synchronizers, then emits one `FeedMessage` per round.
+   A round whose wait runs out before any synchronizer delivered a block still goes out, with
+   empty `state_msgs` and every synchronizer's `sync_states`
 4. Synchronizers classified as `Started | Ready | Delayed | Stale | Advanced | Ended`; stale ones are polled after the active ones:
    each round they only consume what queued while the active ones advanced, so a stale synchronizer
    cannot hold the round to its `block_time` wait. They wait only when no synchronizer is active.
