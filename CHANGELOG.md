@@ -1,3 +1,19 @@
+## [0.542.0](https://github.com/propeller-heads/tycho/compare/0.541.0...0.542.0) (2026-11-26)
+
+
+### Features
+
+* **baibai:** rename the protocol system to pamm:baibai ([836a8c0](https://github.com/propeller-heads/tycho/commit/836a8c0ae73ba1f38182880a0ffc9488577fe5e7))
+* **execution:** execute BaiBai through a fallback router ([45c9166](https://github.com/propeller-heads/tycho/commit/45c9166d1873c70d344e475a5a62a8564e4ed558))
+* **simulation:** price BaiBai books for the fallback router ([b0ed53d](https://github.com/propeller-heads/tycho/commit/b0ed53d139eea7fe60a498220aa9486488fdd557))
+
+
+### Bug Fixes
+
+* **execution:** net BaiBai quoteFor gas of the warm entrypoint ([be983fc](https://github.com/propeller-heads/tycho/commit/be983fcc0c1c7b6adf22f043c462bc912db764f3))
+* **execution:** restore pancakeswap_infinity_cl in the Base deploy list ([8385ba2](https://github.com/propeller-heads/tycho/commit/8385ba2c08c42553a2233dc5542b1fc991e9f10c))
+* **execution:** return input BaiBai does not pull to the caller ([bb77313](https://github.com/propeller-heads/tycho/commit/bb77313d3a6d1d47de1155a61e40f2b15e2822a3))
+
 ## [0.541.0](https://github.com/propeller-heads/tycho/compare/0.540.1...0.541.0) (2026-11-26)
 
 
