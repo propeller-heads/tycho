@@ -261,6 +261,8 @@ Each message includes block details to help you stay on track with the latest bl
 
 The main outer message type. It contains both the individual SynchronizerState (one per extractor) and the StateSyncMessage (also one per extractor). Each extractor is supposed to emit one message per block (even if no changes happened in that block) and metadata about the extractor's block synchronization state. The latter allows consumers to handle delayed extractors gracefully.
 
+The client emits one FeedMessage per round. Each round waits up to the block time plus a timeout for every extractor's next block (`block_time` and `timeout` on the Rust `TychoStreamBuilder`, with defaults per chain). When the wait runs out before any extractor delivers a block, the client still emits the FeedMessage: its `state_msgs` is empty, and `sync_states` reports each extractor's state. Chains that only produce a block when someone transacts reach this point whenever they go quiet for longer than the wait. Treat such a message as "no new block yet". The [Tycho Simulation](../../simulation.md#when-no-block-arrives) stream skips these rounds for you.
+
 **SynchronizerState** (`sync_states`**`)`**
 
 This struct contains metadata about the extractor's block synchronization state. It allows consumers to handle delayed extractors gracefully. Extractors can have any of the following states:
