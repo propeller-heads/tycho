@@ -38,40 +38,8 @@ impl SwapEncoder for BaibaiSwapEncoder {
         swap: &Swap,
         _context: &EncodingContext,
     ) -> Result<Vec<u8>, EncodingError> {
-        let component = swap.component();
-        let address = |name: &str| -> Result<Vec<u8>, EncodingError> {
-            let value = get_static_attribute(swap, name).map_err(|e| {
-                EncodingError::FatalError(format!("BaiBai component {}: {e}", component.id))
-            })?;
-            if value.len() != 20 {
-                return Err(EncodingError::FatalError(format!(
-                    "BaiBai component {}: attribute {name} holds {} bytes, not an address",
-                    component.id,
-                    value.len()
-                )));
-            }
-            Ok(value)
-        };
-        let base = address(BAIBAI_BASE_ATTRIBUTE)?;
-        let quote = address(BAIBAI_QUOTE_ATTRIBUTE)?;
-        let token_in = swap.token_in().address.as_ref();
-        let token_out = swap.token_out().address.as_ref();
-        let sell_base = if token_in == base && token_out == quote {
-            1
-        } else if token_in == quote && token_out == base {
-            0
-        } else {
-            return Err(EncodingError::InvalidInput(format!(
-                "BaiBai component {} trades {} against {}, not {} for {}",
-                component.id,
-                Bytes::from(base),
-                Bytes::from(quote),
-                swap.token_in().address,
-                swap.token_out().address
-            )));
-        };
-        let mut data = base;
-        data.push(sell_base);
+        let (mut data, sell_base) = base_and_direction(swap)?;
+        data.push(u8::from(sell_base));
         Ok(data)
     }
 
@@ -82,6 +50,44 @@ impl SwapEncoder for BaibaiSwapEncoder {
     fn clone_box(&self) -> Box<dyn SwapEncoder> {
         Box::new(self.clone())
     }
+}
+
+/// The pair's base token and whether the swap sells it, read from the component's attributes.
+/// Fails for a swap whose tokens are not the pair's base and quote token.
+pub(super) fn base_and_direction(swap: &Swap) -> Result<(Vec<u8>, bool), EncodingError> {
+    let component = swap.component();
+    let address = |name: &str| -> Result<Vec<u8>, EncodingError> {
+        let value = get_static_attribute(swap, name).map_err(|e| {
+            EncodingError::FatalError(format!("BaiBai component {}: {e}", component.id))
+        })?;
+        if value.len() != 20 {
+            return Err(EncodingError::FatalError(format!(
+                "BaiBai component {}: attribute {name} holds {} bytes, not an address",
+                component.id,
+                value.len()
+            )));
+        }
+        Ok(value)
+    };
+    let base = address(BAIBAI_BASE_ATTRIBUTE)?;
+    let quote = address(BAIBAI_QUOTE_ATTRIBUTE)?;
+    let token_in = swap.token_in().address.as_ref();
+    let token_out = swap.token_out().address.as_ref();
+    let sell_base = if token_in == base && token_out == quote {
+        true
+    } else if token_in == quote && token_out == base {
+        false
+    } else {
+        return Err(EncodingError::InvalidInput(format!(
+            "BaiBai component {} trades {} against {}, not {} for {}",
+            component.id,
+            Bytes::from(base),
+            Bytes::from(quote),
+            swap.token_in().address,
+            swap.token_out().address
+        )));
+    };
+    Ok((base, sell_base))
 }
 
 #[cfg(test)]

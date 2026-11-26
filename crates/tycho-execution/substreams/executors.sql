@@ -42,6 +42,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('base', '0x021d3c156948bef1ae9c842259386522e25993b7', ARRAY['ekubo_v3']),
     ('base', '0x08b9228a2ab320fa5335322961ed60da2e7cffc2', ARRAY['rfq:metric']),
     ('base', '0x08f22285d13533d68aa8be5949536322db3538de', ARRAY['fallback']),
+    ('base', '0x0a2b394dc0c8645c0b3ceea3b9cec60a1fd52c8c', ARRAY['baibai']),
     ('base', '0x21a97f2aa8d9ae7144bfd080266ee87cc2369656', ARRAY['pancakeswap_v3']),
     ('base', '0x321c00604355dd20a2cb472d44fe8f37d821a82c', ARRAY['sushiswap_v2', 'uniswap_v2']),
     ('base', '0x489a3f531da3873d6585bf3f8e0dee48cac6f7bc', ARRAY['bebop']),
