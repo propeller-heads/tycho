@@ -4623,14 +4623,18 @@ const HANJI_ETH_USDC: &str = "0x6a6951db3bb99f76a8ccb9f8a8399b613666298b";
 const HANJI_CBBTC_USDC: &str = "0x15c8cb4e336b1e478d155d813830129fb225eee3";
 const HANJI_CBBTC_ETH: &str = "0xf455b3c0756908c6a2f44a7f7390053cfe354eea";
 
-/// A swap on the Hanji market behind `orderbook`, whose tokens are `base` then `quote` (native ETH
-/// as the zero address, as the book feed publishes it), selling base when `sell_base`.
-fn hanji_swap(orderbook: &str, base: Bytes, quote: Bytes, sell_base: bool) -> Swap {
-    let (token_in, token_out) =
-        if sell_base { (base.clone(), quote.clone()) } else { (quote.clone(), base.clone()) };
+/// A swap on the Hanji market behind `orderbook`, whose tokens are `base_token` then
+/// `quote_token` (native ETH as the zero address, as the book feed publishes it), selling the base
+/// token when `sell_base`.
+fn hanji_swap(orderbook: &str, base_token: Bytes, quote_token: Bytes, sell_base: bool) -> Swap {
+    let (token_in, token_out) = if sell_base {
+        (base_token.clone(), quote_token.clone())
+    } else {
+        (quote_token.clone(), base_token.clone())
+    };
     let market = ProtocolComponent {
         protocol_system: HANJI_PROTOCOL_SYSTEM.into(),
-        tokens: vec![base, quote],
+        tokens: vec![base_token, quote_token],
         static_attributes: HashMap::from([(
             HANJI_ORDERBOOK_ATTRIBUTE.into(),
             Bytes::from(orderbook),
