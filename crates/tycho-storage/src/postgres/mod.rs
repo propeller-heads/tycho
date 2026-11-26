@@ -1054,7 +1054,7 @@ pub mod db_fixtures {
     //! the entries that are crucial to your test case.
     use std::str::FromStr;
 
-    use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime};
+    use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
     use diesel::{prelude::*, sql_query};
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use serde_json::Value;
@@ -1562,8 +1562,8 @@ pub mod db_fixtures {
             .expect("inserting the instance account failed")
     }
 
-    /// Inserts the balance of `token` in an account of the instance, valid from 2020-01-01 00:00 at
-    /// transaction index 0.
+    /// Inserts the balance of `token` in an account of the instance, valid from
+    /// [`INSTANCE_VALID_FROM`] at transaction index 0.
     pub async fn insert_instance_account_balance(
         conn: &mut AsyncPgConnection,
         instance_id: InstanceId,
@@ -1571,16 +1571,13 @@ pub mod db_fixtures {
         token: Bytes,
         balance: Bytes,
     ) {
-        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date");
         diesel::insert_into(instance::schema::tycho::account_balance::table)
             .values(instance::orm::NewAccountBalance {
                 instance_id,
                 account_id,
                 token,
                 balance,
-                valid_from,
+                valid_from: INSTANCE_VALID_FROM,
                 tx_index: 0,
             })
             .execute(conn)
@@ -1588,8 +1585,8 @@ pub mod db_fixtures {
             .expect("inserting the account balance failed");
     }
 
-    /// Inserts the code of an account of the instance, valid from 2020-01-01 00:00 at transaction
-    /// index 0.
+    /// Inserts the code of an account of the instance, valid from [`INSTANCE_VALID_FROM`] at
+    /// transaction index 0.
     pub async fn insert_instance_code(
         conn: &mut AsyncPgConnection,
         instance_id: InstanceId,
@@ -1598,9 +1595,6 @@ pub mod db_fixtures {
         hash: Bytes,
         modify_tx_hash: Bytes,
     ) {
-        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date");
         diesel::insert_into(instance::schema::tycho::contract_code::table)
             .values(instance::orm::NewContractCode {
                 instance_id,
@@ -1608,7 +1602,7 @@ pub mod db_fixtures {
                 code,
                 hash,
                 modify_tx_hash,
-                valid_from,
+                valid_from: INSTANCE_VALID_FROM,
                 tx_index: 0,
             })
             .execute(conn)
@@ -1617,16 +1611,13 @@ pub mod db_fixtures {
     }
 
     /// Inserts storage slots of an account of the instance, as `(slot, value)` pairs, valid from
-    /// 2020-01-01 00:00 at transaction index 0, with no previous value.
+    /// [`INSTANCE_VALID_FROM`] at transaction index 0, with no previous value.
     pub async fn insert_instance_slots(
         conn: &mut AsyncPgConnection,
         instance_id: InstanceId,
         account_id: i64,
         slots: &[(Bytes, Bytes)],
     ) {
-        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date");
         let rows: Vec<_> = slots
             .iter()
             .map(|(slot, value)| instance::orm::NewContractStorage {
@@ -1635,7 +1626,7 @@ pub mod db_fixtures {
                 slot: slot.clone(),
                 value: Some(value.clone()),
                 previous_value: None,
-                valid_from,
+                valid_from: INSTANCE_VALID_FROM,
                 tx_index: 0,
             })
             .collect();
@@ -1667,8 +1658,8 @@ pub mod db_fixtures {
             .expect("inserting the extraction state failed");
     }
 
-    /// Inserts the balance of `token` in a component of the instance, valid from 2020-01-01 00:00
-    /// at transaction index 0, with previous value `0x00`.
+    /// Inserts the balance of `token` in a component of the instance, valid from
+    /// [`INSTANCE_VALID_FROM`] at transaction index 0, with previous value `0x00`.
     pub async fn insert_instance_component_balance(
         conn: &mut AsyncPgConnection,
         instance_id: InstanceId,
@@ -1677,9 +1668,6 @@ pub mod db_fixtures {
         balance: Bytes,
         balance_float: f64,
     ) {
-        let valid_from = NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date");
         diesel::insert_into(instance::schema::tycho::component_balance::table)
             .values(instance::orm::NewComponentBalance {
                 instance_id,
@@ -1688,7 +1676,7 @@ pub mod db_fixtures {
                 new_balance: balance,
                 previous_value: Bytes::from("0x00"),
                 balance_float,
-                valid_from,
+                valid_from: INSTANCE_VALID_FROM,
                 tx_index: 0,
             })
             .execute(conn)
@@ -1696,15 +1684,21 @@ pub mod db_fixtures {
             .expect("inserting the component balance failed");
     }
 
-    /// The `valid_from` of the state attributes that [`insert_instance_state`] inserts:
-    /// 2020-01-01 00:00.
-    pub const INSTANCE_STATE_VALID_FROM: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 1)
+    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
+    pub fn minutes_ago(minutes: i64) -> NaiveDateTime {
+        let ts = Utc::now().naive_utc() - chrono::Duration::minutes(minutes);
+        ts.with_nanosecond(0)
+            .expect("zero nanoseconds is valid")
+    }
+
+    /// The `valid_from` of the versioned rows that the instance fixtures insert: 2020-01-01 00:00.
+    pub const INSTANCE_VALID_FROM: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 1)
         .expect("a valid date")
         .and_hms_opt(0, 0, 0)
         .expect("a valid time");
 
     /// Inserts the state attribute `attribute_name` of a component of the instance, valid from
-    /// [`INSTANCE_STATE_VALID_FROM`] at transaction index 0, with no previous value.
+    /// [`INSTANCE_VALID_FROM`] at transaction index 0, with no previous value.
     pub async fn insert_instance_state(
         conn: &mut AsyncPgConnection,
         instance_id: InstanceId,
@@ -1719,7 +1713,7 @@ pub mod db_fixtures {
                 attribute_name: attribute_name.to_string(),
                 attribute_value: value,
                 previous_value: None,
-                valid_from: INSTANCE_STATE_VALID_FROM,
+                valid_from: INSTANCE_VALID_FROM,
                 tx_index: 0,
             })
             .execute(conn)

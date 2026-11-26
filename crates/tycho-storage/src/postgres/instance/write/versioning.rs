@@ -511,15 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn test_change_at_a_dropped_repeat_fails() {
-        let changes = vec![update_dropping_repeats(1, 10, 2, 0), update(1, 20, 2, 0)];
-
-        let result = plan(vec![row(1, 10, 1, 0)], changes);
-
-        assert!(matches!(result, Err(StorageError::Unexpected(_))));
-    }
-
-    #[test]
     fn test_same_value_is_a_new_version_by_default() {
         let stored = row(1, 10, 1, 0);
 
@@ -533,6 +524,10 @@ mod tests {
     #[case::at_the_stored_version(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)])]
     #[case::before_the_stored_version(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)])]
     #[case::two_changes_in_one_transaction(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)])]
+    #[case::at_a_dropped_repeat(
+        vec![row(1, 10, 1, 0)],
+        vec![update_dropping_repeats(1, 10, 2, 0), update(1, 20, 2, 0)]
+    )]
     fn test_change_not_after_the_replaced_version_fails(
         #[case] stored: Vec<Row>,
         #[case] changes: Vec<VersionedChange<Row>>,

@@ -152,7 +152,7 @@ impl VersionedRowNew for NewAccountBalance {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+    use chrono::NaiveDateTime;
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::Bytes;
@@ -193,19 +193,6 @@ mod tests {
         .await;
         let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
         Setup { conn, gateway, instance, account }
-    }
-
-    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
-    fn minutes_ago(minutes: i64) -> NaiveDateTime {
-        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
-        ts.with_nanosecond(0)
-            .expect("zero nanoseconds is valid")
-    }
-
-    fn stored_since() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date")
     }
 
     fn update(
@@ -254,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_balance_is_current_without_history() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, "0x02", 5, at);
         write(&mut setup, vec![change]).await;
@@ -271,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_moves_the_stored_balance_to_history() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, "0x01", 2, at);
         write(&mut setup, vec![change]).await;
@@ -282,7 +269,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             (&history[0].balance, history[0].valid_from, history[0].valid_to),
-            (&Bytes::from(1u64), stored_since(), at)
+            (&Bytes::from(1u64), db_fixtures::INSTANCE_VALID_FROM, at)
         );
     }
 }

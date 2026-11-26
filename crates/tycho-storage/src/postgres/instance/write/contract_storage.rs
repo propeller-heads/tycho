@@ -156,7 +156,7 @@ impl VersionedRowNew for NewContractStorage {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+    use chrono::NaiveDateTime;
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::Bytes;
@@ -196,19 +196,6 @@ mod tests {
         .await;
         let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
         Setup { conn, gateway, instance, account }
-    }
-
-    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
-    fn minutes_ago(minutes: i64) -> NaiveDateTime {
-        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
-        ts.with_nanosecond(0)
-            .expect("zero nanoseconds is valid")
-    }
-
-    fn stored_since() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date")
     }
 
     fn update(
@@ -258,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_slot_is_current_without_previous_value() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, "0x02", Some("0x0b"), at);
         write(&mut setup, vec![change]).await;
@@ -280,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_links_the_previous_value_and_moves_it_to_history() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, "0x01", Some("0x0b"), at);
         write(&mut setup, vec![change]).await;
@@ -294,14 +281,14 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             (&history[0].value, history[0].valid_from, history[0].valid_to),
-            (&Some(Bytes::from("0x0a")), stored_since(), at)
+            (&Some(Bytes::from("0x0a")), db_fixtures::INSTANCE_VALID_FROM, at)
         );
     }
 
     #[tokio::test]
     async fn test_slot_without_value_is_a_version_with_null_value() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, "0x01", None, at);
         write(&mut setup, vec![change]).await;

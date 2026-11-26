@@ -224,7 +224,7 @@ impl VersionedRowNew for NewComponentBalance {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, NaiveDate, NaiveDateTime, Timelike, Utc};
+    use chrono::{Duration, NaiveDateTime};
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
@@ -287,19 +287,6 @@ mod tests {
         Bytes::from(value)
     }
 
-    fn stored_since() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2020, 1, 1)
-            .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .expect("a valid date")
-    }
-
-    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
-    fn minutes_ago(minutes: i64) -> NaiveDateTime {
-        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
-        ts.with_nanosecond(0)
-            .expect("zero nanoseconds is valid")
-    }
-
     fn update(
         setup: &Setup,
         token_id: u8,
@@ -352,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_balance_is_current_without_history() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, 2, 5, at, 3);
 
@@ -374,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_moves_the_stored_balance_to_history() {
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = update(&setup, 1, 2, at, 3);
 
@@ -391,7 +378,7 @@ mod tests {
         assert_eq!(history[0].new_balance, value(1));
         assert_eq!(
             (history[0].valid_from, history[0].valid_to, history[0].tx_index),
-            (stored_since(), at, 0)
+            (db_fixtures::INSTANCE_VALID_FROM, at, 0)
         );
     }
 
@@ -400,7 +387,7 @@ mod tests {
         use crate::postgres::instance::origins::ChangeOrigin;
 
         let mut setup = setup().await;
-        let at = minutes_ago(1);
+        let at = db_fixtures::minutes_ago(1);
 
         let change = VersionedChange::Delete {
             key: (setup.component, token(1)),
@@ -416,14 +403,14 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             (&history[0].new_balance, history[0].valid_from, history[0].valid_to),
-            (&value(1), stored_since(), at)
+            (&value(1), db_fixtures::INSTANCE_VALID_FROM, at)
         );
     }
 
     #[tokio::test]
     async fn test_two_changes_of_one_key_chain_in_order() {
         let mut setup = setup().await;
-        let block_ts = minutes_ago(1);
+        let block_ts = db_fixtures::minutes_ago(1);
 
         let later = update(&setup, 1, 5, block_ts, 5);
         let earlier = update(&setup, 1, 2, block_ts, 2);
@@ -446,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_without_history_day_fails() {
         let mut setup = setup().await;
-        let far_ahead = minutes_ago(0) + Duration::days(60);
+        let far_ahead = db_fixtures::minutes_ago(0) + Duration::days(60);
 
         let change = update(&setup, 1, 2, far_ahead, 0);
 
@@ -509,7 +496,7 @@ mod tests {
     async fn test_balances_of_a_batch_take_their_origin() {
         let mut setup = setup().await;
         insert_tokens(&mut setup, &[2, 3]).await;
-        let ts = minutes_ago(1);
+        let ts = db_fixtures::minutes_ago(1);
 
         insert_batch(&mut setup, &origins(ts), &[balance(2, 20, 0xa1), balance(3, 30, 0xa3)])
             .await
@@ -526,7 +513,7 @@ mod tests {
         assert_eq!(
             stored,
             vec![
-                (token(1), value(1), none.clone(), stored_since(), 0),
+                (token(1), value(1), none.clone(), db_fixtures::INSTANCE_VALID_FROM, 0),
                 (token(2), value(20), none.clone(), ts, 1),
                 (token(3), value(30), none, ts, 3),
             ]
@@ -537,7 +524,7 @@ mod tests {
     async fn test_balances_of_one_key_in_a_batch_chain_in_order() {
         let mut setup = setup().await;
         insert_tokens(&mut setup, &[2]).await;
-        let ts = minutes_ago(1);
+        let ts = db_fixtures::minutes_ago(1);
 
         insert_batch(&mut setup, &origins(ts), &[balance(2, 30, 0xa3), balance(2, 20, 0xa1)])
             .await
@@ -564,7 +551,7 @@ mod tests {
 
         let result = insert_batch(
             &mut setup,
-            &origins(minutes_ago(1)),
+            &origins(db_fixtures::minutes_ago(1)),
             &[balance(2, 20, 0xa1), balance(9, 90, 0xa1)],
         )
         .await;
@@ -578,8 +565,12 @@ mod tests {
         let mut setup = setup().await;
         insert_tokens(&mut setup, &[2]).await;
 
-        let result =
-            insert_batch(&mut setup, &origins(minutes_ago(1)), &[balance(2, 20, 0xff)]).await;
+        let result = insert_batch(
+            &mut setup,
+            &origins(db_fixtures::minutes_ago(1)),
+            &[balance(2, 20, 0xff)],
+        )
+        .await;
 
         assert_eq!(
             result,
