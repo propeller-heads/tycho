@@ -1,5 +1,5 @@
 //! Protocol components of an instance.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -7,6 +7,7 @@ use tycho_common::storage::StorageError;
 
 use crate::postgres::{
     instance::{gateway::PostgresGatewayNew, schema::tycho::protocol_component, InstanceId},
+    schema::protocol_type,
     storage_error_from_diesel,
 };
 
@@ -44,6 +45,32 @@ impl PostgresGatewayNew {
         }
         Ok(ids)
     }
+}
+
+/// Fails with `NotFound` for the first of `names` that is not a stored protocol type.
+///
+/// Instance components name their type with no foreign key into `public.protocol_type`, so a
+/// writer checks the names first.
+pub(super) async fn check_protocol_types_stored(
+    names: &[&str],
+    conn: &mut AsyncPgConnection,
+) -> Result<(), StorageError> {
+    let unique: HashSet<&str> = names.iter().copied().collect();
+    let stored: HashSet<String> = protocol_type::table
+        .filter(protocol_type::name.eq_any(&unique))
+        .select(protocol_type::name)
+        .load::<String>(conn)
+        .await
+        .map_err(|err| storage_error_from_diesel(err, "ProtocolType", "batch", None))?
+        .into_iter()
+        .collect();
+    if let Some(missing) = names
+        .iter()
+        .find(|name| !stored.contains(**name))
+    {
+        return Err(StorageError::NotFound("ProtocolType".to_string(), (*missing).to_string()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
