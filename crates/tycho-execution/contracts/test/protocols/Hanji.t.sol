@@ -14,10 +14,9 @@ interface IHanjiWhitelist {
     function setWhitelisted(address caller, bool allowed) external;
 }
 
-/// @dev An orderbook that reports an ERC20 market until the router approves it, and from then on
-///      a market whose quote side is native ETH: the router's allowance is state the router
-///      changes between `getTransferData` and `swap`, so a view can answer the two differently.
-contract FlippingOrderbook {
+/// @dev A mock orderbook at scaling 1 trading `base` for `quote`, whose quote side is native ETH
+///      when `_nativeQuote` says so.
+abstract contract MockOrderbook {
     address public immutable base;
     address public immutable quote;
 
@@ -25,6 +24,8 @@ contract FlippingOrderbook {
         base = base_;
         quote = quote_;
     }
+
+    function _nativeQuote() internal view virtual returns (bool);
 
     function getConfig()
         external
@@ -45,14 +46,12 @@ contract FlippingOrderbook {
             bool
         )
     {
-        bool approved =
-            IERC20(quote).allowance(msg.sender, address(this)) > 0;
         return (
             1,
             1,
             base,
             quote,
-            approved,
+            _nativeQuote(),
             false,
             address(0),
             address(0),
@@ -62,6 +61,17 @@ contract FlippingOrderbook {
             0,
             false
         );
+    }
+}
+
+/// @dev An orderbook that reports an ERC20 market until the router approves it, and from then on
+///      a market whose quote side is native ETH: the router's allowance is state the router
+///      changes between `getTransferData` and `swap`, so a view can answer the two differently.
+contract FlippingOrderbook is MockOrderbook {
+    constructor(address base_, address quote_) MockOrderbook(base_, quote_) {}
+
+    function _nativeQuote() internal view override returns (bool) {
+        return IERC20(quote).allowance(msg.sender, address(this)) > 0;
     }
 
     function placeMarketOrderWithTargetValue(
@@ -76,58 +86,21 @@ contract FlippingOrderbook {
     }
 }
 
-/// @dev An ERC20 orderbook at scaling 1 whose buy reports the fill the test scripted, so the
-///      executor's fill check can be driven to its boundary. It moves no tokens.
-contract ScriptedOrderbook {
-    address public immutable base;
-    address public immutable quote;
+/// @dev An ERC20 orderbook whose buy reports the fill the test scripted, so the executor's fill
+///      check can be driven to its boundary. It moves no tokens.
+contract ScriptedOrderbook is MockOrderbook {
     uint128 internal _shares;
     uint128 internal _value;
     uint128 internal _fee;
 
-    constructor(address base_, address quote_) {
-        base = base_;
-        quote = quote_;
-    }
+    constructor(address base_, address quote_) MockOrderbook(base_, quote_) {}
 
     function script(uint128 shares, uint128 value, uint128 fee) external {
         (_shares, _value, _fee) = (shares, value, fee);
     }
 
-    function getConfig()
-        external
-        view
-        returns (
-            uint256,
-            uint256,
-            address,
-            address,
-            bool,
-            bool,
-            address,
-            address,
-            uint64,
-            uint64,
-            uint64,
-            uint64,
-            bool
-        )
-    {
-        return (
-            1,
-            1,
-            base,
-            quote,
-            false,
-            false,
-            address(0),
-            address(0),
-            0,
-            0,
-            0,
-            0,
-            false
-        );
+    function _nativeQuote() internal pure override returns (bool) {
+        return false;
     }
 
     function placeMarketOrderWithTargetValue(
@@ -147,9 +120,6 @@ contract HanjiTest is TychoRouterTestSetup {
     address constant ETH_USDC = 0x6A6951db3bb99f76A8cCB9f8A8399B613666298B;
     address constant CBBTC_USDC = 0x15C8cb4E336b1E478d155D813830129fb225eeE3;
     address constant CBBTC_ETH = 0xf455b3C0756908c6a2F44a7f7390053cFe354eeA;
-    address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-    address constant WETH = 0x4200000000000000000000000000000000000006;
     /// @dev Where the executor is placed: derived from its name, so deployments the shared
     ///      setup adds do not move it, and the Rust-encoded calldata
     ///      (config/test_executor_addresses.json) keeps addressing it.
@@ -194,31 +164,31 @@ contract HanjiTest is TychoRouterTestSetup {
         _assertTransferData(
             ETH_USDC,
             ETH_ADDRESS,
-            USDC,
+            BASE_USDC,
             TransferManager.TransferType.TransferNativeInExecutor
         );
         _assertTransferData(
             ETH_USDC,
-            USDC,
+            BASE_USDC,
             ETH_ADDRESS,
             TransferManager.TransferType.ProtocolWillDebit
         );
         _assertTransferData(
             CBBTC_ETH,
-            CBBTC,
+            BASE_cbBTC,
             ETH_ADDRESS,
             TransferManager.TransferType.ProtocolWillDebit
         );
         _assertTransferData(
             CBBTC_ETH,
             ETH_ADDRESS,
-            CBBTC,
+            BASE_cbBTC,
             TransferManager.TransferType.TransferNativeInExecutor
         );
         _assertTransferData(
             CBBTC_USDC,
-            CBBTC,
-            USDC,
+            BASE_cbBTC,
+            BASE_USDC,
             TransferManager.TransferType.ProtocolWillDebit
         );
         assertEq(hanjiExecutor.fundsExpectedAddress(""), address(this));
@@ -251,8 +221,8 @@ contract HanjiTest is TychoRouterTestSetup {
         bytes[4] memory invalid = [
             abi.encodePacked(ETH_USDC, uint8(1)),
             abi.encodePacked(ETH_USDC, ETH_ADDRESS),
-            abi.encodePacked(ETH_USDC, ETH_ADDRESS, USDC, uint8(0)),
-            abi.encodePacked(address(0), ETH_ADDRESS, USDC)
+            abi.encodePacked(ETH_USDC, ETH_ADDRESS, BASE_USDC, uint8(0)),
+            abi.encodePacked(address(0), ETH_ADDRESS, BASE_USDC)
         ];
         for (uint256 i; i < invalid.length; ++i) {
             vm.expectRevert(HanjiExecutor.HanjiExecutor__InvalidData.selector);
@@ -260,14 +230,14 @@ contract HanjiTest is TychoRouterTestSetup {
         }
     }
 
-    /// @dev The data's pair must be the market's, with native ETH where the market has it: WETH
-    ///      for ETH/USDC's native base, a token the market does not trade, or the same token on
+    /// @dev The data's pair must be the market's, with native ETH where the market has it: BASE_WETH
+    ///      for ETH/BASE_USDC's native base, a token the market does not trade, or the same token on
     ///      both sides, are all refused.
     function testAPairOtherThanTheMarketsIsRefused() public {
         bytes[3] memory mismatched = [
-            abi.encodePacked(ETH_USDC, WETH, USDC),
-            abi.encodePacked(CBBTC_USDC, CBBTC, WETH),
-            abi.encodePacked(CBBTC_USDC, USDC, USDC)
+            abi.encodePacked(ETH_USDC, BASE_WETH, BASE_USDC),
+            abi.encodePacked(CBBTC_USDC, BASE_cbBTC, BASE_WETH),
+            abi.encodePacked(CBBTC_USDC, BASE_USDC, BASE_USDC)
         ];
         for (uint256 i; i < mismatched.length; ++i) {
             vm.expectRevert(HanjiExecutor.HanjiExecutor__TokenMismatch.selector);
@@ -289,8 +259,8 @@ contract HanjiTest is TychoRouterTestSetup {
             abi.encode(
                 scalingX,
                 scalingY,
-                CBBTC,
-                USDC,
+                BASE_cbBTC,
+                BASE_USDC,
                 false,
                 false,
                 address(0),
@@ -303,7 +273,9 @@ contract HanjiTest is TychoRouterTestSetup {
             )
         );
         vm.expectRevert(HanjiExecutor.HanjiExecutor__InvalidConfig.selector);
-        hanjiExecutor.getTransferData(abi.encodePacked(CBBTC_USDC, CBBTC, USDC));
+        hanjiExecutor.getTransferData(
+            abi.encodePacked(CBBTC_USDC, BASE_cbBTC, BASE_USDC)
+        );
     }
 
     /// @dev An input past uint128 shares is refused before anything is sent.
@@ -311,7 +283,7 @@ contract HanjiTest is TychoRouterTestSetup {
         vm.expectRevert(HanjiExecutor.HanjiExecutor__AmountTooLarge.selector);
         hanjiExecutor.swap(
             type(uint256).max,
-            abi.encodePacked(CBBTC_USDC, CBBTC, USDC),
+            abi.encodePacked(CBBTC_USDC, BASE_cbBTC, BASE_USDC),
             address(0)
         );
     }
@@ -320,26 +292,27 @@ contract HanjiTest is TychoRouterTestSetup {
     ///      native one cannot make the executor send the router's ETH: the data says the input
     ///      is an ERC20, and `swap` refuses the config that disagrees.
     function testAnOrderbookCannotTurnAnErc20InputIntoTheRoutersEth() public {
-        FlippingOrderbook orderbook = new FlippingOrderbook(CBBTC, USDC);
+        FlippingOrderbook orderbook =
+            new FlippingOrderbook(BASE_cbBTC, BASE_USDC);
         uint256 routerEth = 5 ether;
         deal(tychoRouterAddr, routerEth);
         uint256 amount = 1000e6;
-        deal(USDC, BOB, amount);
+        deal(BASE_USDC, BOB, amount);
 
         vm.startPrank(BOB);
-        IERC20(USDC).approve(tychoRouterAddr, amount);
+        IERC20(BASE_USDC).approve(tychoRouterAddr, amount);
         vm.expectRevert(HanjiExecutor.HanjiExecutor__TokenMismatch.selector);
         tychoRouter.singleSwap(
             amount,
-            USDC,
-            CBBTC,
+            BASE_USDC,
+            BASE_cbBTC,
             1,
             1,
             BOB,
             noClientFee(),
             encodeSingleSwap(
                 HANJI_EXECUTOR,
-                abi.encodePacked(address(orderbook), USDC, CBBTC)
+                abi.encodePacked(address(orderbook), BASE_USDC, BASE_cbBTC)
             )
         );
         vm.stopPrank();
@@ -355,17 +328,17 @@ contract HanjiTest is TychoRouterTestSetup {
             "test_single_encoding_strategy_hanji_sell_eth",
             ETH_USDC,
             ETH_ADDRESS,
-            USDC,
+            BASE_USDC,
             1 ether
         );
     }
 
-    /// @dev Buying ETH with 1,000 USDC: the router receives native ETH and forwards it.
+    /// @dev Buying ETH with 1,000 BASE_USDC: the router receives native ETH and forwards it.
     function testRouterBuysEth() public {
         _assertRouterFillsAsAContract(
             "test_single_encoding_strategy_hanji_buy_eth",
             ETH_USDC,
-            USDC,
+            BASE_USDC,
             ETH_ADDRESS,
             1000e6
         );
@@ -375,8 +348,8 @@ contract HanjiTest is TychoRouterTestSetup {
         _assertRouterFillsAsAContract(
             "test_single_encoding_strategy_hanji_sell_cbbtc",
             CBBTC_USDC,
-            CBBTC,
-            USDC,
+            BASE_cbBTC,
+            BASE_USDC,
             1e6
         );
     }
@@ -385,8 +358,8 @@ contract HanjiTest is TychoRouterTestSetup {
         _assertRouterFillsAsAContract(
             "test_single_encoding_strategy_hanji_buy_cbbtc",
             CBBTC_USDC,
-            USDC,
-            CBBTC,
+            BASE_USDC,
+            BASE_cbBTC,
             1000e6
         );
     }
@@ -396,7 +369,7 @@ contract HanjiTest is TychoRouterTestSetup {
         _assertRouterFillsAsAContract(
             "test_single_encoding_strategy_hanji_sell_cbbtc_for_eth",
             CBBTC_ETH,
-            CBBTC,
+            BASE_cbBTC,
             ETH_ADDRESS,
             1e6
         );
@@ -409,7 +382,7 @@ contract HanjiTest is TychoRouterTestSetup {
             "test_single_encoding_strategy_hanji_buy_cbbtc_with_eth",
             CBBTC_ETH,
             ETH_ADDRESS,
-            CBBTC,
+            BASE_cbBTC,
             0.1 ether
         );
     }
@@ -419,15 +392,15 @@ contract HanjiTest is TychoRouterTestSetup {
     function testRouterIsFilledAsAContract() public {
         uint256 amount = 1 ether;
         Fill memory sender =
-            _directFill(ETH_USDC, ETH_ADDRESS, USDC, amount, false);
+            _directFill(ETH_USDC, ETH_ADDRESS, BASE_USDC, amount, false);
         Fill memory contractCaller =
-            _directFill(ETH_USDC, ETH_ADDRESS, USDC, amount, true);
+            _directFill(ETH_USDC, ETH_ADDRESS, BASE_USDC, amount, true);
         deal(BOB, amount);
 
         uint256 received = _routerSwap(
             "test_single_encoding_strategy_hanji_sell_eth",
             ETH_ADDRESS,
-            USDC,
+            BASE_USDC,
             amount
         );
 
@@ -440,7 +413,7 @@ contract HanjiTest is TychoRouterTestSetup {
     function testWhitelistedRouterIsFilledAsTheSender() public {
         uint256 amount = 1 ether;
         Fill memory sender =
-            _directFill(ETH_USDC, ETH_ADDRESS, USDC, amount, false);
+            _directFill(ETH_USDC, ETH_ADDRESS, BASE_USDC, amount, false);
         vm.prank(IHanjiWhitelist(ETH_USDC).owner());
         IHanjiWhitelist(ETH_USDC).setWhitelisted(tychoRouterAddr, true);
         deal(BOB, amount);
@@ -448,14 +421,14 @@ contract HanjiTest is TychoRouterTestSetup {
         uint256 received = _routerSwap(
             "test_single_encoding_strategy_hanji_sell_eth",
             ETH_ADDRESS,
-            USDC,
+            BASE_USDC,
             amount
         );
 
         assertEq(received, sender.received);
     }
 
-    /// @dev ETH -> USDC on one orderbook, then USDC -> cbBTC on another: the second hop spends
+    /// @dev ETH -> BASE_USDC on one orderbook, then BASE_USDC -> cbBTC on another: the second hop spends
     ///      the first hop's output from the router, approved to its orderbook, and the route pays
     ///      exactly what the two fills pay a contract in a row.
     function testSequentialRouteThroughTwoMarkets() public {
@@ -466,96 +439,53 @@ contract HanjiTest is TychoRouterTestSetup {
         uint256 received = _routerSwap(
             "test_sequential_encoding_strategy_hanji",
             ETH_ADDRESS,
-            CBBTC,
+            BASE_cbBTC,
             amount
         );
 
         assertEq(received, expected);
-        assertEq(IERC20(USDC).allowance(tychoRouterAddr, CBBTC_USDC), 0);
+        assertEq(IERC20(BASE_USDC).allowance(tychoRouterAddr, CBBTC_USDC), 0);
     }
 
     /// @dev Once the quoters' prices are a few seconds old their book is empty. A sell then fills
     ///      nothing without the orderbook reverting, and the executor refuses it.
     function testASellIntoAStaleBookIsRefused() public {
         uint256 amount = 1e6;
-        deal(CBBTC, BOB, amount);
+        _fundBob(BASE_cbBTC, amount);
         vm.warp(forkTimestamp + 10);
-
-        vm.startPrank(BOB);
-        IERC20(CBBTC).approve(tychoRouterAddr, amount);
         vm.expectRevert(HanjiExecutor.HanjiExecutor__NothingFilled.selector);
-        tychoRouter.singleSwap(
-            amount,
-            CBBTC,
-            USDC,
-            1,
-            1,
-            BOB,
-            noClientFee(),
-            encodeSingleSwap(
-                HANJI_EXECUTOR, abi.encodePacked(CBBTC_USDC, CBBTC, USDC)
-            )
-        );
-        vm.stopPrank();
+        _swapThroughRouter(CBBTC_USDC, BASE_cbBTC, BASE_USDC, amount);
     }
 
     /// @dev A buy from a stale book is refused by the orderbook itself, which will not transfer
     ///      zero tokens (ZeroTokenTransferNotAllowed, 0x7c329980), before the executor checks it.
     function testABuyFromAStaleBookReverts() public {
         uint256 amount = 1000e6;
-        deal(USDC, BOB, amount);
+        _fundBob(BASE_USDC, amount);
         vm.warp(forkTimestamp + 10);
-
-        vm.startPrank(BOB);
-        IERC20(USDC).approve(tychoRouterAddr, amount);
         vm.expectRevert(bytes4(0x7c329980));
-        tychoRouter.singleSwap(
-            amount,
-            USDC,
-            CBBTC,
-            1,
-            1,
-            BOB,
-            noClientFee(),
-            encodeSingleSwap(
-                HANJI_EXECUTOR, abi.encodePacked(CBBTC_USDC, USDC, CBBTC)
-            )
-        );
-        vm.stopPrank();
+        _swapThroughRouter(CBBTC_USDC, BASE_USDC, BASE_cbBTC, amount);
     }
 
     /// @dev Selling more than the bids hold would leave the rest at the router: the executor
     ///      refuses it.
     function testASellPastTheBookIsRefused() public {
         uint256 amount = 1000e8;
-        deal(CBBTC, BOB, amount);
-
-        vm.startPrank(BOB);
-        IERC20(CBBTC).approve(tychoRouterAddr, amount);
+        _fundBob(BASE_cbBTC, amount);
         vm.expectPartialRevert(
             HanjiExecutor.HanjiExecutor__PartialFill.selector
         );
-        tychoRouter.singleSwap(
-            amount,
-            CBBTC,
-            USDC,
-            1,
-            1,
-            BOB,
-            noClientFee(),
-            encodeSingleSwap(
-                HANJI_EXECUTOR, abi.encodePacked(CBBTC_USDC, CBBTC, USDC)
-            )
-        );
-        vm.stopPrank();
+        _swapThroughRouter(CBBTC_USDC, BASE_cbBTC, BASE_USDC, amount);
     }
 
     /// @dev A buy may leave unspent less than two shares' cost at the fill's average price: 10
     ///      shares for 501 leave 100 unspent of 601 (under 2 x 50.1), and 10 shares for 500 leave
     ///      100 of 600, exactly two shares' cost, which is refused.
     function testABuyMayLeaveLessThanTwoSharesUnspent() public {
-        ScriptedOrderbook orderbook = new ScriptedOrderbook(CBBTC, USDC);
-        bytes memory data = abi.encodePacked(address(orderbook), USDC, CBBTC);
+        ScriptedOrderbook orderbook =
+            new ScriptedOrderbook(BASE_cbBTC, BASE_USDC);
+        bytes memory data =
+            abi.encodePacked(address(orderbook), BASE_USDC, BASE_cbBTC);
 
         orderbook.script(10, 501, 0);
         hanjiExecutor.swap(601, data, BOB);
@@ -569,27 +499,57 @@ contract HanjiTest is TychoRouterTestSetup {
         hanjiExecutor.swap(600, data, BOB);
     }
 
+    /// @dev A buy that reports no shares is refused as filling nothing, whatever it reports spent.
+    function testABuyThatFillsNothingIsRefused() public {
+        ScriptedOrderbook orderbook =
+            new ScriptedOrderbook(BASE_cbBTC, BASE_USDC);
+        orderbook.script(0, 0, 1);
+
+        vm.expectRevert(HanjiExecutor.HanjiExecutor__NothingFilled.selector);
+        hanjiExecutor.swap(
+            600,
+            abi.encodePacked(address(orderbook), BASE_USDC, BASE_cbBTC),
+            BOB
+        );
+    }
+
     /// @dev Buying with more than the asks cost would leave the rest at the router: the executor
     ///      refuses it.
     function testABuyPastTheBookIsRefused() public {
         uint256 amount = 100_000_000e6;
-        deal(USDC, BOB, amount);
-
-        vm.startPrank(BOB);
-        IERC20(USDC).approve(tychoRouterAddr, amount);
+        _fundBob(BASE_USDC, amount);
         vm.expectPartialRevert(
             HanjiExecutor.HanjiExecutor__PartialFill.selector
         );
+        _swapThroughRouter(CBBTC_USDC, BASE_USDC, BASE_cbBTC, amount);
+    }
+
+    /// @dev Gives Bob `amount` of `token` and approves the router for it, leaving Bob pranked
+    ///      for `_swapThroughRouter`, so a test can set its revert expectation in between.
+    function _fundBob(address token, uint256 amount) internal {
+        deal(token, BOB, amount);
+        vm.startPrank(BOB);
+        IERC20(token).approve(tychoRouterAddr, amount);
+    }
+
+    /// @dev Bob's single swap of `amount` on `orderbook` through the router, with any output
+    ///      accepted.
+    function _swapThroughRouter(
+        address orderbook,
+        address tokenIn,
+        address tokenOut,
+        uint256 amount
+    ) internal {
         tychoRouter.singleSwap(
             amount,
-            USDC,
-            CBBTC,
+            tokenIn,
+            tokenOut,
             1,
             1,
             BOB,
             noClientFee(),
             encodeSingleSwap(
-                HANJI_EXECUTOR, abi.encodePacked(CBBTC_USDC, USDC, CBBTC)
+                HANJI_EXECUTOR, abi.encodePacked(orderbook, tokenIn, tokenOut)
             )
         );
         vm.stopPrank();
@@ -658,15 +618,17 @@ contract HanjiTest is TychoRouterTestSetup {
         vm.revertToState(snapshot);
     }
 
-    /// @dev What a contract receives selling `amount` ETH for USDC and then that USDC for cbBTC,
+    /// @dev What a contract receives selling `amount` ETH for BASE_USDC and then that BASE_USDC for cbBTC,
     ///      in a row, measured on a snapshot that is rolled back.
     function _chainedDirectFills(uint256 amount)
         internal
         returns (uint256 received)
     {
         uint256 snapshot = vm.snapshotState();
-        Fill memory first = _fill(ETH_USDC, ETH_ADDRESS, USDC, amount, true);
-        received = _fill(CBBTC_USDC, USDC, CBBTC, first.received, true).received;
+        Fill memory first =
+            _fill(ETH_USDC, ETH_ADDRESS, BASE_USDC, amount, true);
+        received =
+        _fill(CBBTC_USDC, BASE_USDC, BASE_cbBTC, first.received, true).received;
         vm.revertToState(snapshot);
     }
 

@@ -6,8 +6,10 @@ import {TransferManager} from "../TransferManager.sol";
 import {ETH_ADDRESS} from "../../lib/NativeETH.sol";
 
 /// @dev From Hanji's aggregator documentation
-///      (docs.hanji.io/for-developers/liquidity-source-integration); the implementations behind
-///      the proxy orderbooks are not source-verified.
+///      (docs.hanji.io/for-developers/liquidity-source-integration). The proxy orderbooks' shells
+///      are verified on Sourcify; the implementations behind them are not (checked 2026-11-26).
+///      Prices are `uint72`: the contract-API page's `uint56 price` is stale, and only the
+///      `uint72` selectors (0xf513ef4c, 0xad73d32e) exist on the Base implementations.
 interface IHanjiOrderbook {
     function getConfig()
         external
@@ -127,7 +129,7 @@ contract HanjiExecutor is IExecutor {
         external
         payable
     {
-        Swap memory s = _swap(data);
+        Swap memory s = _decodeData(data);
         uint256 units = amountIn / s.scaling;
         if (units > type(uint128).max) revert HanjiExecutor__AmountTooLarge();
         // A native input is rounded down to whole units: the orderbook takes no more than that,
@@ -188,7 +190,7 @@ contract HanjiExecutor is IExecutor {
             bool outputToRouter
         )
     {
-        Swap memory s = _swap(data);
+        Swap memory s = _decodeData(data);
         transferType = s.tokenIn == ETH_ADDRESS
             ? TransferManager.TransferType.TransferNativeInExecutor
             : TransferManager.TransferType.ProtocolWillDebit;
@@ -229,7 +231,11 @@ contract HanjiExecutor is IExecutor {
 
     /// @dev The swap the data describes, checked against the orderbook's config: the data's pair
     ///      must be the market's, in either direction, with native ETH on the same side.
-    function _swap(bytes calldata data) internal view returns (Swap memory s) {
+    function _decodeData(bytes calldata data)
+        internal
+        view
+        returns (Swap memory s)
+    {
         if (data.length != 60) revert HanjiExecutor__InvalidData();
         s.orderbook = IHanjiOrderbook(address(bytes20(data[:20])));
         s.tokenIn = address(bytes20(data[20:40]));

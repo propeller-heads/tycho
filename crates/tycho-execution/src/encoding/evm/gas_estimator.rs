@@ -423,23 +423,29 @@ mod tests {
     }
 
     /// Every Hanji direction has `outputToRouter = true`, so each pays an output transfer on top
-    /// of the input transfer. `default_token` measures 60,000 gas for each transfer.
-    const HANJI_INPUT_AND_OUTPUT_TRANSFERS: u64 = 120_000;
+    /// of the input transfer, each priced from the token's own measured gas.
+    fn hanji_input_and_output_transfers_gas() -> BigUint {
+        let one_transfer = transfer_token_gas(&default_token(Bytes::from(vec![0u8; 20])));
+        &one_transfer + &one_transfer
+    }
 
     /// The orderbook debits an ERC20 input, which the router approves first.
     #[test]
-    fn hanji_overhead_charges_an_erc20_input_its_approval() {
+    fn test_hanji_overhead_charges_an_erc20_input_its_approval() {
         let overhead = hanji_overhead(&[0x83; 20], &[0; 20]);
 
-        assert_eq!(overhead, BigUint::from(HANJI_INPUT_AND_OUTPUT_TRANSFERS + TOKEN_APPROVAL_GAS));
+        assert_eq!(
+            overhead,
+            hanji_input_and_output_transfers_gas() + BigUint::from(TOKEN_APPROVAL_GAS)
+        );
     }
 
     /// Native ETH goes to the orderbook as `msg.value`, with no approval.
     #[test]
-    fn hanji_overhead_charges_no_approval_for_a_native_input() {
+    fn test_hanji_overhead_charges_no_approval_for_a_native_input() {
         let overhead = hanji_overhead(&[0; 20], &[0x83; 20]);
 
-        assert_eq!(overhead, BigUint::from(HANJI_INPUT_AND_OUTPUT_TRANSFERS));
+        assert_eq!(overhead, hanji_input_and_output_transfers_gas());
     }
 
     fn make_swap(protocol: &str) -> Swap {

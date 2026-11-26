@@ -47,14 +47,12 @@ impl SwapEncoder for HanjiSwapEncoder {
         let orderbook = get_static_attribute(swap, HANJI_ORDERBOOK_ATTRIBUTE).map_err(|e| {
             EncodingError::FatalError(format!("Hanji component {}: {e}", component.id))
         })?;
-        if orderbook.len() != 20 {
-            return Err(EncodingError::FatalError(format!(
-                "Hanji component {}: attribute {HANJI_ORDERBOOK_ATTRIBUTE} holds {} bytes, not an \
-                 address",
-                component.id,
-                orderbook.len()
-            )));
-        }
+        let orderbook = bytes_to_address(&Bytes::from(orderbook)).map_err(|e| {
+            EncodingError::FatalError(format!(
+                "Hanji component {}: attribute {HANJI_ORDERBOOK_ATTRIBUTE}: {e}",
+                component.id
+            ))
+        })?;
         let [base, quote] = component.tokens.as_slice() else {
             return Err(EncodingError::FatalError(format!(
                 "Hanji component {} lists {} tokens, not a base and a quote",
@@ -72,7 +70,6 @@ impl SwapEncoder for HanjiSwapEncoder {
                 component.id
             )));
         }
-        let orderbook = bytes_to_address(&Bytes::from(orderbook))?;
         let token_in = convert_to_router_token(bytes_to_address(token_in)?);
         let token_out = convert_to_router_token(bytes_to_address(token_out)?);
         Ok((orderbook, token_in, token_out).abi_encode_packed())
@@ -165,7 +162,7 @@ mod tests {
          833589fcd6edb6e08f4c7c32d4f71b54bda02913\
          eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     )]
-    fn encodes_the_orderbook_and_the_pair(#[case] sell_base: bool, #[case] expected: &str) {
+    fn test_encodes_the_orderbook_and_the_pair(#[case] sell_base: bool, #[case] expected: &str) {
         let eth = eth();
         let (token_in, token_out) =
             if sell_base { (eth.as_str(), USDC) } else { (USDC, eth.as_str()) };
@@ -177,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_outside_the_market_is_refused() {
+    fn test_a_token_outside_the_market_is_refused() {
         let encoded = encode_with(component(Some(ORDERBOOK), &[&eth(), USDC]), OTHER, USDC);
 
         assert!(matches!(encoded, Err(EncodingError::InvalidInput(_))));
@@ -188,14 +185,17 @@ mod tests {
     #[case::short_orderbook(Some("0x6a6951db"), &[USDC, OTHER])]
     #[case::long_orderbook(Some("0x6a6951db3bb99f76a8ccb9f8a8399b613666298b00"), &[USDC, OTHER])]
     #[case::one_token(Some(ORDERBOOK), &[USDC])]
-    fn a_malformed_component_is_refused(#[case] orderbook: Option<&str>, #[case] tokens: &[&str]) {
+    fn test_a_malformed_component_is_refused(
+        #[case] orderbook: Option<&str>,
+        #[case] tokens: &[&str],
+    ) {
         let encoded = encode_with(component(orderbook, tokens), USDC, OTHER);
 
         assert!(matches!(encoded, Err(EncodingError::FatalError(_))));
     }
 
     #[test]
-    fn other_chains_are_refused() {
+    fn test_other_chains_are_refused() {
         let encoder = HanjiSwapEncoder::new(Bytes::from("0x12"), Chain::Ethereum, None);
 
         assert!(matches!(encoder, Err(EncodingError::FatalError(_))));

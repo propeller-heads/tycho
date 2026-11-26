@@ -177,6 +177,11 @@ the standard `IPropAMM` interface; the pAMM address travels in the swap data), F
 `TychoFallbackRouter` -- see "Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and
 pays a signed subsidy -- see "Subsidies").
 
+Hanji's orderbook fills whole shares and pulls only what it fills, and `HanjiExecutor` runs by delegatecall, so the
+input it does not spend stays at TychoRouter and is lost to the user: less than one share of a sell's input, and less
+than two shares' cost at the fill's average price of a buy's (`_MAX_UNSPENT_SHARES`). A fill short of that reverts
+`HanjiExecutor__PartialFill`.
+
 ### Protocol fallback (`fallback/TychoFallbackRouter.sol`, `fallback/*FallbackRouter.sol`, `executors/*FallbackExecutor.sol`)
 
 An executor cannot fall back on its own. The Dispatcher performs a leg's input transfer *before* it delegatecalls
@@ -371,9 +376,8 @@ Constraints:
   `0xd38142E88f3d1011D8258737f257c709Dd0e2204`, executor `0x08f22285d13533d68aA8bE5949536322DB3538De`). They were
   built before the base-router split, so their verified sources are named `TychoFallbackRouter` and
   `FallbackExecutor`. A redeploy from `executor_deployments.json` builds `PropAMMFallbackExecutor` at a new address.
-- The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, the input a
-  Hanji orderbook leaves below one share, a mistaken transfer) is claimable by anyone through the permissionless `swap`
-  and is considered lost. A Curve exchange leaves its
+- The contract holds no funds between transactions. A balance that does end up here (Curve rounding dust, a mistaken
+  transfer) is claimable by anyone through the permissionless `swap` and is considered lost. A Curve exchange leaves its
   approval in place; the same reasoning covers it, since there is nothing here to take.
 
 ### Subsidies (`executors/TychoSubsidizingExecutor.sol`)
