@@ -566,12 +566,6 @@ impl BookStreamProcessor {
     }
 }
 
-/// Adds the feed of each venue `selection` names. `rpc_url` is the node of the book config's
-/// chain, and `secret` looks up an environment variable.
-///
-/// # Errors
-/// Returns an error when a venue listed in `--pamm` lacks its credentials or its feed fails to
-/// build. A default venue that cannot run is logged and skipped instead.
 /// Adds the feed a builder `built` under `venue`'s name: `Ok(false)` when that name is taken.
 fn add_built<F>(
     feeds: &mut BookFeedStreams,
@@ -587,6 +581,12 @@ where
         .is_ok())
 }
 
+/// Adds the feed of each venue `selection` names. `rpc_url` is the node of the book config's
+/// chain, and `secret` looks up an environment variable.
+///
+/// # Errors
+/// Returns an error when a venue listed in `--pamm` lacks its credentials or its feed fails to
+/// build. A default venue that cannot run is logged and skipped instead.
 fn add_pamm_feeds(
     selection: &PammSelection,
     book_config: &BookFeedConfig,

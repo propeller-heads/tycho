@@ -167,10 +167,8 @@ for any protocol indexed by Tycho.
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   Hanji follows the same layout without `math.rs` (its level walk lives in `state.rs`), plus
-  `market.rs` for the market list it fetches from Hanji's API. Its reader takes each market's
-  book from the quoter the proxy fills the taker against: the FastQuoter for a whitelisted
-  taker, a wider contract quoter otherwise (Tycho's Base router unless `HanjiFeedBuilder::taker`
-  sets another), and leaves out paused markets and those naming no contract quoter.
+  `market.rs` for the market list it fetches from Hanji's API; `hanji/mod.rs` documents which
+  book it reads for which taker and the markets it leaves out.
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the

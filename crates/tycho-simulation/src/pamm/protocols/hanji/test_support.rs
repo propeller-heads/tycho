@@ -165,7 +165,13 @@ impl FixtureConfig {
 impl FixtureMarket {
     pub(super) fn market(&self) -> Market {
         let entry: ApiMarket = serde_json::from_value(self.api.clone()).expect("an API entry");
-        Market::from_api(&entry, BASE_DEPLOYMENT.wrapped_native).expect("a tradable market")
+        Market::from_api(
+            &entry,
+            BASE_DEPLOYMENT
+                .wrapped_native()
+                .unwrap(),
+        )
+        .expect("a tradable market")
     }
 
     /// The market as a read for `caller` reports it, or `None` where it has no book for it.
@@ -734,7 +740,9 @@ pub(super) fn source(
     HanjiBookSource {
         markets: MarketList::new(
             format!("{}/aggregators/markets", server.url()),
-            BASE_DEPLOYMENT.wrapped_native,
+            BASE_DEPLOYMENT
+                .wrapped_native()
+                .unwrap(),
             market_refresh,
             TEST_API_TIMEOUT,
             TEST_FIRST_FETCH_TIMEOUT,

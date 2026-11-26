@@ -6,6 +6,11 @@
 //! quoter reports the book it would place with `assembleOrderbookFromOrders(lob, isAsk, depth)`,
 //! where `lob` is the market's underlying CLOB.
 //!
+//! Hanji's documentation points aggregators to `FastQuoterHelper.assembleOrderbookFromOrders`,
+//! which forwards to FastQuoter only, so it reports the book of the transaction's sender and
+//! whitelisted callers and never the wider one other contracts are filled against. The reader
+//! asks both quoters directly instead.
+//!
 //! A read is one `eth_call` of `Multicall3.aggregate3` at the latest block: the block's number,
 //! timestamp and chain id, then for each market its proxy's `getConfig()`, whether it is paused,
 //! its wiring (CLOB and quoters), whether the taker is whitelisted, and both quoters' books. The
@@ -296,7 +301,7 @@ impl HanjiReader {
         if read.markets.is_empty() {
             return Err(FeedError::Parsing(format!(
                 "Hanji: none of the {} markets read cleanly; {orderbook} failed with: {reason}",
-                markets.len()
+                wired.len()
             )));
         }
         warn!(skipped = failures.len(), %orderbook, %reason, "skipping Hanji markets");
@@ -313,7 +318,7 @@ impl HanjiReader {
             .iter()
             .filter_map(|market| match cache.get(&market.orderbook)? {
                 Resolution::Wired(wiring) => Some((*market, *wiring)),
-                Resolution::Unserved { .. } => None,
+                Resolution::Unserved { retry_at: _ } => None,
             })
             .collect()
     }
@@ -441,9 +446,12 @@ impl HanjiReader {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&market.orderbook);
-            return Err(format!("its wiring changed from {wiring:?} to {found:?}"));
+            return Err(match found {
+                Ok(found) => format!("its wiring changed from {wiring:?} to {found:?}"),
+                Err(reason) => format!("its wiring no longer resolves: {reason}"),
+            });
         }
-        let config = Self::decode_config(market, config)?;
+        let config = decode_config(market, config)?;
         if decode_answer::<pausedCall>(paused, "paused")? {
             debug!(orderbook = %market.orderbook, "skipping paused Hanji market");
             return Ok(None);
@@ -457,38 +465,6 @@ impl HanjiReader {
             asks: decode_levels(asks, "asks")?,
             bids: decode_levels(bids, "bids")?,
         }))
-    }
-
-    /// The market's config, checked against the list: the same tokens with the native token on
-    /// the same side (which `Market::from_api` has checked is the wrapped native).
-    fn decode_config(market: Market, answer: &Call3Result) -> Result<MarketConfig, String> {
-        let config = decode_answer::<getConfigCall>(answer, "getConfig")?;
-        if (config.tokenX, config.tokenY) != (market.token_x, market.token_y) {
-            return Err(format!(
-                "getConfig trades {} against {}, the market list {} against {}",
-                config.tokenX, config.tokenY, market.token_x, market.token_y
-            ));
-        }
-        let native = match (config.supportsNativeEth, config.isTokenXWeth) {
-            (false, _) => NativeSide::None,
-            (true, true) => NativeSide::X,
-            (true, false) => NativeSide::Y,
-        };
-        if native != market.native {
-            return Err(format!(
-                "getConfig makes {native:?} the native side, the market list {:?}",
-                market.native
-            ));
-        }
-        let fee_rate = config
-            .totalAggressiveCommissionRate
-            .checked_add(config.passiveOrderPayoutRate)
-            .ok_or("its commission rates overflow")?;
-        Ok(MarketConfig {
-            scaling_x: config.scalingFactorTokenX,
-            scaling_y: config.scalingFactorTokenY,
-            fee_rate,
-        })
     }
 
     /// Sends `probe` to the market's proxy at `block`, as the taker, and reports what the proxy
@@ -634,6 +610,38 @@ impl HanjiReader {
             .replace(&self.rpc_url, "<rpc url>");
         FeedError::Connection(format!("Hanji multicall: {error}"))
     }
+}
+
+/// The market's config, checked against the list: the same tokens with the native token on
+/// the same side (which `Market::from_api` has checked is the wrapped native).
+fn decode_config(market: Market, answer: &Call3Result) -> Result<MarketConfig, String> {
+    let config = decode_answer::<getConfigCall>(answer, "getConfig")?;
+    if (config.tokenX, config.tokenY) != (market.token_x, market.token_y) {
+        return Err(format!(
+            "getConfig trades {} against {}, the market list {} against {}",
+            config.tokenX, config.tokenY, market.token_x, market.token_y
+        ));
+    }
+    let native = match (config.supportsNativeEth, config.isTokenXWeth) {
+        (false, _) => NativeSide::None,
+        (true, true) => NativeSide::X,
+        (true, false) => NativeSide::Y,
+    };
+    if native != market.native {
+        return Err(format!(
+            "getConfig makes {native:?} the native side, the market list {:?}",
+            market.native
+        ));
+    }
+    let fee_rate = config
+        .totalAggressiveCommissionRate
+        .checked_add(config.passiveOrderPayoutRate)
+        .ok_or("its commission rates overflow")?;
+    Ok(MarketConfig {
+        scaling_x: config.scalingFactorTokenX,
+        scaling_y: config.scalingFactorTokenY,
+        fee_rate,
+    })
 }
 
 /// The storage writes that give `owner` `amount` of `token` and let `spender` take it all, or
@@ -805,6 +813,24 @@ mod tests {
         let error = decode_levels(&answer(true, side), "bids").unwrap_err();
 
         assert!(error.contains("2 prices for 1 share counts"), "{error}");
+    }
+
+    /// `testdata/record_fixture.py` records what the feed reads: the same depth, getters, router
+    /// and market list.
+    #[test]
+    fn testdata_constants_match() {
+        let script = include_str!("testdata/record_fixture.py");
+        let expected = [
+            format!("DEPTH = {}", MAX_PRICE_LEVELS),
+            format!("LOB_SELECTOR = \"{}\"", hex::encode(LOB_SELECTOR)),
+            format!("QUOTER_SELECTOR = \"{}\"", hex::encode(QUOTER_SELECTOR)),
+            format!("CONTRACT_QUOTER_SELECTOR = \"{}\"", hex::encode(CONTRACT_QUOTER_SELECTOR)),
+            format!("TYCHO_ROUTER = \"{:#x}\"", crate::pamm::protocols::hanji::BASE_ROUTER),
+            format!("API = \"{}\"", crate::pamm::protocols::hanji::BASE_DEPLOYMENT.markets_url),
+        ];
+        for line in expected {
+            assert!(script.contains(&line), "record_fixture.py lacks `{line}`");
+        }
     }
 
     #[test]

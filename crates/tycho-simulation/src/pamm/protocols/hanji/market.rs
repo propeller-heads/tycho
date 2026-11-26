@@ -170,18 +170,16 @@ fn markets_from_api(entries: &[ApiMarket], wrapped_native: Address) -> Vec<Marke
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::address;
     use rstest::rstest;
 
     use super::*;
     use crate::{
-        pamm::protocols::hanji::{
-            test_support::{fixture, CBBTC, USDC},
-            BASE_DEPLOYMENT,
-        },
+        pamm::protocols::hanji::test_support::{fixture, CBBTC, USDC},
         snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
     };
 
-    const WETH: Address = BASE_DEPLOYMENT.wrapped_native;
+    const WETH: Address = address!("4200000000000000000000000000000000000006");
 
     fn entry(orderbook: Address, base: (Address, bool), quote: (Address, bool)) -> ApiMarket {
         ApiMarket {

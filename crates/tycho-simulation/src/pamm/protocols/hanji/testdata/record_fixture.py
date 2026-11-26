@@ -18,13 +18,18 @@ answer. Balances and allowances come from state overrides. The node must be an a
 serves `debug_traceCall` with state overrides (call and prestate tracers). Foundry's `cast` must be
 on PATH: the script hashes with `cast keccak`.
 
-Usage: python3 -I record_fixture.py <rpc url> [block] > live_<block>.json
+Usage: BASE_RPC_URL=<rpc url> python3 -I record_fixture.py [block] > live_<block>.json
+
+The RPC URL is read from the environment, not the command line, since it usually carries a key.
+The constants below mirror the feed's (`reader.rs`, `mod.rs`); `testdata_constants_match` in the
+Rust tests keeps them in step.
 
 The Rust tests read one recording by name and pin its counts and gas figures, so a new recording
 replaces `live_<block>.json` in `test_support.rs` and the figures that cite its block.
 """
 
 import json
+import os
 import subprocess
 import sys
 import urllib.request
@@ -384,9 +389,9 @@ def record_market(recorder: Recorder, market: dict) -> dict:
 
 
 def main() -> None:
-    node = Node(sys.argv[1])
+    node = Node(os.environ["BASE_RPC_URL"])
     head = int(node.rpc("eth_blockNumber", []), 16)
-    block = hex(int(sys.argv[2])) if len(sys.argv) > 2 else hex(head - 1)
+    block = hex(int(sys.argv[1])) if len(sys.argv) > 1 else hex(head - 1)
     header = node.rpc("eth_getBlockByNumber", [block, False])
     request = urllib.request.Request(API, headers={"User-Agent": "curl/8"})
     markets = json.load(urllib.request.urlopen(request))

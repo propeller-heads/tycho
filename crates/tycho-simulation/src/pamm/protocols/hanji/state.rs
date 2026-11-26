@@ -38,8 +38,9 @@ const RATE_DENOMINATOR: u64 = 1_000_000_000_000_000_000;
 /// 61,672,816, not kept) whose fills cost up to 7% more, so they sit 5% (ETH/USDC) to 14% over the
 /// kept one's first levels and 12% over its further levels. Most of it is the quoter placing and
 /// removing its virtual orders around the fill and re-reading the pools it prices from. A caller
-/// the proxy serves from its FastQuoter (a whitelisted taker) pays about 15% less, which this model
-/// does not tell apart. A market not listed here is charged the largest first-level cost.
+/// the proxy serves from its FastQuoter (a whitelisted taker, as Tycho's router is since about
+/// block 62,515,500) pays within 2% of that, measured on the same basis, so the model does not
+/// tell the two apart. A market not listed here is charged the largest first-level cost.
 /// Re-measure when the recorded gas stops fitting (`the_gas_covers_every_recorded_contract_fill`).
 /// The router's own transfers and approval are added on top by tycho-execution's gas estimator.
 const FIRST_LEVEL_GAS: [(Address, u64); 3] = [
@@ -48,13 +49,23 @@ const FIRST_LEVEL_GAS: [(Address, u64); 3] = [
     (address!("f455b3c0756908c6a2f44a7f7390053cfe354eea"), 1_570_000),
 ];
 /// The first-level gas of a market [`FIRST_LEVEL_GAS`] does not list: the largest it lists.
-const UNMEASURED_MARKET_FIRST_LEVEL_GAS: u64 = 1_570_000;
+const UNMEASURED_MARKET_FIRST_LEVEL_GAS: u64 = {
+    let mut largest = 0;
+    let mut i = 0;
+    while i < FIRST_LEVEL_GAS.len() {
+        if FIRST_LEVEL_GAS[i].1 > largest {
+            largest = FIRST_LEVEL_GAS[i].1;
+        }
+        i += 1;
+    }
+    largest
+};
 /// See [`FIRST_LEVEL_GAS`].
 const GAS_PER_FURTHER_LEVEL: u64 = 300_000;
 
 /// One price level of a Hanji book, in the market's scaled units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Level {
+pub(super) struct Level {
     /// Token Y units per share.
     pub price: U256,
     /// Shares of token X resting at the price.
@@ -227,19 +238,12 @@ impl HanjiState {
     }
 
     /// The most value a buy with `target` can pay for, fee included: the largest `v` with
-    /// `cost(v) <= target`. `cost` grows by at least one per unit of value, so the estimate from
-    /// the rate is at most one off either way.
+    /// `cost(v) <= target`, which is `floor(target * D / (D + rate))` exactly. `t - v` is an
+    /// integer, so `v + ceil(v * rate / D) <= t` holds just when `v * rate / D <= t - v`, that is
+    /// when `v * (D + rate) <= t * D`.
     fn affordable_value(&self, target: U256) -> Result<U256, SimulationError> {
         let denominator = U256::from(RATE_DENOMINATOR);
-        let mut value =
-            safe_mul_u256(target, denominator)? / (denominator + U256::from(self.fee_rate));
-        while self.cost(value + U256::from(1))? <= target {
-            value += U256::from(1);
-        }
-        while !value.is_zero() && self.cost(value)? > target {
-            value -= U256::from(1);
-        }
-        Ok(value)
+        Ok(safe_mul_u256(target, denominator)? / (denominator + U256::from(self.fee_rate)))
     }
 
     /// Sells `shares` into the bids, best first; the bids must hold at least that many.
@@ -272,9 +276,6 @@ impl HanjiState {
             fill.shares += take;
             fill.value = safe_add_u256(fill.value, safe_mul_u256(take, level.price)?)?;
             fill.levels += 1;
-            if take < level.shares {
-                break;
-            }
         }
         Ok(fill)
     }

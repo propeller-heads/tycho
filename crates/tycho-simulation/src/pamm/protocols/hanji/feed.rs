@@ -79,8 +79,10 @@ pub struct HanjiFeed {
     source: HanjiBookSource,
 }
 
-/// Builds a [`HanjiFeed`] from the shared [`BookFeedConfig`] and a Base JSON-RPC URL. Every poll
-/// sends one `eth_call` at the latest block, so a full node is enough; the market list comes from
+/// Builds a [`HanjiFeed`] from the shared [`BookFeedConfig`] and a Base JSON-RPC URL. A poll sends
+/// one `eth_call` at the latest block, a second when a market's wiring is resolved, and the fill
+/// checks' `eth_call`s with state overrides at that block when they are due, so a full node that
+/// serves recent state and overrides is enough; the market list comes from
 /// Hanji's aggregator API.
 pub struct HanjiFeedBuilder {
     book_config: BookFeedConfig,
@@ -109,16 +111,19 @@ impl HanjiFeedBuilder {
         self
     }
 
-    /// How long a fetched market list is used before the API is asked again. A refresh that
-    /// fails, or that the API does not answer within half the poll's request timeout, keeps the
-    /// list fetched before it and is retried 30 s later. The first fetch, with no list to fall
-    /// back on, gets the poll's whole request timeout.
+    /// How long a fetched market list is used before the API is asked again;
+    /// [`DEFAULT_MARKET_REFRESH`] unless set. A refresh that fails, or that the API does not answer
+    /// within half the poll's request timeout, keeps the list fetched before it and is retried
+    /// [`MARKET_RETRY`] later. The first fetch, with no list to fall back on, gets the poll's whole
+    /// request timeout.
     pub fn market_refresh(mut self, market_refresh: Duration) -> Self {
         self.market_refresh = market_refresh;
         self
     }
 
-    /// Tune the poll loop (poll cadence, request timeout, failure limit).
+    /// Tune the poll loop (poll cadence, request timeout, failure limit, snapshot age). This
+    /// replaces [`Self::default_feed_config`] whole, including its `max_snapshot_age`, which keeps
+    /// a book from being served after the quoters stop quoting it; start from that default.
     pub fn feed_config(mut self, feed_config: HttpFeedConfig) -> Self {
         self.feed_config = feed_config;
         self
@@ -158,12 +163,20 @@ impl HanjiFeedBuilder {
         let taker = Address::try_from(self.taker.as_ref()).map_err(|_wrong_length| {
             FeedError::InvalidInput(format!("Hanji taker {} is not a 20-byte address", self.taker))
         })?;
+        let wrapped_native = deployment
+            .wrapped_native()
+            .ok_or_else(|| {
+                FeedError::InvalidInput(format!(
+                    "Hanji: Tycho knows no wrapped native token on {}",
+                    deployment.chain
+                ))
+            })?;
         let api_timeout = self.feed_config.request_timeout / MARKET_API_SHARE_OF_POLL;
         Ok(HanjiFeed {
             source: HanjiBookSource {
                 markets: MarketList::new(
                     deployment.markets_url.to_string(),
-                    deployment.wrapped_native,
+                    wrapped_native,
                     self.market_refresh,
                     api_timeout,
                     self.feed_config.request_timeout,
@@ -772,7 +785,8 @@ mod tests {
 
     /// A poll at the recorded block publishes the three markets whose tokens the universe holds,
     /// with ETH as the native token on whichever side it is, the proxy each trades through, and
-    /// the book of the contract quoter, which Tycho's router gets while it is not whitelisted.
+    /// the book of the contract quoter, which Tycho's router gets while it is not whitelisted, as
+    /// at the recorded block.
     #[tokio::test]
     async fn a_poll_publishes_the_markets_of_served_tokens() {
         let (_node, source, _server) = served(FakeNode::new(), REFRESH).await;

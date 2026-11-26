@@ -7,11 +7,11 @@
 //!
 //! Hanji's aggregator API (`/aggregators/markets`) lists the markets and the proxy orderbook of
 //! each. The feed reads that list on its first poll and again every
-//! [`HanjiFeedBuilder::market_refresh`] after. A refresh the API fails, or does not answer within
-//! half the poll's request timeout, keeps the last list and is retried 30 s later. Every poll then
-//! reads each listed market over JSON-RPC, all at one block in one `Multicall3.aggregate3` (see
-//! `reader.rs`). Events cannot rebuild these books: the quoter places its orders inside the swap
-//! and removes them after, so no event ever records them.
+//! [`HanjiFeedBuilder::market_refresh`] after; a refresh that fails keeps the last list. Every poll
+//! then reads each listed market over JSON-RPC, all at one block in one `Multicall3.aggregate3`
+//! (see `reader.rs`), after a multicall that resolves the wiring of markets not yet resolved.
+//! Events cannot rebuild these books: the quoter places its orders inside the swap and removes them
+//! after, so no event ever records them.
 //!
 //! # Whose book
 //!
@@ -24,7 +24,9 @@
 //! cbBTC/ETH. FastQuoterHelper, which Hanji's documentation points aggregators to, reports only
 //! FastQuoter's book. The feed reads both quoters' books, and whether its taker (Tycho's router
 //! unless [`HanjiFeedBuilder::taker`] says otherwise) is whitelisted, and publishes the book the
-//! proxy will fill the taker against. The router was not whitelisted on any market at that block.
+//! proxy will fill the taker against. The router was not whitelisted on any market at that block;
+//! Hanji whitelisted it on every Base market at about block 62,515,500 (2026-11-26), from when it
+//! is filled against FastQuoter's book.
 //! The tokenized-equity markets name no second quoter and run other implementations, and their
 //! fills and gas were not recorded, so the feed does not read them, whoever the taker. A paused
 //! proxy reverts every fill while its quoters still report a book, so a paused market is left out.
@@ -129,16 +131,21 @@ pub(crate) struct Deployment {
     pub chain: Chain,
     /// The aggregator API's market list.
     pub markets_url: &'static str,
-    /// The token the API and `getConfig()` name for the native side of a native market.
-    pub wrapped_native: Address,
+}
+
+impl Deployment {
+    /// The token the API and `getConfig()` name for the native side of a native market: the
+    /// chain's wrapped native token, if Tycho knows one.
+    pub(crate) fn wrapped_native(&self) -> Option<Address> {
+        self.chain
+            .wrapped_native_token()
+            .map(|token| Address::from_slice(&token.address))
+    }
 }
 
 /// The Base deployment.
-pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
-    chain: Chain::Base,
-    markets_url: "https://api-base.hanji.io/aggregators/markets",
-    wrapped_native: address!("4200000000000000000000000000000000000006"),
-};
+pub(crate) const BASE_DEPLOYMENT: Deployment =
+    Deployment { chain: Chain::Base, markets_url: "https://api-base.hanji.io/aggregators/markets" };
 
 /// Tycho's default router on Base, the taker the books are read for unless
 /// [`HanjiFeedBuilder::taker`] sets another.
