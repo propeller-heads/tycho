@@ -131,6 +131,15 @@ pub struct NewProtocolComponent {
     pub deletion_tx_hash: Option<Bytes>,
 }
 
+impl NewProtocolComponent {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 9;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::protocol_component_holds_token)]
 #[diesel(primary_key(instance_id, protocol_component_id, token))]
@@ -153,6 +162,15 @@ pub struct NewProtocolComponentHoldsToken {
     pub protocol_component_id: i64,
     pub token: Bytes,
     pub token_index: i16,
+}
+
+impl NewProtocolComponentHoldsToken {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 4;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
@@ -398,6 +416,15 @@ pub struct NewProtocolComponentHoldsContract {
     pub instance_id: InstanceId,
     pub protocol_component_id: i64,
     pub account_id: i64,
+}
+
+impl NewProtocolComponentHoldsContract {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
