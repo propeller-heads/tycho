@@ -1031,7 +1031,7 @@ mod test_serial_db {
                 .build()
                 .await
                 .expect("Failed to create Gateway");
-            let instance = cached_gw
+            let (instance, _) = cached_gw
                 .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
                 .await
                 .expect("Failed to create the instance");
@@ -1068,7 +1068,7 @@ mod test_serial_db {
                 .await
                 .expect("Failed to create Gateway");
 
-            let instance = cached_gw
+            let (instance, _) = cached_gw
                 .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
                 .await
                 .expect("Failed to create the instance");
@@ -1103,7 +1103,7 @@ mod test_serial_db {
                 .await
                 .expect("Failed to create Gateway");
 
-            let instance = cached_gw
+            let (instance, _) = cached_gw
                 .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
                 .await
                 .expect("Failed to create the instance");

@@ -141,10 +141,11 @@ mod tests {
     async fn test_ensure_instance_creates_an_active_instance_with_its_partitions() {
         let mut conn = setup().await;
 
-        let instance = ensure_instance("vm:curve", "0.0.1", &mut conn)
+        let (instance, created) = ensure_instance("vm:curve", "0.0.1", &mut conn)
             .await
             .unwrap();
 
+        assert!(created);
         let status: InstanceStatus = protocol_instance::table
             .find(instance)
             .select(protocol_instance::status)
@@ -176,21 +177,22 @@ mod tests {
     #[tokio::test]
     async fn test_ensure_instance_returns_the_stored_instance() {
         let mut conn = setup().await;
-        let first = ensure_instance("vm:curve", "0.0.1", &mut conn)
+        let (first, _) = ensure_instance("vm:curve", "0.0.1", &mut conn)
             .await
             .unwrap();
 
-        let second = ensure_instance("vm:curve", "0.0.1", &mut conn)
+        let (second, created) = ensure_instance("vm:curve", "0.0.1", &mut conn)
             .await
             .unwrap();
 
         assert_eq!(first, second);
+        assert!(!created);
     }
 
     #[tokio::test]
     async fn test_ensure_instance_fails_for_a_dropped_instance() {
         let mut conn = setup().await;
-        let instance = ensure_instance("vm:curve", "0.0.1", &mut conn)
+        let (instance, _) = ensure_instance("vm:curve", "0.0.1", &mut conn)
             .await
             .unwrap();
         diesel::update(protocol_instance::table.find(instance))
