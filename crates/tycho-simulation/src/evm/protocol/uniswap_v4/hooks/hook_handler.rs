@@ -56,6 +56,13 @@ pub trait HookHandler: Debug + Send + Sync + 'static {
         true
     }
 
+    /// Whether `after_swap` needs the swap's fee accounting
+    /// ([`PoolAfterSwap::fees`](super::models::PoolAfterSwap::fees)). Recording it bypasses the
+    /// swap step cache, so only a hook that runs the PoolManager's own code asks for it.
+    fn needs_swap_fee_accrual(&self) -> bool {
+        false
+    }
+
     /// Gas the pool manager spends on each call to this hook beyond what the hook's own gas
     /// estimates cover: encoding the call, the call itself and decoding the result.
     ///

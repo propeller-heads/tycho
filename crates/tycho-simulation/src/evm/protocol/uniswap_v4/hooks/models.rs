@@ -161,6 +161,32 @@ pub struct AfterSwapParameters {
     pub swap_params: SwapParams,
     pub delta: BalanceDelta,
     pub hook_data: Bytes,
+    pub pool_after_swap: PoolAfterSwap,
+}
+
+/// The pool state `Pool.swap` has stored when the PoolManager calls `afterSwap`, so a hook that
+/// reads the pool there sees these values.
+#[derive(Debug, Clone, Default)]
+pub struct PoolAfterSwap {
+    pub sqrt_price: U256,
+    pub tick: i32,
+    pub liquidity: u128,
+    /// The swap's fee accounting. Set only for a hook whose
+    /// [`HookHandler::needs_swap_fee_accrual`](super::hook_handler::HookHandler::needs_swap_fee_accrual)
+    /// is true.
+    pub fees: Option<SwapFeeAccrual>,
+}
+
+/// The fees a swap accrues, as `Pool.swap` accounts them, on the swap's input token.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SwapFeeAccrual {
+    /// What the swap adds to the pool's fee growth per unit of liquidity, in Q128.
+    pub fee_growth: U256,
+    /// Input owed to the protocol.
+    pub protocol_fee: U256,
+    /// The initialized ticks the swap crossed, in order, each with the fee growth the swap had
+    /// added when it crossed that tick.
+    pub crossed_ticks: Vec<(i32, U256)>,
 }
 
 #[derive(Debug, Clone)]
