@@ -142,6 +142,25 @@ struct Fill {
     levels: usize,
 }
 
+/// What a proxy reports for one fill: the shares it executed, their value and the taker fee it
+/// charged, all in the market's scaled units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FillReport {
+    pub shares: U256,
+    pub value: U256,
+    pub fee: U256,
+}
+
+/// A swap to send the proxy to check this state against it: `sell_base` and the input in the units
+/// the proxy takes it (shares to sell, or the target value of a buy), with the fill the state
+/// predicts for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Probe {
+    pub sell_base: bool,
+    pub units: U256,
+    pub expected: FillReport,
+}
+
 fn invalid(message: impl Into<String>) -> SimulationError {
     SimulationError::InvalidInput(message.into(), None)
 }
@@ -298,6 +317,44 @@ impl HanjiState {
             return Ok((U256::ZERO, U256::ZERO));
         }
         Ok((input, output))
+    }
+}
+
+impl HanjiState {
+    /// A swap that walks past the best level of the side `sell_base` trades against, when the
+    /// side holds two: all of the best level and one share of the next, and for a buy half a
+    /// share's value more, which the proxy must leave unspent. On a one-level side, the whole
+    /// level. `None` for an empty side.
+    pub(super) fn probe(&self, sell_base: bool) -> Result<Option<Probe>, SimulationError> {
+        let (side, direction) = if sell_base {
+            (&self.bids, SwapDirection::BaseToQuote)
+        } else {
+            (&self.asks, SwapDirection::QuoteToBase)
+        };
+        let Some(best) = side.first() else {
+            return Ok(None);
+        };
+        let next = side.get(1);
+        let (units, fill) = match direction {
+            SwapDirection::BaseToQuote => {
+                let shares = safe_add_u256(best.shares, U256::from(next.is_some()))?;
+                (shares, self.sell(shares)?)
+            }
+            SwapDirection::QuoteToBase => {
+                let best_value = safe_mul_u256(best.price, best.shares)?;
+                let target = match next {
+                    Some(next) => safe_add_u256(
+                        self.cost(safe_add_u256(best_value, next.price)?)?,
+                        next.price / U256::from(2),
+                    )?,
+                    None => self.cost(best_value)?,
+                };
+                (target, self.buy(target)?)
+            }
+        };
+        let expected =
+            FillReport { shares: fill.shares, value: fill.value, fee: self.fee_on(fill.value)? };
+        Ok(Some(Probe { sell_base, units, expected }))
     }
 }
 

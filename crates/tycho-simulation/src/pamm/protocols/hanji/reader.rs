@@ -22,7 +22,11 @@ use std::{
 
 use alloy::{
     eips::BlockId,
-    primitives::{aliases::U24, Address, Bytes as AlloyBytes, U256},
+    primitives::{
+        address,
+        aliases::{U24, U72},
+        hex, keccak256, Address, Bytes as AlloyBytes, B256, U256,
+    },
     providers::{
         bindings::IMulticall3::{
             aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
@@ -30,9 +34,13 @@ use alloy::{
         },
         Provider, RootProvider, MULTICALL3_ADDRESS,
     },
-    rpc::types::{TransactionInput, TransactionRequest},
+    rpc::types::{
+        state::{AccountOverride, StateOverride},
+        TransactionInput, TransactionRequest,
+    },
     sol,
     sol_types::{SolCall, SolValue},
+    transports::RpcError,
 };
 use reqwest::Url;
 use tracing::{debug, warn};
@@ -40,7 +48,7 @@ use tracing::{debug, warn};
 use crate::{
     pamm::protocols::hanji::{
         market::{Market, NativeSide},
-        state::Level,
+        state::{FillReport, Level, Probe},
         Deployment,
     },
     snapshot_feed::errors::FeedError,
@@ -76,6 +84,33 @@ sol! {
     #[derive(Debug)]
     function assembleOrderbookFromOrders(address lobAddress, bool isAsk, uint24 maxPriceLevels)
         external view returns (uint72[] memory arrayPrices, uint128[] memory arrayShares);
+
+    #[derive(Debug)]
+    function placeOrder(
+        bool isAsk,
+        uint128 quantity,
+        uint72 price,
+        uint128 maxCommission,
+        bool marketOnly,
+        bool postOnly,
+        bool transferExecutedTokens,
+        uint256 expires
+    ) external payable returns (
+        uint64 orderId,
+        uint128 executedShares,
+        uint128 executedValue,
+        uint128 aggressiveFee
+    );
+
+    #[derive(Debug)]
+    function placeMarketOrderWithTargetValue(
+        bool isAsk,
+        uint128 targetTokenYValue,
+        uint72 price,
+        uint128 maxCommission,
+        bool transferExecutedTokens,
+        uint256 expires
+    ) external payable returns (uint128 executedShares, uint128 executedValue, uint128 aggressiveFee);
 }
 
 /// Unnamed getters of the proxy orderbooks' unverified implementations, each identified by what
@@ -104,6 +139,47 @@ const WIRING_CALLS: usize = 3;
 /// How long a market that is not read, because its wiring did not resolve or it names no
 /// contract quoter, waits before its wiring is asked for again.
 const UNSERVED_RETRY: Duration = Duration::from_secs(30);
+
+/// Runtime code planted at the taker for a fill check: it calls the address in the first 20 bytes
+/// of its calldata with the rest and its value, and returns or reverts with the answer. A call
+/// without calldata stops, so it takes the native ETH a proxy pays out, as the router does.
+pub(super) const FORWARDER: [u8; 51] = hex!(
+    "3615603157" // if calldatasize == 0 jump to stop
+    "6014360380601460003760006000826000" // calldatacopy(0, 20, size - 20); call's sizes, offsets
+    "3460003560601c5af1" // value, target = calldata[0..20], gas, call
+    "3d600060003e" // returndatacopy(0, 0, returndatasize)
+    "602c573d6000fd" // if the call failed revert(0, returndatasize)
+    "5b3d6000f3" // return(0, returndatasize)
+    "5b00" // stop
+);
+
+/// The sender of a fill check's call. It is not the taker, so the proxy sees the taker as a
+/// contract that is not the transaction's sender, as it sees Tycho's router inside a route.
+pub(super) const PROBE_SENDER: Address = address!("00000000000000000000000000000000000c4ec4");
+
+/// The prices a fill check accepts, as tycho-execution's `HanjiExecutor` sends them: any bid for a
+/// sell, and the highest price the orderbooks accept for a buy.
+const MIN_PRICE: U72 = U72::from_limbs([1, 0]);
+/// 999,999e15, as limbs.
+const MAX_PRICE: U72 = U72::from_limbs([0x35c6_2047_39d9_8000, 0x36]);
+
+/// Balance and allowance mapping slots of the ERC20s a fill check funds, found by overriding
+/// candidate slots and reading `balanceOf` back. A token not listed here is not funded, and a
+/// check that would need it is skipped.
+const TOKEN_SLOTS: [(Address, u64, u64); 2] = [
+    (address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), 9, 10), // USDC
+    (address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"), 9, 10), // cbBTC
+];
+
+/// What one fill check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ProbeOutcome {
+    Filled(FillReport),
+    /// The proxy reverted, with the node's message.
+    Reverted(String),
+    /// The input is an ERC20 the check cannot fund (see [`TOKEN_SLOTS`]).
+    Unfunded,
+}
 
 /// Where a market's virtual orders come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +491,115 @@ impl HanjiReader {
         })
     }
 
+    /// Sends `probe` to the market's proxy at `block`, as the taker, and reports what the proxy
+    /// filled. The taker's code is replaced by [`FORWARDER`] and it is given the input, so the
+    /// proxy fills it as it fills the taker inside a route. A connection failure is an error; a
+    /// revert is an outcome.
+    pub(super) async fn probe(
+        &self,
+        block: u64,
+        timestamp: u64,
+        read: &MarketRead,
+        probe: &Probe,
+    ) -> Result<ProbeOutcome, FeedError> {
+        let market = &read.market;
+        let (token, native, scaling) = if probe.sell_base {
+            (market.token_x, market.native == NativeSide::X, read.config.scaling_x)
+        } else {
+            (market.token_y, market.native == NativeSide::Y, read.config.scaling_y)
+        };
+        let amount = probe
+            .units
+            .checked_mul(scaling)
+            .ok_or_else(|| FeedError::Parsing("Hanji fill check input overflows".into()))?;
+        let mut overrides = StateOverride::default();
+        overrides.insert(
+            self.taker,
+            AccountOverride::default()
+                .with_code(FORWARDER)
+                .with_balance(amount),
+        );
+        let value = if native {
+            overrides.insert(PROBE_SENDER, AccountOverride::default().with_balance(amount));
+            amount
+        } else {
+            let Some(funding) = erc20_funding(token, self.taker, market.orderbook, amount) else {
+                return Ok(ProbeOutcome::Unfunded);
+            };
+            overrides.insert(token, funding);
+            U256::ZERO
+        };
+        let units = u128::try_from(probe.units)
+            .map_err(|e| FeedError::Parsing(format!("Hanji fill check input: {e}")))?;
+        let expires = U256::from(timestamp) + U256::from(60);
+        let call = if probe.sell_base {
+            placeOrderCall {
+                isAsk: true,
+                quantity: units,
+                price: MIN_PRICE,
+                maxCommission: u128::MAX,
+                marketOnly: true,
+                postOnly: false,
+                transferExecutedTokens: true,
+                expires,
+            }
+            .abi_encode()
+        } else {
+            placeMarketOrderWithTargetValueCall {
+                isAsk: false,
+                targetTokenYValue: units,
+                price: MAX_PRICE,
+                maxCommission: u128::MAX,
+                transferExecutedTokens: true,
+                expires,
+            }
+            .abi_encode()
+        };
+        let mut input = market.orderbook.to_vec();
+        input.extend(call);
+        let request = TransactionRequest::default()
+            .from(PROBE_SENDER)
+            .to(self.taker)
+            .value(value)
+            .input(TransactionInput::new(input.into()));
+        let answer = self
+            .provider
+            .call(request)
+            .block(BlockId::number(block))
+            .overrides(overrides)
+            .await;
+        let raw = match answer {
+            Ok(raw) => raw,
+            Err(RpcError::ErrorResp(error)) => {
+                return Ok(ProbeOutcome::Reverted(format!(
+                    "{} {}",
+                    error.message,
+                    error
+                        .data
+                        .as_ref()
+                        .map_or("", |data| data.get())
+                )));
+            }
+            Err(e) => return Err(self.connection_error(e)),
+        };
+        let report = if probe.sell_base {
+            placeOrderCall::abi_decode_returns(&raw).map(|fill| FillReport {
+                shares: U256::from(fill.executedShares),
+                value: U256::from(fill.executedValue),
+                fee: U256::from(fill.aggressiveFee),
+            })
+        } else {
+            placeMarketOrderWithTargetValueCall::abi_decode_returns(&raw).map(|fill| FillReport {
+                shares: U256::from(fill.executedShares),
+                value: U256::from(fill.executedValue),
+                fee: U256::from(fill.aggressiveFee),
+            })
+        };
+        report
+            .map(ProbeOutcome::Filled)
+            .map_err(|e| FeedError::Parsing(format!("Hanji fill check answer: {e}")))
+    }
+
     async fn aggregate(&self, calls: Vec<Call3>) -> Result<Vec<Call3Result>, FeedError> {
         let expected = calls.len();
         let request = TransactionRequest::default()
@@ -449,6 +634,27 @@ impl HanjiReader {
             .replace(&self.rpc_url, "<rpc url>");
         FeedError::Connection(format!("Hanji multicall: {error}"))
     }
+}
+
+/// The storage writes that give `owner` `amount` of `token` and let `spender` take it all, or
+/// `None` for a token whose slots [`TOKEN_SLOTS`] does not list.
+fn erc20_funding(
+    token: Address,
+    owner: Address,
+    spender: Address,
+    amount: U256,
+) -> Option<AccountOverride> {
+    let (_, balance_slot, allowance_slot) = TOKEN_SLOTS
+        .iter()
+        .find(|(listed, _, _)| *listed == token)?;
+    let slot = |key: B256, slot: u64| keccak256((key, U256::from(slot)).abi_encode());
+    let balance = slot(owner.into_word(), *balance_slot);
+    let allowance =
+        keccak256((spender.into_word(), slot(owner.into_word(), *allowance_slot)).abi_encode());
+    Some(
+        AccountOverride::default()
+            .with_state_diff([(balance, B256::from(amount)), (allowance, B256::from(U256::MAX))]),
+    )
 }
 
 /// The proxy's CLOB, quoter and contract quoter getters, in the order [`decode_wiring`] reads

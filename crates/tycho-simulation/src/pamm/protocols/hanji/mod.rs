@@ -87,14 +87,20 @@
 //!
 //! # What this integration depends on
 //!
-//! The proxies and both quoters are not source-verified, and each market's proxy runs its own
-//! implementation. Beside what Hanji documents (the API's market list, `getConfig()`,
-//! `assembleOrderbookFromOrders` and the two swap methods), the feed calls three unnamed getters
-//! of the proxies, identified by what they return (`reader.rs`), and `whitelisted(address)`. The
-//! fill rules and the choice of quoter were measured rather than read from source. A change to how
-//! the proxy fills against the books its quoters report would break the quotes without failing any
-//! read; re-recording the fixture with `testdata/record_fixture.py` and running the state tests
-//! checks them.
+//! The proxies and the underlying CLOBs are UUPS proxies whose shells are verified on Sourcify;
+//! their implementations and both quoters are not source-verified (checked 2026-11-26), and each
+//! market's proxy runs its own implementation. One EOA,
+//! `0xA24D2aF7B9d58579225800B32111D71fb34643C9`, owns them all and upgrades them without a
+//! timelock: ETH/USDC's proxy was upgraded at Base blocks 56,481,785 and 59,531,598, cbBTC/ETH's at
+//! 59,531,787, and Hanji says it adjusts the on-chain quoting logic from time to time. Beside what
+//! Hanji documents (the API's market list, `getConfig()`, `assembleOrderbookFromOrders` and the
+//! two swap methods), the feed calls three unnamed getters of the proxies, identified by what they
+//! return (`reader.rs`), and `whitelisted(address)`. The fill rules and the choice of quoter were
+//! measured rather than read from source, so an upgrade can break the quotes without failing any
+//! read. The feed therefore checks each served market's fills against its state once a minute,
+//! with an `eth_call` of a swap from the taker, and withholds a market whose proxy fills otherwise
+//! (`FillChecks` in `feed.rs`). Re-recording the fixture with `testdata/record_fixture.py` and
+//! running the state tests checks the rules across sizes.
 
 use alloy::primitives::{address, Address};
 use tycho_common::models::Chain;

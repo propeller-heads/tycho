@@ -2,7 +2,7 @@
 //! complete [`BookSnapshot`].
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -13,9 +13,10 @@ use std::{
 
 use alloy::primitives::Address;
 use chrono::DateTime;
+use futures::future::join_all;
 use reqwest::Url;
-use tracing::{debug, warn};
-use tycho_common::Bytes;
+use tracing::{debug, error, info, warn};
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::{
     book::{
@@ -28,8 +29,8 @@ use crate::{
     evm::protocol::u256_num::u256_to_f64,
     pamm::protocols::hanji::{
         market::{fetch_markets, Market},
-        reader::{BookRead, HanjiReader, MarketRead},
-        state::{HanjiState, Level},
+        reader::{BookRead, HanjiReader, MarketRead, ProbeOutcome},
+        state::{HanjiState, Level, Probe},
         BASE_DEPLOYMENT, BASE_ROUTER, ORDERBOOK_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
     snapshot_feed::{
@@ -62,6 +63,13 @@ const MARKET_RETRY: Duration = Duration::from_secs(30);
 /// must give up early enough to leave the poll time for its chain read, and for the fallback to the
 /// last list to run at all.
 const MARKET_API_SHARE_OF_POLL: u32 = 2;
+
+/// How often each served market is sent a fill check (see [`FillChecks`]).
+const FILL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a market waits for its next fill check after one that could not reach the node.
+const FILL_CHECK_RETRY: Duration = Duration::from_secs(10);
+/// How long one poll's fill checks may take; the poll's request timeout also covers its read.
+const FILL_CHECK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Hanji's book feed. Built through [`HanjiFeedBuilder`]. Neither its `Debug` output nor its
 /// errors carry the RPC URL, which commonly carries a key.
@@ -162,6 +170,7 @@ impl HanjiFeedBuilder {
                 ),
                 reader: HanjiReader::new(rpc_url, deployment, taker),
                 assembler: HanjiBookAssembler { book_config: self.book_config },
+                fill_checks: FillChecks::new(FILL_CHECK_INTERVAL),
                 clock: Arc::new(unix_now_ms),
                 last_block: Arc::new(AtomicU64::new(0)),
             },
@@ -271,6 +280,7 @@ pub(super) struct HanjiBookSource {
     pub(super) markets: MarketList,
     pub(super) reader: HanjiReader,
     pub(super) assembler: HanjiBookAssembler,
+    pub(super) fill_checks: FillChecks,
     /// The current Unix time in milliseconds.
     #[debug(skip)]
     pub(super) clock: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -308,7 +318,204 @@ impl HttpSource for HanjiBookSource {
                 read.block_number
             )));
         }
-        Ok(BookSnapshot::received_now(self.assembler.books(&read)))
+        let states = self.assembler.states(&read)?;
+        self.fill_checks
+            .run(&self.reader, &read, &states)
+            .await;
+        let books = self
+            .assembler
+            .books_of(&read, states, |orderbook| !self.fill_checks.withheld(orderbook));
+        Ok(BookSnapshot::received_now(books))
+    }
+}
+
+/// Checks each served market's state against its proxy, as a guard against an upgrade that
+/// changes how the proxy fills. Every [`FILL_CHECK_INTERVAL`], and at once for a market not yet
+/// checked, each side of the book is sent a swap past its best level ([`HanjiState::probe`]) as
+/// an `eth_call` at the read's block, from the taker (see [`HanjiReader::probe`]). A market whose
+/// proxy fills other shares, value or fee than its state predicts, or reverts, is withheld until
+/// a later check agrees. A check that cannot reach the node changes nothing and is retried after
+/// [`FILL_CHECK_RETRY`]; a market no check has decided is published.
+#[derive(Clone, Debug)]
+pub(super) struct FillChecks {
+    interval: Duration,
+    verdicts: Arc<Mutex<HashMap<Address, Verdict>>>,
+}
+
+/// A market's last fill check: whether its fills agreed with its state (`None` until a check
+/// decides), and when it is checked next.
+#[derive(Clone, Copy, Debug)]
+struct Verdict {
+    agrees: Option<bool>,
+    next_check: Instant,
+}
+
+/// What a market's fill checks found in one poll.
+enum Finding {
+    Agrees,
+    Disagrees(String),
+    /// The node could not be asked, or no side could be funded.
+    Undecided {
+        retry: bool,
+        reason: String,
+    },
+}
+
+impl FillChecks {
+    pub(super) fn new(interval: Duration) -> Self {
+        Self { interval, verdicts: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// Whether the last check of `orderbook` found its fills disagreeing with its state.
+    pub(super) fn withheld(&self, orderbook: Address) -> bool {
+        self.verdicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&orderbook)
+            .is_some_and(|verdict| verdict.agrees == Some(false))
+    }
+
+    /// Checks the markets of `states` that are due, within [`FILL_CHECK_TIMEOUT`].
+    async fn run(
+        &self,
+        reader: &HanjiReader,
+        read: &BookRead,
+        states: &[(&MarketRead, HanjiState)],
+    ) {
+        let now = Instant::now();
+        let due: Vec<_> = {
+            let verdicts = self
+                .verdicts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            states
+                .iter()
+                .filter(|(market_read, _)| {
+                    verdicts
+                        .get(&market_read.market.orderbook)
+                        .is_none_or(|verdict| now >= verdict.next_check)
+                })
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let checks = join_all(
+            due.iter()
+                .map(|(market_read, state)| check_market(reader, read, market_read, state)),
+        );
+        let Ok(findings) = tokio::time::timeout(FILL_CHECK_TIMEOUT, checks).await else {
+            warn!(markets = due.len(), timeout = ?FILL_CHECK_TIMEOUT, "Hanji fill checks timed out");
+            self.postpone(
+                due.iter()
+                    .map(|(market_read, _)| market_read.market.orderbook),
+                now,
+            );
+            return;
+        };
+        let mut verdicts = self
+            .verdicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for ((market_read, _), finding) in due.iter().zip(findings) {
+            let orderbook = market_read.market.orderbook;
+            let previous = verdicts
+                .get(&orderbook)
+                .and_then(|verdict| verdict.agrees);
+            let verdict = match finding {
+                Finding::Agrees => {
+                    if previous == Some(false) {
+                        info!(%orderbook, "Hanji market's fills agree with its book again");
+                    }
+                    Verdict { agrees: Some(true), next_check: now + self.interval }
+                }
+                Finding::Disagrees(reason) => {
+                    error!(%orderbook, block = read.block_number, %reason, "withholding Hanji market whose fills disagree with its book");
+                    Verdict { agrees: Some(false), next_check: now + self.interval }
+                }
+                Finding::Undecided { retry, reason } => {
+                    warn!(%orderbook, %reason, "Hanji fill check undecided");
+                    let wait = if retry { FILL_CHECK_RETRY } else { self.interval };
+                    Verdict { agrees: previous, next_check: now + wait }
+                }
+            };
+            verdicts.insert(orderbook, verdict);
+        }
+    }
+
+    /// Whether the last check that decided found `orderbook`'s fills agreeing with its state.
+    #[cfg(test)]
+    pub(super) fn agrees(&self, orderbook: Address) -> Option<bool> {
+        self.verdicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&orderbook)
+            .and_then(|verdict| verdict.agrees)
+    }
+
+    /// Leaves the verdicts of `orderbooks` as they are and checks them again after
+    /// [`FILL_CHECK_RETRY`].
+    fn postpone(&self, orderbooks: impl Iterator<Item = Address>, now: Instant) {
+        let mut verdicts = self
+            .verdicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for orderbook in orderbooks {
+            let agrees = verdicts
+                .get(&orderbook)
+                .and_then(|verdict| verdict.agrees);
+            verdicts.insert(orderbook, Verdict { agrees, next_check: now + FILL_CHECK_RETRY });
+        }
+    }
+}
+
+/// Sends each side of `state` its probe and compares the fills with the state's.
+async fn check_market(
+    reader: &HanjiReader,
+    read: &BookRead,
+    market_read: &MarketRead,
+    state: &HanjiState,
+) -> Finding {
+    let mut probes: Vec<Probe> = Vec::new();
+    for sell_base in [true, false] {
+        match state.probe(sell_base) {
+            Ok(Some(probe)) => probes.push(probe),
+            Ok(None) => {}
+            Err(error) => {
+                return Finding::Disagrees(format!("the state cannot price a probe: {error}"))
+            }
+        }
+    }
+    let outcomes = join_all(
+        probes
+            .iter()
+            .map(|probe| reader.probe(read.block_number, read.timestamp, market_read, probe)),
+    )
+    .await;
+    let mut checked = false;
+    for (probe, outcome) in probes.iter().zip(outcomes) {
+        let side = if probe.sell_base { "sell" } else { "buy" };
+        match outcome {
+            Ok(ProbeOutcome::Filled(report)) if report == probe.expected => checked = true,
+            Ok(ProbeOutcome::Filled(report)) => {
+                return Finding::Disagrees(format!(
+                    "a {side} of {} filled {report:?}, the book predicts {:?}",
+                    probe.units, probe.expected
+                ))
+            }
+            Ok(ProbeOutcome::Reverted(reason)) => {
+                return Finding::Disagrees(format!("a {side} of {} reverted: {reason}", probe.units))
+            }
+            Ok(ProbeOutcome::Unfunded) => {}
+            Err(error) => {
+                return Finding::Undecided { retry: true, reason: format!("a {side}: {error}") }
+            }
+        }
+    }
+    if checked {
+        Finding::Agrees
+    } else {
+        Finding::Undecided { retry: false, reason: "no side of the book can be funded".into() }
     }
 }
 
@@ -328,17 +535,56 @@ pub(super) struct HanjiBookAssembler {
 }
 
 impl HanjiBookAssembler {
-    pub(super) fn books(&self, read: &BookRead) -> Books {
+    /// Every market of `read` that is served, with its state: those between served tokens whose
+    /// book has a level and reads as one the contracts could report. Fails when every market
+    /// read is malformed, which is a change in what the chain reports rather than in its books.
+    pub(super) fn states<'r>(
+        &self,
+        read: &'r BookRead,
+    ) -> Result<Vec<(&'r MarketRead, HanjiState)>, FeedError> {
         let native = self
             .book_config
             .chain
             .native_token()
             .address;
-        let states: Vec<(&MarketRead, HanjiState)> = read
-            .markets
-            .iter()
-            .filter_map(|market_read| Some((market_read, self.state(market_read, &native)?)))
-            .collect();
+        let mut states = Vec::new();
+        let mut malformed = Vec::new();
+        for market_read in &read.markets {
+            match self.state(market_read, &native) {
+                Ok(Some(state)) => states.push((market_read, state)),
+                Ok(None) => {}
+                Err(error) => malformed.push((market_read.market.orderbook, error)),
+            }
+        }
+        if let Some((orderbook, error)) = malformed.first() {
+            if malformed.len() == read.markets.len() {
+                return Err(FeedError::Parsing(format!(
+                    "Hanji: all {} markets read are malformed; {orderbook}: {error}",
+                    malformed.len()
+                )));
+            }
+            warn!(skipped = malformed.len(), %orderbook, %error, "skipping Hanji markets the chain reports malformed");
+        }
+        Ok(states)
+    }
+
+    /// The books of `read`'s served markets that clear the TVL floor.
+    #[cfg(test)]
+    pub(super) fn books(&self, read: &BookRead) -> Books {
+        let states = self
+            .states(read)
+            .expect("a read with a well-formed market");
+        self.books_of(read, states, |_| true)
+    }
+
+    /// The books of `states` whose proxy `publish` accepts and that clear the TVL floor. Every
+    /// state, published or not, can value another's quote token in USD.
+    pub(super) fn books_of(
+        &self,
+        read: &BookRead,
+        states: Vec<(&MarketRead, HanjiState)>,
+        publish: impl Fn(Address) -> bool,
+    ) -> Books {
         let usd_tokens = usd_stablecoins_for_chain(self.book_config.chain).unwrap_or_default();
         let bids: Vec<(Bytes, Bytes, Levels)> = states
             .iter()
@@ -353,6 +599,9 @@ impl HanjiBookAssembler {
         let mut books = Books::new();
         for (market_read, state) in states {
             let orderbook = market_read.market.orderbook;
+            if !publish(orderbook) {
+                continue;
+            }
             // A pair could be listed on two proxies, each its own market, so the proxy is part of
             // the id.
             let component_id = maker_component_id(
@@ -387,9 +636,13 @@ impl HanjiBookAssembler {
         books
     }
 
-    /// The market's state, or `None`, logged, when its tokens are not served, neither side of
-    /// its book holds a level, or the chain reports it malformed.
-    fn state(&self, market_read: &MarketRead, native: &Bytes) -> Option<HanjiState> {
+    /// The market's state; `None`, logged, when its tokens are not served or neither side of its
+    /// book holds a level; an error when the chain reports it malformed.
+    fn state(
+        &self,
+        market_read: &MarketRead,
+        native: &Bytes,
+    ) -> Result<Option<HanjiState>, SimulationError> {
         let market = &market_read.market;
         let (base, quote) = market.published_tokens(native);
         let Some((base_token, quote_token)) = self
@@ -397,11 +650,11 @@ impl HanjiBookAssembler {
             .pair_tokens(&base, &quote)
         else {
             debug!(orderbook = %market.orderbook, %base, %quote, "skipping Hanji market of unserved tokens");
-            return None;
+            return Ok(None);
         };
         if market_read.asks.is_empty() && market_read.bids.is_empty() {
             debug!(orderbook = %market.orderbook, "skipping Hanji market with an empty book");
-            return None;
+            return Ok(None);
         }
         let state = HanjiState {
             orderbook: market.orderbook,
@@ -413,13 +666,7 @@ impl HanjiBookAssembler {
             asks: market_read.asks.clone(),
             bids: market_read.bids.clone(),
         };
-        match state.validated() {
-            Ok(state) => Some(state),
-            Err(error) => {
-                warn!(orderbook = %market.orderbook, %error, "skipping Hanji market the chain reports malformed");
-                None
-            }
-        }
+        state.validated().map(Some)
     }
 }
 
@@ -569,6 +816,25 @@ mod tests {
         assert_eq!(published(100_000_000.0), 0);
     }
 
+    /// A read whose every market is malformed fails rather than publishing nothing; one malformed
+    /// market among others is left out.
+    #[test]
+    fn a_read_of_malformed_markets_fails() {
+        let fixture = fixture();
+        let assembler = HanjiBookAssembler { book_config: book_config() };
+        let mut read = fixture.read(Caller::Contract);
+        read.markets[0].config.scaling_x = alloy::primitives::U256::ZERO;
+        let served = assembler.states(&read).unwrap().len();
+        for market in &mut read.markets {
+            market.config.scaling_x = alloy::primitives::U256::ZERO;
+        }
+
+        let all_malformed = assembler.states(&read);
+
+        assert_eq!(served, 2);
+        assert!(matches!(all_malformed, Err(FeedError::Parsing(_))));
+    }
+
     #[test]
     fn a_market_with_an_empty_book_is_not_published() {
         let fixture = fixture();
@@ -610,7 +876,8 @@ mod tests {
         let started = Instant::now();
         let start_ms = node.fixture.timestamp * 1_000 + MAX_READ_LAG_MS - 100;
         let mut source = source(&server, start_ms, REFRESH);
-        source.clock = Arc::new(move || start_ms + started.elapsed().as_millis() as u64);
+        source.clock =
+            Arc::new(move || start_ms + u64::try_from(started.elapsed().as_millis()).unwrap());
 
         let result = source.fetch().await;
 
@@ -728,7 +995,8 @@ mod tests {
     }
 
     /// Within the refresh interval the list is not fetched again: the API is asked once, and the
-    /// node once for the wiring and once per poll.
+    /// node once for the wiring, once per poll, and once per side of each market for the fill
+    /// checks of the first poll, which are not due again within their interval.
     #[tokio::test]
     async fn the_market_list_is_fetched_once_per_refresh() {
         let (node, source, server) = served(FakeNode::new(), REFRESH).await;
@@ -738,7 +1006,7 @@ mod tests {
         }
 
         assert_eq!(node.api_requests.load(Ordering::SeqCst), 1);
-        assert_eq!(server.request_count(), 1 + 1 + 3);
+        assert_eq!(server.request_count(), 1 + 1 + 3 + 3 * 2);
     }
 
     /// Once the proxies whitelist the taker, they fill it against FastQuoter's book, and the feed
@@ -851,6 +1119,113 @@ mod tests {
         assert!(!changed.books.contains_key(&id));
         // The proxy now sends contracts to FastQuoter, so they get its book.
         assert_eq!(published_bids(&resolved, &id), recorded_bids(CBBTC_USDC, Caller::Direct));
+    }
+
+    /// The first poll checks both sides of every served market, sent as the taker at the read's
+    /// block, and publishes them all when their fills agree with their books.
+    #[tokio::test]
+    async fn fills_that_agree_keep_the_markets_published() {
+        let (node, source, _server) = served(FakeNode::new(), REFRESH).await;
+
+        let snapshot = source.fetch().await.unwrap();
+
+        assert_eq!(snapshot.books.len(), 3);
+        let mut fills = node.fills.lock().unwrap().clone();
+        fills.sort();
+        let mut expected: Vec<_> = [ETH_USDC, CBBTC_USDC, CBBTC_ETH]
+            .into_iter()
+            .flat_map(|orderbook| [(orderbook, false), (orderbook, true)])
+            .collect();
+        expected.sort();
+        assert_eq!(fills, expected);
+        for orderbook in [ETH_USDC, CBBTC_USDC, CBBTC_ETH] {
+            assert_eq!(source.fill_checks.agrees(orderbook), Some(true));
+        }
+    }
+
+    /// A market whose proxy fills other than its book predicts is withheld, and published again
+    /// once a later check agrees.
+    #[tokio::test]
+    async fn a_market_whose_fills_disagree_is_withheld_until_they_agree() {
+        let (node, mut source, _server) = served(FakeNode::new(), REFRESH).await;
+        source.fill_checks = FillChecks::new(Duration::ZERO);
+        node.misfilling
+            .lock()
+            .unwrap()
+            .insert(CBBTC_USDC);
+        let id = component_id(&cbbtc(), &usdc(), CBBTC_USDC);
+
+        let withheld = source.fetch().await.unwrap();
+        node.misfilling.lock().unwrap().clear();
+        let restored = source.fetch().await.unwrap();
+
+        assert_eq!(withheld.books.len(), 2);
+        assert!(!withheld.books.contains_key(&id));
+        assert!(restored.books.contains_key(&id));
+    }
+
+    #[tokio::test]
+    async fn a_market_whose_fills_revert_is_withheld() {
+        let mut node = FakeNode::new();
+        node.fill_reverting.insert(ETH_USDC);
+        let (_node, source, _server) = served(node, REFRESH).await;
+
+        let snapshot = source.fetch().await.unwrap();
+
+        assert_eq!(snapshot.books.len(), 2);
+        assert_eq!(source.fill_checks.agrees(ETH_USDC), Some(false));
+    }
+
+    /// A check the node cannot answer decides nothing: an unchecked market is still published,
+    /// and a withheld one stays withheld.
+    #[tokio::test]
+    async fn an_unreachable_check_leaves_the_verdicts_as_they_were() {
+        let (node, mut source, _server) = served(FakeNode::new(), REFRESH).await;
+        source.fill_checks = FillChecks::new(Duration::ZERO);
+        node.misfilling
+            .lock()
+            .unwrap()
+            .insert(CBBTC_USDC);
+        source.fetch().await.unwrap();
+
+        node.misfilling.lock().unwrap().clear();
+        node.fills_unreachable
+            .store(true, Ordering::SeqCst);
+        let (other, fresh, _other_server) = served(FakeNode::new(), REFRESH).await;
+        other
+            .fills_unreachable
+            .store(true, Ordering::SeqCst);
+        let withheld = source.fetch().await.unwrap();
+        let unchecked = fresh.fetch().await.unwrap();
+
+        assert_eq!(withheld.books.len(), 2);
+        assert_eq!(source.fill_checks.agrees(CBBTC_USDC), Some(false));
+        assert_eq!(unchecked.books.len(), 3);
+        assert_eq!(fresh.fill_checks.agrees(CBBTC_USDC), None);
+    }
+
+    /// Against Base mainnet: a poll publishes the three crypto markets, and each one's fills, sent
+    /// as Tycho's router, agree with its published state.
+    #[tokio::test]
+    #[ignore = "reads Base mainnet and Hanji's API; set BASE_RPC_URL"]
+    async fn live_fills_agree_with_the_published_books() {
+        let url = std::env::var("BASE_RPC_URL").expect("BASE_RPC_URL not set");
+        let feed = HanjiFeedBuilder::new(book_config(), url)
+            .build()
+            .unwrap();
+
+        let snapshot = feed.source.fetch().await.unwrap();
+
+        assert_eq!(snapshot.books.len(), 3, "{:?}", snapshot.books.keys());
+        for orderbook in [ETH_USDC, CBBTC_USDC, CBBTC_ETH] {
+            assert_eq!(
+                feed.source
+                    .fill_checks
+                    .agrees(orderbook),
+                Some(true),
+                "{orderbook}"
+            );
+        }
     }
 
     #[test]
