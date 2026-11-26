@@ -1,0 +1,7 @@
+[
+  {"anonymous": false, "type": "event", "name": "FyndPolicyCreated", "inputs": [{"name": "pool", "type": "address", "indexed": true}, {"name": "version", "type": "uint256", "indexed": false}]},
+  {"anonymous": false, "type": "event", "name": "SetController", "inputs": [{"name": "controller", "type": "address", "indexed": false}]},
+  {"anonymous": false, "type": "event", "name": "SetRouter", "inputs": [{"name": "router", "type": "address", "indexed": false}]},
+  {"anonymous": false, "type": "event", "name": "SetMinFee", "inputs": [{"name": "min_fee", "type": "uint256", "indexed": false}]},
+  {"anonymous": false, "type": "event", "name": "SetKilled", "inputs": [{"name": "is_killed", "type": "bool", "indexed": false}]}
+]

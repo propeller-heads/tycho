@@ -192,7 +192,7 @@ Applies: solidity-test, rust-test, integration-test · look first at lines match
 ### no-placeholder-addresses
 Config files and contract constants never ship placeholder or zero addresses: deployment args carry the real per-chain address for every listed chain, and a 'TODO: replace with deployed address' constant is replaced before merge or tracked on the deployment task.
 Why: A zero or placeholder address encodes calldata that reverts or approves nothing, and a forgotten placeholder ships silently because nothing fails at build time.
-Spot: `0x0000000000000000000000000000000000000000` or `0x…_HERE` values in config JSONs, `PLACEHOLDER`/`TODO: replace` next to an address constant, a contributor PR editing executor_addresses.json.
+Spot: `0x0000000000000000000000000000000000000000` or `0x…_HERE` values in config JSONs, `PLACEHOLDER`/`TODO: replace` next to an address constant, a placeholder or zero address added to executor_addresses.json.
 Applies: config, solidity, script, rust · look first at lines matching `0x|placeholder|todo|_here|address`
 Checked by: ast-grep `json-placeholder-address`; ast-grep `sol-placeholder-address-constant`
 
@@ -210,9 +210,9 @@ Applies: solidity · look first at lines matching `settle|credit|swap|amount|unl
 Checked by: ast-grep `sol-settle-without-credit-readback`
 
 ### deployment-artifacts-after-launch
-An integration PR leaves deployment-time artifacts untouched: deployed executor addresses (executor_addresses.json) and the solver-facing supported-protocols listing change only after the executor is deployed and the integration is live in production.
-Why: Listing an undeployed executor or an unlaunched protocol advertises something solvers and hosted users cannot use yet, and placeholder addresses get mistaken for real deployments.
-Spot: An integration diff touching crates/tycho-execution/config/executor_addresses.json or docs/for-solvers/supported-protocols.md.
+An integration PR leaves deployment-time artifacts untouched: deployed executor addresses (executor_addresses.json) change only after the executor is deployed, and the solver-facing supported-protocols listing changes only after the integration is live in production. An integration that adds no executor contract and is executed by an already-deployed executor may add its executor_addresses.json entry in the PR, pointing at that deployed address, once the deployed instance's configuration (constructor arguments such as factory or init code hash) is checked to support the new protocol (`executor-address-config`).
+Why: Listing an undeployed executor or an unlaunched protocol advertises something solvers and hosted users cannot use yet, and placeholder addresses get mistaken for real deployments. A reused executor's address is already real, so its entry advertises nothing undeployed.
+Spot: An integration diff that adds an executor contract and touches crates/tycho-execution/config/executor_addresses.json; any integration diff touching docs/for-solvers/supported-protocols.md.
 Applies: config, docs
 
 ### executor-receive-justified

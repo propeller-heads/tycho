@@ -36,8 +36,9 @@ use crate::{
         },
         post_processors::POST_PROCESSOR_REGISTRY,
         protocol_cache::ProtocolMemoryCache,
-        protocol_extractor::{ExtractorPgGateway, ProtocolExtractor},
+        protocol_extractor::{ExtractorPgGateway, ProtocolExtractor, ResumeFrom},
         runner::{compute_start_block, DCIPlugin, ExtractorRunner, SubscriptionsMap},
+        writer_status::WriterStatus,
         ExtractionError, Extractor,
     },
     pb::sf::substreams::v1::Package,
@@ -179,10 +180,14 @@ pub struct ExtractorFactory {
     token_pre_processor: EthereumTokenPreProcessor,
     rpc_client: EthereumRpcClient,
     database_insert_batch_size: usize,
-    partial_blocks: bool,
+    pub(super) partial_blocks: bool,
     runtime_handle: Option<Handle>,
     protocol_cache: ProtocolMemoryCache,
     chain_state: ChainState,
+    writer_status: WriterStatus,
+    /// Where the next build resumes, taken by that build. A build without one reads its cursor
+    /// from the database.
+    next_resume: std::sync::Mutex<Option<ResumeFrom>>,
 }
 
 impl ExtractorFactory {
@@ -234,7 +239,40 @@ impl ExtractorFactory {
             runtime_handle,
             protocol_cache,
             chain_state,
+            writer_status: WriterStatus::leader(),
+            next_resume: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Makes the next extractor this factory builds resume from `resume` instead of the cursor
+    /// in the database. A build after it reads the database again, unless this is called again.
+    pub fn resume_next_build_from(&self, resume: ResumeFrom) {
+        *self
+            .next_resume
+            .lock()
+            .expect("next resume lock poisoned") = Some(resume);
+    }
+
+    /// Takes the resume point set with [`Self::resume_next_build_from`], or
+    /// [`ResumeFrom::Database`] without one.
+    fn take_next_resume(&self) -> ResumeFrom {
+        self.next_resume
+            .lock()
+            .expect("next resume lock poisoned")
+            .take()
+            .unwrap_or(ResumeFrom::Database)
+    }
+
+    /// Makes every extractor this factory builds commit or follow according to
+    /// `writer_status`. Without this call the extractors commit as the only writer.
+    pub fn with_writer_status(mut self, writer_status: WriterStatus) -> Self {
+        self.writer_status = writer_status;
+        self
+    }
+
+    /// Returns the writer status the extractors of this factory commit or follow by.
+    pub(super) fn writer_status(&self) -> &WriterStatus {
+        &self.writer_status
     }
 
     /// Builds a fresh, ready-to-run [`ExtractorRunner`].
@@ -292,17 +330,36 @@ impl ExtractorFactory {
             })
             .transpose()?;
 
+        // The protocol extractor reads its cursor before the DCI plugin loads its state, so
+        // the stream never starts above the block of that state.
+        let mut extractor =
+            ProtocolExtractor::<ExtractorPgGateway, EthereumTokenPreProcessor, DCIPlugin<_>>::new(
+                gw,
+                self.database_insert_batch_size,
+                &self.config.name,
+                self.config.chain,
+                self.chain_state,
+                self.config.name.clone(),
+                self.protocol_cache.clone(),
+                protocol_types,
+                self.token_pre_processor.clone(),
+                post_processor,
+                self.writer_status.clone(),
+                self.take_next_resume(),
+            )
+            .await?;
+
         // Optional DCI plugin.
         let dci_plugin = match self.config.dci_plugin.as_ref() {
             None => None,
             Some(DCIType::RPC) => {
-                let rpc_dci = Self::create_rpc_dci(
+                let mut rpc_dci = Self::create_rpc_dci(
                     &self.rpc_client,
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
+                rpc_dci.initialize().await?;
                 Some(DCIPlugin::Standard(rpc_dci))
             }
             Some(DCIType::UniswapV4Hooks { pool_manager_address }) => {
@@ -315,8 +372,7 @@ impl ExtractorFactory {
                     self.config.chain,
                     self.config.name.clone(),
                     &fresh_gw,
-                )
-                .await?;
+                )?;
 
                 let mut hooks_dci = UniswapV4HookDCIBuilder::new(
                     base_dci,
@@ -335,23 +391,10 @@ impl ExtractorFactory {
             }
         };
 
-        // Build the protocol extractor.
-        let extractor = Arc::new(
-            ProtocolExtractor::<ExtractorPgGateway, EthereumTokenPreProcessor, DCIPlugin<_>>::new(
-                gw,
-                self.database_insert_batch_size,
-                &self.config.name,
-                self.config.chain,
-                self.chain_state,
-                self.config.name.clone(),
-                self.protocol_cache.clone(),
-                protocol_types,
-                self.token_pre_processor.clone(),
-                post_processor,
-                dci_plugin,
-            )
-            .await?,
-        );
+        if let Some(dci_plugin) = dci_plugin {
+            extractor = extractor.with_dci_plugin(dci_plugin);
+        }
+        let extractor = Arc::new(extractor);
 
         // Ensure the spkg file is present (download from S3 if needed).
         ensure_spkg(&self.config.spkg, self.s3_bucket.as_deref()).await?;
@@ -404,7 +447,7 @@ impl ExtractorFactory {
                     "New extractor: stamps its first block after the block before it"
                 );
                 extractor
-                    .update_last_processed_block(before.clone())
+                    .set_block_before_start(before.clone())
                     .await;
             }
         }
@@ -441,7 +484,10 @@ impl ExtractorFactory {
     }
 
     /// Creates a RPC-based `DynamicContractIndexer` with account extractor and tracer configured.
-    async fn create_rpc_dci(
+    ///
+    /// The returned indexer is not initialized: the caller must call `initialize` on it, or on
+    /// the plugin that wraps it, before it processes a block.
+    fn create_rpc_dci(
         rpc_client: &EthereumRpcClient,
         chain: Chain,
         extractor_name: String,
@@ -475,15 +521,13 @@ impl ExtractorFactory {
         let tracer =
             EVMEntrypointService::new_with_config(&tracer_rpc_client, max_retries, retry_delay_ms);
 
-        let mut rpc_dci = DynamicContractIndexer::new(
+        let rpc_dci = DynamicContractIndexer::new(
             chain,
             extractor_name,
             cached_gw.clone(),
             account_extractor,
             tracer,
         );
-        rpc_dci.initialize().await?;
-
         Ok(rpc_dci)
     }
 }

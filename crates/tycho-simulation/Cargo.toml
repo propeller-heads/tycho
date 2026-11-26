@@ -140,6 +140,7 @@ evm = [
     "dep:reqwest",
     "dep:alloy-primitives",
     "dep:tokio-tungstenite",
+    "dep:metrics",
 ]
 # The off-chain book feeds and everything they are built from: the transport loops in
 # `snapshot_feed`, the shared `book` layer, and the `rfq` and `pamm` provider families. The

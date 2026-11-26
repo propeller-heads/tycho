@@ -6,18 +6,19 @@ use crate::encoding::{
     errors::EncodingError,
     evm::{
         constants::{
-            BAIBAI_PROTOCOL_SYSTEM, BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON,
-            FALLBACK_KEY, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-            NATIVE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_WRAPPER_PROTOCOL_SYSTEM,
-            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
-            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, SUBSIDY_KEY,
-            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
+            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
+            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
+            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
+            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, aqua0::Aqua0SwapEncoder,
-            baibai::BaibaiSwapEncoder, balancer_v2::BalancerV2SwapEncoder,
+            baibai::BaibaiSwapEncoder, baibai_fallback::BaibaiFallbackSwapEncoder,
+            balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
             bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
@@ -170,6 +171,7 @@ impl SwapEncoderRegistry {
             _ if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) => PRICE_LEVEL_STREAM_KEY,
             _ if protocol_system.starts_with(FALLBACK_PREFIX) &&
                 protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+                protocol_system != BAIBAI_FALLBACK_PROTOCOL_SYSTEM &&
                 !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) =>
             {
                 FALLBACK_KEY
@@ -328,6 +330,9 @@ impl SwapEncoderRegistry {
             METRIC_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(MetricFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(BaibaiFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
             BEBOP_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(BebopFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -416,6 +421,23 @@ mod tests {
             .is_none());
     }
 
+    /// A native IPropAMM venue published as `fallback:biconomy` resolves to Base's deployed
+    /// fallback executor through the family entry.
+    #[test]
+    fn test_native_venue_fallback_resolves_on_base() {
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(None)
+            .unwrap();
+        let resolved = registry
+            .get_encoder("fallback:biconomy")
+            .expect("no encoder resolved for fallback:biconomy");
+
+        assert_eq!(
+            resolved.executor_address(),
+            &Bytes::from_str("0x08f22285d13533d68aA8bE5949536322DB3538De").unwrap()
+        );
+    }
+
     /// An exact entry wins over the `fallback` family entry.
     #[test]
     fn test_rfq_fallback_routers_resolve_before_the_family() {
@@ -447,6 +469,9 @@ mod tests {
             .is_none());
         assert!(registry
             .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(registry
+            .get_encoder(BAIBAI_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
     }
 
