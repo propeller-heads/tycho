@@ -1,10 +1,20 @@
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    fmt::Debug,
+    hash::Hash,
+};
+
 use chrono::NaiveDateTime;
 use diesel_async::AsyncPgConnection;
+use metrics::counter;
 use tycho_common::storage::{
     BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind,
 };
 
-use crate::postgres::{instance::active::ActiveInstance, maybe_lookup_version_ts};
+use crate::postgres::{
+    instance::{active::ActiveInstance, InstanceId},
+    maybe_lookup_version_ts,
+};
 
 /// Checks that the current tables of `instance` can answer the version `at`, and returns the
 /// timestamp of `at`. The head is the one the read looked up with the instance.
@@ -39,15 +49,120 @@ pub(super) async fn check_current(
     }
 }
 
+/// Which rows answer a read at a version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadAt {
+    /// The current tables answer: every current row is valid at this version, so the read takes
+    /// them all, unfiltered. No current row is newer than the head, because the writer saves the
+    /// extraction state in the same transaction as the rows.
+    Current,
+    /// A version before the head: current rows with `valid_from <= ts`, and history rows with
+    /// `valid_from <= ts < valid_to` and `valid_to <= head`.
+    ///
+    /// When the head and the rows come from one snapshot, `valid_to <= head` removes no row: it
+    /// lets Postgres skip the history days that pg_partman makes in advance. Read the head in the
+    /// same snapshot as the rows. Outside one snapshot, the filter drops a key that the writer
+    /// moves between the head lookup and the row queries.
+    Past { ts: NaiveDateTime, head: NaiveDateTime },
+}
+
+/// Resolves the version `at` of `instance` to the rows that answer it. The head, the base and the
+/// history horizon are the ones the read looked up with the instance.
+///
+/// In this order:
+/// - `None` or the `Latest` block with kind `Last`: `Current`. Reads nothing.
+/// - a timestamp at or after the head, or any timestamp when the instance has no head: `Current`.
+/// - a timestamp before the history horizon: `Unsupported`, because older history is dropped.
+/// - a timestamp before the base block of the instance: `Unsupported`, because the instance has no
+///   history before it.
+/// - any other timestamp before the head: `Past { ts, head }`.
+///
+/// A version kind other than `Last` is `Unsupported`.
+pub(super) async fn resolve_version(
+    instance: &ActiveInstance,
+    at: Option<&Version>,
+    conn: &mut AsyncPgConnection,
+) -> Result<ReadAt, StorageError> {
+    let Some(at) = at else {
+        return Ok(ReadAt::Current);
+    };
+    if let Version(BlockOrTimestamp::Block(BlockIdentifier::Latest(_)), VersionKind::Last) = at {
+        return Ok(ReadAt::Current);
+    }
+    let ts = maybe_lookup_version_ts(at, conn).await?;
+    let Some(head) = instance.head.filter(|head| ts < *head) else {
+        return Ok(ReadAt::Current);
+    };
+    if ts < instance.history_horizon {
+        return Err(StorageError::Unsupported(format!(
+            "version {ts} is before the history horizon {} (now() - partition_retention()): older \
+             history is dropped",
+            instance.history_horizon
+        )));
+    }
+    if let Some(base) = instance.base.filter(|base| ts < *base) {
+        return Err(StorageError::Unsupported(format!(
+            "version {ts} is before the base block of instance {} at {base}: the instance has no \
+             history before it",
+            instance.id
+        )));
+    }
+    Ok(ReadAt::Past { ts, head })
+}
+
+/// Collects `rows` into a map by outer key, then by inner key. `Unexpected` if two rows have the
+/// same outer and inner key: two rows of `entity` are then valid at one version, which the writer
+/// must prevent. The error names the `instance` and the version of `read`, and
+/// `storage_overlapping_versions{entity}` counts it.
+pub(super) fn unique_by_key<O, I, V>(
+    entity: &'static str,
+    instance: InstanceId,
+    read: ReadAt,
+    rows: impl IntoIterator<Item = ((O, I), V)>,
+) -> Result<HashMap<O, HashMap<I, V>>, StorageError>
+where
+    O: Eq + Hash + Debug,
+    I: Eq + Hash + Debug,
+{
+    rows.into_iter().try_fold(
+        HashMap::new(),
+        |mut map: HashMap<O, HashMap<I, V>>, ((outer, inner), value)| {
+            match map.entry(outer) {
+                Entry::Vacant(e) => {
+                    e.insert(HashMap::from([(inner, value)]));
+                }
+                Entry::Occupied(mut e) if !e.get().contains_key(&inner) => {
+                    e.get_mut().insert(inner, value);
+                }
+                Entry::Occupied(e) => {
+                    counter!("storage_overlapping_versions", "entity" => entity).increment(1);
+                    let version = match read {
+                        ReadAt::Current => "the head".to_string(),
+                        ReadAt::Past { ts, head: _ } => format!("version {ts}"),
+                    };
+                    return Err(StorageError::Unexpected(format!(
+                        "{entity} of instance {instance} at {version}: two rows of {:?} are valid",
+                        (e.key(), &inner)
+                    )));
+                }
+            }
+            Ok(map)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::{NaiveDate, NaiveDateTime};
+    use rstest::rstest;
     use tycho_common::{
         models::Chain,
         storage::{BlockIdentifier, BlockOrTimestamp, StorageError, Version, VersionKind},
     };
 
-    use super::check_current;
+    use super::{check_current, resolve_version, unique_by_key, ReadAt};
     use crate::postgres::{
         instance::{active::ActiveInstance, InstanceId},
         testing::instance_test_connection,
@@ -63,14 +178,22 @@ mod tests {
         Version(BlockOrTimestamp::Timestamp(ts), VersionKind::Last)
     }
 
-    fn instance(head: Option<NaiveDateTime>) -> ActiveInstance {
-        ActiveInstance { id: InstanceId(1), head }
+    /// An instance with its history horizon at `day(2)`.
+    fn instance(head: Option<NaiveDateTime>, base: Option<NaiveDateTime>) -> ActiveInstance {
+        ActiveInstance { id: InstanceId(1), head, base, history_horizon: day(2) }
+    }
+
+    fn latest() -> Version {
+        Version(
+            BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
+            VersionKind::Last,
+        )
     }
 
     #[tokio::test]
     async fn test_no_version_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(None);
+        let instance = instance(None, None);
 
         assert_eq!(
             check_current(&instance, None, &mut conn)
@@ -83,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_at_or_after_head_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
+        let instance = instance(Some(day(2)), None);
 
         for ts in [day(2), day(3)] {
             assert_eq!(
@@ -98,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_before_head_is_unsupported() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
+        let instance = instance(Some(day(2)), None);
 
         let result = check_current(&instance, Some(&at(day(1))), &mut conn).await;
 
@@ -108,14 +231,10 @@ mod tests {
     #[tokio::test]
     async fn test_check_current_answers_latest_without_a_block() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(Some(day(2)));
-        let latest = Version(
-            BlockOrTimestamp::Block(BlockIdentifier::Latest(Chain::Ethereum)),
-            VersionKind::Last,
-        );
+        let instance = instance(Some(day(2)), None);
 
         assert_eq!(
-            check_current(&instance, Some(&latest), &mut conn)
+            check_current(&instance, Some(&latest()), &mut conn)
                 .await
                 .unwrap(),
             None
@@ -125,13 +244,83 @@ mod tests {
     #[tokio::test]
     async fn test_instance_without_head_is_current() {
         let mut conn = instance_test_connection().await;
-        let instance = instance(None);
+        let instance = instance(None, None);
 
         assert_eq!(
             check_current(&instance, Some(&at(day(1))), &mut conn)
                 .await
                 .unwrap(),
             Some(day(1))
+        );
+    }
+
+    #[rstest]
+    #[case::no_version(Some(day(5)), None, None, Ok(ReadAt::Current))]
+    #[case::latest(Some(day(5)), None, Some(latest()), Ok(ReadAt::Current))]
+    #[case::at_head(Some(day(5)), None, Some(at(day(5))), Ok(ReadAt::Current))]
+    #[case::after_head(Some(day(5)), None, Some(at(day(6))), Ok(ReadAt::Current))]
+    #[case::without_head(None, None, Some(at(day(1))), Ok(ReadAt::Current))]
+    #[case::before_head(Some(day(5)), None, Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
+    #[case::at_horizon(Some(day(5)), None, Some(at(day(2))), Ok(ReadAt::Past { ts: day(2), head: day(5) }))]
+    #[case::at_base(Some(day(5)), Some(day(3)), Some(at(day(3))), Ok(ReadAt::Past { ts: day(3), head: day(5) }))]
+    #[case::before_horizon(Some(day(5)), None, Some(at(day(1))), Err("history horizon"))]
+    #[case::before_base(Some(day(5)), Some(day(4)), Some(at(day(3))), Err("base block"))]
+    #[tokio::test]
+    async fn test_resolve_version(
+        #[case] head: Option<NaiveDateTime>,
+        #[case] base: Option<NaiveDateTime>,
+        #[case] at: Option<Version>,
+        #[case] expected: Result<ReadAt, &str>,
+    ) {
+        let mut conn = instance_test_connection().await;
+
+        let result = resolve_version(&instance(head, base), at.as_ref(), &mut conn).await;
+
+        match (result, expected) {
+            (Ok(read), Ok(expected)) => assert_eq!(read, expected),
+            (Err(StorageError::Unsupported(msg)), Err(part)) => {
+                assert!(msg.contains(part), "{msg}")
+            }
+            (result, expected) => panic!("expected {expected:?}, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unique_by_key_collects_rows() {
+        let map = unique_by_key(
+            "protocol_state",
+            InstanceId(7),
+            ReadAt::Current,
+            [((1, "x"), "a"), ((1, "y"), "b"), ((2, "x"), "c")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            map,
+            HashMap::from([
+                (1, HashMap::from([("x", "a"), ("y", "b")])),
+                (2, HashMap::from([("x", "c")])),
+            ])
+        );
+    }
+
+    #[rstest]
+    #[case::current(ReadAt::Current, "the head")]
+    #[case::past(ReadAt::Past { ts: day(3), head: day(5) }, "version 2020-01-03 00:00:00")]
+    fn test_unique_by_key_fails_on_a_repeated_key(#[case] read: ReadAt, #[case] version: &str) {
+        let result = unique_by_key(
+            "protocol_state",
+            InstanceId(7),
+            read,
+            [((42, "x"), "a"), ((42, "x"), "b")],
+        );
+
+        let Err(StorageError::Unexpected(msg)) = result else {
+            panic!("expected Unexpected, got {result:?}");
+        };
+        assert_eq!(
+            msg,
+            format!("protocol_state of instance 7 at {version}: two rows of (42, \"x\") are valid")
         );
     }
 }
