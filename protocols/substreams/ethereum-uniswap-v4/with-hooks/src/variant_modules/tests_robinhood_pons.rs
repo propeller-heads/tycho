@@ -144,7 +144,9 @@ fn creation_block() -> Block {
 /// balances, ticks or liquidity, then Pons enrichment.
 fn block_changes(block: &Block) -> BlockChanges {
     let mut new_pools = Vec::new();
-    get_new_pools(block, &mut new_pools, POOL_MANAGER);
+    let pool_manager =
+        crate::address_list::parse_address("pool_manager", POOL_MANAGER).expect("an address");
+    get_new_pools(block, &mut new_pools, &pool_manager);
 
     let mut changes = collect_transaction_changes(
         BlockEntityChanges { block: None, changes: new_pools },

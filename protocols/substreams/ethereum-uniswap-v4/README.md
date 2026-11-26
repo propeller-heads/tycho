@@ -21,7 +21,8 @@ Tracks Protocol Components **WITHOUT** swap hooks:
 Tracks Protocol Components **WITH** swap hooks:
 - Only includes pools that have `beforeSwap` or `afterSwap` hook permissions  
 - Uses `HookPermissionsDetector::has_swap_hooks() == true`
-- Configuration: `ethereum-uniswap-v4-with-hooks.yaml`, `robinhood-uniswap-v4-with-hooks.yaml`
+- Configuration: `ethereum-uniswap-v4-with-hooks.yaml`, `unichain-uniswap-v4-with-hooks.yaml`,
+  `robinhood-uniswap-v4-with-hooks.yaml`, `elysium-uniswap-v4-with-hooks.yaml`
 
 On Robinhood, `map_pons_enriched_block_changes` decodes a Pons V2 MemeHook pool's `hookFeeBps` and
 `creatorTaxBps` straight from the storage writes its creation transaction's `registerPool` call
@@ -29,6 +30,12 @@ makes, rather than from an event or a stored attribute the hook exposes. The mod
 addresses it treats as Pons from one parameter, `pons_hooks=<address>[,<address>...]`, and the
 manifest sets it to the canonical deployment. Per-call storage writes only reach a Substreams
 module on extended blocks, so a provider serving this manifest needs `DetailLevel: EXTENDED`.
+
+On Elysium, `map_montra_pools_created` creates only the pools of the Montra hooks listed in
+`montra_hooks`, and `map_montra_enriched_block_changes` decodes each pool's fee terms and stage
+from the hook's storage writes into `montra_*` attributes, pausing a pool until its seed is
+placed. The same extended-block requirement applies. `with-hooks/Readme.md` describes what the
+manifest emits and its rollout constraints.
 
 ## Hook Permission Detection
 

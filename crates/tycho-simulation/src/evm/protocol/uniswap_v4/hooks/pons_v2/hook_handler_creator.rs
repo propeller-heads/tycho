@@ -90,81 +90,40 @@ impl HookHandlerCreator for PonsV2HookCreator {
 mod tests {
     use std::collections::HashMap;
 
-    use alloy::primitives::{address, Address, U256};
+    use alloy::primitives::address;
     use rstest::rstest;
-    use tycho_common::{
-        models::{token::Token, Chain},
-        Bytes,
-    };
+    use tycho_common::{models::Chain, Bytes};
 
     use super::*;
     use crate::{
-        evm::protocol::uniswap_v4::{
-            hooks::{
-                hook_handler::HookHandler,
-                hook_handler_creator::{
-                    initialize_hook_handlers, instantiate_hook_handler, HookCreationParams,
-                    HookHandlerCreator,
-                },
-                pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
+        evm::protocol::uniswap_v4::hooks::{
+            hook_handler::HookHandler,
+            hook_handler_creator::{
+                initialize_hook_handlers, instantiate_hook_handler, test_fixtures::BareSnapshot,
+                HookHandlerCreator,
             },
-            state::{UniswapV4Fees, UniswapV4State},
+            pons_v2::hook_handler::{PonsV2HookHandler, PONS_V2_HOOK_ROBINHOOD},
         },
         protocol::errors::InvalidSnapshotError,
     };
 
-    /// Owns the collections a [`HookCreationParams`] borrows.
-    struct Snapshot {
-        account_balances: HashMap<Bytes, HashMap<Bytes, Bytes>>,
-        all_tokens: HashMap<Bytes, Token>,
-        attributes: HashMap<String, Bytes>,
-        balances: HashMap<Bytes, Bytes>,
-    }
-
-    impl Snapshot {
-        fn new(hook_fee_bps: Option<&[u8]>, creator_tax_bps: Option<&[u8]>) -> Self {
-            let mut attributes = HashMap::new();
-            if let Some(value) = hook_fee_bps {
-                attributes.insert("pons_hook_fee_bps".to_string(), Bytes::from(value.to_vec()));
-            }
-            if let Some(value) = creator_tax_bps {
-                attributes.insert("pons_creator_tax_bps".to_string(), Bytes::from(value.to_vec()));
-            }
-            Self {
-                account_balances: HashMap::new(),
-                all_tokens: HashMap::new(),
-                attributes,
-                balances: HashMap::new(),
-            }
+    /// A snapshot carrying only the Pons fee attributes given.
+    fn snapshot(hook_fee_bps: Option<&[u8]>, creator_tax_bps: Option<&[u8]>) -> BareSnapshot {
+        let mut attributes = HashMap::new();
+        if let Some(value) = hook_fee_bps {
+            attributes.insert("pons_hook_fee_bps".to_string(), Bytes::from(value.to_vec()));
         }
-
-        fn params(&self, hook: Address) -> HookCreationParams<'_> {
-            let state = UniswapV4State::new(
-                0,
-                U256::from(1),
-                UniswapV4Fees::new(0, 0, 0),
-                0,
-                1,
-                Vec::new(),
-            )
-            .expect("a bare pool state builds");
-            HookCreationParams::new(
-                hook,
-                &self.account_balances,
-                &self.all_tokens,
-                state,
-                &self.attributes,
-                &self.balances,
-                None,
-            )
+        if let Some(value) = creator_tax_bps {
+            attributes.insert("pons_creator_tax_bps".to_string(), Bytes::from(value.to_vec()));
         }
+        BareSnapshot::with_attributes(attributes)
     }
 
     fn instantiate(
         hook_fee_bps: Option<&[u8]>,
         creator_tax_bps: Option<&[u8]>,
     ) -> Result<Box<dyn HookHandler>, InvalidSnapshotError> {
-        let snapshot = Snapshot::new(hook_fee_bps, creator_tax_bps);
+        let snapshot = snapshot(hook_fee_bps, creator_tax_bps);
         PonsV2HookCreator.instantiate_hook_handler(snapshot.params(PONS_V2_HOOK_ROBINHOOD))
     }
 
@@ -259,7 +218,7 @@ mod tests {
     #[test]
     fn the_handler_takes_the_hook_address_from_the_creation_params() {
         let other = address!("00000000000000000000000000000000000000aa");
-        let snapshot = Snapshot::new(Some(&[0x64]), Some(&[0x00]));
+        let snapshot = snapshot(Some(&[0x64]), Some(&[0x00]));
 
         let handler = PonsV2HookCreator
             .instantiate_hook_handler(snapshot.params(other))
@@ -271,7 +230,7 @@ mod tests {
     #[test]
     fn the_creator_is_registered_for_pons_on_robinhood() {
         initialize_hook_handlers().expect("hook handler registration should succeed");
-        let snapshot = Snapshot::new(Some(&[0x64]), Some(&[0x00, 0xc8]));
+        let snapshot = snapshot(Some(&[0x64]), Some(&[0x00, 0xc8]));
 
         let handler = instantiate_hook_handler(
             Chain::Robinhood,
@@ -292,7 +251,7 @@ mod tests {
     #[test]
     fn the_creator_does_not_serve_the_same_address_on_another_chain() {
         initialize_hook_handlers().expect("hook handler registration should succeed");
-        let snapshot = Snapshot::new(Some(&[0x64]), Some(&[0x00, 0xc8]));
+        let snapshot = snapshot(Some(&[0x64]), Some(&[0x00, 0xc8]));
 
         let error = instantiate_hook_handler(
             Chain::Ethereum,
