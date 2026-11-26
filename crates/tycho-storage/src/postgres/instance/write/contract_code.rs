@@ -8,7 +8,7 @@ use tycho_common::storage::StorageError;
 
 use crate::postgres::{
     instance::{
-        orm::{ContractCode, NewContractCode, NewContractCodeHistory},
+        orm::{NewContractCode, NewContractCodeHistory},
         schema::tycho::{contract_code, contract_code_history},
         write::versioning::VersionedRowNew,
         InstanceId,
@@ -61,27 +61,15 @@ impl VersionedRowNew for NewContractCode {
         keys: &[i64],
         conn: &mut AsyncPgConnection,
     ) -> Result<Vec<Self>, StorageError> {
-        let rows: Vec<ContractCode> = contract_code::table
+        contract_code::table
             .filter(contract_code::instance_id.eq(instance))
             .filter(contract_code::account_id.eq_any(keys))
-            .select(ContractCode::as_select())
+            .select(NewContractCode::as_select())
             .load(conn)
             .await
             .map_err(|err| {
-                storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None)
-            })?;
-        Ok(rows
-            .into_iter()
-            .map(|row| NewContractCode {
-                instance_id: row.instance_id,
-                account_id: row.account_id,
-                code: row.code,
-                hash: row.hash,
-                modify_tx_hash: row.modify_tx_hash,
-                valid_from: row.valid_from,
-                tx_index: row.tx_index,
+                storage_error_from_diesel(err, Self::ENTITY, &instance.to_string(), None).into()
             })
-            .collect())
     }
 
     async fn upsert_current(

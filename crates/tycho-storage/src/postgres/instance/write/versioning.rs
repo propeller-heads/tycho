@@ -216,11 +216,11 @@ fn plan_writes<R: VersionedRowNew>(
 
     let mut current = Vec::new();
     let mut deleted = Vec::new();
-    for (key, last) in latest {
-        match last {
-            Latest { changed: false, .. } => {}
-            Latest { row: Some(row), .. } => current.push(row),
-            Latest { row: None, .. } => deleted.push(key),
+    for (key, Latest { version: _, row, changed }) in latest {
+        match (changed, row) {
+            (false, _) => {}
+            (true, Some(row)) => current.push(row),
+            (true, None) => deleted.push(key),
         }
     }
     Ok(VersionWrites { current, deleted, history })

@@ -118,16 +118,11 @@ impl PostgresGatewayNew {
         let account_ids = self
             .account_ids(instance, &addresses, conn)
             .await?;
-        let native_tokens = deltas
-            .iter()
-            .filter(|(_, delta)| delta.balance.is_some())
-            .map(|(_, delta)| native_token(delta))
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        check_tokens_stored(&native_tokens.iter().collect::<Vec<_>>(), conn).await?;
 
         let mut code = Vec::new();
         let mut storage = Vec::new();
         let mut balances = Vec::new();
+        let mut native_tokens = Vec::new();
         for (tx, delta) in deltas {
             let origin = origins.change(tx)?;
             let account_id = account_ids[&delta.address];
@@ -155,16 +150,19 @@ impl PostgresGatewayNew {
                 }));
             }
             if let Some(balance) = &delta.balance {
+                let token = native_token(delta)?;
+                native_tokens.push(token.clone());
                 balances.push(VersionedChange::Update(NewAccountBalance {
                     instance_id: instance,
                     account_id,
-                    token: native_token(delta)?,
+                    token,
                     balance: balance.clone(),
                     valid_from: origin.valid_from,
                     tx_index: origin.tx_index,
                 }));
             }
         }
+        check_tokens_stored(&native_tokens.iter().collect::<Vec<_>>(), conn).await?;
         self.write_versions(instance, code, conn)
             .await?;
         self.write_versions(instance, storage, conn)
@@ -222,7 +220,7 @@ impl PostgresGatewayNew {
     /// Returns the id of each account of the instance, by address. Deleted accounts are found too.
     ///
     /// `NotFound` for the first address that has no account in the instance.
-    pub(crate) async fn account_ids(
+    async fn account_ids(
         &self,
         instance: InstanceId,
         addresses: &[&Bytes],

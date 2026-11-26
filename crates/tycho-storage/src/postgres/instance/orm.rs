@@ -416,7 +416,7 @@ pub struct ContractCode {
     pub modified_ts: NaiveDateTime,
 }
 
-#[derive(Debug, Insertable)]
+#[derive(Debug, Insertable, Queryable, Selectable)]
 #[diesel(table_name = tycho::contract_code)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct NewContractCode {
