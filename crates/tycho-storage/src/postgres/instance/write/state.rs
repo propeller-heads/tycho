@@ -159,7 +159,7 @@ impl VersionedRowNew for NewProtocolState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Timelike, Utc};
+    use chrono::Duration;
     use tycho_common::Bytes;
 
     use super::*;
@@ -182,7 +182,7 @@ mod tests {
     }
 
     /// An instance with one component, whose `reserve` attribute is 1 since
-    /// [`db_fixtures::INSTANCE_STATE_VALID_FROM`] at transaction index 0.
+    /// [`db_fixtures::INSTANCE_VALID_FROM`] at transaction index 0.
     async fn setup() -> Setup {
         let mut conn = instance_test_connection().await;
         let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
@@ -197,13 +197,6 @@ mod tests {
 
     fn value(value: u64) -> Bytes {
         Bytes::from(value)
-    }
-
-    /// A time `minutes` before now, in whole seconds, so it compares equal after a round trip.
-    fn minutes_ago(minutes: i64) -> NaiveDateTime {
-        let ts = Utc::now().naive_utc() - Duration::minutes(minutes);
-        ts.with_nanosecond(0)
-            .expect("zero nanoseconds is valid")
     }
 
     fn origin(valid_from: NaiveDateTime, tx_index: i32) -> ChangeOrigin {
@@ -268,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_attribute_is_current_without_history() {
         let mut setup = setup().await;
-        let at = origin(minutes_ago(1), 3);
+        let at = origin(db_fixtures::minutes_ago(1), 3);
 
         let change = update(&setup, "fee", 30, at);
 
@@ -290,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_moves_the_stored_value_to_history() {
         let mut setup = setup().await;
-        let at = origin(minutes_ago(1), 3);
+        let at = origin(db_fixtures::minutes_ago(1), 3);
 
         let change = update(&setup, "reserve", 2, at);
 
@@ -312,15 +305,15 @@ mod tests {
         assert_eq!(archived.attribute_value, value(1));
         assert_eq!(
             (archived.valid_from, archived.valid_to, archived.tx_index),
-            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from, 0)
+            (db_fixtures::INSTANCE_VALID_FROM, at.valid_from, 0)
         );
     }
 
     #[tokio::test]
     async fn test_two_updates_in_one_batch_link_the_history() {
         let mut setup = setup().await;
-        let first = origin(minutes_ago(2), 0);
-        let second = origin(minutes_ago(1), 0);
+        let first = origin(db_fixtures::minutes_ago(2), 0);
+        let second = origin(db_fixtures::minutes_ago(1), 0);
 
         let changes =
             vec![update(&setup, "reserve", 2, first), update(&setup, "reserve", 3, second)];
@@ -346,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_deletion_moves_the_stored_value_to_history() {
         let mut setup = setup().await;
-        let at = origin(minutes_ago(1), 0);
+        let at = origin(db_fixtures::minutes_ago(1), 0);
 
         let change = delete(&setup, "reserve", at);
 
@@ -359,7 +352,7 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(
             (history[0].valid_from, history[0].valid_to),
-            (db_fixtures::INSTANCE_STATE_VALID_FROM, at.valid_from)
+            (db_fixtures::INSTANCE_VALID_FROM, at.valid_from)
         );
     }
 
@@ -398,7 +391,7 @@ mod tests {
             db_fixtures::insert_instance_state(&mut setup.conn, other, component, name, value(9))
                 .await;
         }
-        let at = origin(minutes_ago(1), 0);
+        let at = origin(db_fixtures::minutes_ago(1), 0);
 
         let changes = vec![
             delete(&setup, "reserve", at),
@@ -464,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn test_change_before_the_stored_version_fails_and_keeps_it() {
         let mut setup = setup().await;
-        let before = origin(db_fixtures::INSTANCE_STATE_VALID_FROM - Duration::days(1), 0);
+        let before = origin(db_fixtures::INSTANCE_VALID_FROM - Duration::days(1), 0);
 
         let change = update(&setup, "reserve", 2, before);
 
@@ -479,9 +472,9 @@ mod tests {
     #[tokio::test]
     async fn test_version_ending_before_the_horizon_is_not_archived() {
         let mut setup = setup().await;
-        setup.gateway.retention_horizon = minutes_ago(0);
+        setup.gateway.retention_horizon = db_fixtures::minutes_ago(0);
 
-        let change = update(&setup, "reserve", 2, origin(minutes_ago(1), 0));
+        let change = update(&setup, "reserve", 2, origin(db_fixtures::minutes_ago(1), 0));
 
         write(&mut setup, vec![change])
             .await
@@ -494,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn test_version_without_history_day_fails() {
         let mut setup = setup().await;
-        let far_ahead = origin(minutes_ago(0) + Duration::days(60), 0);
+        let far_ahead = origin(db_fixtures::minutes_ago(0) + Duration::days(60), 0);
 
         let change = update(&setup, "reserve", 2, far_ahead);
 

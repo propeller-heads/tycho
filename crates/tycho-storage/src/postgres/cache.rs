@@ -41,7 +41,7 @@ use tycho_common::{
 };
 
 use super::{
-    instance::{gateway::PostgresGatewayNew, origins::BatchOrigins},
+    instance::{ensure_instance, gateway::PostgresGatewayNew, origins::BatchOrigins},
     is_transaction_conflict,
     pool::{self, EXTRACTION_POOL},
     InstanceId, PostgresError,
@@ -585,9 +585,21 @@ impl DBCacheWriteExecutor {
                     .insert_component_balances(instance, origins, balances, conn)
                     .await?
             }
-            WriteOp::InsertContract(_) |
-            WriteOp::UpdateContracts(_) |
-            WriteOp::InsertAccountBalances(_) |
+            WriteOp::InsertContract(accounts) => {
+                self.instance_gateway
+                    .insert_contracts(instance, origins, accounts, conn)
+                    .await?
+            }
+            WriteOp::UpdateContracts(deltas) => {
+                self.instance_gateway
+                    .update_contracts(instance, origins, deltas, conn)
+                    .await?
+            }
+            WriteOp::InsertAccountBalances(balances) => {
+                self.instance_gateway
+                    .insert_account_balances(instance, origins, balances, conn)
+                    .await?
+            }
             WriteOp::InsertProtocolComponents(_) |
             WriteOp::UpdateTokens(_) |
             WriteOp::UpsertProtocolState(_) |
@@ -798,6 +810,17 @@ impl CachedGateway {
     /// change. A gateway with no instance writes nothing: the old gateway is off.
     pub fn for_instance(&self, instance: InstanceId) -> Self {
         CachedGateway { instance: Some(instance), ..self.new_instance() }
+    }
+
+    /// Runs `instance::create::ensure_instance` on a connection from this gateway's pool. That
+    /// function's doc gives what it returns and when it fails.
+    pub async fn ensure_instance(
+        &self,
+        protocol_system: &str,
+        label: &str,
+    ) -> Result<(InstanceId, bool), StorageError> {
+        let mut conn = pool::checkout(&self.pool, self.pool_label).await?;
+        ensure_instance(protocol_system, label, &mut conn).await
     }
 
     /// Creates a gateway that shares this one's write channel and state caches but takes its
@@ -1951,6 +1974,123 @@ mod test_serial_db {
                 stored_balance,
                 (component, token_address, Bytes::from(7_u64), block_1.ts, 1)
             );
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_instance_batch_writes_contracts() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let usdc = Bytes::from("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+            db_fixtures::insert_token(&mut connection, &hex::encode(&usdc), "USDC", 6, Some(100))
+                .await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let address = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+            let creation = AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                HashMap::from([(Bytes::from("0x01"), Some(Bytes::from("0x0a")))]),
+                Some(Bytes::from(7_u64)),
+                Some(Bytes::from("0x6080")),
+                models::ChangeType::Creation,
+            );
+            let token_balance = models::contract::AccountBalance::new(
+                address.clone(),
+                usdc.clone(),
+                Bytes::from(5_u64),
+                tx_1.hash.clone(),
+            );
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            // Staged before the account: the executor writes accounts first anyway.
+            cached_gw
+                .update_contracts(&[(tx_1.hash.clone(), creation.clone())])
+                .await
+                .expect("Staging contract changes ok");
+            cached_gw
+                .add_account_balances(&[token_balance])
+                .await
+                .expect("Staging account balances ok");
+            cached_gw
+                .insert_contract(&creation.ref_into_account(&tx_1))
+                .await
+                .expect("Staging account ok");
+            cached_gw
+                .save_state(&get_sample_extraction(1))
+                .await
+                .expect("Save state ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let system: i64 = schema::protocol_system::table
+                .filter(schema::protocol_system::name.eq("vm:test"))
+                .select(schema::protocol_system::id)
+                .get_result(&mut connection)
+                .await
+                .expect("the protocol system is stored");
+            db_fixtures::set_active_instance(&mut connection, system, Some(instance)).await;
+            let gateway = PostgresGatewayNew::from_connection(&mut connection).await;
+            let contracts = gateway
+                .get_contracts(
+                    &Chain::Ethereum,
+                    "vm:test",
+                    Some(slice::from_ref(&address)),
+                    None,
+                    true,
+                    None,
+                    &mut connection,
+                )
+                .await
+                .expect("reading the contracts failed")
+                .entity;
+            assert_eq!(contracts.len(), 1);
+            let contract = &contracts[0];
+            assert_eq!(contract.code, Bytes::from("0x6080"));
+            assert_eq!(contract.code_modify_tx, tx_1.hash);
+            assert_eq!(contract.slots, HashMap::from([(Bytes::from("0x01"), Bytes::from("0x0a"))]));
+            assert_eq!(contract.native_balance, Bytes::from(7_u64));
+            let token_balances = gateway
+                .get_account_balances(
+                    &Chain::Ethereum,
+                    "vm:test",
+                    Some(slice::from_ref(&address)),
+                    None,
+                    false,
+                    &mut connection,
+                )
+                .await
+                .expect("reading the account balances failed");
+            assert_eq!(token_balances[&address][&usdc].balance, Bytes::from(5_u64));
+            // The read leaves out the creation transaction; the account row stores it.
+            let creation: (Option<Bytes>, Option<i64>) = instance_schema::account::table
+                .filter(instance_schema::account::instance_id.eq(instance))
+                .select((
+                    instance_schema::account::creation_tx_hash,
+                    instance_schema::account::creation_block,
+                ))
+                .get_result(&mut connection)
+                .await
+                .expect("the account is stored");
+            assert_eq!(creation, (Some(tx_1.hash.clone()), Some(1)));
         })
         .await;
     }

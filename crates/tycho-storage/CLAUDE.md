@@ -41,6 +41,7 @@ postgres/
 └── instance/           — per-instance `tycho` schema; written by gateways bound to an instance, not yet read by the public gateways; callers run each read in one `snapshot_transaction`
     ├── mod.rs          — `InstanceId` newtype; joins with the shared `public` tables
     ├── active.rs       — the active instance of one protocol and of all protocols, looked up once per read from `protocol_system.active_instance_id`
+    ├── create.rs       — `ensure_instance`: find or create an active instance by label, called through `CachedGateway::ensure_instance`; for initialized accounts until extractors create theirs
     ├── gateway.rs      — PostgresGatewayNew, inner gateway on the instance tables (renamed to PostgresGateway at cut-over)
     ├── origins.rs      — BatchOrigins: block number, timestamp and tx index of each change in a batch
     ├── read/           — its read methods, one file per domain
@@ -50,12 +51,16 @@ postgres/
     │   ├── token.rs    — tokens, prices and token owners; tokens by `token.address`, owners and the traded filter from the active instances
     │   └── version.rs  — the check that the current tables can answer a version
     ├── write/          — its write methods, one file per domain
+    │   ├── account_balance.rs — account balances (native and token): their key, history row and table writes for versioning
     │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
     │   ├── component.rs — the component id of each external id, in one instance
+    │   ├── contract.rs — accounts of a batch (the first creation wins), account deltas and token balances; the account id of each address, in one instance
+    │   ├── contract_code.rs — contract code rows: their key, history row and table writes for versioning; the same hash adds no version
+    │   ├── contract_storage.rs — contract storage rows: their key, history row and table writes for versioning
     │   ├── extraction_state.rs — cursor and last block of each instance
     │   ├── state.rs    — protocol state rows: their key, history row and table writes for versioning
-    │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins
+    │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins; the stored-token check of balance writes
     │   └── versioning.rs — VersionedRowNew (renamed to VersionedRow at cut-over) + write_versions(): latest version in the current table, replaced versions in history
     ├── orm.rs          — Diesel row and insert structs for every `tycho` table
     ├── schema.rs       — auto-generated (`[print_schema.instance]` in diesel.toml)
@@ -84,15 +89,17 @@ instances. No table has a DEFAULT partition.
 - `CachedGateway::for_instance(id)` makes a gateway whose batches the write executor runs through
   `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows
   take their block timestamp and tx index from the batch (`instance::origins`), and `UpsertTx`
-  writes nothing. It writes blocks, tokens, component balances and `tycho.extraction_state` so far;
-  any other op fails the whole batch with `StorageError::Unsupported`. At cut-over, the old
-  gateway is deleted and `PostgresGatewayNew` is renamed.
+  writes nothing. It writes blocks, tokens, component balances, accounts, contract code, storage,
+  account balances and `tycho.extraction_state` so far; any other op fails the whole batch with
+  `StorageError::Unsupported`. At cut-over, the old gateway is deleted and `PostgresGatewayNew`
+  is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
-  `instance::write::versioning::VersionedRowNew` (protocol state and component balances so far).
-  The module doc of `write/versioning.rs` has the rules. A change that does not start after the
-  version it replaces fails the batch. The old versioning (`postgres/versioning.rs`) compares a change only
-  with the stored row. It skips a change that is not after that row. It does not compare the
-  changes of one key inside a batch, so it applies two changes with the same start.
+  `instance::write::versioning::VersionedRowNew` (protocol state, component balances, contract
+  code, contract storage and account balances). The module doc of `write/versioning.rs` has the
+  rules, repeats included. A change that does not start after the version it replaces fails the
+  batch. The old versioning (`postgres/versioning.rs`) compares a change only with the stored
+  row. It skips a change that is not after that row. It does not compare the changes of one key
+  inside a batch, so it applies two changes with the same start.
 
 ## Architecture
 

@@ -9,6 +9,11 @@
 //! Each block of an instance starts strictly later than the one before, and a transaction changes
 //! a key at most once. So every change of a key must start after the version it replaces. When a
 //! change starts at or before that version, `write_versions` fails the whole batch.
+//!
+//! An entity can say that a change only repeats the version it replaces
+//! ([`VersionedRowNew::repeats`]). A repeat adds no version: the replaced version stays the latest
+//! one and does not move to history, and a key with only repeats is not written again. A repeat
+//! still counts for the order: the next change of its key must start after the repeat.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Debug,
@@ -46,6 +51,14 @@ pub trait VersionedRowNew: Debug + Send + Sync + Sized {
 
     /// Records on `next` what it keeps of the version it replaces, such as the previous value.
     fn link_next(&self, next: &mut Self);
+
+    /// Whether this row only repeats `replaced`, the version it would replace. A repeat adds no
+    /// version: `replaced` stays the latest version of the key.
+    ///
+    /// No entity repeats by default: every change is a new version.
+    fn repeats(&self, _replaced: &Self) -> bool {
+        false
+    }
 
     /// The history row of this version, ended at `valid_to`.
     fn into_history(self, valid_to: NaiveDateTime) -> Self::History;
@@ -115,7 +128,19 @@ struct VersionWrites<R: VersionedRowNew> {
     history: Vec<R::History>,
 }
 
-/// Chains `changes` after the `stored` current rows of their keys, in the order they start.
+/// The last change of a key in [`plan_writes`].
+struct Latest<R: VersionedRowNew> {
+    /// Start of the last change: a later change must start after it.
+    version: (NaiveDateTime, i32),
+    /// The latest row of the key: `None` once deleted.
+    row: Option<R>,
+    /// Whether the batch changed the stored row. A key with only repeats is not written.
+    changed: bool,
+}
+
+/// Chains `changes` after the `stored` current rows of their keys, in the order they start. An
+/// update that repeats the version it replaces is dropped, and a key with only repeats is not
+/// written.
 ///
 /// Fails on each failure that `write_versions` lists, except a missing history day: only the
 /// history insert finds that one.
@@ -127,28 +152,36 @@ fn plan_writes<R: VersionedRowNew>(
 ) -> Result<VersionWrites<R>, StorageError> {
     changes.sort_by_key(VersionedChange::version);
 
-    // The start of the last version of each key, and its latest row: `None` once deleted.
     let mut latest: BTreeMap<_, _> = stored
         .into_iter()
-        .map(|row| (row.key(), (row.version(), Some(row))))
+        .map(|row| (row.key(), Latest { version: row.version(), row: Some(row), changed: false }))
         .collect();
 
     let mut history = Vec::new();
     for change in changes {
         let key = change.key();
         let version = change.version();
-        let replaced = match latest.remove(&key) {
-            Some((last, _)) if version <= last => {
+        let (replaced, changed) = match latest.remove(&key) {
+            Some(last) if version <= last.version => {
                 return Err(StorageError::Unexpected(format!(
                     "{} {key:?}: a change at {version:?} does not start after the version it \
-                     replaces, at {last:?}",
-                    R::ENTITY
+                     replaces, at {:?}",
+                    R::ENTITY,
+                    last.version
                 )));
             }
-            Some((_, replaced)) => replaced,
-            None => None,
+            Some(last) => (last.row, last.changed),
+            None => (None, false),
         };
         let next = match change {
+            VersionedChange::Update(row)
+                if replaced
+                    .as_ref()
+                    .is_some_and(|replaced| row.repeats(replaced)) =>
+            {
+                latest.insert(key, Latest { version, row: replaced, changed });
+                continue;
+            }
             VersionedChange::Update(mut row) => {
                 if row.instance() != instance {
                     return Err(StorageError::Unexpected(format!(
@@ -178,15 +211,16 @@ fn plan_writes<R: VersionedRowNew>(
                 history.push(replaced.into_history(valid_from));
             }
         }
-        latest.insert(key, (version, next));
+        latest.insert(key, Latest { version, row: next, changed: true });
     }
 
     let mut current = Vec::new();
     let mut deleted = Vec::new();
-    for (key, (_, row)) in latest {
-        match row {
-            Some(row) => current.push(row),
-            None => deleted.push(key),
+    for (key, Latest { version: _, row, changed }) in latest {
+        match (changed, row) {
+            (false, _) => {}
+            (true, Some(row)) => current.push(row),
+            (true, None) => deleted.push(key),
         }
     }
     Ok(VersionWrites { current, deleted, history })
@@ -248,6 +282,8 @@ mod tests {
         previous: Option<u8>,
         valid_from: NaiveDateTime,
         tx_index: i32,
+        /// Whether a change with the value of the version it replaces only repeats it.
+        drops_repeats: bool,
     }
 
     #[derive(Debug, PartialEq)]
@@ -276,6 +312,10 @@ mod tests {
 
         fn link_next(&self, next: &mut Self) {
             next.previous = Some(self.value);
+        }
+
+        fn repeats(&self, replaced: &Self) -> bool {
+            self.drops_repeats && self.value == replaced.value
         }
 
         fn into_history(self, valid_to: NaiveDateTime) -> HistoryRow {
@@ -325,11 +365,21 @@ mod tests {
     }
 
     fn row(key: u8, value: u8, block: u32, tx_index: i32) -> Row {
-        Row { key, value, previous: None, valid_from: ts(block), tx_index }
+        Row { key, value, previous: None, valid_from: ts(block), tx_index, drops_repeats: false }
     }
 
     fn update(key: u8, value: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
         VersionedChange::Update(row(key, value, block, tx_index))
+    }
+
+    /// An update of an entity that drops a change with the value of the version it replaces.
+    fn update_dropping_repeats(
+        key: u8,
+        value: u8,
+        block: u32,
+        tx_index: i32,
+    ) -> VersionedChange<Row> {
+        VersionedChange::Update(Row { drops_repeats: true, ..row(key, value, block, tx_index) })
     }
 
     fn delete(key: u8, block: u32, tx_index: i32) -> VersionedChange<Row> {
@@ -416,10 +466,68 @@ mod tests {
         assert_eq!(writes.history, vec![archived(row(2, 10, 1, 0), 3)]);
     }
 
+    #[test]
+    fn test_repeat_of_the_stored_version_writes_nothing() {
+        let stored = row(1, 10, 1, 0);
+
+        let writes = plan(vec![stored], vec![update_dropping_repeats(1, 10, 2, 0)]).unwrap();
+
+        assert!(writes.current.is_empty());
+        assert!(writes.deleted.is_empty());
+        assert!(writes.history.is_empty());
+    }
+
+    #[test]
+    fn test_repeat_after_a_change_keeps_the_change() {
+        let stored = row(1, 10, 1, 0);
+        let changes =
+            vec![update_dropping_repeats(1, 20, 2, 0), update_dropping_repeats(1, 20, 3, 0)];
+
+        let writes = plan(vec![stored.clone()], changes).unwrap();
+
+        assert_eq!(
+            writes.current,
+            vec![Row { previous: Some(10), drops_repeats: true, ..row(1, 20, 2, 0) }]
+        );
+        assert_eq!(writes.history, vec![archived(stored, 2)]);
+    }
+
+    #[test]
+    fn test_repeat_in_a_batch_is_dropped_between_changes() {
+        let changes = vec![
+            update_dropping_repeats(1, 20, 2, 0),
+            update_dropping_repeats(1, 20, 3, 0),
+            update_dropping_repeats(1, 30, 4, 0),
+        ];
+
+        let writes = plan(vec![], changes).unwrap();
+
+        let first = Row { drops_repeats: true, ..row(1, 20, 2, 0) };
+        assert_eq!(
+            writes.current,
+            vec![Row { previous: Some(20), drops_repeats: true, ..row(1, 30, 4, 0) }]
+        );
+        assert_eq!(writes.history, vec![archived(first, 4)]);
+    }
+
+    #[test]
+    fn test_same_value_is_a_new_version_by_default() {
+        let stored = row(1, 10, 1, 0);
+
+        let writes = plan(vec![stored.clone()], vec![update(1, 10, 2, 0)]).unwrap();
+
+        assert_eq!(writes.current, vec![Row { previous: Some(10), ..row(1, 10, 2, 0) }]);
+        assert_eq!(writes.history, vec![archived(stored, 2)]);
+    }
+
     #[rstest]
     #[case::at_the_stored_version(vec![row(1, 10, 2, 0)], vec![update(1, 20, 2, 0)])]
     #[case::before_the_stored_version(vec![row(1, 10, 2, 4)], vec![update(1, 20, 2, 3)])]
     #[case::two_changes_in_one_transaction(vec![], vec![update(1, 20, 2, 0), update(1, 21, 2, 0)])]
+    #[case::at_a_dropped_repeat(
+        vec![row(1, 10, 1, 0)],
+        vec![update_dropping_repeats(1, 10, 2, 0), update(1, 20, 2, 0)]
+    )]
     fn test_change_not_after_the_replaced_version_fails(
         #[case] stored: Vec<Row>,
         #[case] changes: Vec<VersionedChange<Row>>,

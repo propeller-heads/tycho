@@ -44,9 +44,9 @@ use tycho_common::{
         blockchain::{Block, Transaction},
         chain_config::{init_chain_registry, ChainConfigRegistry},
         contract::AccountDelta,
-        Address, Chain, ExtractionState, ImplementationType,
+        Address, Chain, ImplementationType,
     },
-    storage::{ChainGateway, ContractStateGateway, ExtractionStateGateway},
+    storage::{ChainGateway, ContractStateGateway},
     traits::{AccountExtractor, StorageSnapshotRequest},
     Bytes,
 };
@@ -73,7 +73,7 @@ use tycho_indexer::{
         EntityCache, EntityCacheMode, EntityCacheSetup, PlansConfig, ServicesBuilder, WindowConfig,
     },
 };
-use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway};
+use tycho_storage::postgres::{builder::GatewayBuilder, cache::CachedGateway, InstanceId};
 
 mod ot;
 
@@ -81,6 +81,11 @@ mod ot;
 /// subscriber channels created by `ExtractorHandle::subscribe` since a single consumer
 /// drains the channels of all extractors.
 const PENDING_DELTAS_CHANNEL_SIZE: usize = 256;
+
+/// Label of the instance that the initialized accounts of a protocol are written into. Only tests
+/// initialize accounts. Once extractors create their instances, the accounts go into the
+/// extractor's instance.
+const INITIALIZED_ACCOUNTS_LABEL: &str = "initialized-accounts";
 
 #[derive(Debug, Deserialize)]
 struct ExtractorConfigs {
@@ -761,16 +766,35 @@ async fn build_all_extractors(
     protocol_cache.populate().await?;
 
     for extractor_config in config.extractors.values() {
-        initialize_accounts(
-            extractor_config
-                .initialized_accounts
-                .clone(),
-            extractor_config.initialized_accounts_block,
-            rpc_client,
-            chain,
-            cached_gw,
-        )
-        .await;
+        if !extractor_config
+            .initialized_accounts
+            .is_empty()
+        {
+            let (instance, created) = cached_gw
+                .ensure_instance(&extractor_config.name, INITIALIZED_ACCOUNTS_LABEL)
+                .await?;
+            // A rerun on a kept database finds the accounts already written. Writing them again
+            // fails: their changes do not start after the stored versions.
+            if created {
+                initialize_accounts(
+                    instance,
+                    extractor_config
+                        .initialized_accounts
+                        .clone(),
+                    extractor_config.initialized_accounts_block,
+                    rpc_client,
+                    chain,
+                    cached_gw,
+                )
+                .await;
+            } else {
+                info!(
+                    %instance,
+                    extractor = %extractor_config.name,
+                    "Instance of the initialized accounts exists, skipping account initialization"
+                );
+            }
+        }
 
         #[expect(
             clippy::disallowed_methods,
@@ -811,22 +835,13 @@ async fn build_all_extractors(
     Ok((supervisors, extractor_handles, pending_deltas_rxs))
 }
 
-async fn with_transaction<F, Fut, R>(gw: &CachedGateway, block: &Block, f: F) -> R
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = R>,
-{
-    gw.start_transaction(block, Some("accountExtractor"))
-        .await;
-    let result = f().await;
-    gw.commit_transaction(0)
-        .await
-        .expect("Failed to commit transaction");
-    result
-}
-
-#[instrument(skip_all, fields(n_accounts = %accounts.len(), block_id = block_id))]
+/// Writes the accounts at block `block_id`, read from `rpc`, into `instance`: the block, one
+/// synthetic transaction that creates every account, and the accounts, in one batch.
+///
+/// The batch carries no extraction state, so the instance's extractor keeps its own cursor.
+#[instrument(skip_all, fields(n_accounts = %accounts.len(), block_id = block_id, %instance))]
 async fn initialize_accounts(
+    instance: InstanceId,
     accounts: Vec<Address>,
     block_id: u64,
     rpc: &EthereumRpcClient,
@@ -848,54 +863,30 @@ async fn initialize_accounts(
         index: 0,
     };
 
-    // First transaction
-    with_transaction(cached_gw, &block, || async {
-        cached_gw
-            .upsert_block(slice::from_ref(&block))
-            .await
-            .expect("Failed to insert block");
-
-        cached_gw
-            .upsert_tx(slice::from_ref(&tx))
-            .await
-            .expect("Failed to insert tx");
-    })
-    .await;
-
-    // Process account updates
+    // One batch: each change finds the block and index of its transaction only in its own batch.
+    let gw = cached_gw.for_instance(instance);
+    gw.start_transaction(&block, None).await;
+    gw.upsert_block(slice::from_ref(&block))
+        .await
+        .expect("Failed to insert block");
+    gw.upsert_tx(slice::from_ref(&tx))
+        .await
+        .expect("Failed to insert tx");
+    let mut deltas = Vec::with_capacity(extracted_accounts.len());
     for account_update in extracted_accounts.into_values() {
-        with_transaction(cached_gw, &block, || async {
-            let new_account = account_update.ref_into_account(&tx);
-            info!(block_number = block.number, contract_address = ?new_account.address, "NewContract");
-
-            // Insert new accounts
-            cached_gw
-                .insert_contract(&new_account)
-                .await
-                .expect("Failed to insert contract");
-            cached_gw
-                .update_contracts(&[(tx.hash.clone(), account_update)])
-                .await
-                .expect("Failed to update contract");
-        })
-        .await;
-    }
-
-    with_transaction(cached_gw, &block, || async {
-        let state = ExtractionState::new(
-            "accountExtractor".to_string(),
-            chain,
-            None,
-            "account_cursor".as_bytes(),
-            block.hash.clone(),
-        );
-
-        cached_gw
-            .save_state(&state)
+        let new_account = account_update.ref_into_account(&tx);
+        info!(block_number = block.number, contract_address = ?new_account.address, "NewContract");
+        gw.insert_contract(&new_account)
             .await
-            .expect("Failed to save cursor");
-    })
-    .await;
+            .expect("Failed to insert contract");
+        deltas.push((tx.hash.clone(), account_update));
+    }
+    gw.update_contracts(&deltas)
+        .await
+        .expect("Failed to update contracts");
+    gw.commit_transaction(0)
+        .await
+        .expect("Failed to commit the initialized accounts");
 }
 
 async fn get_accounts_data(
@@ -1036,10 +1027,15 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(&db_url.to_string())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let (instance, _) = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1067,11 +1063,16 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(db_url.as_str())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let (instance, _) = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1097,14 +1098,19 @@ mod test_serial_db {
 
             let (cached_gw, _) = GatewayBuilder::new(db_url.as_str())
                 .set_chains(&[chain])
+                .set_protocol_systems(&["vm:test".to_string()])
                 .build()
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &RPC, chain, &cached_gw).await;
+            let (instance, _) = cached_gw
+                .ensure_instance("vm:test", INITIALIZED_ACCOUNTS_LABEL)
+                .await
+                .expect("Failed to create the instance");
+            initialize_accounts(instance, accounts, block_id, &RPC, chain, &cached_gw).await;
             let accounts =
                 vec![Address::from_str("0x3175Df0976dFA876431C2E9eE6Bc45b65d3473CC").unwrap()];
-            initialize_accounts(accounts, 20378315, &RPC, chain, &cached_gw).await;
+            initialize_accounts(instance, accounts, 20378315, &RPC, chain, &cached_gw).await;
 
             let contracts = cached_gw
                 .get_contracts(&chain, "", None, None, true, None)
@@ -1136,7 +1142,7 @@ mod test_serial_db {
                 .await
                 .expect("Failed to create Gateway");
 
-            initialize_accounts(accounts, block_id, &rpc, chain, &cached_gw).await;
+            initialize_accounts(InstanceId(1), accounts, block_id, &rpc, chain, &cached_gw).await;
         })
         .await;
     }

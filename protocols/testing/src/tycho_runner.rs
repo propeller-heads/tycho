@@ -90,7 +90,7 @@ impl TychoRunner {
                 "--initialized-accounts",
                 &all_accounts.join(","),
                 "--initialization-block",
-                &start_block.to_string(),
+                &initialization_block(start_block).to_string(),
             ]);
         }
 
@@ -297,7 +297,7 @@ impl TychoRunner {
                     .map(|acc| format!("      - \"{}\"", acc))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                start_block
+                initialization_block(start_block)
             )
         };
 
@@ -353,6 +353,15 @@ pub fn get_default_endpoint(chain: &Chain) -> Option<String> {
     }
 }
 
+/// Block of the initialized accounts for a run from `start_block`: the block before it.
+///
+/// The indexer reads the accounts at the end of this block, and the extractor applies the start
+/// block on top. At the start block itself, a change of an initialized account in its first
+/// transaction would start at the same version as the account, and its batch would fail.
+fn initialization_block(start_block: u64) -> u64 {
+    start_block.saturating_sub(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +396,26 @@ mod tests {
             get_default_endpoint(&Chain::Arbitrum).as_deref(),
             Some("https://arb-one.streamingfast.io:443")
         );
+    }
+
+    #[test]
+    fn initialized_accounts_are_read_one_block_before_the_start() {
+        assert_eq!(initialization_block(100), 99);
+        assert_eq!(initialization_block(0), 0);
+    }
+
+    #[test]
+    fn index_config_initializes_accounts_one_block_before_the_start() {
+        let runner = TychoRunner::new(
+            Chain::Ethereum,
+            "postgres://localhost/test".to_string(),
+            4242,
+            vec!["0x01".to_string()],
+        );
+
+        let config = runner.create_extractors_config("test.spkg", 100, &[], "vm:test", None);
+
+        assert!(config.contains("    start_block: 100\n"), "{config}");
+        assert!(config.contains("    initialized_accounts_block: 99\n"), "{config}");
     }
 }
