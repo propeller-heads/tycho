@@ -310,7 +310,10 @@ impl HttpSource for HanjiBookSource {
     /// quote.
     async fn fetch(&self) -> Result<BookSnapshot<ReceivedAt>, FeedError> {
         let markets = self.markets.current().await?;
-        // Read before the call, so the lag measures the node and not the round trip.
+        self.reader
+            .resolve_wiring(&markets)
+            .await?;
+        // Read just before the read is sent, so the lag measures the node and not round trips.
         let now_ms = (self.clock)();
         let read = self.reader.read(&markets).await?;
         let block_ms = read.timestamp.saturating_mul(1_000);
@@ -914,22 +917,29 @@ mod tests {
         assert!(result.is_ok() || matches!(result, Err(FeedError::Connection(_))));
     }
 
-    /// The lag is measured from before the read is sent, so a slow answer from a node that was
-    /// in time is not taken for a lagging node.
+    /// The lag is measured just before the read is sent. A read that takes 300 ms to answer does
+    /// not count; the 300 ms spent resolving wiring before it does, since the node's latest block
+    /// has not moved meanwhile.
+    #[rstest]
+    #[case::the_answer_is_slow(MAX_READ_LAG_MS - 400, true)]
+    #[case::the_node_fell_behind_while_wiring_resolved(MAX_READ_LAG_MS - 200, false)]
     #[tokio::test]
-    async fn a_slow_answer_does_not_count_as_lag() {
+    async fn the_lag_is_measured_when_the_read_is_sent(
+        #[case] lag_at_start_ms: u64,
+        #[case] published: bool,
+    ) {
         let node = Arc::new(FakeNode::new());
         *node.node_delay.lock().unwrap() = Duration::from_millis(300);
         let server = Arc::clone(&node).serve().await;
         let started = Instant::now();
-        let start_ms = node.fixture.timestamp * 1_000 + MAX_READ_LAG_MS - 100;
+        let start_ms = node.fixture.timestamp * 1_000 + lag_at_start_ms;
         let mut source = source(&server, start_ms, REFRESH);
         source.clock =
             Arc::new(move || start_ms + u64::try_from(started.elapsed().as_millis()).unwrap());
 
         let result = source.fetch().await;
 
-        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(result.is_ok(), published, "{result:?}");
     }
 
     #[tokio::test]
@@ -1361,7 +1371,7 @@ mod tests {
 
         let debug = format!("{feed:?}");
         let error = reader
-            .read(&markets)
+            .resolve_wiring(&markets)
             .await
             .unwrap_err()
             .to_string();

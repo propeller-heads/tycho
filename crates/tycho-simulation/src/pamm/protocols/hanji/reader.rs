@@ -259,13 +259,13 @@ impl HanjiReader {
         }
     }
 
-    /// Reads `markets` at the latest block. A market whose calls revert, whose config names other
-    /// tokens or another native side than the list, or whose wiring changed is left out, and the
-    /// read logs how many with the first reason; it fails when every market was left out that way
-    /// or none is served (see the module docs), and fails fatally when the node serves another
-    /// chain. A paused market is left out without failing anything.
+    /// Reads `markets` at the latest block, those whose wiring [`Self::resolve_wiring`] resolved.
+    /// A market whose calls revert, whose config names other tokens or another native side than
+    /// the list, or whose wiring changed is left out, and the read logs how many with the first
+    /// reason; it fails when every market was left out that way or none is served (see the module
+    /// docs), and fails fatally when the node serves another chain. A paused market is left out
+    /// without failing anything.
     pub(super) async fn read(&self, markets: &[Market]) -> Result<BookRead, FeedError> {
-        self.resolve_wiring(markets).await?;
         let wired = self.wired(markets);
         if wired.is_empty() {
             return Err(FeedError::Parsing(format!(
@@ -326,7 +326,7 @@ impl HanjiReader {
     /// Resolves, in one multicall, the wiring of every market not yet resolved or whose
     /// [`UNSERVED_RETRY`] has passed. A market whose getters revert, or that names no contract
     /// quoter, is left out of the reads until then.
-    async fn resolve_wiring(&self, markets: &[Market]) -> Result<(), FeedError> {
+    pub(super) async fn resolve_wiring(&self, markets: &[Market]) -> Result<(), FeedError> {
         let now = Instant::now();
         let unresolved: Vec<Address> = {
             let cache = self
