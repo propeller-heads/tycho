@@ -600,9 +600,17 @@ impl DBCacheWriteExecutor {
                     .insert_account_balances(instance, origins, balances, conn)
                     .await?
             }
-            WriteOp::InsertProtocolComponents(_) |
+            WriteOp::InsertProtocolComponents(components) => {
+                self.instance_gateway
+                    .insert_protocol_components(instance, origins, components, conn)
+                    .await?
+            }
+            WriteOp::UpsertProtocolState(deltas) => {
+                self.instance_gateway
+                    .upsert_protocol_states(instance, origins, deltas, conn)
+                    .await?
+            }
             WriteOp::UpdateTokens(_) |
-            WriteOp::UpsertProtocolState(_) |
             WriteOp::InsertEntryPoints(_) |
             WriteOp::InsertEntryPointTracingParams(_) |
             WriteOp::UpsertTracedEntryPoints(_) => {
