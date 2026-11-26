@@ -770,20 +770,30 @@ async fn build_all_extractors(
             .initialized_accounts
             .is_empty()
         {
-            let instance = cached_gw
+            let (instance, created) = cached_gw
                 .ensure_instance(&extractor_config.name, INITIALIZED_ACCOUNTS_LABEL)
                 .await?;
-            initialize_accounts(
-                instance,
-                extractor_config
-                    .initialized_accounts
-                    .clone(),
-                extractor_config.initialized_accounts_block,
-                rpc_client,
-                chain,
-                cached_gw,
-            )
-            .await;
+            // A rerun on a kept database finds the accounts already written. Writing them again
+            // fails: their changes do not start after the stored versions.
+            if created {
+                initialize_accounts(
+                    instance,
+                    extractor_config
+                        .initialized_accounts
+                        .clone(),
+                    extractor_config.initialized_accounts_block,
+                    rpc_client,
+                    chain,
+                    cached_gw,
+                )
+                .await;
+            } else {
+                info!(
+                    %instance,
+                    extractor = %extractor_config.name,
+                    "Instance of the initialized accounts exists, skipping account initialization"
+                );
+            }
         }
 
         #[expect(

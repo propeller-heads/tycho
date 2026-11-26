@@ -16,6 +16,7 @@ use crate::postgres::{
 
 /// Returns the instance `label` of `protocol_system`, and makes it the active instance of the
 /// protocol. Creates the instance, with its partitions, when the database does not have it yet.
+/// The flag is true when this call created the instance.
 ///
 /// The gateway that calls it has run the migrations and stored its protocol systems when it was
 /// built.
@@ -26,7 +27,7 @@ pub async fn ensure_instance(
     protocol_system: &str,
     label: &str,
     conn: &mut AsyncPgConnection,
-) -> Result<InstanceId, StorageError> {
+) -> Result<(InstanceId, bool), StorageError> {
     conn.transaction(|conn| {
         async move {
             let system_id: i64 = schema::protocol_system::table
@@ -45,15 +46,15 @@ pub async fn ensure_instance(
                 .await
                 .optional()
                 .map_err(|err| storage_error_from_diesel(err, "ProtocolInstance", label, None))?;
-            let instance = match stored {
-                Some((instance, InstanceStatus::Ready)) => instance,
+            let (instance, created) = match stored {
+                Some((instance, InstanceStatus::Ready)) => (instance, false),
                 Some((instance, status)) => {
                     return Err(StorageError::Unexpected(format!(
                         "instance {instance} ({protocol_system} {label}) is {status:?}, not ready"
                     ))
                     .into());
                 }
-                None => create(system_id, label, conn).await?,
+                None => (create(system_id, label, conn).await?, true),
             };
             diesel::update(schema::protocol_system::table.find(system_id))
                 .set(schema::protocol_system::active_instance_id.eq(instance))
@@ -62,7 +63,7 @@ pub async fn ensure_instance(
                 .map_err(|err| {
                     storage_error_from_diesel(err, "ProtocolSystem", protocol_system, None)
                 })?;
-            Ok::<_, PostgresError>(instance)
+            Ok::<_, PostgresError>((instance, created))
         }
         .scope_boxed()
     })

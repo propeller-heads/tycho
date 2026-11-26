@@ -813,7 +813,8 @@ impl CachedGateway {
     }
 
     /// Returns the instance `label` of `protocol_system`, created when the database does not have
-    /// it yet, and makes it the active instance of the protocol.
+    /// it yet, and makes it the active instance of the protocol. The flag is true when this call
+    /// created the instance.
     ///
     /// For the initialized accounts, until extractors create their instances. Fails with
     /// `NotFound` when the protocol system is not stored, and with `Unexpected` when the instance
@@ -822,7 +823,7 @@ impl CachedGateway {
         &self,
         protocol_system: &str,
         label: &str,
-    ) -> Result<InstanceId, StorageError> {
+    ) -> Result<(InstanceId, bool), StorageError> {
         let mut conn = pool::checkout(&self.pool, self.pool_label).await?;
         ensure_instance(protocol_system, label, &mut conn).await
     }
