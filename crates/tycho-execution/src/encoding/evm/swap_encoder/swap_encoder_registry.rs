@@ -6,6 +6,7 @@ use crate::encoding::{
     errors::EncodingError,
     evm::{
         constants::{
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
             BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
             HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
             METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
@@ -15,11 +16,12 @@ use crate::encoding::{
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
-            aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
+            aerodrome_v1::AerodromeV1SwapEncoder, baibai::BaibaiSwapEncoder,
+            baibai_fallback::BaibaiFallbackSwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
             bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
+            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
             hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
@@ -40,6 +42,7 @@ use crate::encoding::{
 
 /// The protocol system of a Uniswap V4 pool whose pool key names a hook.
 const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
+const PANCAKESWAP_INFINITY_BIN: &str = "pancakeswap_infinity_bin";
 const PANCAKESWAP_INFINITY_CL: &str = "pancakeswap_infinity_cl";
 const PANCAKESWAP_INFINITY_CL_HOOKS: &str = "pancakeswap_infinity_cl_hooks";
 
@@ -145,8 +148,13 @@ impl SwapEncoderRegistry {
     /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
     /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
     ///
-    /// `pancakeswap_infinity_cl_hooks` resolves to the `pancakeswap_infinity_cl` encoder the same
-    /// way: one Infinity executor serves hooked and hookless CL pools alike.
+    /// `pancakeswap_infinity_cl_hooks` and `pancakeswap_infinity_bin` resolve to the
+    /// `pancakeswap_infinity_cl` encoder the same way: one Infinity executor serves hooked and
+    /// hookless CL pools and Bin pools, picking the pool type by a byte in the swap data. Bin only
+    /// on the chains whose executor holds a BinPoolManager; the Robinhood one has none and would
+    /// revert `PancakeswapInfinityRobinhoodExecutor__UnknownPoolType(1)`. A configured
+    /// `pancakeswap_infinity_bin` entry is refused at build on those chains, so an exact entry
+    /// never bypasses the check.
     #[expect(
         clippy::borrowed_box,
         reason = "public API; returning Option<&dyn SwapEncoder> is a breaking change"
@@ -155,26 +163,27 @@ impl SwapEncoderRegistry {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
         }
-        if protocol_system == UNISWAP_V4_HOOKS {
-            return self.encoders.get("uniswap_v4");
-        }
-        if protocol_system == PANCAKESWAP_INFINITY_CL_HOOKS {
-            return self
-                .encoders
-                .get(PANCAKESWAP_INFINITY_CL);
-        }
-        if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
-            return self
-                .encoders
-                .get(PRICE_LEVEL_STREAM_KEY);
-        }
-        if protocol_system.starts_with(FALLBACK_PREFIX) &&
-            protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
-            !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
-        {
-            return self.encoders.get(FALLBACK_KEY);
-        }
-        None
+        let family = match protocol_system {
+            UNISWAP_V4_HOOKS => "uniswap_v4",
+            PANCAKESWAP_INFINITY_CL_HOOKS => PANCAKESWAP_INFINITY_CL,
+            PANCAKESWAP_INFINITY_BIN if self.has_bin_pool_manager() => PANCAKESWAP_INFINITY_CL,
+            _ if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) => PRICE_LEVEL_STREAM_KEY,
+            _ if protocol_system.starts_with(FALLBACK_PREFIX) &&
+                protocol_system != METRIC_FALLBACK_PROTOCOL_SYSTEM &&
+                protocol_system != BAIBAI_FALLBACK_PROTOCOL_SYSTEM &&
+                !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system) =>
+            {
+                FALLBACK_KEY
+            }
+            _ => return None,
+        };
+        self.encoders.get(family)
+    }
+
+    /// Whether the chain's Infinity executor holds a BinPoolManager. Hardcoded: the registry sees
+    /// executor addresses, not the constructor arguments in `executor_deployments.json`.
+    fn has_bin_pool_manager(&self) -> bool {
+        matches!(self.chain, Chain::Base | Chain::Bsc)
     }
 
     /// The executor address of every encoder in this registry, keyed by protocol system.
@@ -216,13 +225,20 @@ impl SwapEncoderRegistry {
             "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            PANCAKESWAP_INFINITY_CL |
-            PANCAKESWAP_INFINITY_CL_HOOKS |
-            "pancakeswap_infinity_bin" => Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
-                executor_address,
-                self.chain,
-                config,
-            )?)),
+            PANCAKESWAP_INFINITY_BIN if !self.has_bin_pool_manager() => {
+                Err(EncodingError::FatalError(format!(
+                    "{PANCAKESWAP_INFINITY_BIN} on {}: the Infinity executor there has no \
+                     BinPoolManager",
+                    self.chain
+                )))
+            }
+            PANCAKESWAP_INFINITY_CL | PANCAKESWAP_INFINITY_CL_HOOKS | PANCAKESWAP_INFINITY_BIN => {
+                Ok(Box::new(PancakeswapInfinitySwapEncoder::new(
+                    executor_address,
+                    self.chain,
+                    config,
+                )?))
+            }
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -243,6 +259,9 @@ impl SwapEncoderRegistry {
             }
             "rfq:bebop" => {
                 Ok(Box::new(BebopSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "rfq:euclid" => {
+                Ok(Box::new(EuclidSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "rfq:hashflow" => {
                 Ok(Box::new(HashflowSwapEncoder::new(executor_address, self.chain, config)?))
@@ -270,6 +289,9 @@ impl SwapEncoderRegistry {
             }
             "rocketpool" => {
                 Ok(Box::new(RocketpoolSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            BAIBAI_PROTOCOL_SYSTEM => {
+                Ok(Box::new(BaibaiSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "sky" => Ok(Box::new(SkySwapEncoder::new(executor_address, self.chain, config)?)),
             "erc4626" => {
@@ -303,6 +325,9 @@ impl SwapEncoderRegistry {
             // Matched before the `fallback:` family.
             METRIC_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(MetricFallbackSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM => {
+                Ok(Box::new(BaibaiFallbackSwapEncoder::new(executor_address, self.chain, config)?))
             }
             BEBOP_FALLBACK_PROTOCOL_SYSTEM => {
                 Ok(Box::new(BebopFallbackSwapEncoder::new(executor_address, self.chain, config)?))
@@ -379,7 +404,7 @@ mod tests {
         for protocol in [
             FALLBACK_KEY,
             "fallback:fermiswap",
-            "fallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
+            "fallback:0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977",
         ] {
             let resolved = registry
                 .get_encoder(protocol)
@@ -390,6 +415,23 @@ mod tests {
         assert!(registry
             .get_encoder("fallbackless_protocol")
             .is_none());
+    }
+
+    /// A native IPropAMM venue published as `fallback:biconomy` resolves to Base's deployed
+    /// fallback executor through the family entry.
+    #[test]
+    fn test_native_venue_fallback_resolves_on_base() {
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(None)
+            .unwrap();
+        let resolved = registry
+            .get_encoder("fallback:biconomy")
+            .expect("no encoder resolved for fallback:biconomy");
+
+        assert_eq!(
+            resolved.executor_address(),
+            &Bytes::from_str("0x08f22285d13533d68aA8bE5949536322DB3538De").unwrap()
+        );
     }
 
     /// An exact entry wins over the `fallback` family entry.
@@ -424,6 +466,9 @@ mod tests {
         assert!(registry
             .get_encoder(LIQUORICE_FALLBACK_PROTOCOL_SYSTEM)
             .is_none());
+        assert!(registry
+            .get_encoder(BAIBAI_FALLBACK_PROTOCOL_SYSTEM)
+            .is_none());
     }
 
     #[test]
@@ -438,6 +483,7 @@ mod tests {
             Chain::Plasma,
             Chain::Robinhood,
             Chain::Arc,
+            Chain::Elysium,
         ];
         for chain in chains {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {
@@ -472,29 +518,65 @@ mod tests {
         assert_eq!(hooked.executor_address(), core.executor_address());
     }
 
-    /// Hooked Infinity CL pools swap through the same executor as hookless ones, so the
-    /// `pancakeswap_infinity_cl` entry serves them without a deployment of their own.
-    #[test]
-    fn test_pancakeswap_infinity_cl_hooks_resolves_to_the_cl_encoder() {
+    /// One Infinity executor serves hooked CL pools and Bin pools, so the `pancakeswap_infinity_cl`
+    /// entry serves them without a deployment of their own. Bin only where the executor holds a
+    /// BinPoolManager: the Robinhood one has none.
+    #[rstest]
+    #[case::cl_hooks_on_bsc(Chain::Bsc, "pancakeswap_infinity_cl_hooks", true)]
+    #[case::bin_on_base(Chain::Base, "pancakeswap_infinity_bin", true)]
+    #[case::bin_on_bsc(Chain::Bsc, "pancakeswap_infinity_bin", true)]
+    #[case::bin_on_robinhood(Chain::Robinhood, "pancakeswap_infinity_bin", false)]
+    fn test_pancakeswap_infinity_aliases_resolve_to_the_cl_encoder(
+        #[case] chain: Chain,
+        #[case] protocol_system: &str,
+        #[case] resolves: bool,
+    ) {
         let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
-        let executors = format!(r#"{{"bsc": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
+        let executors = format!(r#"{{"{chain}": {{"pancakeswap_infinity_cl": "{executor}"}}}}"#);
 
-        let registry = SwapEncoderRegistry::new(Chain::Bsc)
+        let registry = SwapEncoderRegistry::new(chain)
             .add_default_encoders(Some(executors))
             .unwrap();
 
-        let hooks = registry
-            .get_encoder("pancakeswap_infinity_cl_hooks")
-            .expect("a hooked Infinity CL pool must resolve to the Infinity encoder");
-        assert_eq!(hooks.executor_address(), &Bytes::from_str(executor).unwrap());
+        match registry.get_encoder(protocol_system) {
+            Some(encoder) if resolves => {
+                assert_eq!(encoder.executor_address(), &Bytes::from_str(executor).unwrap())
+            }
+            None if !resolves => {}
+            found => panic!("{protocol_system} on {chain}: resolved = {}", found.is_some()),
+        }
+    }
+
+    /// An exact `pancakeswap_infinity_bin` entry would skip the alias gate, so building one is
+    /// refused where the executor has no BinPoolManager.
+    #[rstest]
+    #[case::base(Chain::Base, true)]
+    #[case::robinhood(Chain::Robinhood, false)]
+    fn test_bin_entry_builds_only_with_a_bin_pool_manager(
+        #[case] chain: Chain,
+        #[case] builds: bool,
+    ) {
+        let executor = "0xe54a55121A47451c5727ADBAF9b9FC1643477e25";
+        let executors = format!(r#"{{"{chain}": {{"pancakeswap_infinity_bin": "{executor}"}}}}"#);
+
+        let result = SwapEncoderRegistry::new(chain).add_default_encoders(Some(executors));
+
+        match result {
+            Ok(registry) if builds => assert!(registry
+                .get_encoder("pancakeswap_infinity_bin")
+                .is_some()),
+            Err(EncodingError::FatalError(message)) if !builds => {
+                assert!(message.contains("BinPoolManager"), "{message}")
+            }
+            other => panic!("{chain}: built = {}", other.is_ok()),
+        }
     }
 
     #[test]
     fn test_registry_configured_with_subsidizing_executor_without_payer() {
-        let executors =
-            r#"{"ethereum": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
+        let executors = r#"{"polygon": {"subsidy": "0x1111111111111111111111111111111111111111"}}"#;
 
-        let result = SwapEncoderRegistry::new(Chain::Ethereum)
+        let result = SwapEncoderRegistry::new(Chain::Polygon)
             .add_default_encoders(Some(executors.to_string()));
 
         assert!(

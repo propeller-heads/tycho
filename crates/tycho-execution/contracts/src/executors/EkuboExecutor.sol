@@ -13,6 +13,7 @@ import {ILocker, IPayer} from "@ekubo/interfaces/IFlashAccountant.sol";
 import {NATIVE_TOKEN_ADDRESS} from "@ekubo/math/constants.sol";
 import {SafeTransferLib} from "@solady/utils/SafeTransferLib.sol";
 import {LibBytes} from "@solady/utils/LibBytes.sol";
+import {SafeCastLib} from "@solady/utils/SafeCastLib.sol";
 import {Config, PoolKey} from "@ekubo/types/poolKey.sol";
 import {
     MAX_SQRT_RATIO,
@@ -69,10 +70,10 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
             revert EkuboExecutor__InvalidDataLength();
         }
 
-        // amountIn must be at most type(int128).MAX
+        // amountIn must be at most type(int128).max
         _lock(
             abi.encodePacked(
-                bytes16(uint128(amountIn)), bytes20(receiver), data
+                SafeCastLib.toInt128(amountIn), bytes20(receiver), data
             )
         );
     }
@@ -124,8 +125,9 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
     }
 
     function _locked(bytes calldata swapData) internal {
-        int128 nextAmountIn = int128(uint128(bytes16(swapData[0:16])));
-        uint128 tokenInDebtAmount = uint128(nextAmountIn);
+        uint128 tokenInDebtAmount = uint128(bytes16(swapData[0:16]));
+        // forge-lint: disable-next-line(unsafe-typecast) swap packs amountIn with toInt128, so it fits int128.
+        int128 nextAmountIn = int128(tokenInDebtAmount);
         address receiver = address(bytes20(swapData[16:36]));
         address tokenIn = address(bytes20(swapData[36:56]));
         // Swap data uses ETH_ADDRESS for native ETH; translate to
@@ -142,6 +144,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         uint256 offset = _POOL_DATA_OFFSET;
 
         for (uint256 i = 0; i < hopsLength; i++) {
+            // forge-lint: disable-next-item(unsafe-typecast) Reads the address at the front of the loaded word.
             nextTokenOut =
                 address(bytes20(LibBytes.loadCalldata(swapData, offset)));
             if (nextTokenOut == ETH_ADDRESS) nextTokenOut = address(0);
@@ -192,6 +195,7 @@ contract EkuboExecutor is IExecutor, ILocker, IPayer, ICallback {
         }
 
         _pay(tokenIn, tokenInDebtAmount);
+        // forge-lint: disable-next-line(unsafe-typecast) The core's exact-input swap returns a non-positive output delta, so nextAmountIn is non-negative.
         _core.withdraw(nextTokenIn, receiver, uint128(nextAmountIn));
     }
 

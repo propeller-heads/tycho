@@ -9,6 +9,7 @@ use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
 use thiserror::Error;
+use tokio::sync::watch;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -27,7 +28,10 @@ use tycho_common::{
 use tycho_storage::postgres::{count_to_i64, page_window};
 
 use crate::{
-    extractor::reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+    extractor::{
+        reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
+        writer_status::WriterStatus,
+    },
     services::{
         cache::{RpcCache, RpcCacheKind},
         deltas_buffer::{PendingDeltasBuffer, PendingDeltasError},
@@ -105,6 +109,21 @@ impl ResponseError for RpcError {
     }
 }
 
+/// Clears `handler`'s pause-dependent response caches each time `changes` is notified, until its
+/// sender is dropped. Several changes that arrive during one clear trigger a single further clear.
+pub async fn clear_caches_on_pause_change<G, T>(
+    handler: web::Data<RpcHandler<G, T>>,
+    mut changes: watch::Receiver<()>,
+) where
+    G: Gateway,
+    T: EntryPointTracer + Sync,
+{
+    while changes.changed().await.is_ok() {
+        debug!("Admin pauses changed; clearing the pause-dependent response caches");
+        handler.clear_pause_dependent_caches();
+    }
+}
+
 /// A state endpoint's answer: built by the entity cache, or read through the database path.
 #[derive(Debug)]
 enum StateAnswer<D> {
@@ -138,6 +157,14 @@ pub struct RpcHandler<G, T> {
     state_service: EntityCacheSetup<Arc<StateService>, Shadow>,
     /// Builds and serializes large state responses off the request workers.
     off_worker: OffWorker,
+    /// Role of this process as database writer, read by the health and readiness endpoints.
+    /// `None` for a process that never writes extraction results.
+    writer_status: Option<WriterStatus>,
+    /// How old the newest block of a streamed extractor may be on a ready follower.
+    ready_head_tolerance: chrono::Duration,
+    /// Turns `true` when the process starts to shut down. `None` for a process without a
+    /// shutdown sequence.
+    shutdown: Option<watch::Receiver<bool>>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -152,6 +179,7 @@ where
         plans_config: PlansConfig,
         dci_protocols: Vec<String>,
         protocol_systems: Vec<String>,
+        writer_status: Option<WriterStatus>,
     ) -> Self {
         const ONE_MB: u64 = 1_024 * 1_024;
         const HUNDRED_MB: u64 = ONE_MB * 100;
@@ -193,7 +221,30 @@ where
             protocol_systems,
             state_service: EntityCacheSetup::Off,
             off_worker: OffWorker::new(),
+            writer_status,
+            ready_head_tolerance: DEFAULT_READY_HEAD_TOLERANCE,
+            shutdown: None,
         }
+    }
+
+    /// Sets how old the newest block of a streamed extractor may be on a ready follower.
+    pub(crate) fn with_ready_head_tolerance(mut self, tolerance: chrono::Duration) -> Self {
+        self.ready_head_tolerance = tolerance;
+        self
+    }
+
+    /// Sets the signal that turns `true` when the process starts to shut down.
+    pub(crate) fn with_shutdown_signal(mut self, shutdown: Option<watch::Receiver<bool>>) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
+    /// Returns whether the process has started to shut down. Always `false` without a shutdown
+    /// signal.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutdown
+            .as_ref()
+            .is_some_and(|shutdown| *shutdown.borrow())
     }
 
     /// Turns the given response caches off. A request to an endpoint whose cache is off always
@@ -208,6 +259,12 @@ where
             }
         }
         self
+    }
+
+    /// Drops the cached `/protocol_components` and `/protocol_state` responses.
+    pub(crate) fn clear_pause_dependent_caches(&self) {
+        self.component_cache.clear();
+        self.protocol_state_cache.clear();
     }
 
     /// Sets which path answers the state endpoints.
@@ -552,6 +609,10 @@ where
             "Version finality calculated!"
         );
 
+        // Known gap on a follower that lags the leader by more than the finality delay: an
+        // uncommitted version reads the database at `Latest`, which can already hold the leader's
+        // newer commits (see crates/tycho-indexer/CLAUDE.md, "Why extractor messages must be
+        // broadcast to the RPC service").
         match request_version_commit_status {
             CommitStatus::Committed => {
                 Ok((Version(request_version.clone(), VersionKind::Last), None))
@@ -1025,6 +1086,10 @@ where
             .await
         {
             Ok(component_data) => {
+                // Known gap: the window learns the committed height only from the next block
+                // message, so a component the database already holds can also come from the
+                // window here and appear twice (see "Why extractor messages must be broadcast to
+                // the RPC service" in crates/tycho-indexer/CLAUDE.md).
                 let db_total = component_data.total.unwrap_or_default();
                 let total = db_total + count_to_i64(buffered_components.len());
                 let (_, page_limit) = page_window(&pagination_params)?;
@@ -1214,10 +1279,7 @@ where
                     .entry_point_with_params
                     .clone()
                     .into();
-            let tracing_result: dto::TracingResult = traced_entry_point
-                .tracing_result
-                .clone()
-                .into();
+            let tracing_result: dto::TracingResult = traced_entry_point.tracing_result.into();
             let component_id = entry_point_to_component
                 .get(
                     &entry_point_with_tracing_params
@@ -1227,10 +1289,8 @@ where
                 )
                 .cloned()
                 .unwrap_or_default();
-            traced_entry_points.insert(
-                component_id.to_string(),
-                vec![(entry_point_with_tracing_params, tracing_result)],
-            );
+            traced_entry_points
+                .insert(component_id, vec![(entry_point_with_tracing_params, tracing_result)]);
         }
         Ok(dto::AddEntryPointRequestResponse { traced_entry_points })
     }
@@ -1668,21 +1728,108 @@ pub async fn add_entry_points<G: Gateway, T: EntryPointTracer>(
     }
 }
 
+/// How long a leader may go without confirming its leader lock before it reports unhealthy.
+///
+/// A leader confirms its lock every second. A leader that stops confirming but keeps the lock
+/// blocks every other process from taking over, so it must be restarted.
+const LEAD_CONFIRMATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Default for how old the newest block of a streamed extractor may be on a ready follower.
+pub const DEFAULT_READY_HEAD_TOLERANCE: chrono::Duration = chrono::Duration::seconds(60);
+
 /// Health check endpoint
 ///
-/// This endpoint is used to check the health of the service.
+/// Reports whether the process must be restarted. It fails with 503 while this process is the
+/// database writer and has not confirmed its leader lock for 30 seconds. A follower that is behind
+/// the leader stays healthy. See `/v1/ready` for whether a process can serve clients.
 #[utoipa::path(
     get,
     path = "/v1/health",
     responses(
         (status = 200, description = "OK", body=Health),
+        (status = 503, description = "The database writer stopped confirming its lock", body=Health),
     ),
     security(
          ("apiKey" = [])
     )
 )]
-pub async fn health() -> Result<HttpResponse, RpcError> {
-    Ok(HttpResponse::Ok().json(dto::Health::Ready))
+pub async fn health<G: Gateway, T: EntryPointTracer>(
+    handler: web::Data<RpcHandler<G, T>>,
+) -> HttpResponse {
+    match lead_unconfirmed(handler.writer_status.as_ref()) {
+        Some(reason) => HttpResponse::ServiceUnavailable().json(dto::Health::NotReady(reason)),
+        None => HttpResponse::Ok().json(dto::Health::Ready),
+    }
+}
+
+/// Returns a reason when this process is the database writer and has not confirmed its leader
+/// lock within [`LEAD_CONFIRMATION_LIMIT`], or `None` otherwise.
+fn lead_unconfirmed(writer_status: Option<&WriterStatus>) -> Option<String> {
+    let elapsed = writer_status.and_then(WriterStatus::time_since_lead_confirmed)?;
+    (elapsed > LEAD_CONFIRMATION_LIMIT)
+        .then(|| format!("Leader has not confirmed its leader lock for {}s", elapsed.as_secs()))
+}
+
+/// Readiness check endpoint
+///
+/// Fails with 503 when the health check fails. A follower also fails while it is behind the chain
+/// head, which means an extractor it streams has no block yet, or its newest block is older than
+/// the configured tolerance (60 seconds by default). Extractors that a follower does not stream do
+/// not count. These are the extractors whose history the leader syncs, and those the leader has
+/// not committed a block for yet.
+#[utoipa::path(
+    get,
+    path = "/v1/ready",
+    responses(
+        (status = 200, description = "OK", body=Health),
+        (status = 503, description = "Unhealthy, or a follower behind the chain head", body=Health),
+    ),
+    security(
+         ("apiKey" = [])
+    )
+)]
+pub async fn ready<G: Gateway, T: EntryPointTracer>(
+    handler: web::Data<RpcHandler<G, T>>,
+) -> HttpResponse {
+    match not_ready_reason(&handler) {
+        Some(reason) => HttpResponse::ServiceUnavailable().json(dto::Health::NotReady(reason)),
+        None => HttpResponse::Ok().json(dto::Health::Ready),
+    }
+}
+
+/// Returns why this process is not ready, or `None` when it is.
+fn not_ready_reason<G: Gateway, T: EntryPointTracer>(handler: &RpcHandler<G, T>) -> Option<String> {
+    if let Some(reason) = lead_unconfirmed(handler.writer_status.as_ref()) {
+        return Some(reason);
+    }
+    let (Some(writer_status), Some(pending_deltas)) =
+        (handler.writer_status.as_ref(), handler.pending_deltas.as_ref())
+    else {
+        return None;
+    };
+    let newest_blocks = match pending_deltas.newest_blocks() {
+        Ok(newest_blocks) => newest_blocks,
+        Err(err) => return Some(format!("Failed to read the newest received blocks: {err}")),
+    };
+    let behind = writer_status.extractors_behind_head(
+        &newest_blocks,
+        chrono::Utc::now().naive_utc(),
+        handler.ready_head_tolerance,
+    );
+    if behind.is_empty() {
+        return None;
+    }
+    let behind = behind
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Behind the chain head by more than {}s: {behind}",
+        handler
+            .ready_head_tolerance
+            .num_seconds()
+    ))
 }
 
 #[cfg(test)]
@@ -1711,8 +1858,8 @@ mod tests {
             ChangeType,
         },
         storage::{
-            AccountSnapshot, AccountWriteTimestamps, ComponentSnapshot, StateSnapshot, WithTotal,
-            WriteTimestamp,
+            AccountSnapshot, AccountWriteTimestamps, CommitWatermark, ComponentSnapshot,
+            StateSnapshot, WithTotal, WriteTimestamp,
         },
         traits::MockEntryPointTracer,
     };
@@ -1779,6 +1926,10 @@ mod tests {
                     f: &dyn Fn(&BlockAggregatedChanges) -> bool,
                     protocol_system: &'a str,
                 ) -> Result<Option<BlockAggregatedChanges>, PendingDeltasError>;
+
+                fn newest_blocks(
+                    &self,
+                ) -> Result<HashMap<String, Option<tycho_common::models::blockchain::Block>>, PendingDeltasError>;
             }
         }
     }
@@ -1954,6 +2105,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::StateRequestBody {
@@ -2009,6 +2161,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
 
@@ -2080,6 +2233,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(setup)
     }
@@ -2101,6 +2255,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let result = handler
@@ -2147,6 +2302,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Shadow(Shadow::new(service, Sampler::new(rate))))
     }
@@ -2200,6 +2356,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(state_service);
 
@@ -2663,6 +2820,132 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_clear_pause_dependent_caches() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                let component = ProtocolComponent::new(
+                    "c1",
+                    "ex",
+                    "pool",
+                    Chain::Ethereum,
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    ChangeType::Creation,
+                    Bytes::default(),
+                    NaiveDateTime::default(),
+                );
+                Box::pin(async move { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+            });
+        gw.expect_get_protocol_states()
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        // Block 1 is below the window, so the state request takes the database path and is cached.
+        let handler = state_routing_handler(gw, CacheMode::Serve);
+        let components_request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ex".to_string(),
+            component_ids: Some(vec!["c1".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+        let state_request = dto::ProtocolStateRequestBody {
+            protocol_ids: Some(vec!["c1".to_string()]),
+            protocol_system: "ex".to_string(),
+            chain: dto::Chain::Ethereum,
+            include_balances: true,
+            version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+            pagination: dto::PaginationParams::new(0, 100),
+        };
+        handler
+            .get_protocol_components(&components_request)
+            .await
+            .unwrap();
+        handler
+            .get_protocol_state(&state_request)
+            .await
+            .unwrap();
+        assert!(handler
+            .component_cache
+            .contains(&components_request));
+        assert!(handler
+            .protocol_state_cache
+            .contains(&state_request));
+
+        handler.clear_pause_dependent_caches();
+
+        assert!(!handler
+            .component_cache
+            .contains(&components_request));
+        assert!(!handler
+            .protocol_state_cache
+            .contains(&state_request));
+    }
+
+    #[tokio::test]
+    async fn test_clear_caches_on_pause_change() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                let component = ProtocolComponent::new(
+                    "c1",
+                    "ex",
+                    "pool",
+                    Chain::Ethereum,
+                    vec![],
+                    vec![],
+                    HashMap::new(),
+                    ChangeType::Creation,
+                    Bytes::default(),
+                    NaiveDateTime::default(),
+                );
+                Box::pin(async move { Ok(WithTotal { entity: vec![component], total: Some(1) }) })
+            });
+        let handler = web::Data::new(RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+            None,
+        ));
+        let request = dto::ProtocolComponentsRequestBody {
+            protocol_system: "ex".to_string(),
+            component_ids: Some(vec!["c1".to_string()]),
+            tvl_gt: None,
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams { page: 0, page_size: 10 },
+        };
+        let (changes, receiver) = watch::channel(());
+        let task = tokio::spawn(clear_caches_on_pause_change(handler.clone(), receiver));
+
+        // Each change clears the cache; the yield lets the task run on this single-threaded
+        // runtime.
+        let mut cleared = Vec::new();
+        for _ in 0..2 {
+            handler
+                .get_protocol_components(&request)
+                .await
+                .unwrap();
+            changes.send_replace(());
+            tokio::task::yield_now().await;
+            cleared.push(
+                !handler
+                    .component_cache
+                    .contains(&request),
+            );
+        }
+        drop(changes);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+
+        assert_eq!(cleared, vec![true, true]);
+        assert!(ended.is_ok(), "the task outlived its sender");
+    }
+
     /// The `db_path_requests` counters that moved since the last snapshot, as
     /// `(endpoint, reason, count)`, sorted.
     fn moved_db_path_requests(snapshotter: &Snapshotter) -> Vec<(String, String, u64)> {
@@ -2793,6 +3076,8 @@ mod tests {
                 state: loaded_component(),
                 updated_at: at,
             }],
+            cursors: HashMap::new(),
+            watermark: CommitWatermark::new(0),
         });
         let windows = new_windows(["ex"], WindowConfig::default());
         let address = Bytes::from(1u64).lpad(20, 0);
@@ -2824,6 +3109,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_state_service(EntityCacheSetup::Serve(Arc::new(service)))
     }
@@ -2939,6 +3225,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::StateRequestBody {
@@ -3259,6 +3546,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
         let response = req_handler
             .add_entry_points(&req_body)
@@ -3333,7 +3621,8 @@ mod tests {
             expected_upserted_tracing_results,
         );
 
-        let req_handler = RpcHandler::new(gw, None, tracer, PlansConfig::default(), vec![], vec![]);
+        let req_handler =
+            RpcHandler::new(gw, None, tracer, PlansConfig::default(), vec![], vec![], None);
         let response = req_handler
             .add_entry_points(&req_body)
             .await
@@ -3451,6 +3740,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         // Request for two protocol components
@@ -3624,6 +3914,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         // request for 2 tokens that are in the DB (WETH and USDC)
@@ -3679,6 +3970,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         )
         .with_disabled_caches(&[RpcCacheKind::ProtocolComponents]);
 
@@ -3739,6 +4031,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolStateRequestBody {
@@ -3827,6 +4120,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolComponentsRequestBody {
@@ -3927,6 +4221,7 @@ mod tests {
             PlansConfig::default(),
             vec![],
             vec![],
+            None,
         );
 
         let request = dto::ProtocolComponentsRequestBody {
@@ -4013,6 +4308,7 @@ mod tests {
             plans_config_with_restrictions(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4079,6 +4375,7 @@ mod tests {
             plans_config_with_restrictions(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4130,8 +4427,15 @@ plans:
         let config: PlansConfig = serde_yaml::from_str(yaml).unwrap();
 
         let gw_free = MockGateway::new();
-        let handler_free =
-            RpcHandler::new(gw_free, None, MockEntryPointTracer::new(), config, vec![], vec![]);
+        let handler_free = RpcHandler::new(
+            gw_free,
+            None,
+            MockEntryPointTracer::new(),
+            config,
+            vec![],
+            vec![],
+            None,
+        );
 
         let restrictions = handler_free
             .resolve_plan_restrictions(
@@ -4185,6 +4489,7 @@ plans:
             PlansConfig::default(),
             dci_protocols.clone(),
             protocol_systems,
+            None,
         );
 
         let request = dto::ProtocolSystemsRequestBody {
@@ -4217,6 +4522,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let allowed: HashSet<String> =
@@ -4252,6 +4558,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let allowed: HashSet<String> = HashSet::from([
@@ -4300,6 +4607,7 @@ plans:
             PlansConfig::default(),
             vec![],
             protocol_systems,
+            None,
         );
 
         let request = dto::ProtocolSystemsRequestBody {
@@ -4328,6 +4636,7 @@ plans:
             plans_config_with_restrictions(),
             vec![],
             active_systems,
+            None,
         );
 
         let app = test::init_service(
@@ -4418,6 +4727,7 @@ plans:
             plans_config_restricted_history(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4488,6 +4798,7 @@ plans:
             plans_config_restricted_history(),
             vec![],
             vec![],
+            None,
         );
 
         let app = test::init_service(
@@ -4525,5 +4836,215 @@ plans:
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
         }
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use std::collections::HashMap;
+
+    use actix_web::{test, App};
+    use tokio::{sync::watch, time::Instant};
+    use tycho_common::traits::MockEntryPointTracer;
+    use tycho_storage::postgres::cache::CommittedBlock;
+
+    use super::*;
+    use crate::{
+        extractor::writer_status::Role,
+        services::{
+            deltas_buffer::PendingDeltas,
+            state::window::{new_windows, DiscardSink, WindowConfig},
+        },
+        testing::{self, MockGateway},
+    };
+
+    fn writer_status(role: Role, last_confirmed_ago: std::time::Duration) -> WriterStatus {
+        let confirmed_at = Instant::now()
+            .checked_sub(last_confirmed_ago)
+            .expect("the clock should be past the duration");
+        let (_, role) = watch::channel(role);
+        let (_, heights) = watch::channel(HashMap::new());
+        let (_, confirmed_at) = watch::channel(confirmed_at);
+        WriterStatus::new(role, heights, confirmed_at)
+    }
+
+    async fn health_status(writer_status: Option<WriterStatus>) -> StatusCode {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+            writer_status,
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route("/health", web::get().to(health::<MockGateway, MockEntryPointTracer>)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/health")
+            .to_request();
+        test::call_service(&app, req)
+            .await
+            .status()
+    }
+
+    #[actix_web::test]
+    async fn test_health_fails_when_the_leader_stopped_confirming_its_lock() {
+        let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(stale)).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A follower whose leader committed block 100 of `uniswap_v2` a minute ago, so the follower
+    /// streams `uniswap_v2`.
+    fn follower_streaming_uniswap_v2() -> WriterStatus {
+        let committed = HashMap::from([(
+            "uniswap_v2".to_string(),
+            CommittedBlock {
+                number: 100,
+                ts: chrono::Utc::now().naive_utc() - chrono::Duration::minutes(1),
+            },
+        )]);
+        let (_, role) = watch::channel(Role::Follower);
+        let (_, committed) = watch::channel(committed);
+        let (_, confirmed_at) = watch::channel(Instant::now());
+        WriterStatus::new(role, committed, confirmed_at)
+    }
+
+    /// Windows for `uniswap_v2` whose newest block, block 120, the chain produced `age` ago.
+    fn deltas_with_newest_block_of_age(
+        age: chrono::Duration,
+    ) -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        let windows = new_windows(["uniswap_v2"], WindowConfig::default());
+        let mut block = testing::aggregated_changes("uniswap_v2", 120, 0, None);
+        block.block.ts = chrono::Utc::now().naive_utc() - age;
+        windows["uniswap_v2"]
+            .lock()
+            .expect("the window lock is not poisoned")
+            .insert(&Arc::new(block))
+            .expect("an empty window takes any block");
+        Arc::new(PendingDeltas::from_windows(windows, Arc::new(DiscardSink)))
+    }
+
+    fn fresh_deltas() -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        deltas_with_newest_block_of_age(chrono::Duration::seconds(5))
+    }
+
+    fn stale_deltas() -> Arc<dyn PendingDeltasBuffer + Send + Sync> {
+        deltas_with_newest_block_of_age(chrono::Duration::minutes(5))
+    }
+
+    async fn ready_response(
+        writer_status: Option<WriterStatus>,
+        pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+    ) -> (StatusCode, String) {
+        ready_response_with_tolerance(writer_status, pending_deltas, DEFAULT_READY_HEAD_TOLERANCE)
+            .await
+    }
+
+    async fn ready_response_with_tolerance(
+        writer_status: Option<WriterStatus>,
+        pending_deltas: Option<Arc<dyn PendingDeltasBuffer + Send + Sync>>,
+        tolerance: chrono::Duration,
+    ) -> (StatusCode, String) {
+        let handler = RpcHandler::new(
+            MockGateway::new(),
+            pending_deltas,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+            writer_status,
+        )
+        .with_ready_head_tolerance(tolerance);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(handler))
+                .route("/ready", web::get().to(ready::<MockGateway, MockEntryPointTracer>)),
+        )
+        .await;
+        let req = test::TestRequest::get()
+            .uri("/ready")
+            .to_request();
+        let response = test::call_service(&app, req).await;
+        let status = response.status();
+        let body = test::read_body(response).await;
+        (status, String::from_utf8(body.to_vec()).expect("the body is UTF-8"))
+    }
+
+    #[actix_web::test]
+    async fn test_ready_fails_while_a_followers_newest_block_is_older_than_the_tolerance() {
+        let (status, body) =
+            ready_response(Some(follower_streaming_uniswap_v2()), Some(stale_deltas())).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("uniswap_v2 at block 120, 300s old"), "unexpected body: {body}");
+    }
+
+    #[actix_web::test]
+    async fn test_ready_passes_once_a_followers_newest_block_is_within_the_tolerance() {
+        let (status, _) =
+            ready_response(Some(follower_streaming_uniswap_v2()), Some(fresh_deltas())).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_uses_the_configured_tolerance() {
+        let (status, _) = ready_response_with_tolerance(
+            Some(follower_streaming_uniswap_v2()),
+            Some(stale_deltas()),
+            chrono::Duration::minutes(10),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_fails_when_the_health_check_fails() {
+        let stale = writer_status(Role::Leader, LEAD_CONFIRMATION_LIMIT * 2);
+
+        let (status, _) = ready_response(Some(stale), Some(stale_deltas())).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[actix_web::test]
+    async fn test_ready_passes_for_a_leader_and_without_writer_status_or_windows() {
+        let leader = writer_status(Role::Leader, std::time::Duration::from_secs(1));
+
+        assert_eq!(
+            ready_response(Some(leader), Some(stale_deltas()))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ready_response(None, Some(stale_deltas()))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ready_response(Some(follower_streaming_uniswap_v2()), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    #[actix_web::test]
+    async fn test_health_passes_for_a_confirming_leader_a_follower_and_no_status() {
+        let confirming = writer_status(Role::Leader, std::time::Duration::from_secs(1));
+        let follower = writer_status(Role::Follower, LEAD_CONFIRMATION_LIMIT * 2);
+
+        assert_eq!(health_status(Some(confirming)).await, StatusCode::OK);
+        assert_eq!(health_status(Some(follower)).await, StatusCode::OK);
+        assert_eq!(health_status(None).await, StatusCode::OK);
     }
 }

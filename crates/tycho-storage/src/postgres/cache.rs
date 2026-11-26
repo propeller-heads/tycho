@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -28,16 +28,17 @@ use tycho_common::{
         },
         contract::{Account, AccountBalance, AccountDelta},
         protocol::{
-            ComponentBalance, ProtocolComponent, ProtocolComponentState,
-            ProtocolComponentStateDelta, QualityRange,
+            ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
+            ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
         token::Token,
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
     storage::{
-        BlockIdentifier, BlockOrTimestamp, ChainGateway, ContractStateGateway, EntryPointFilter,
-        EntryPointGateway, ExtractionStateGateway, Gateway, ProtocolGateway, StateSnapshot,
+        BlockIdentifier, BlockOrTimestamp, CatchUpRead, ChainGateway, CommitWatermark,
+        ComponentPauseGateway, ContractStateGateway, EntryPointFilter, EntryPointGateway,
+        ExtractionStateGateway, ExtractorCursor, Gateway, ProtocolGateway, StateSnapshot,
         StateSnapshotGateway, StorageError, Version, WithTotal,
     },
     Bytes,
@@ -47,7 +48,7 @@ use super::{
     is_transaction_conflict,
     pool::{self, PooledConnection, EXTRACTION_POOL},
     snapshot::{bound_snapshot_reads, snapshot_transaction},
-    PostgresError, PostgresGateway,
+    writer_epoch, PostgresError, PostgresGateway,
 };
 
 /// Represents different types of database write operations.
@@ -151,10 +152,20 @@ impl std::fmt::Display for BlockRange {
     }
 }
 
+/// Which writes the executor runs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WritePriority {
+    /// Blocks of an extractor at the chain head. Runs before any waiting backfill.
+    Head,
+    /// Blocks of an extractor that is still syncing historical blocks.
+    Backfill,
+}
+
 /// Represents a transaction in the database, including the block information,
 /// a list of operations to be performed, and a channel to send the result.
 pub struct DBTransaction {
     block_range: BlockRange,
+    priority: WritePriority,
     size: usize,
     operations: Vec<WriteOp>,
     tx: oneshot::Sender<Result<(), StorageError>>,
@@ -273,6 +284,32 @@ pub enum DBCacheMessage {
     Write(DBTransaction),
 }
 
+/// Transactions waiting for the write executor. [`WritePriority::Head`] transactions leave first,
+/// each priority in arrival order.
+///
+/// Unbounded, but each gateway instance waits for the result of its transaction before it sends
+/// the next one, so the queue holds at most one transaction per instance.
+#[derive(Default)]
+struct WriteQueue {
+    head: VecDeque<DBTransaction>,
+    backfill: VecDeque<DBTransaction>,
+}
+
+impl WriteQueue {
+    fn push(&mut self, transaction: DBTransaction) {
+        match transaction.priority {
+            WritePriority::Head => self.head.push_back(transaction),
+            WritePriority::Backfill => self.backfill.push_back(transaction),
+        }
+    }
+
+    fn pop(&mut self) -> Option<DBTransaction> {
+        self.head
+            .pop_front()
+            .or_else(|| self.backfill.pop_front())
+    }
+}
+
 /// Extractors can start transaction.
 /// This will guarantee that a group of changes they provide is executed atomically.
 ///
@@ -326,6 +363,8 @@ pub(crate) struct DBCacheWriteExecutor {
 }
 
 impl DBCacheWriteExecutor {
+    /// Creates the executor. Every write fails until this process increments the writer epoch
+    /// through [`CachedGateway::increment_writer_epoch`].
     pub(crate) async fn new(
         name: String,
         chain: Chain,
@@ -352,13 +391,21 @@ impl DBCacheWriteExecutor {
     pub fn run(mut self) -> JoinHandle<()> {
         info!(name = self.name, "DBCacheWriteExecutor started!");
         tokio::spawn(async move {
-            while let Some(message) = self.msg_receiver.recv().await {
-                match message {
-                    DBCacheMessage::Write(db_tx) => {
-                        // Process the write transaction
-                        self.write(db_tx).await;
-                    }
+            let mut queue = WriteQueue::default();
+            loop {
+                // Take everything already sent, so a head transaction that arrived after a
+                // backfill one still runs first.
+                while let Ok(DBCacheMessage::Write(db_tx)) = self.msg_receiver.try_recv() {
+                    queue.push(db_tx);
                 }
+                if let Some(db_tx) = queue.pop() {
+                    self.write(db_tx).await;
+                    continue;
+                }
+                let Some(DBCacheMessage::Write(db_tx)) = self.msg_receiver.recv().await else {
+                    break;
+                };
+                queue.push(db_tx);
             }
         })
     }
@@ -370,6 +417,21 @@ impl DBCacheWriteExecutor {
         if let Some(extractor_id) = new_db_tx.owner.as_ref() {
             tracing::Span::current().record("extractor_id", extractor_id);
         }
+
+        let Some(epoch) = self.state_gateway.claimed_epoch.get() else {
+            error!("DBTransactionRejected: this process has not claimed the writer epoch");
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the caller may have stopped waiting for the result; nothing was written"
+            )]
+            let _ = new_db_tx
+                .tx
+                .send(Err(StorageError::Unexpected(
+                    "Write rejected: this process has not claimed the database writer epoch"
+                        .to_string(),
+                )));
+            return;
+        };
 
         let mut conn = pool::checkout(&self.pool, EXTRACTION_POOL)
             .await
@@ -386,6 +448,7 @@ impl DBCacheWriteExecutor {
                 .repeatable_read()
                 .run(|conn| {
                     async {
+                        writer_epoch::lock_epoch_row_and_verify(conn, epoch).await?;
                         for op in new_db_tx.operations.iter() {
                             match self.execute_write_op(op, conn).await {
                                 Err(PostgresError(StorageError::DuplicateEntry(entity, id))) => {
@@ -432,7 +495,7 @@ impl DBCacheWriteExecutor {
         }
 
         if res.is_ok() {
-            debug!("DBTransactionCommitted");
+            debug!(priority = ?new_db_tx.priority, "DBTransactionCommitted");
         }
 
         if let Err(e) = &res {
@@ -582,6 +645,14 @@ type DeltasCache = LruCache<
 
 type OpenTx = (DBTransaction, oneshot::Receiver<Result<(), StorageError>>);
 
+/// The newest block an extractor has committed to the database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedBlock {
+    pub number: u64,
+    /// Chain timestamp of the block.
+    pub ts: NaiveDateTime,
+}
+
 pub struct CachedGateway {
     // Can we batch multiple block in here without breaking things?
     // Assuming we are still syncing?
@@ -617,15 +688,43 @@ impl Clone for CachedGateway {
 impl CachedGateway {
     // Accumulating transactions does not drop previous data nor are transactions nested.
     pub async fn start_transaction(&self, block: &models::blockchain::Block, owner: Option<&str>) {
+        self.open_transaction(block, owner, WritePriority::Head)
+            .await;
+    }
+
+    /// Like [`CachedGateway::start_transaction`], but the write runs after every waiting
+    /// [`WritePriority::Head`] write. For blocks of an extractor that is still syncing.
+    pub async fn start_backfill_transaction(
+        &self,
+        block: &models::blockchain::Block,
+        owner: Option<&str>,
+    ) {
+        self.open_transaction(block, owner, WritePriority::Backfill)
+            .await;
+    }
+
+    /// Opens a transaction with `priority`, or extends the open one to `block`. Extending with
+    /// [`WritePriority::Head`] raises the open transaction to head priority, because its owner has
+    /// caught up with the chain head.
+    async fn open_transaction(
+        &self,
+        block: &models::blockchain::Block,
+        owner: Option<&str>,
+        priority: WritePriority,
+    ) {
         let mut open_tx = self.open_tx.lock().await;
 
         if let Some(tx) = open_tx.as_mut() {
             tx.0.block_range.end = block.clone();
+            if priority == WritePriority::Head {
+                tx.0.priority = WritePriority::Head;
+            }
         } else {
             let (tx, rx) = oneshot::channel();
             *open_tx = Some((
                 DBTransaction {
                     block_range: BlockRange::new(block, block),
+                    priority,
                     size: 0,
                     operations: vec![],
                     tx,
@@ -650,6 +749,70 @@ impl CachedGateway {
         }
     }
 
+    /// Increments the database writer epoch, makes this process the writer, and returns the new
+    /// epoch.
+    ///
+    /// From then on this process's writes go through, and every write of a process that
+    /// incremented the epoch earlier fails with [`StorageError::Fenced`]. Waits while a write
+    /// transaction of a former writer is still open.
+    pub async fn increment_writer_epoch(&self) -> Result<i64, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+        self.state_gateway
+            .increment_writer_epoch(&mut conn)
+            .await
+    }
+
+    /// Returns the newest block each extractor of `chain` has committed to the database, keyed
+    /// by extractor name.
+    pub async fn get_committed_blocks(
+        &self,
+        chain: &Chain,
+    ) -> Result<HashMap<String, CommittedBlock>, StorageError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| StorageError::Unexpected(err.to_string()))?;
+        self.state_gateway
+            .get_committed_blocks(chain, &mut conn)
+            .await
+    }
+
+    /// Adds `tokens` to the in-memory token cache without writing them to the database.
+    ///
+    /// Tokens already in the cache keep their cached values. Does nothing when the token cache is
+    /// disabled. Lets a process that does not write serve tokens it extracted before the database
+    /// writer stores them.
+    pub fn cache_tokens(&self, tokens: &[Token]) {
+        if let Some(token_cache) = &self.state_gateway.token_cache {
+            if let Err(err) = token_cache.add_tokens(tokens) {
+                error!(%err, "Failed to add tokens to the token cache");
+            }
+        }
+    }
+
+    /// Moves the cached `last_traded` timestamp of each `chain` token in `last_traded` forward,
+    /// without writing to the database.
+    ///
+    /// A cached timestamp never moves back, and tokens not in the cache are ignored. Does nothing
+    /// when the token cache is disabled. Lets a process that does not write balances keep the
+    /// "recently traded" filter of token queries current, because the cache refresh reads only
+    /// token rows.
+    pub fn cache_last_traded(&self, chain: &Chain, last_traded: &[(Address, NaiveDateTime)]) {
+        if let Some(token_cache) = &self.state_gateway.token_cache {
+            token_cache.update_last_traded(
+                chain,
+                last_traded
+                    .iter()
+                    .map(|(address, ts)| (address, *ts)),
+            );
+        }
+    }
+
     /// Returns the height of the newest block whose staged writes reached the store, or
     /// `None` when this instance has not flushed anything yet.
     pub fn flushed_block_height(&self) -> Option<u64> {
@@ -660,6 +823,15 @@ impl CachedGateway {
             0 => None,
             height => Some(height),
         }
+    }
+
+    /// Sends the open transaction to the database, whatever its size, and waits for the write.
+    /// Returns at once when no transaction is open.
+    pub async fn commit_open_transaction(&self) -> Result<(), StorageError> {
+        if self.open_tx.lock().await.is_none() {
+            return Ok(());
+        }
+        self.commit_transaction(0).await
     }
 
     pub async fn commit_transaction(&self, min_ops_batch_size: usize) -> Result<(), StorageError> {
@@ -1200,6 +1372,48 @@ impl ProtocolGateway for CachedGateway {
 }
 
 #[async_trait]
+impl ComponentPauseGateway for CachedGateway {
+    // Pause writes skip `DBCacheWriteExecutor` and use their own connection, because they are
+    // not block data.
+    #[instrument(skip_all)]
+    async fn pause_components(
+        &self,
+        chain: &Chain,
+        system: &str,
+        pauses: &[PauseRecord],
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .pause_components(chain, system, pauses, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn unpause_components(
+        &self,
+        chain: &Chain,
+        component_ids: &[&str],
+        unpause: &UnpauseRecord,
+    ) -> Result<Vec<ComponentId>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .unpause_components(chain, component_ids, unpause, &mut conn)
+            .await
+    }
+
+    #[instrument(skip_all)]
+    async fn get_component_pauses(
+        &self,
+        chain: &Chain,
+    ) -> Result<Vec<ComponentPause>, StorageError> {
+        let mut conn = self.checkout().await?;
+        self.state_gateway
+            .get_component_pauses(chain, &mut conn)
+            .await
+    }
+}
+
+#[async_trait]
 impl EntryPointGateway for CachedGateway {
     #[instrument(skip_all)]
     async fn insert_entry_points(
@@ -1285,10 +1499,19 @@ impl EntryPointGateway for CachedGateway {
 
 impl Gateway for CachedGateway {}
 
+/// The block number of each extractor cursor, keyed by extractor name.
+fn committed_blocks(cursors: &HashMap<String, ExtractorCursor>) -> HashMap<String, u64> {
+    let mut blocks = HashMap::with_capacity(cursors.len());
+    for (name, cursor) in cursors {
+        blocks.insert(name.clone(), cursor.block.number);
+    }
+    blocks
+}
+
 #[async_trait]
 impl StateSnapshotGateway for CachedGateway {
     /// Reads on one pooled connection in one [`snapshot_transaction`], so every part of the
-    /// result comes from the same database snapshot. The reads are bounded by
+    /// result comes from the same transaction snapshot. The reads are bounded by
     /// [`bound_snapshot_reads`]: a read that runs too long, or outlives its client, is cancelled
     /// by Postgres.
     async fn state_snapshot(&self, chain: &Chain) -> Result<StateSnapshot, StorageError> {
@@ -1297,15 +1520,77 @@ impl StateSnapshotGateway for CachedGateway {
             .run(|conn| {
                 async move {
                     bound_snapshot_reads(conn).await?;
+                    let watermark = self
+                        .state_gateway
+                        .snapshot_watermark(conn)
+                        .await?;
                     let accounts = self
                         .state_gateway
                         .account_snapshots(chain, conn)
                         .await?;
                     let components = self
                         .state_gateway
-                        .component_snapshots(chain, conn)
+                        .component_snapshots(chain, None, conn)
                         .await?;
-                    Result::<_, PostgresError>::Ok(StateSnapshot { accounts, components })
+                    let cursors = self
+                        .state_gateway
+                        .get_extractor_cursors(chain, conn)
+                        .await?;
+                    let watermark = watermark.with_committed_blocks(committed_blocks(&cursors));
+                    Result::<_, PostgresError>::Ok(StateSnapshot {
+                        accounts,
+                        components,
+                        cursors,
+                        watermark,
+                    })
+                }
+                .scope_boxed()
+            })
+            .await
+            .map_err(StorageError::from)
+    }
+
+    /// Reads on one pooled connection in one [`snapshot_transaction`], bounded as
+    /// [`Self::state_snapshot`].
+    async fn catch_up_read(
+        &self,
+        chain: &Chain,
+        since: CommitWatermark,
+        system: &str,
+    ) -> Result<CatchUpRead, StorageError> {
+        let mut conn = self.checkout().await?;
+        snapshot_transaction(&mut conn)
+            .run(|conn| {
+                async move {
+                    bound_snapshot_reads(conn).await?;
+                    let watermark = self
+                        .state_gateway
+                        .snapshot_watermark(conn)
+                        .await?;
+                    let accounts = self
+                        .state_gateway
+                        .account_snapshots_written_since(chain, &since, conn)
+                        .await?;
+                    let changes = self
+                        .state_gateway
+                        .account_changes_since(chain, &since, conn)
+                        .await?;
+                    let components = self
+                        .state_gateway
+                        .component_snapshots(chain, Some(system), conn)
+                        .await?;
+                    let cursors = self
+                        .state_gateway
+                        .get_extractor_cursors(chain, conn)
+                        .await?;
+                    let watermark = watermark.with_committed_blocks(committed_blocks(&cursors));
+                    Result::<_, PostgresError>::Ok(CatchUpRead {
+                        accounts,
+                        changes,
+                        components,
+                        cursors,
+                        watermark,
+                    })
                 }
                 .scope_boxed()
             })
@@ -1315,17 +1600,121 @@ impl StateSnapshotGateway for CachedGateway {
 }
 
 #[cfg(test)]
+mod test_write_queue {
+    use super::*;
+
+    fn transaction(number: u64, priority: WritePriority) -> DBTransaction {
+        let block = models::blockchain::Block { number, ..Default::default() };
+        DBTransaction {
+            block_range: BlockRange::new(&block, &block),
+            priority,
+            size: 0,
+            operations: vec![],
+            tx: oneshot::channel().0,
+            owner: None,
+            caller_span: tracing::Span::none(),
+        }
+    }
+
+    #[test]
+    fn head_transactions_leave_before_backfill_ones_in_arrival_order() {
+        let mut queue = WriteQueue::default();
+        queue.push(transaction(1, WritePriority::Backfill));
+        queue.push(transaction(2, WritePriority::Head));
+        queue.push(transaction(3, WritePriority::Backfill));
+        queue.push(transaction(4, WritePriority::Head));
+
+        let order: Vec<u64> = std::iter::from_fn(|| queue.pop())
+            .map(|tx| tx.block_range.start.number)
+            .collect();
+
+        assert_eq!(order, vec![2, 4, 1, 3]);
+    }
+
+    #[test]
+    fn empty_queue_has_nothing_to_pop() {
+        assert!(WriteQueue::default().pop().is_none());
+    }
+}
+
+#[cfg(test)]
 mod test_serial_db {
     use std::{collections::HashSet, slice, str::FromStr, time::Duration};
 
-    use diesel::{sql_query, QueryableByName};
+    use diesel::{sql_query, ExpressionMethods, QueryDsl, QueryableByName};
     use diesel_async::RunQueryDsl;
     use tycho_common::models::ChangeType;
 
     use super::*;
     use crate::postgres::{
-        db_fixtures, db_fixtures::yesterday_one_am, orm, testing::run_against_db,
+        builder::GatewayBuilder, db_fixtures, db_fixtures::yesterday_one_am, orm, schema,
+        testing::run_against_db,
     };
+
+    /// Makes `gateway`'s process the database writer, as the election does before any write.
+    async fn increment_writer_epoch(
+        gateway: &PostgresGateway,
+        connection_pool: &Pool<AsyncPgConnection>,
+    ) -> i64 {
+        let mut connection = connection_pool
+            .get()
+            .await
+            .expect("Failed to get a connection from the pool");
+        gateway
+            .increment_writer_epoch(&mut connection)
+            .await
+            .expect("the epoch increment should succeed")
+    }
+
+    #[tokio::test]
+    async fn test_update_tokens_writes_without_a_write_executor() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let dai = "6b175474e89094c44da98b954eedeac495271d0f";
+            db_fixtures::insert_token(&mut connection, chain_id, dai, "DAI", 18, Some(10)).await;
+            let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let cached_gw = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .build_gw()
+                .await
+                .expect("gateway should build");
+            let address = Bytes::from_str(dai).unwrap();
+            let mut token = cached_gw
+                .get_tokens(Chain::Ethereum, Some(&[&address]), QualityRange::None(), None, None)
+                .await
+                .expect("the token should be read")
+                .entity
+                .pop()
+                .expect("the token should exist");
+            token.quality = 100;
+
+            cached_gw
+                .update_tokens(slice::from_ref(&token))
+                .await
+                .expect("the update should be written without a write executor");
+
+            let stored = cached_gw
+                .get_tokens(Chain::Ethereum, Some(&[&address]), QualityRange::None(), None, None)
+                .await
+                .expect("the token should be read")
+                .entity;
+            assert_eq!(stored, vec![token]);
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn test_write_and_flush() {
@@ -1354,6 +1743,7 @@ mod test_serial_db {
                 rx,
             )
             .await;
+            increment_writer_epoch(&gateway, &connection_pool).await;
 
             let handle = write_executor.run();
 
@@ -1383,6 +1773,347 @@ mod test_serial_db {
         .await;
     }
 
+    async fn setup_write_executor(
+        connection_pool: &Pool<AsyncPgConnection>,
+    ) -> (PostgresGateway, mpsc::Sender<DBCacheMessage>, i64, JoinHandle<()>) {
+        let mut connection = connection_pool
+            .get()
+            .await
+            .expect("Failed to get a connection from the pool");
+        let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+        db_fixtures::insert_token(
+            &mut connection,
+            chain_id,
+            "0000000000000000000000000000000000000000",
+            "ETH",
+            18,
+            Some(100),
+        )
+        .await;
+        let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+        let (tx, rx) = mpsc::channel(10);
+        let write_executor = DBCacheWriteExecutor::new(
+            "ethereum".to_owned(),
+            Chain::Ethereum,
+            connection_pool.clone(),
+            gateway.clone(),
+            rx,
+        )
+        .await;
+        let epoch = increment_writer_epoch(&gateway, connection_pool).await;
+        (gateway, tx, epoch, write_executor.run())
+    }
+
+    #[tokio::test]
+    async fn test_write_is_fenced_after_another_writer_claims() {
+        run_against_db(|connection_pool| async move {
+            let (gateway, tx, epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let newer_epoch = writer_epoch::ClaimedEpoch::default()
+                .increment_writer_epoch(&mut connection)
+                .await
+                .expect("second writer should claim");
+
+            let block = get_sample_block(1);
+            let res =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            handle.abort();
+
+            assert_eq!(res, Err(StorageError::Fenced { claimed: epoch, current: newer_epoch }));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await;
+            assert!(stored.is_err(), "a fenced write must not reach the database");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_writes_fail_until_the_writer_epoch_is_incremented() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let handle = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await
+            .run();
+            let cached_gw = CachedGateway::new(tx.clone(), connection_pool.clone(), gateway.clone());
+            let block = get_sample_block(1);
+
+            let before_claim =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block.clone()])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            let epoch = cached_gw
+                .increment_writer_epoch()
+                .await
+                .expect("the epoch increment should succeed");
+            let after_claim =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block.clone()])])
+                    .await
+                    .await
+                    .expect("executor should answer");
+            handle.abort();
+
+            assert!(
+                matches!(before_claim, Err(StorageError::Unexpected(ref msg)) if msg.contains("not claimed")),
+                "unexpected result before the claim: {before_claim:?}"
+            );
+            assert!(epoch > 0);
+            assert_eq!(after_claim, Ok(()));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("the block written after the claim should be stored");
+            assert_eq!(stored, block);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_cache_tokens_serves_tokens_without_writing_them() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+            let cached_gw = GatewayBuilder::new(&db_url)
+                .set_chains(&[Chain::Ethereum])
+                .enable_token_cache()
+                .build_gw()
+                .await
+                .expect("gateway should build");
+            let address = Bytes::from_str("6b175474e89094c44da98b954eedeac495271d0f").unwrap();
+            let token = models::token::Token::new(
+                &address,
+                "DAI",
+                18,
+                0,
+                &[Some(100)],
+                Chain::Ethereum,
+                100,
+            );
+
+            cached_gw.cache_tokens(slice::from_ref(&token));
+
+            let served = cached_gw
+                .get_tokens(Chain::Ethereum, Some(&[&address]), QualityRange::None(), None, None)
+                .await
+                .expect("tokens should be served")
+                .entity;
+            assert_eq!(served, vec![token]);
+            let stored: i64 = schema::token::table
+                .inner_join(schema::account::table)
+                .filter(schema::account::address.eq(&address))
+                .count()
+                .get_result(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(stored, 0, "cached tokens must not be written to the database");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_head_block_raises_an_open_backfill_transaction_to_head() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, mut rx) = mpsc::channel(10);
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway);
+            let (block_1, block_2) = (get_sample_block(1), get_sample_block(2));
+            cached_gw
+                .start_backfill_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .start_transaction(&block_2, None)
+                .await;
+            cached_gw
+                .upsert_block(&[block_1, block_2])
+                .await
+                .expect("Upsert blocks ok");
+
+            let executor = async {
+                let Some(DBCacheMessage::Write(db_tx)) = rx.recv().await else {
+                    panic!("expected a write");
+                };
+                let priority = db_tx.priority;
+                db_tx.tx.send(Ok(())).unwrap();
+                priority
+            };
+            let (committed, priority) = tokio::join!(cached_gw.commit_transaction(0), executor);
+
+            committed.expect("commit should succeed");
+            assert_eq!(priority, WritePriority::Head);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_head_write_runs_before_an_earlier_backfill_write() {
+        run_against_db(|connection_pool| async move {
+            let (_gateway, tx, _epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut holder = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            // Every write first reads the epoch row FOR SHARE, so this holds up the executor.
+            sql_query("BEGIN")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+            sql_query("SELECT epoch FROM writer_epoch FOR UPDATE")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+
+            let block_1 = get_sample_block(1);
+            let busy =
+                send_write_message(&tx, block_1.clone(), vec![WriteOp::UpsertBlock(vec![block_1])])
+                    .await;
+            // Give the executor time to start the first write and wait on the epoch row.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let block_2 = get_sample_block(2);
+            let backfill = send_prioritized_write(
+                &tx,
+                block_2.clone(),
+                vec![WriteOp::UpsertBlock(vec![block_2])],
+                WritePriority::Backfill,
+            )
+            .await;
+            let block_3 = get_sample_block(3);
+            let head = send_prioritized_write(
+                &tx,
+                block_3.clone(),
+                vec![WriteOp::UpsertBlock(vec![block_3])],
+                WritePriority::Head,
+            )
+            .await;
+            sql_query("ROLLBACK")
+                .execute(&mut holder)
+                .await
+                .unwrap();
+            for response in [busy, backfill, head] {
+                response
+                    .await
+                    .expect("executor should answer")
+                    .expect("write should succeed");
+            }
+            handle.abort();
+
+            let written: Vec<(i64, NaiveDateTime)> = schema::block::table
+                .select((schema::block::number, schema::block::inserted_ts))
+                .filter(schema::block::number.eq_any([2_i64, 3]))
+                .load(&mut holder)
+                .await
+                .unwrap();
+            let inserted = |number| {
+                written
+                    .iter()
+                    .find(|(n, _)| *n == number)
+                    .map(|(_, ts)| *ts)
+                    .expect("block should be written")
+            };
+            assert!(
+                inserted(3) < inserted(2),
+                "the head write must run before the backfill write sent earlier"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_write_waiting_on_a_concurrent_claim_is_fenced() {
+        run_against_db(|connection_pool| async move {
+            let (gateway, tx, epoch, handle) = setup_write_executor(&connection_pool).await;
+            let mut claimer = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            sql_query("BEGIN")
+                .execute(&mut claimer)
+                .await
+                .unwrap();
+            let newer_epoch = writer_epoch::ClaimedEpoch::default()
+                .increment_writer_epoch(&mut claimer)
+                .await
+                .expect("second writer should claim");
+
+            let block = get_sample_block(1);
+            let response =
+                send_write_message(&tx, block.clone(), vec![WriteOp::UpsertBlock(vec![block])])
+                    .await;
+            // Give the write time to block on the epoch row held by the uncommitted claim.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sql_query("COMMIT")
+                .execute(&mut claimer)
+                .await
+                .unwrap();
+
+            let res = response
+                .await
+                .expect("executor should answer");
+            handle.abort();
+
+            assert_eq!(res, Err(StorageError::Fenced { claimed: epoch, current: newer_epoch }));
+            let stored = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut claimer)
+                .await;
+            assert!(stored.is_err(), "a fenced write must not reach the database");
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn test_write_retries_serialization_failure() {
         run_against_db(|connection_pool| async move {
@@ -1404,6 +2135,7 @@ mod test_serial_db {
                 rx,
             )
             .await;
+            increment_writer_epoch(&gateway, &connection_pool).await;
 
             let handle = write_executor.run();
 
@@ -1487,6 +2219,7 @@ mod test_serial_db {
                 rx,
             )
             .await;
+            increment_writer_epoch(&gateway, &connection_pool).await;
             write_executor.max_retries = 1;
 
             let handle = write_executor.run();
@@ -1573,6 +2306,8 @@ mod test_serial_db {
                 rx,
             )
             .await;
+
+            increment_writer_epoch(&gateway, &connection_pool).await;
 
             let handle = write_executor.run();
 
@@ -1737,6 +2472,8 @@ mod test_serial_db {
             )
             .await;
 
+            increment_writer_epoch(&gateway, &connection_pool).await;
+
             let handle = write_executor.run();
             let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway);
 
@@ -1854,6 +2591,8 @@ mod test_serial_db {
             )
             .await;
 
+            increment_writer_epoch(&gateway, &connection_pool).await;
+
             let handle = write_executor.run();
             let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
             assert_eq!(cached_gw.flushed_block_height(), None);
@@ -1898,6 +2637,77 @@ mod test_serial_db {
                 .expect("Failed to fetch block");
             assert_eq!(fetched_block, block_1);
 
+            handle.abort();
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_commit_open_transaction_writes_a_transaction_below_the_batch_size() {
+        run_against_db(|connection_pool| async move {
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            let chain_id = db_fixtures::insert_chain(&mut connection, "ethereum").await;
+            // `from_connection` builds the native-token cache and panics without this row.
+            db_fixtures::insert_token(
+                &mut connection,
+                chain_id,
+                "0000000000000000000000000000000000000000",
+                "ETH",
+                18,
+                Some(100),
+            )
+            .await;
+            let gateway: PostgresGateway = PostgresGateway::from_connection(&mut connection).await;
+            let (tx, rx) = mpsc::channel(10);
+            let write_executor = DBCacheWriteExecutor::new(
+                "ethereum".to_owned(),
+                Chain::Ethereum,
+                connection_pool.clone(),
+                gateway.clone(),
+                rx,
+            )
+            .await;
+            increment_writer_epoch(&gateway, &connection_pool).await;
+            let handle = write_executor.run();
+            let cached_gw = CachedGateway::new(tx, connection_pool.clone(), gateway.clone());
+
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("without an open transaction there is nothing to write");
+
+            let block_1 = get_sample_block(1);
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .commit_transaction(100)
+                .await
+                .expect("staging below the batch size should succeed");
+            assert_eq!(cached_gw.flushed_block_height(), None);
+
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("the staged transaction should commit");
+
+            assert_eq!(cached_gw.flushed_block_height(), Some(block_1.number));
+            let fetched_block = gateway
+                .get_block(&BlockIdentifier::Number((Chain::Ethereum, 1)), &mut connection)
+                .await
+                .expect("block 1 should be in the database");
+            assert_eq!(fetched_block, block_1);
+            cached_gw
+                .commit_open_transaction()
+                .await
+                .expect("the transaction is closed, so there is nothing to write");
             handle.abort();
         })
         .await;
@@ -1979,9 +2789,19 @@ mod test_serial_db {
         block: models::blockchain::Block,
         operations: Vec<WriteOp>,
     ) -> oneshot::Receiver<Result<(), StorageError>> {
+        send_prioritized_write(tx, block, operations, WritePriority::Head).await
+    }
+
+    async fn send_prioritized_write(
+        tx: &mpsc::Sender<DBCacheMessage>,
+        block: models::blockchain::Block,
+        operations: Vec<WriteOp>,
+        priority: WritePriority,
+    ) -> oneshot::Receiver<Result<(), StorageError>> {
         let (os_tx, os_rx) = oneshot::channel();
         let db_transaction = DBTransaction {
             block_range: BlockRange::new(&block, &block),
+            priority,
             size: operations.len(),
             operations,
             tx: os_tx,

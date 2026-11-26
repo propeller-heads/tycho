@@ -8,12 +8,6 @@ In this guide, you'll learn more about the Tycho Client and the streamed data mo
 If you are developing in Rust and is using Tycho to simulate DeFi Protocol's behavior, we recommend checking out our [simulation.md](../../simulation.md "mention") package - this tool extends Tycho Client's data streaming functionality with powerful simulation capabilities.
 {% endhint %}
 
-{% hint style="info" %}
-**✨ New: Sub-Second Latency with Partial Blocks**
-
-Tycho now provides early support for partial blocks on Base, enabling sub-second latency by streaming pre-confirmation updates. Enable via `--partial-blocks` (CLI), `partial_blocks=True` (Python), or `.enable_partial_blocks()` (Rust). See [Streaming Options](./#streaming-options) below for details.
-{% endhint %}
-
 ### Key Features
 
 * **Real-Time Streaming**: Get low-latency updates to stay in sync with the latest protocol changes. Discover new pools as they’re created.
@@ -108,7 +102,7 @@ Tycho Client supports several options to customize the data stream. These are av
 
 <summary><strong>Details:</strong> <strong>Partial Blocks</strong></summary>
 
-Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ - pre-confirmation updates that contain parts of a future block before its construction is finished. When `partial blocks` is enabled, Tycho streams these incremental updates as they arrive, giving you sub-block latency. On chains without flash block support, enabling this flag is unsupported.
+Some chains make _partial blocks_: pre-confirmation updates that contain parts of a block before the chain seals it. When you enable `partial blocks`, Tycho streams these updates as they arrive, so you get state changes before the block is complete. Do not enable this option on a chain that does not have partial blocks.
 
 {% hint style="warning" %}
 Block hashes in partial block messages are **unstable** — they change between partial updates and will differ from the final block hash. Do not use them as persistent identifiers or cache keys. See the <a href="https://docs.substreams.dev/reference-material/chain-support/flashblocks#developing-for-partial-blocks" target="_blank" rel="noopener noreferrer">Substreams documentation</a> for details.
@@ -266,6 +260,8 @@ Each message includes block details to help you stay on track with the latest bl
 **FeedMessage**
 
 The main outer message type. It contains both the individual SynchronizerState (one per extractor) and the StateSyncMessage (also one per extractor). Each extractor is supposed to emit one message per block (even if no changes happened in that block) and metadata about the extractor's block synchronization state. The latter allows consumers to handle delayed extractors gracefully.
+
+The client emits one FeedMessage per round. Each round waits up to the block time plus a timeout for every extractor's next block (`block_time` and `timeout` on the Rust `TychoStreamBuilder`, with defaults per chain). When the wait runs out before any extractor delivers a block, the client still emits the FeedMessage: its `state_msgs` is empty, and `sync_states` reports each extractor's state. Chains that only produce a block when someone transacts reach this point whenever they go quiet for longer than the wait. Treat such a message as "no new block yet". The [Tycho Simulation](../../simulation.md#when-no-block-arrives) stream skips these rounds for you.
 
 **SynchronizerState** (`sync_states`**`)`**
 

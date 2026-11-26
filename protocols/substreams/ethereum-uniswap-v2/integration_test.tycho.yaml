@@ -1,10 +1,17 @@
+harness: strict
 substreams_yaml_path: ./ethereum-uniswap-v2.yaml
 protocol_system: "uniswap_v2"
 protocol_type_names:
   - "uniswap_v2_pool"
 module_name: "map_pool_events"
-skip_balance_check: false
-initialized_accounts:
+# The pair contract holds its own reserves, so its balance is the pair's own `balanceOf`.
+balance_lens: ComponentIdBalances
+# The pair accepts any input: UniswapV2Pair.swap checks only the fee-adjusted invariant and
+# `amountOut < reserve_out`, and reverts on input only when a balance overflows uint112. The
+# simulated limit is therefore a recommended size (about 90% price impact), not a bound.
+limits:
+  kind: soft
+  reason: "UniswapV2Pair.swap has no input bound; it checks only the fee-adjusted invariant and amountOut < reserveOut. Checked on pool 0x6732...f2c18c2 at block 19701397 (reserves 1e30 WOLF / 1e18 WETH; the quoted limit is ~2.16e18 WETH): eth_call swap with the pair's WETH balance raised by state override accepted 1e20 WETH in (~46x the limit) and 1e24 WETH in (~460000x), each for the invariant-exact WOLF out, and reverted `UniswapV2: K` for 1e15 WOLF more than that out. We aim for the input with ~90% price impact (≈ 2.162 × reserve_in): a recommended size, not the pair's bound."
 tests:
   - name: test_wolf_weth_pool
     start_block: 19701395
@@ -17,4 +24,40 @@ tests:
         static_attributes:
           fee: "0x1e"
         creation_tx: "0x5e01ae1522722340871708a3c55e1395dda647a57767781230317319fa36ea7b"
-        skip_simulation: false
+  # The first Uniswap V2 pair with real liquidity, created at the start of the package's range
+  # (initialBlock 10008300), then funded and traded in the blocks after.
+  - name: test_usdc_weth_pool
+    start_block: 10008355
+    stop_block: 10008455
+    expected_components:
+      - id: "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          fee: "0x1e"
+        creation_tx: "0xd07cbde817318492092cc7a27b3064a69bd893c01cb593d6029683ffd290ab3a"
+  # USDT's transfer returns no value, which the router's transfer handling must tolerate.
+  - name: test_weth_usdt_pool
+    start_block: 10093341
+    stop_block: 10093441
+    expected_components:
+      - id: "0x0d4a11d5eeaac28ec3f61d100daf4d40471f1852"
+        tokens:
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          - "0xdac17f958d2ee523a2206206994597c13d831ec7"
+        static_attributes:
+          fee: "0x1e"
+        creation_tx: "0xe64069acd123ec94b8a3316378183ba8bf42b40979df3b0bb57b0e7b9e47ef38"
+  # WBTC has 8 decimals, against 18 for WETH.
+  - name: test_wbtc_weth_pool
+    start_block: 10091097
+    stop_block: 10091197
+    expected_components:
+      - id: "0xbb2b8038a1640196fbe3e38816f3e67cba72d940"
+        tokens:
+          - "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+          - "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        static_attributes:
+          fee: "0x1e"
+        creation_tx: "0x7578a3b32f0c884422126d606098d164eca40d0e51bae3d997bb993cc1646b13"

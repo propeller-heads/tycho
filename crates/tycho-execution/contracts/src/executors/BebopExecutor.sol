@@ -78,6 +78,7 @@ contract BebopExecutor is IExecutor {
 
         // Only allow calling the settlement or router contract, and only with
         // the swap selectors each one exposes.
+        // forge-lint: disable-next-line(unsafe-typecast) Reads the selector; shorter calldata pads with zeros, which _validateCall rejects.
         _validateCall(target, bytes4(bebopCalldata));
 
         // Modify the filledTakerAmount in the calldata

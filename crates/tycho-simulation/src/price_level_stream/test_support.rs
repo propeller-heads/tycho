@@ -33,8 +33,19 @@ use super::{
     },
 };
 
-/// The FermiSwapper router, one of the default venues.
+/// The FermiSwapper router as it was when the 2026-10-16 captures were taken, whose books name it.
+/// The default venue has since moved to a new router, so tests that read these captures register
+/// this address themselves.
 pub(super) const PAMM: &str = "0x5979458912f80b96d30d4220af8e2e4925a33320";
+
+/// The FermiSwapper router the default venues register as `fermiswap` today.
+pub(super) const FERMISWAP_ROUTER: &str = "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977";
+
+/// The recorded FermiSwap router ([`PAMM`]) registered as `fermiswap`, which the default venues no
+/// longer name: the captures' Fermi books stream under it.
+pub(super) fn recorded_fermiswap() -> PriceLevelStreamConfig {
+    PriceLevelStreamConfig::new("fermiswap", Bytes::from_str(PAMM).unwrap(), 185_000u64.into())
+}
 /// The KipseliPropAMMWrapper router: Kipseli's canonical public identity, and one of the default
 /// venues.
 pub(super) const KIPSELI: &str = "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d";

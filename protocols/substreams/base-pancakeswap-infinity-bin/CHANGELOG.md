@@ -1,0 +1,16 @@
+# Changelog
+
+## v0.1.1
+
+The hook bitmap, dynamic fee flag, `pool_state_base_slot`, protocol fee split and deployment params
+come from the `pancakeswap-infinity-substreams` crate, shared with the CL package. The output is
+unchanged; the wasm hash is not.
+
+## v0.1.0
+
+Initial PancakeSwap Infinity Liquidity Book integration (`BinPoolManager`
+`0xC697d2898e0D09264376196696c51D7aBbbAA4a9`, deployed at block 30544163 on Base and 47214336 on
+BNB). Indexes pools without swap hooks and with a static LP fee. Per-bin reserves are read from
+BinPoolManager storage diffs because no event carries them, and the protocol fee is read from the
+pool's slot0 storage write at creation because `Initialize` omits it. `active_in_tree` is created
+with the pool and follows every write to the active bin and every swap.

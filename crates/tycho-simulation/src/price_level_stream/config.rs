@@ -61,8 +61,9 @@ impl PriceLevelStreamConfig {
 /// [`auto_detected_gas_cost`](super::stream::PriceLevelStreamBuilder::auto_detected_gas_cost).
 pub const DEFAULT_AUTO_DETECTED_GAS_COST: u64 = 335_000;
 
-/// The pAMMs known to be served by the Titan price level stream (as of 2026-10-19): FermiSwap,
-/// Kipseli, Metric, Bebop, TaurusFi, Tempest, Goliath, Stelaxis, and ElZorro.
+/// The pAMMs known to be served by the Titan price level stream (as of 2026-11-17): FermiSwap,
+/// Kipseli, Metric, Bebop, TaurusFi, Tempest, Goliath, Stelaxis, ElZorro, and one venue without a
+/// public name.
 ///
 /// Registered on a builder via
 /// [`with_known_pamms`](super::stream::PriceLevelStreamBuilder::with_known_pamms), so their
@@ -80,8 +81,8 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
     // router-level overhead (user/input/fee transfers): tycho-execution's gas estimator accounts
     // for those on top of this per-swap value.
     let pamms = [
-        // The FermiSwapper router. Measured ~177k-182k (2026-08-18).
-        ("fermiswap", "0x5979458912f80b96d30d4220af8e2e4925a33320", 185_000u64),
+        // The FermiSwapper router. Measured ~47k-165k (2026-11-19).
+        ("fermiswap", "0xf6d5b2fefec7b420d9990b95790adfd3d4c4f977", 170_000u64),
         // The KipseliPropAMMWrapper router. Measured ~308k-329k (2026-08-18). Titan's venue docs
         // list a newer Kipseli router (0x342b8458…), which has no activity. The stream keys
         // Kipseli's books by 0xc9a9… instead, which `PAMM_ADDRESS_ALIASES` maps onto this
@@ -117,6 +118,14 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
         // The ElZorro router, which the stream keys its books by: a minimal proxy that emits the
         // pAMM swap event. Gas over 71 traced fills (2026-10-19): p50 ~35k, p90 ~68k, max ~97k.
         ("elzorro", "0xcf211b4dd0d2be5c173ea57bcf938fc61d1d3bd3", 105_000u64),
+        // A venue without a public name, named by its address as auto-detection names it.
+        // Gas is the router call measured by the integration test over 2 days (2026-11-17) less
+        // the router overhead, not traced fills: ~124k-142k.
+        (
+            "0x6e27bb694393840e253262361b79187d4899e9cf",
+            "0x6e27bb694393840e253262361b79187d4899e9cf",
+            145_000u64,
+        ),
     ];
     pamms
         .into_iter()
@@ -137,10 +146,24 @@ pub fn default_served_pamms() -> Vec<PriceLevelStreamConfig> {
 /// [`add_pamm`](super::stream::PriceLevelStreamBuilder::add_pamm) entry for one of these
 /// addresses overrides the denial.
 pub fn default_denied_pamms() -> Vec<Bytes> {
-    // No streamed venue is currently known to reject the executor's swap. This is where one
-    // goes that gates settlement — on a taker allowlist, say — or otherwise reverts a swap sent
-    // by an arbitrary caller.
-    Vec::new()
+    let pamms = [
+        // Unnamed venue that settles only for callers on its own allowlist, which Tycho's routers
+        // are not on; reverts `NotWhitelisted()` for the TychoRouterV3 (2026-11-17).
+        "0xb8d4e06e3038b07b4376ba3020eabce69f673463",
+        // Metric's second quote address (see `PAMM_ADDRESS_ALIASES`), which now streams books of
+        // its own but is not a swap entry point: every swap sent to it reverts
+        // `FeedsLengthMismatch()` (6,518 of 6,518 integration test swaps, 2026-11-22). Denial
+        // only keeps its books out; its quote stream entries still complete Metric's overrides
+        // through `pricedAddresses`.
+        "0x30a88bf894d1b806125a23ebf23d715496fd7102",
+        // Unnamed venue whose simulation overrides include Metric's streamed state; every swap
+        // reverts `Dispatcher__SwapReverted` (7,920 of 7,920 integration test swaps, 2026-11-22).
+        "0x38e6f145586043a030d02f1aa32eb55c65183a1d",
+    ];
+    pamms
+        .into_iter()
+        .map(|address| Bytes::from_str(address).expect("hardcoded pAMM address must parse"))
+        .collect()
 }
 
 /// The streamed identities Titan streams some venues under, each paired with that venue's canonical
@@ -164,13 +187,13 @@ pub const PAMM_ADDRESS_ALIASES: &[(&str, &str)] = &[
     // pAMM swap event at all — while its swaps go to the router 0x99ab7c1c…, the address
     // `default_served_pamms` registers it under.
     //
-    // Metric's router also reads the state of a second quote address, 0x30a88bf8…, which streams
-    // no books of its own (2026-10-21) but lists 0x99ab7c1c… in its quote stream entries'
-    // `pricedAddresses`. It is deliberately left unaliased. The overrides path merges its entries
-    // into Metric's own through `pricedAddresses`; aliased, they would count as Metric's own
-    // entries and replace rather than complete them. And any book it streamed in future would
-    // become a second book of the same pair, where the duplicate rule keeps the last in stream
-    // order rather than the better price.
+    // Metric's router also reads the state of a second quote address, 0x30a88bf8…, which lists
+    // 0x99ab7c1c… in its quote stream entries' `pricedAddresses`. It also streams books of its
+    // own (seen 2026-11-22), which `default_denied_pamms` keeps out. It is deliberately left
+    // unaliased. The overrides path merges its entries into Metric's own through
+    // `pricedAddresses`; aliased, they would count as Metric's own entries and replace rather than
+    // complete them. And any book it streamed in future would become a second book of the same
+    // pair, where the duplicate rule keeps the last in stream order rather than the better price.
     ("0xe844701934d9c6085b292e428f41b911cc0b3872", "0x99ab7c1c5eab47801f7937075998527a550fba8a"),
 ];
 

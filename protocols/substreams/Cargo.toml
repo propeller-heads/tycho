@@ -5,6 +5,7 @@ members = [
     "ethereum-curve",
     "crates/tycho-substreams",
     "crates/substreams-helper",
+    "crates/pancakeswap-infinity-substreams",
     "ethereum-ambient",
     "ethereum-uniswap-v2",
     "ethereum-uniswap-v3",
@@ -41,6 +42,7 @@ members = [
     "polygon-ramses-v3",
     "ethereum-etherfi",
     "base-pancakeswap-infinity-cl",
+    "base-pancakeswap-infinity-bin",
     "bsc-pancakeswap-infinity-cl-hooks",
 ]
 resolver = "2"

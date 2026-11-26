@@ -40,6 +40,7 @@ import {
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {AeroBasicExecutor} from "../src/executors/AeroBasicExecutor.sol";
+import {EuclidExecutor} from "@src/executors/EuclidExecutor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
 import {RingSwapV2Executor} from "../src/executors/RingSwapV2Executor.sol";
 import {NativeExecutor} from "../src/executors/NativeExecutor.sol";
@@ -60,7 +61,8 @@ contract TychoRouterExposed is TychoRouterV3 {
     constructor(
         address permit2_,
         address feeCalculator,
-        address pauser,
+        address[] memory executors,
+        address[] memory pausers,
         address unpauser,
         address executorSetter,
         address routerFeeSetter
@@ -68,7 +70,8 @@ contract TychoRouterExposed is TychoRouterV3 {
         TychoRouterV3(
             permit2_,
             feeCalculator,
-            pauser,
+            executors,
+            pausers,
             unpauser,
             executorSetter,
             routerFeeSetter
@@ -159,6 +162,7 @@ contract TychoRouterTestSetup is
     LiquoriceExecutor public liquoriceExecutor;
     AerodromeV1Executor public aerodromeV1Executor;
     AeroBasicExecutor public aeroBasicExecutor;
+    EuclidExecutor public euclidExecutor;
     FermiSwapExecutor public fermiSwapExecutor;
     MetricExecutor public metricExecutor;
     BopAMMExecutor public bopAMMExecutor;
@@ -181,12 +185,23 @@ contract TychoRouterTestSetup is
         return 22082754;
     }
 
+    /// @dev A test whose venue only quotes in the block its oracle was refreshed in forks to the
+    /// state just before a real transaction of that block, by returning its hash. The default,
+    /// zero, forks at the end of `getForkBlock()`.
+    function getForkTx() public view virtual returns (bytes32) {
+        return bytes32(0);
+    }
+
     uint256 internal forkTimestamp;
 
     function setUp() public virtual {
         string memory chain = getChain();
-        uint256 forkBlock = getForkBlock();
-        vm.createSelectFork(vm.rpcUrl(chain), forkBlock);
+        bytes32 forkTx = getForkTx();
+        if (forkTx == bytes32(0)) {
+            vm.createSelectFork(vm.rpcUrl(chain), getForkBlock());
+        } else {
+            vm.createSelectFork(vm.rpcUrl(chain), forkTx);
+        }
 
         forkTimestamp = vm.getBlockTimestamp();
         uint256 setupTime = forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR;
@@ -196,6 +211,9 @@ contract TychoRouterTestSetup is
         tychoRouter = deployRouter();
         deployDummyContract();
         vm.stopPrank();
+        // The router deploys with the vault paused; most tests use the vault.
+        vm.prank(UNPAUSER);
+        tychoRouter.unpauseVault();
 
         address[] memory executors = deployExecutors();
         vm.startPrank(EXECUTOR_SETTER);
@@ -216,6 +234,12 @@ contract TychoRouterTestSetup is
         vm.warp(forkTimestamp);
     }
 
+    function listTestPausers() internal view returns (address[] memory) {
+        address[] memory pausers = new address[](1);
+        pausers[0] = PAUSER;
+        return pausers;
+    }
+
     function deployRouter() public returns (TychoRouterExposed) {
         // Use vm.etch to place dummy bytecode at address(123) so it passes the
         // .code.length check in the constructor without deploying a contract
@@ -226,7 +250,8 @@ contract TychoRouterTestSetup is
         tychoRouter = new TychoRouterExposed(
             PERMIT2_ADDRESS,
             placeholderFeeCalculator,
-            PAUSER,
+            new address[](0),
+            listTestPausers(),
             UNPAUSER,
             EXECUTOR_SETTER,
             FEE_SETTER
@@ -341,9 +366,11 @@ contract TychoRouterTestSetup is
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
         aeroBasicExecutor = new AeroBasicExecutor();
+        // Appended last: every earlier executor keeps its CREATE address.
+        euclidExecutor = new EuclidExecutor(ONEINCH_ROUTER_V5);
 
         address[] memory executors = new address[](
-            30 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            31 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -375,7 +402,8 @@ contract TychoRouterTestSetup is
         executors[27] = address(lidoV4Executor);
         executors[28] = address(pancakeswapInfinityExecutor);
         executors[29] = address(aeroBasicExecutor);
-        uint256 nextExecutorIndex = 30;
+        executors[30] = address(euclidExecutor);
+        uint256 nextExecutorIndex = 31;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;
@@ -402,12 +430,12 @@ contract TychoRouterTestSetup is
         // clientFeeReceiver is the address corresponding to CLIENT_FEE_RECEIVER_PK
         clientFeeReceiver = vm.addr(CLIENT_FEE_RECEIVER_PK);
         feeCalculator = new FeeCalculator(FEE_SETTER, routerFeeReceiver);
-        // The calculator enables positive slippage capture in its constructor.
+        // The calculator captures the full surplus from its constructor.
         // The swap tests quote a round `expectedAmountOut` below the real pool
-        // output and assert the receiver gets that whole output, so capture is
-        // switched off here and exercised by the tests that opt back in.
+        // output and assert the receiver gets that whole output, so the capture
+        // bps is set to zero here and the capture tests set it back.
         vm.prank(FEE_SETTER);
-        feeCalculator.setPositiveSlippageEnabled(false);
+        feeCalculator.setRouterPositiveSlippageBps(0);
     }
 
     function pleEncode(bytes[] memory data)

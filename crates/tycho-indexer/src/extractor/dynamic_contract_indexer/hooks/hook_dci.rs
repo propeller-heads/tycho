@@ -2,7 +2,7 @@ use std::{collections::HashMap, slice};
 
 use deepsize::DeepSizeOf;
 use tonic::async_trait;
-use tracing::{debug, error, info, instrument, span, warn, Level};
+use tracing::{debug, error, info, instrument, span, warn, Instrument, Level};
 use tycho_common::{
     models::{
         blockchain::Transaction, protocol::ProtocolComponent, BlockHash, Chain, ComponentId, TxHash,
@@ -46,7 +46,8 @@ where
     pause_after_retries: u32,
 }
 
-type ComponentWithTxHash = (TxHash, ProtocolComponent); // TODO: See if it makes sens to make this a struct
+// TODO: See if it makes sens to make this a struct
+type ComponentWithTxHash = (TxHash, ProtocolComponent);
 
 impl<AE, T, G> UniswapV4HookDCI<AE, T, G>
 where
@@ -736,7 +737,6 @@ where
                 component_id = %component.id,
                 needs_entrypoints = needs_entrypoints,
             );
-            let _orchestrator_guard = orchestrator_span.enter();
 
             if let Some(orchestrator) = self
                 .hook_orchestrator_registry
@@ -767,6 +767,7 @@ where
                         &component_metadata_map,
                         needs_entrypoints,
                     )
+                    .instrument(orchestrator_span)
                     .await
                 {
                     Ok(()) => {

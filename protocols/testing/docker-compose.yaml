@@ -36,7 +36,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      RUST_LOG: "${RUST_LOG:-protocol_testing=info,error}"
+      RUST_LOG: "${RUST_LOG:-protocol_testing=info,tycho_test=info,error}"
       # Test mode: "range" (default) or "full" (continuous sync to chain tip, runs indefinitely).
       MODE: "${MODE:-range}"
       DATABASE_URL: postgres://postgres:mypassword@db:5432/tycho_indexer_0
@@ -48,7 +48,12 @@ services:
       BSC_RPC_URL: "${BSC_RPC_URL:-}"
       POLYGON_RPC_URL: "${POLYGON_RPC_URL:-}"
       ROBINHOOD_RPC_URL: "${ROBINHOOD_RPC_URL:-}"
+      ELYSIUM_RPC_URL: "${ELYSIUM_RPC_URL:-}"
       SUBSTREAMS_API_TOKEN: "${SUBSTREAMS_API_TOKEN}"
+      # Set to /reports to write each package's test report to ./reports on the host.
+      REPORT_DIR: "${REPORT_DIR:-}"
+    volumes:
+      - ./reports:/reports
     # PROTOCOLS to test separated by space and with optional filter
     # e.g. "ethereum-balancer-v2=weighted_legacy_creation ethereum-ekubo-v2"
     entrypoint: [ "/entrypoint.sh", "${PROTOCOLS}" ]

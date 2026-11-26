@@ -10,12 +10,6 @@ Tycho Simulation is a Rust crate that provides powerful tools for **interacting 
 
 The crate lives at <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">`crates/tycho-simulation`</a> inside the <a href="https://github.com/propeller-heads/tycho-indexer" target="_blank" rel="noopener noreferrer">Tycho monorepo</a>.
 
-{% hint style="info" %}
-**✨ New: Sub-Second Latency with Partial Blocks**
-
-Tycho now provides early support for partial blocks on Base, enabling sub-second latency by streaming pre-confirmation updates. Enable this feature with `.enable_partial_blocks()` on your `ProtocolStreamBuilder`.
-{% endhint %}
-
 ## Installation
 
 The `tycho-simulation` package is available on <a href="https://crates.io/crates/tycho-simulation" target="_blank" rel="noopener noreferrer">crates.io</a>.
@@ -196,12 +190,21 @@ Some protocols, such as Balancer V2 and Curve, require a pool filter to be defin
 
 The stream created emits `Update` messages which consist of:
 
-* `block number_or_timestamp`- the block this update message refers to
+* `block_number`- the block this update message refers to
 * `new_pairs`- new components witnessed (either recently created or newly meeting filter criteria)
 * `removed_pairs`- components no longer tracked (either deleted due to a reorg or no longer meeting filter criteria)
 * `states`- the updated `ProtocolSim` states for all components modified in this block
+* `sync_states`- the synchronization state of every protocol (see SynchronizerState in [Tycho Client](indexer/tycho-client/README.md))
 
 The first message received will contain states for all protocol components registered to. Thereafter, further block updates will only contain data for updated or new components.
+
+### When no block arrives
+
+The stream emits an `Update` only for rounds that carry a block. Each round waits up to the block time plus the latency buffer for the protocols' next block. When that wait runs out before any protocol delivers a block, the stream skips the round, so you receive nothing rather than an error. Chains that only produce a block when someone transacts reach this point whenever they go quiet for longer than the wait. The next `Update` carries the current `sync_states` of every protocol, including any that fell behind in the meantime.
+
+A quiet chain and a stalled upstream look the same from the stream: no `Update` arrives. To tell when your state has gone stale, track how long ago the last `Update` arrived, or compare the timestamp of the newest `Ready` header in `sync_states` with the clock, and stop quoting once it passes your limit.
+
+The stream counts every round it skips in the `protocol_stream_rounds_without_block_total` counter, which starts at zero. If your application installs a recorder for the <a href="https://docs.rs/metrics" target="_blank" rel="noopener noreferrer">metrics</a> crate, the counter reaches it with no further setup. At `DEBUG` level, `tycho_simulation::evm::stream` also logs each skipped round with its `sync_states`.
 
 If you want to restrict processing to specific tokens (for example USDC/WETH only), apply that filter in your own consumer logic when reading `new_pairs` and `states`.
 
@@ -213,12 +216,12 @@ For a full list of supported protocols and the simulation state implementations 
 `ProtocolStreamBuilder` supports the same <a href="https://docs.propellerheads.xyz/tycho/for-solvers/indexer/tycho-client#streaming-options" target="_blank" rel="noopener noreferrer">streaming options</a> as the Tycho Client, with one difference: TVL estimates are **always included** in the simulation package and cannot be disabled.
 {% endhint %}
 
-### Partial Blocks (Flashblocks)
+### Partial Blocks
 
-Some chains, such as <a href="https://docs.base.org/building-with-base/differences/flashblocks" target="_blank" rel="noopener noreferrer">Base</a>, support _flash blocks_ — pre-confirmation updates that contain parts of a future block before its construction is finished. Enable this on your stream to receive sub-block latency updates as they arrive. On chains without flash block support, enabling this flag is unsupported.
+Some chains make _partial blocks_: pre-confirmation updates that contain parts of a block before the chain seals it. Enable this option on your stream to receive these updates as they arrive. Do not enable this option on a chain that does not have partial blocks.
 
 ```rust
-let mut protocol_stream = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Base)
+let mut protocol_stream = ProtocolStreamBuilder::new(&tycho_url, chain)
     // ... other builder options ...
     .enable_partial_blocks()
     .await

@@ -36,6 +36,7 @@ const deploy_protocols = {
         "rfq:metric",
         "pricelevelstream",
         "rfq:native",
+        "rfq:euclid",
         "sky",
         "lido_v4",
         "etherfi",
@@ -45,6 +46,7 @@ const deploy_protocols = {
         "fallback:rfq:hashflow",
         "fallback:rfq:native",
         "fallback:rfq:liquorice",
+        "subsidy",
     ],
     "base": [
         "aero_basic",
@@ -58,13 +60,16 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "biconomy",
+        "pamm:baibai",
         "rfq:metric",
         "rfq:native",
         "fallback",
         "fallback:rfq:metric",
         "fallback:rfq:bebop",
         "fallback:rfq:native",
+        "fallback:pamm:baibai",
         "pancakeswap_infinity_cl",
+        "subsidy",
     ],
     "unichain": [
         "uniswap_v2",
@@ -107,6 +112,7 @@ const deploy_protocols = {
         "fallback:rfq:metric",
         "fallback:rfq:native",
         "lunarbase",
+        "subsidy",
     ],
     "plasma": [
         "uniswap_v3",
@@ -132,6 +138,15 @@ const deploy_protocols = {
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+    ],
+    "elysium": [
+        "aero_basic",
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
+        "native_wrapper",
+        "rfq:metric",
+        "fallback:rfq:metric",
     ],
 };
 

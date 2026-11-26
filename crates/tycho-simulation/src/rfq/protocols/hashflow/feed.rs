@@ -307,7 +307,7 @@ impl SnapshotFeed for HashflowPricesFeed {
 mod tests {
     use std::{env, str::FromStr, time::Duration};
 
-    use dotenv::dotenv;
+    use dotenvy::dotenv;
     use futures::StreamExt;
     use num_bigint::BigUint;
     use tokio::time::timeout;

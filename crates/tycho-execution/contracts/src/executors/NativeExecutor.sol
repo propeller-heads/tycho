@@ -70,6 +70,7 @@ contract NativeExecutor is IExecutor {
             revert NativeExecutor__InvalidTarget();
         }
 
+        // forge-lint: disable-next-line(unsafe-typecast) _decodeData guarantees at least four payload bytes; the cast reads the selector.
         bytes4 selector = bytes4(payload);
         if (selector != TRADE_RFQT_SELECTOR) {
             revert NativeExecutor__InvalidPayload();

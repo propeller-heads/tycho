@@ -9,19 +9,22 @@ serves it over HTTP/WebSocket.
 main.rs                     CLI entry point; account initialisation; extractor startup; Pyroscope CPU (and, with jemalloc heap profiling on, memory) profiling when PYROSCOPE_SERVER_URL is set
 cli.rs                      Command definitions: Index, Run, AnalyzeTokens, Rpc
 ot.rs                       OpenTelemetry tracing configuration
+leadership.rs               Leader election: one process commits, the others follow; `elect` returns the WriterStatus + background task; a send on its `release` gives up the lock on shutdown
 testing.rs                  Test utilities
 
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control; waits for internal subscribers (`PendingDeltas`) but removes a websocket client whose channel is full, counted in `extractor_slow_clients_removed_total` (registered at zero)
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero); a fenced writer (`StorageError::Fenced`) ends supervision instead of restarting; `RestartToTakeOver` rebuilds at once, without backoff; on a follower, waits to build the extractor while the leader syncs history; catches the entity cache up before every build but an immediate first one, and every hour while it waits
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
+  pause.rs                  PauseRegistry — admin pauses per protocol system, loaded at startup (a failed load stops startup); PauseRefresher re-reads them periodically, queues pause/unpause events for the extracted systems and signals each change
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
+  writer_status.rs          Role (Leader | Follower) + WriterStatus: role, leader's committed blocks and last lock confirmation as watch receivers; `needs_stream`, `extractors_behind_head`
   dynamic_contract_indexer/ DCI optional extension (see below)
     dci.rs                  Core DCI: DynamicContractIndexer implementation
     cache.rs                DCI component/contract cache
@@ -41,13 +44,14 @@ extractor/
 
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
-  rpc.rs                    HTTP endpoints: state snapshots, component queries
+  rpc.rs                    HTTP endpoints: state snapshots, component queries; clears the protocol_components and protocol_state response caches on each admin pause change
   off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per endpoint and step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
-    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::from_snapshot builds it from one StateSnapshotGateway read at startup; EntityCache::apply_catch_up writes a catch-up read atomically
+    catch_up.rs             CacheCatchUp — reads what the database committed since the last read (CatchUpRead) and applies it to the EntityCache; keeps the commit watermark
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
     shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
     cache/view.rs           AccountView / ComponentView — views of cache entries plus window changes;
@@ -86,9 +90,22 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 7. Aggregate all tx-level deltas → `BlockAggregatedChanges`; compute TVL.
 8. Broadcast `Arc<BlockAggregatedChanges>` to subscribers.
 
+### Block timestamps
+
+Several blocks of a fast chain share one second. The extractor stamps such a block one
+microsecond after the block before it, so every extractor gives a block the same timestamp. An
+extractor with no stored block has no block before its first one. The factory reads the blocks of
+that second up to the first one from the node, stamped (`earlier_blocks_in_second`). It never
+reads the stamp from the database, so the stamp depends only on the chain. Then it runs
+`check_stored_block` on the first block: when the block is already stored with another timestamp,
+the extractor stops with a setup error. After the check, it sets the block before the first one as
+the last processed block. The blocks after the first one are stamped from it, so this one check
+at start is enough, and the write path has no check. Account initialisation (used in tests)
+stores its block outside an extractor, so it takes the stamp from `earlier_blocks_in_second` too.
+
 ### Partial-block path
 
-Some chains (e.g. Base) emit multiple partial messages per block. While
+Some chains emit multiple partial messages per block. While
 `partial_block_index.is_some()`, each message is merged into `PartialBlockBuffer` (a single
 `Option<BlockChanges>`). An aggregated message is broadcast immediately for WebSocket consumers,
 but the block is **not** inserted into `ReorgBuffer` or written to DB until the full-block signal
@@ -102,6 +119,19 @@ contract state and injects it back into `BlockChanges`. Two implementations exis
 `DynamicContractIndexer` (`dci.rs` — generic EVM tracing) and `HooksDCI` (`hooks/hook_dci.rs` —
 UniswapV4-style hooks with permission detection and protocol-specific metadata via `integrations/`).
 When no DCI is configured the call is a no-op.
+`ExtractorFactory::build_runner` adds the plugin (`ProtocolExtractor::with_dci_plugin`) after the
+extractor read its cursor, so the plugin loads its state from the database after that read. On a
+follower the leader can commit in between: the stream then starts below the block of the plugin's
+state, and the plugin sees those blocks again (it does not trace again an entry point with a stored
+result) instead of missing them.
+Such a follower's messages for the replayed blocks can still differ from the leader's: a contract
+first tracked inside the replayed range counts as tracked already, so the message carries only its
+traced changes and not its full state, and a token first stored inside the range is known already,
+so a traced token contract gets only its traced slots. The database never holds this difference:
+an extractor that commits is built while no other process writes, either as the first leader or,
+after a takeover, from the cursor once the former leader is fenced (see "Restart to take over").
+Known and not yet fixed; reading the cursor and the plugin's state in one database snapshot
+removes it.
 
 ### Revert handling
 
@@ -147,7 +177,13 @@ database cursor.
 ## Persistence
 
 `CachedGateway` enqueues `WriteOp` messages; `DBCacheWriteExecutor` flushes them when the next
-block batch arrives. Writes follow a fixed FK-safe order (block → tx → contracts → tokens →
+block batch arrives. Each commit has a `WritePriority` (`write_priority`): `Backfill` when the
+newest block the extractor has received is older than `BACKFILL_BLOCK_AGE` (10 minutes, by block
+timestamp), else `Head`, so the executor runs the commits of extractors at the chain head first. A
+takeover commit uses the same rule. The committed blocks' own age cannot decide it, because only
+finalized blocks are committed and these are minutes old at the head. Finality cannot decide it
+either, because on many chains a block at the head is already final. Writes follow a fixed FK-safe
+order (block → tx → contracts → tokens →
 components → state → entry points → cursor). Every mutable row is versioned with `valid_from` /
 `valid_to` — historical rows are never mutated (see `tycho-storage/CLAUDE.md`).
 
@@ -157,6 +193,131 @@ they are provably behind the finality horizon.
 Drained blocks stay in the buffer's committing section (shared with the commit task via
 `Arc`) until `CachedGateway::flushed_block_height` passes them, so revert lookups can
 still see them while their write is in flight.
+
+### Leader election
+
+Several `index` processes can run against one database. All of them extract and serve WS/RPC;
+only the leader commits. `leadership::elect` (called in `main.rs` before the extractors are built)
+tries the `LeaderLock` once:
+
+- **Lock taken**: increments the writer epoch (`CachedGateway::increment_writer_epoch`), role
+  `Leader` from the start. `main.rs` then runs `initialize_all_accounts`. A single replica always
+  takes this path.
+- **Lock held elsewhere**: role `Follower`. A background task polls
+  `CachedGateway::get_committed_blocks` into the `WriterStatus` every second and retries the lock.
+  On success it increments the writer epoch (fencing the former leader, see "Writer fencing" in
+  `crates/tycho-storage/CLAUDE.md`) and only then switches the role to `Leader`, so no extractor
+  commits before the fence. A promoted process does not run `initialize_all_accounts`. The
+  initialized accounts are a testing aid to start indexing from a later block, and the first
+  leader wrote them.
+- **Leader**: the task checks the lock session every second (5s timeout) and ends with an error when
+  it fails. The task is one of the service tasks, so the process then shuts down. It restarts as a
+  follower. `tycho_leader` (gauge, 0/1) shows the role. `leader_lock_check_duration_seconds`
+  (histogram) records each check. The check runs on the main runtime, so checks close to the 5s
+  timeout show a runtime too busy to keep the lead.
+- **Shutdown**: on SIGTERM or SIGINT, `Shutdown::run` (`main.rs`) hands over in this order. It
+  closes every websocket connection with close code `Away` (`WsData::close_on_shutdown`), and
+  closes each open HTTP/1 connection after its next response (`close_connection_on_shutdown`
+  middleware). The server already stops accepting connections on the signal. So clients connect
+  to another instance, which streams already. It stops the extractors and waits up to 120 s
+  (`EXTRACTOR_STOP_TIMEOUT`) until their supervisors end (`ExtractorHandle::stopped`). A stopping
+  extractor of the leader first commits every final block of its reorg buffer and its staged
+  writes (`Extractor::shutdown`), so the next leader starts from that cursor and a DCI extractor
+  replays fewer blocks. With a large `--database-insert-batch-size` this takes time, so give the
+  pods a grace period above the timeout. It then sends on the `release` of `elect`. A leader
+  closes its lock session, so a follower takes over within one poll instead of when this process
+  exits. A follower stops retrying the lock, so a process that shuts down never becomes the
+  leader. A commit still running then fails on the writer fence. Last, it stops the server and
+  the write executor. Each supervisor logs `ExtractorStopped` and `Shutdown::run` logs
+  `ExtractorsStopped`, both with the time since the stop. The runner and the supervisor do not
+  wait to free their state, because freeing the chain-wide protocol cache takes seconds (about
+  7 s for 10M entries on Base) and would hold the lock that long. The runner closes its
+  substreams stream and ends, and the supervisor closes its control channel, so `stopped`
+  resolves. Each then frees its
+  state on the blocking thread pool (`drop_in_background`, logs `ExtractorStateFreed`). The
+  process still waits for those frees before it exits. The main thread exits after the first
+  error, or after the services end. When the extractors end cleanly first, it waits up to 40 s
+  (`SERVICES_STOP_TIMEOUT`) for the services, so the shutdown releases the lock and stops the
+  server before the process exits. A clean end of the election task, at that release, does not
+  end the services. They end with the shutdown task.
+- **Health**: each successful lock check is published in the `WriterStatus`
+  (`time_since_lead_confirmed`). `GET /v1/health` returns 503 while this process leads and has not
+  confirmed its lock for 30s, so a liveness probe restarts a leader that is stuck but still holds
+  the lock. A frozen process does not answer the probe at all, which has the same effect.
+- **Readiness**: `GET /v1/ready` returns 503 when `/v1/health` does, and while a follower is
+  behind the chain head (`WriterStatus::extractors_behind_head`): an extractor that
+  `needs_stream` has no block in its `DeltaWindow`, or its newest block is older than
+  `--ready-head-tolerance-secs` (`READY_HEAD_TOLERANCE_SECS`, default 60). The age is wall clock
+  minus the block timestamp. Extractors whose history the leader syncs do not count, so a rolling
+  update waits only for the extractors near the head. A leader is always ready while healthy. Use
+  it as the readiness probe and `/v1/health` as the liveness probe, because a follower that is
+  behind must not be restarted.
+
+### Leader and follower extractors
+
+Each extractor has a `CommitMode` driven by its `WriterStatus` (given to `ProtocolExtractor::new`
+by the factory, set by `ExtractorFactory::with_writer_status`; `WriterStatus::leader()` for the
+only writer). `new` reads the role before the cursor, or takes both from the entity cache
+snapshot (`ResumeFrom::Snapshot`, role read before the snapshot). A role only changes from
+follower to leader, so a process that becomes the leader after that read follows and then takes
+over from the cursor the former leader left, instead of committing again from an old cursor:
+
+- **Committing** (leader): the path above.
+- **Following**: drained blocks go into the committing section but are never written. They are
+  released once the leader's committed height for this extractor (`WriterStatus::committed_height`)
+  passes them. The released blocks' `new_tokens` then go into the token cache
+  (`ExtractorGateway::cache_tokens`), and each token with a component balance change gets the
+  block timestamp as its `last_traded`, the same point and values at which the leader's
+  write-through updates its cache. Without this, the cache refresh, which reads only token rows,
+  would leave `last_traded` at its startup value, and a `traded_n_days_ago` token query would
+  return fewer tokens each day.
+  Outgoing messages carry the leader's committed height as `db_committed_block_height`.
+  A following extractor retains committing blocks while they span less than
+  `FOLLOWER_RETENTION_SPAN`: 1 hour of chain time, newest minus oldest committing block
+  timestamp. It is chain time and not a block count, because block times range from 100 ms to
+  minutes. It is more than the finality delay of every chain, so a follower at the head does not
+  pause. At the limit, `Extractor::wait_for_capacity` (awaited by the runner before it pulls the
+  next block, in the same `select!` as the stop signal) pauses it until the leader's commits
+  release blocks or it becomes leader. It logs `FollowerPaused` and `FollowerResumed` with the
+  span and block count. It never drops retained blocks, because revert lookups rely on them until
+  the database covers them.
+- **Takeover**: on the first full block after the role turns `Leader`, the extractor reads its
+  `extraction_state` block (the former leader's last commit, `floor`), releases retained blocks at
+  or below it, commits the rest, and from then on drops every drained block at or below `floor`. A
+  follower that was behind the former leader therefore never writes a block twice. Messages report
+  `min(committed, finalized)`. If the first retained block is not the child of `floor` (by number
+  and parent hash), the takeover fails with `ReorgBufferError` and the supervisor restarts that
+  extractor from its cursor.
+- **Restart to take over (DCI)**: an extractor with a DCI plugin does not take over in place. Its
+  retained blocks and DCI state come from this process's own traces, and a trace that failed here
+  but not on the former leader (or the opposite) makes them track other contracts than the
+  database. On the first full block after the role turns `Leader`, it stops with
+  `ExtractionError::RestartToTakeOver` and commits nothing. The supervisor sends
+  `ExtractorRestarted` and builds it again at once, as leader, from the database cursor. There is
+  no backoff and no count toward `max_restarts` (`extractor_restarts_total` still counts it, and
+  `extractor_stopped{reason="restart_to_take_over"}` names it). The new stream replays the blocks
+  above the cursor, about one finality window, and traces them again.
+- **No stream while the leader syncs**: before it builds an extractor (at start and on each
+  restart), `ExtractorSupervisor` waits while `WriterStatus::needs_stream` is false. That is while
+  the process follows and the leader's newest committed block for the extractor is missing (first
+  sync) or older than `FOLLOWER_RETENTION_SPAN`. So only the leader pays Substreams for history, a
+  follower cannot serve history anyway, and a follower that opens its stream can retain every
+  block from the leader's commit to the head. The wait polls every second and still serves
+  `Stop`. During the wait the supervisor publishes `StreamState::WaitingForLeader` on a `watch`
+  channel, and `ExtractorHandle::subscribe` returns `SubscribeError::NotStreaming` at once, which
+  the WS client receives as `SubscribeError`. In every other state `subscribe` queues the request
+  and returns without waiting for the supervisor, which can be busy for a long time, for example
+  while it builds the extractor. The wait drops a `Subscribe` queued before it started, which
+  closes that subscriber's channel. It logs
+  `FollowerWaitsForLeaderSync`, `SubscriptionRejected` and `FollowerStreamStarts`. It ends when
+  the leader gets near the head or this process becomes leader. `/v1/health` and `/v1/ready` stay
+  200 during the wait, because the wait can last hours and a readiness gate would block a
+  rollout. tycho-client retries a rejected subscription on the same WS connection, so a client
+  that the load balancer keeps on such a follower uses up its retries. A client-side reconnect is
+  follow-up work. A process that is already leader builds the extractor with
+  `CommitMode::Committing` from the database cursor, as at a normal start. Once the stream is
+  open, the wait does not apply again until the next restart, and `FOLLOWER_RETENTION_SPAN` bounds
+  memory instead.
 
 ## Why extractor messages must be broadcast to the RPC service
 
@@ -174,17 +335,56 @@ Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until 
 `min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
 Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
 to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+The window learns `db_committed` only from the next block message, so the database can already
+hold blocks the window still calls uncommitted. Re-applied state deltas are harmless (absolute
+values), but `get_protocol_components` then lists a new component twice, once from the database
+and once from the window, and counts it twice in `total`. On a single writer this lasts from the
+write until the next message; on a follower, which learns the leader's height from a 1 s poll, up
+to 1 s plus one block time per leader commit. Known and not yet fixed.
+A follower can also lag the leader by more than the finality delay, for example after a stream
+reconnect on a chain with a short finality delay. Its `db_committed` is capped at its own
+finalized height, so a request at its tip counts as uncommitted: the database is read at `Latest`,
+which already holds the leader's newer commits, and only the follower's window deltas are applied
+on top. The answer then mixes two versions, and the follower's next deltas can set attributes back
+to older values. Known and not yet fixed; a follow-up can carry the uncapped leader height, so that
+versions at or below it are read from the database at that exact version.
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
 Metrics, labelled by `extractor`: `delta_window_fold_duration_ms` (summary, one sample per
 folded block), `delta_window_blocks` and `delta_window_tip_block` (gauges, set after every insert
 and every restart clear; an empty window reports 0 blocks and keeps its last tip).
 
-With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
-snapshot after the extractors are built and before the server starts (`EntityCache::load` in
-`services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
-window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
-load, and the windows fold into `DiscardSink`.
+With `--entity-cache-mode shadow|serve`, `main.rs` (`load_entity_cache`) reads the writer role and
+then one database snapshot through `StateSnapshotGateway`, before the extractors are built and the
+server starts. `EntityCache::from_snapshot` (`services/state/cache.rs`) builds the cache from it,
+and the services get the cache. The snapshot also holds each extractor's cursor and its block. The
+first build of each extractor resumes from that cursor (`ResumeFrom::Snapshot`, set with
+`ExtractorFactory::resume_next_build_from`), so it streams every block the cache does not hold,
+also when a leader commits during the read. The windows fold into the cache, under the window
+lock. A failed load is a setup error and ends the process. `off` (the default) skips the load,
+every extractor reads its database cursor, and the windows fold into `DiscardSink`.
+
+Every later build of an extractor, and a first build after the follower waited for the leader to
+sync history, resumes from a catch-up instead (`ExtractorSupervisor::catch_up_entity_cache`). The
+supervisor reads the writer role, then calls `CacheCatchUp::catch_up`
+(`services/state/catch_up.rs`) for the extractor's system, and the build resumes from the cursor it
+returns. A catch-up reads in one snapshot transaction (`StateSnapshotGateway::catch_up_read`):
+every live component of the system, the account rows written since the watermark, and the
+extractor cursors. The watermark is a point in the database's commit order (`CommitWatermark`, the
+`xmin` of the Postgres transaction snapshot); a row qualifies when its own `xmin` is not older. The
+account read covers every system, so `CacheCatchUp` keeps one watermark: the newest of the reads
+it applied. `EntityCache::apply_catch_up` then replaces the system's components and writes each
+account value with the fold rule (`AccountWrites`), all under one hold of the write lock.
+Catch-ups of different systems run in parallel: no lock is held during the read, and the apply
+and the move of the watermark happen with no await between them, so a dropped catch-up changes
+nothing. An older read applied after a newer one changes nothing either, because its values have
+older timestamps and the watermark keeps the larger value. A failed catch-up ends
+supervision, like a failed build.
+While a follower waits for the leader to sync an extractor's history, its supervisor also catches
+the cache up for that system every hour (`WAITING_CATCH_UP_INTERVAL`), so the catch-up at the end
+of the wait reads at most an hour of commits. A failed scheduled catch-up is logged and tried again
+at the next interval. Metrics: `entity_cache_catch_ups_total`,
+`entity_cache_catch_up_duration_seconds`.
 A fold copies an entry that a reader still holds. Two metrics count these copies, labelled by
 `entity`: `entity_cache_shared_copies_total` (counter, one per copy) and
 `entity_cache_shared_copy_duration_ms` (histogram, the time of each copy).
@@ -252,7 +452,8 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/add_entry_points` | Register entry points for tracing |
 | `/protocol_systems` | List available protocol systems |
 | `/component_tvl` | Component TVL estimates |
-| `/health` | GET — health check |
+| `/health` | GET — liveness check; 503 when the leader stopped confirming its lock |
+| `/ready` | GET — readiness check; 503 when unhealthy or while a follower is behind the chain head |
 | `/ws` | GET — WebSocket upgrade for delta subscriptions (exact match; `/ws/` 404s) |
 
 Registered outside the version prefix: `GET /docs/{...}` (Swagger UI, schema at

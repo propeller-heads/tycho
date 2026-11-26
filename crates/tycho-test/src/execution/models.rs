@@ -24,9 +24,10 @@ pub struct TychoExecutionInput {
     pub token_out: String,
     pub estimated_gas: BigUint,
     /// Accounts this simulation alone overwrites, applied after every other overwrite: the
-    /// account state a pAMM quote was priced on, for example. An account's balance, nonce, code
-    /// and full storage (`state`) replace the ones set before, and its `state_diff` slots merge in
-    /// slot by slot.
+    /// account state a pAMM quote was priced on, for example. An account's balance and nonce
+    /// replace the ones set before, and its `state_diff` slots merge in slot by slot. An account
+    /// that sets `code`, `state` or `move_precompile_to` is not supported: the simulation is not
+    /// run, and its result is `TychoExecutionResult::Failed` naming the account.
     pub account_overwrites: Option<AddressHashMap<AccountOverride>>,
 }
 
@@ -48,9 +49,15 @@ pub enum TychoExecutionResult {
         state_overwrites: Option<AddressHashMap<AccountOverride>>,
         overwrite_metadata: Option<OverwriteMetadata>,
     },
-    /// Execution failed due to error during preparation or processing
+    /// Nothing was executed: preparing the swap failed (a storage slot not found, an encoding
+    /// error), or the node returned an error for the call, which the simulator reports after
+    /// [`NODE_ERROR_PREFIX`]. Unlike a revert, it says nothing about the venue.
     Failed { error_msg: String },
 }
+
+/// What the `error_msg` of a [`TychoExecutionResult::Failed`] starts with when the node returned
+/// an error for the call, rather than the swap failing to be prepared.
+pub const NODE_ERROR_PREFIX: &str = "Transaction failed:";
 
 /// Input parameters for simulating a transaction.
 /// Contains the transaction request and optional state modifications.
@@ -69,6 +76,8 @@ pub(super) enum SimulationResult {
     Success { return_data: Vec<u8>, gas_used: u64 },
     /// Simulation reverted with reason
     Revert { reason: String },
+    /// The node returned an error for the call, so nothing executed
+    Failed { error_msg: String },
 }
 
 /// What to overwrite on the Tycho router and its executors for a swap simulation.

@@ -13,8 +13,8 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `main-workflow.yaml` | push to `main` | Orchestrates full CI → release → Docker build → dev deploy, and Grafana dashboard sync |
-| `ci-rust.yaml` | PR (Rust paths), push to `main`, `workflow_call` | Rust lint, test, and doc checks |
-| `ci-foundry.yaml` | PR/push (`foundry/`), manual | Solidity fmt, tests, gas snapshot, static analysis |
+| `ci-rust.yaml` | PR (Rust paths), merge queue, push to `main`, `workflow_call` | Rust lint, test, and doc checks |
+| `ci-foundry.yaml` | PR/push (`foundry/`), merge queue, manual | Solidity fmt, tests, gas snapshot, static analysis |
 | `ci-substreams.yaml` | PR (`substreams/`), manual | Lint and unit tests for changed substreams packages |
 | `ci-substreams-integration.yaml` | PR (`protocols/substreams/`, `protocols/testing/`), manual | Full protocol integration tests against a live DB |
 | `ci-router-trades.yaml` | PR/push (`crates/tycho-execution/substreams/`), manual | Router-trades lint, WASM build, unit tests, and PostgreSQL pricing integration |
@@ -23,6 +23,16 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 | `promote-to-prod.yaml` | Manual | Promote a tagged dev image to production |
 | `release.yaml` | GitHub Release published, manual | Upload binaries to GitHub + S3, publish crates to crates.io |
 | `release-substreams.yaml` | Tag `substreams/v*`, manual | Publish substreams crates, build and release substreams packages |
+
+---
+
+## Merge queue
+
+PRs to `main` merge through GitHub's merge queue. The queue tests each group of PRs on a merge commit with `main` and fires a `merge_group` event on it. Every required status check must report on that commit, so each workflow that produces one also runs on `merge_group`:
+
+- `ci-rust.yaml`, `ci-rust-evm.yaml` and `ci-foundry.yaml` filter by path as they do on PRs, diffing the group against its base on `main`. A skip job replaces a real job only when the `changes` job reports no relevant change; when detection fails, the real jobs run.
+- `ci-licensing.yaml` runs as on PRs.
+- `cla.yaml` and `validate-pr.yaml` check the PR itself (author signature, title), which a PR passes before it can enter the queue. On `merge_group` each runs a no-op job under the required check's name.
 
 ---
 

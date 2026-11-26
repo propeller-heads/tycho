@@ -11,6 +11,8 @@ import {
     ICurveCryptoPool,
     ICurveCryptoPoolETH,
     ICurveStablePool,
+    ICurveFyndPolicy,
+    ITwocryptoPolicyPool,
     isCurveStablePool
 } from "@interfaces/ICurvePool.sol";
 
@@ -18,9 +20,19 @@ error CurveExecutor__AddressZero();
 error CurveExecutor__InvalidDataLength();
 error CurveExecutor__TokenAddressZero();
 error CurveExecutor__NotAContract(address addr);
+error CurveExecutor__InvalidTaker(address taker);
 
+/// @notice Swap data: tokenIn(20) | tokenOut(20) | pool(20) | poolType(1) |
+/// i(1) | j(1), optionally followed by a grant for a pool whose policy is
+/// `ICurveFyndPolicy`: taker(20) | minAmountIn(32) | maxAmountIn(32) |
+/// fee(32) | nonce(8) | deadline(4) | signature(65). The executor submits the
+/// grant to the pool's policy before the swap. The grant's input coin is `i`,
+/// so the swap data does not carry it.
 contract CurveExecutor is IExecutor {
     using SafeERC20 for IERC20;
+
+    uint256 private constant _SWAP_DATA_LENGTH = 63;
+    uint256 private constant _GRANT_LENGTH = 193;
 
     address public immutable nativeToken;
     address public immutable stEthAddress;
@@ -55,16 +67,23 @@ contract CurveExecutor is IExecutor {
         external
         payable
     {
-        if (data.length != 63) {
+        if (
+            data.length != _SWAP_DATA_LENGTH
+                && data.length != _SWAP_DATA_LENGTH + _GRANT_LENGTH
+        ) {
             revert CurveExecutor__InvalidDataLength();
         }
         address tokenIn;
         address tokenOut;
         address pool;
         uint8 poolType;
-        int128 i;
-        int128 j;
+        uint8 i;
+        uint8 j;
         (tokenIn, tokenOut, pool, poolType, i, j) = _decodeData(data);
+
+        if (data.length == _SWAP_DATA_LENGTH + _GRANT_LENGTH) {
+            _submitGrant(pool, i, data[_SWAP_DATA_LENGTH:]);
+        }
 
         uint256 ethAmount = 0;
         if (tokenIn == nativeToken) {
@@ -72,22 +91,48 @@ contract CurveExecutor is IExecutor {
         }
 
         if (isCurveStablePool(poolType)) {
-            // forge-lint: disable-next-line(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
-            ICurveStablePool(pool).exchange{value: ethAmount}(i, j, amountIn, 0);
+            // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
+            ICurveStablePool(pool).exchange{value: ethAmount}(
+                int128(uint128(i)), int128(uint128(j)), amountIn, 0
+            );
         } else {
             // crypto or llamma
             if (tokenIn == nativeToken || tokenOut == nativeToken) {
                 // forge-lint: disable-next-item(arbitrary-send-eth) Sends the swap input to the pool the swap data names.
                 ICurveCryptoPoolETH(pool).exchange{value: ethAmount}(
-                    uint256(int256(i)), uint256(int256(j)), amountIn, 0, true
+                    i, j, amountIn, 0, true
                 );
             } else {
-                ICurveCryptoPool(pool)
-                    .exchange(
-                        uint256(int256(i)), uint256(int256(j)), amountIn, 0
-                    );
+                ICurveCryptoPool(pool).exchange(i, j, amountIn, 0);
             }
         }
+    }
+
+    /// @dev The taker must be the router's caller (`msg.sender` under
+    /// delegatecall) or `tx.origin`, as for a subsidy's `boundTo`. We can
+    /// narrow this to one of them if signatures get reused.
+    function _submitGrant(address pool, uint8 coinIn, bytes calldata grant)
+        internal
+    {
+        address taker = address(bytes20(grant[0:20]));
+        // forge-lint: disable-next-line(tx-origin) tx.origin only decides who may use the grant; it guards no funds.
+        if (taker != msg.sender && taker != tx.origin) {
+            revert CurveExecutor__InvalidTaker(taker);
+        }
+        ICurveFyndPolicy(ITwocryptoPolicyPool(pool).POLICY())
+            .submit_grant(
+                ICurveFyndPolicy.Grant({
+                    taker: taker,
+                    coin_in: coinIn,
+                    min_amount_in: uint256(bytes32(grant[20:52])),
+                    max_amount_in: uint256(bytes32(grant[52:84])),
+                    fee: uint256(bytes32(grant[84:116])),
+                    nonce: uint64(bytes8(grant[116:124])),
+                    deadline: uint32(bytes4(grant[124:128]))
+                }),
+                grant[128:_GRANT_LENGTH],
+                taker
+            );
     }
 
     function _decodeData(bytes calldata data)
@@ -98,8 +143,8 @@ contract CurveExecutor is IExecutor {
             address tokenOut,
             address pool,
             uint8 poolType,
-            int128 i,
-            int128 j
+            uint8 i,
+            uint8 j
         )
     {
         tokenIn = address(bytes20(data[0:20]));
@@ -109,8 +154,8 @@ contract CurveExecutor is IExecutor {
         }
         pool = address(bytes20(data[40:60]));
         poolType = uint8(data[60]);
-        i = int128(uint128(uint8(data[61])));
-        j = int128(uint128(uint8(data[62])));
+        i = uint8(data[61]);
+        j = uint8(data[62]);
     }
 
     /**

@@ -53,16 +53,18 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     function _listFixtures() internal {
         _deployments = vm.readFile(DEPLOYMENTS);
 
-        // TychoRouterV3(permit2, feeCalculator, pauserAdmin, unpauserAdmin, executorSetterAdmin,
-        // routerFeeSetterAdmin): permit2 is the only immutable, so it has to be the canonical
-        // Permit2. feeCalculator only needs deployed code, so Permit2 stands in — simulation
-        // points the router at a planted one through storage.
+        // TychoRouterV3(permit2, feeCalculator, executors, pausers, unpauserAdmin,
+        // executorSetterAdmin, routerFeeSetterAdmin): permit2 is the only immutable, so it has to
+        // be the canonical Permit2. feeCalculator only needs deployed code, so Permit2 stands in —
+        // simulation points the router at a planted one through storage. Executors live in
+        // storage too, so none are passed.
         _contract(
             "TychoRouterV3",
             abi.encode(
                 PERMIT2,
                 PERMIT2,
-                PLACEHOLDER_ADMIN,
+                new address[](0),
+                new address[](0),
                 PLACEHOLDER_ADMIN,
                 PLACEHOLDER_ADMIN,
                 PLACEHOLDER_ADMIN
@@ -78,6 +80,8 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // profile's (foundry.toml), not the deployment's, so the bytecode is not the deployed one.
         // Listed by fixture name.
         _executor("AeroBasic", "base", "aero_basic");
+        // The constructor reads the entrypoint's quote token, deployed after Base's pinned block.
+        _executor("Baibai", "base", "pamm:baibai", 53_545_000);
         _executor("BalancerV2", "ethereum", "vm:balancer_v2");
         _executor("BalancerV3", "ethereum", "vm:balancer_v3");
         _executor("Biconomy", "base", "biconomy");
@@ -127,8 +131,9 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // Past block 22090400, where the EtherFi redemption manager went live, so constructors
         // that check it for code can run.
         if (chain.eq(ETHEREUM)) return 23_000_000;
-        // No Base, BSC or Robinhood constructor reads chain state yet; these only pin the fork.
-        // All are past every address the deployment config names on the chain.
+        // No BSC or Robinhood constructor reads chain state yet, and the one Base constructor
+        // that does pins its own block; these only pin the fork. All are past every address the
+        // deployment config names on the chain, except BaiBai's entrypoint on Base.
         if (chain.eq("base")) return 46_500_000;
         if (chain.eq("bsc")) return 46_793_446;
         if (chain.eq("robinhood")) return 80_000_000;

@@ -12,6 +12,11 @@ pub const A_MULTIPLIER: U256 = U256::from_limbs([10_000, 0, 0, 0]);
 const MAX_ITERATIONS: usize = 255;
 
 pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Option<U256> {
+    // Vyper: assert D > 10**17 - 1 and D < 10**15 * 10**18 + 1  # dev: unsafe values D
+    // The contract reverts outside this domain; a drained pool (D = 0) would divide by zero.
+    if d < U256::from(10u128.pow(17)) || d > U256::from(10u128.pow(33)) {
+        return None;
+    }
     let n = U256::from(3u64);
     let mut others: Vec<U256> = x
         .iter()
@@ -25,7 +30,7 @@ pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Op
     let mut y = d / n;
     // others is sorted descending [large, small], iterate reversed (small first)
     for &other in others.iter().rev() {
-        y = y * d / (other * n);
+        y = (y * d).checked_div(other * n)?;
     }
     let k0_i = WAD * n * x_0 / d * n * x_1 / d;
     let s_i = x_0 + x_1;
@@ -53,9 +58,9 @@ pub fn newton_y_3(ann: U256, gamma: U256, x: [U256; 3], d: U256, j: usize) -> Op
             continue;
         }
         let yfprime = yfprime - _dyfprime;
-        let fprime = yfprime / y;
-        let y_minus = mul1 / fprime;
-        let y_plus = (yfprime + WAD * d) / fprime + y_minus * WAD / k0;
+        let fprime = yfprime.checked_div(y)?;
+        let y_minus = mul1.checked_div(fprime)?;
+        let y_plus = (yfprime + WAD * d) / fprime + (y_minus * WAD).checked_div(k0)?;
         let y_minus = y_minus + WAD * s / fprime;
         if y_plus < y_minus {
             y = y_prev / U256::from(2);
@@ -112,6 +117,22 @@ mod tests {
         let y = newton_y_3(ann, gamma, x, d, 2).expect("converge");
         assert!(y > U256::ZERO);
         assert!(y < d);
+    }
+
+    #[test]
+    fn newton_y_3_rejects_out_of_domain_d() {
+        let (ann, gamma, x, _) = realistic_params();
+        let below = U256::from(10u128.pow(17)) - U256::from(1u64);
+        let above = U256::from(10u128.pow(33)) + U256::from(1u64);
+        for (x, d) in [([U256::ZERO; 3], U256::ZERO), (x, U256::ZERO), (x, below), (x, above)] {
+            assert!(newton_y_3(ann, gamma, x, d, 2).is_none());
+        }
+    }
+
+    #[test]
+    fn newton_y_3_rejects_zero_other_balance() {
+        let (ann, gamma, x, d) = realistic_params();
+        assert!(newton_y_3(ann, gamma, [U256::ZERO, x[1], x[2]], d, 2).is_none());
     }
 
     #[test]

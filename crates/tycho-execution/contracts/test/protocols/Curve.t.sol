@@ -34,8 +34,8 @@ contract CurveExecutorExposed is CurveExecutor {
             address tokenOut,
             address pool,
             uint8 poolType,
-            int128 i,
-            int128 j
+            uint8 i,
+            uint8 j
         )
     {
         return _decodeData(data);
@@ -65,8 +65,8 @@ contract CurveExecutorTest is Test, TestUtils, Constants {
             address tokenOut,
             address pool,
             uint8 poolType,
-            int128 i,
-            int128 j
+            uint8 i,
+            uint8 j
         ) = curveExecutorExposed.decodeData(data);
 
         assertEq(tokenIn, WETH_ADDR);
