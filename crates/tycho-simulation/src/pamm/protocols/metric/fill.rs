@@ -8,6 +8,8 @@
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 
+use crate::book::sim;
+
 /// The side of the book an order walks: bids sell token0, asks buy it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BookSide {
@@ -50,6 +52,80 @@ pub(super) fn exact_fill_inside_bin(
             .max(proportional_floor)
             .min(bin.output.clone()),
     )
+}
+
+/// The price of the next unit once `remaining` input is taken inside `bin`, along the bin's own
+/// curve: output per input on bids, input per output on asks, in human units. `None` when the bin
+/// has no curve, and the caller uses the bin's average price.
+///
+/// On asks `exact_fill_inside_bin` solves `(I - E)·t + E·t² = in` for `t = x / O`, so the price
+/// is the slope `((I - E) + 2·E·t) / O`. On bids the fill is the walk's guess
+/// `G = O·in / (I - E)` run through one correction, `G·in / C(G)`, so the price is the slope of
+/// that expression. The walk applies the correction only when `C(G)` exceeds the input; otherwise
+/// the price is `O / (I - E)`.
+pub(super) fn marginal_price_inside_bin(
+    bin: Bin<'_>,
+    side: BookSide,
+    remaining: &BigUint,
+    decimals: (u32, u32),
+) -> Option<f64> {
+    let extra = bin_extra_input(bin, side, decimals)?;
+    let (input_decimals, output_decimals) = match side {
+        BookSide::Bids => (decimals.0, decimals.1),
+        BookSide::Asks => (decimals.1, decimals.0),
+    };
+    let input = sim::to_human(bin.input, input_decimals);
+    let extra = sim::to_human(&extra, input_decimals);
+    let output = sim::to_human(bin.output, output_decimals);
+    match side {
+        BookSide::Asks => {
+            let taken = exact_fill_inside_bin(bin, side, remaining, decimals)?;
+            let fraction = sim::to_human(&taken, output_decimals) / output;
+            Some(((input - extra) + 2.0 * extra * fraction) / output)
+        }
+        BookSide::Bids => {
+            let remaining = sim::to_human(remaining, input_decimals);
+            bid_marginal_price(input, extra, output, remaining)
+        }
+    }
+}
+
+/// The slope of the walk's bid fill at `remaining` input, from the guess and its one correction.
+/// `None` when the guess reaches the bin's whole output, where the walk clamps it.
+fn bid_marginal_price(input: f64, extra: f64, output: f64, remaining: f64) -> Option<f64> {
+    let opening_slope = output / (input - extra);
+    let guess = opening_slope * remaining;
+    if guess >= output {
+        return None;
+    }
+    let cost = bid_input_for_guess(input, extra, output, guess);
+    if cost <= remaining {
+        return Some(opening_slope);
+    }
+    let cost_slope = bid_input_slope(input, extra, output, guess);
+    Some(
+        (opening_slope * remaining + guess) / cost -
+            remaining * guess * cost_slope * opening_slope / (cost * cost),
+    )
+}
+
+/// The input the pool charges for `output` of the bin on bids, in human units. The continuous form
+/// of `bid_input_for_output`.
+fn bid_input_for_guess(input: f64, extra: f64, bin_output: f64, output: f64) -> f64 {
+    let net = input - extra;
+    let high_output = (input + extra) * bin_output;
+    output * net * (high_output - extra * output) /
+        (bin_output * (high_output - 2.0 * extra * output))
+}
+
+/// The derivative of `bid_input_for_guess` in `output`.
+fn bid_input_slope(input: f64, extra: f64, bin_output: f64, output: f64) -> f64 {
+    let net = input - extra;
+    let high_output = (input + extra) * bin_output;
+    let curvature = high_output * high_output - 2.0 * extra * high_output * output +
+        2.0 * extra * extra * output * output;
+    let slope = high_output - 2.0 * extra * output;
+    net * curvature / (bin_output * slope * slope)
 }
 
 /// `E`: what the whole bin would cost at its closing price, minus what it costs, the bin's

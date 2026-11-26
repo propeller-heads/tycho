@@ -13,7 +13,7 @@ use tycho_common::{
     Bytes,
 };
 
-use super::fill::{exact_fill_inside_bin, Bin, BookSide};
+use super::fill::{exact_fill_inside_bin, marginal_price_inside_bin, Bin, BookSide};
 use crate::{
     book::{component::PairState, sim},
     pamm::protocols::metric::models::{MetricBidAskResponse, MetricDepthBin, MetricMetadata},
@@ -176,8 +176,9 @@ impl MetricState {
         }
     }
 
-    /// The average price of the whole bin the fill stopped in, in quote tokens per base token.
-    /// An invalid-input error once the fill used up the side.
+    /// The price of the next unit after the fill, on the curve of the bin the fill stopped in. A
+    /// bin without a curve is priced at its average. An invalid-input error once the fill used up
+    /// the side.
     fn price_after_fill(&self, fill: &MetricFill) -> Result<f64, SimulationError> {
         let Some(side) = self.tradable_side(fill.direction)? else {
             return Err(SimulationError::InvalidInput(NO_TRADABLE_SIDE.into(), None));
@@ -210,6 +211,13 @@ impl MetricState {
                 ));
             }
             if bin.cumulative_input_volume > fill.amount_in {
+                let remaining = saturating_sub(&fill.amount_in, &previous_input);
+                let curve = Bin { input: &input, output: &output, price: &bin.price };
+                if let Some(price) =
+                    marginal_price_inside_bin(curve, side.side, &remaining, side.decimals)
+                {
+                    return Ok(price);
+                }
                 let input = sim::to_human(&input, in_decimals);
                 let output = sim::to_human(&output, out_decimals);
                 return Ok(match fill.direction {
@@ -1646,7 +1654,7 @@ mod tests {
     /// After a buy of WETH on the ask side, the other direction's spot price is the inverse of
     /// the bin's average price: 30100 USDC for 10 WETH, so 3010 USDC per WETH.
     #[test]
-    fn spot_price_after_an_ask_side_fill_is_the_bins_average_price() {
+    fn spot_price_after_an_ask_side_fill_on_a_flat_bin_is_the_bins_price() {
         let bought = buy_weth(&state(), 3_010_000_000).unwrap();
 
         let spot = metric_state(&bought)
@@ -1715,6 +1723,78 @@ mod tests {
         };
         assert_eq!(message, "Metric pool already quoted in this route");
         assert!(matches!(price(&all), Err(SimulationError::InvalidInput(_, None))));
+    }
+
+    /// The bin buys 1 WETH for 2950 USDC and closes at 2900, so it is curved: after a dust fill
+    /// the next unit pays about 3001.7 USDC per WETH, not the bin's average of 2950.
+    #[test]
+    fn spot_price_after_a_fill_on_a_curved_bid_bin_is_the_next_units_price() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![depth_bin("2950000000", "1000000000000000000")];
+
+        let filled = sell_weth(&state, 1_000_000_000_000).unwrap();
+        let spot = metric_state(&filled)
+            .spot_price(&weth(), &usdc())
+            .unwrap();
+
+        let next = sell_weth(metric_state(&filled), 100_000_000_000_000).unwrap();
+        let next_price = next
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap() /
+            1e6 /
+            1e-4;
+        assert!((spot - next_price).abs() / next_price < 1e-4, "spot {spot}, next {next_price}");
+    }
+
+    /// Halfway along the same curved bin the next unit is priced on the curve at that point, which
+    /// is lower than at the open.
+    #[test]
+    fn spot_price_mid_curved_bid_bin_is_the_next_units_price() {
+        let mut state = state();
+        state.bid_ask.depth.bids = vec![depth_bin("2950000000", "1000000000000000000")];
+
+        let filled = sell_weth(&state, 500_000_000_000_000_000).unwrap();
+        let spot = metric_state(&filled)
+            .spot_price(&weth(), &usdc())
+            .unwrap();
+
+        let next = sell_weth(metric_state(&filled), 100_000_000_000_000).unwrap();
+        let next_price = next
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap() /
+            1e6 /
+            1e-4;
+        assert!((spot - next_price).abs() / next_price < 1e-4, "spot {spot}, next {next_price}");
+    }
+
+    /// The ask bin sells 1 WETH for 3000 USDC and closes at 3100, so it is curved: after a small
+    /// buy the next USDC buys about 1 / 2900 WETH, not the bin's average of 1 / 3000.
+    #[test]
+    fn spot_price_after_a_fill_on_a_curved_ask_bin_is_the_next_units_price() {
+        let mut state = state();
+        state.bid_ask.depth.asks = vec![MetricDepthBin {
+            // 3100 * 2^64
+            price: big("57184906628499610009600"),
+            ..depth_bin("1000000000000000000", "3000000000")
+        }];
+
+        let bought = buy_weth(&state, 1_000_000).unwrap();
+        let spot = metric_state(&bought)
+            .spot_price(&usdc(), &weth())
+            .unwrap();
+
+        let next = buy_weth(metric_state(&bought), 1_000_000).unwrap();
+        let next_price = next
+            .amount
+            .to_string()
+            .parse::<f64>()
+            .unwrap() /
+            1e18;
+        assert!((spot - next_price).abs() / next_price < 1e-4, "spot {spot}, next {next_price}");
     }
 
     #[test]
