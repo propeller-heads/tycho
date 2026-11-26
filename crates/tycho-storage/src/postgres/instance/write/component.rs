@@ -349,15 +349,36 @@ pub(super) async fn check_protocol_types_stored(
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
-    use tycho_common::storage::StorageError;
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use serde_json::json;
+    use tycho_common::{
+        models::{
+            blockchain::{Block, Transaction},
+            protocol::ProtocolComponent as DomainComponent,
+            Chain, ChangeType,
+        },
+        storage::StorageError,
+        Bytes,
+    };
 
     use super::check_protocol_types_stored;
     use crate::postgres::{
+        cache::WriteOp,
         db_fixtures,
-        instance::{gateway::PostgresGatewayNew, schema::tycho::protocol_component},
+        instance::{
+            gateway::PostgresGatewayNew,
+            origins::BatchOrigins,
+            orm::ProtocolComponent,
+            schema::tycho::{
+                protocol_component, protocol_component_holds_contract,
+                protocol_component_holds_token,
+            },
+            InstanceId,
+        },
         testing::instance_test_connection,
     };
 
@@ -444,5 +465,450 @@ mod tests {
             result,
             Err(StorageError::NotFound("ProtocolType".to_string(), "missing".to_string()))
         );
+    }
+
+    fn ts(second: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 26)
+            .and_then(|date| date.and_hms_opt(12, 0, second))
+            .expect("a valid timestamp")
+    }
+
+    /// A batch of block 10 at second 10 with the transaction `0xa1` at index 1, and of block 11 at
+    /// second 11 with the transaction `0xb2` at index 2.
+    fn origins() -> BatchOrigins {
+        let block = |number: u8| {
+            Block::new(
+                number.into(),
+                Chain::Ethereum,
+                Bytes::from(vec![number]),
+                Bytes::default(),
+                ts(number.into()),
+            )
+        };
+        let tx = |hash: u8, block: &Block, index: u64| {
+            Transaction::new(
+                Bytes::from(vec![hash]),
+                block.hash.clone(),
+                Bytes::default(),
+                None,
+                index,
+            )
+        };
+        let (block_10, block_11) = (block(10), block(11));
+        let ops = vec![
+            WriteOp::UpsertBlock(vec![block_10.clone(), block_11.clone()]),
+            WriteOp::UpsertTx(vec![tx(0xa1, &block_10, 1), tx(0xb2, &block_11, 2)]),
+        ];
+        BatchOrigins::from_ops(&ops).expect("a valid batch")
+    }
+
+    fn token(id: u8) -> Bytes {
+        Bytes::from(vec![0x70, id])
+    }
+
+    fn contract(id: u8) -> Bytes {
+        Bytes::from(vec![0xc0, id])
+    }
+
+    fn component(
+        id: &str,
+        tokens: Vec<Bytes>,
+        contracts: Vec<Bytes>,
+        creation_tx: u8,
+    ) -> DomainComponent {
+        DomainComponent::new(
+            id,
+            "vm:curve",
+            "pool",
+            Chain::Ethereum,
+            tokens,
+            contracts,
+            HashMap::new(),
+            ChangeType::Creation,
+            Bytes::from(vec![creation_tx]),
+            ts(1),
+        )
+    }
+
+    /// An instance with the protocol type `pool`, the tokens 0 and 1, and the account of
+    /// contract 1.
+    async fn setup() -> (AsyncPgConnection, PostgresGatewayNew, InstanceId) {
+        let mut conn = instance_test_connection().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:curve".to_string()).await;
+        let instance = db_fixtures::insert_instance(&mut conn, system, "0.0.1").await;
+        db_fixtures::insert_protocol_type(&mut conn, "pool", None, None, None).await;
+        for id in [0, 1] {
+            db_fixtures::insert_token(&mut conn, &hex::encode(token(id)), "TKN", 18, None).await;
+        }
+        db_fixtures::insert_instance_account(&mut conn, instance, contract(1)).await;
+        let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
+        (conn, gateway, instance)
+    }
+
+    async fn stored(conn: &mut AsyncPgConnection, instance: InstanceId) -> Vec<ProtocolComponent> {
+        protocol_component::table
+            .filter(protocol_component::instance_id.eq(instance))
+            .order_by(protocol_component::external_id)
+            .select(ProtocolComponent::as_select())
+            .load(conn)
+            .await
+            .expect("loading the components failed")
+    }
+
+    /// Token links of the instance as (component id, token, index), by component and index.
+    async fn token_links(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+    ) -> Vec<(i64, Bytes, i16)> {
+        protocol_component_holds_token::table
+            .filter(protocol_component_holds_token::instance_id.eq(instance))
+            .order_by((
+                protocol_component_holds_token::protocol_component_id,
+                protocol_component_holds_token::token_index,
+            ))
+            .select((
+                protocol_component_holds_token::protocol_component_id,
+                protocol_component_holds_token::token,
+                protocol_component_holds_token::token_index,
+            ))
+            .load(conn)
+            .await
+            .expect("loading the token links failed")
+    }
+
+    /// Contract links of the instance as (component id, account id).
+    async fn contract_links(conn: &mut AsyncPgConnection, instance: InstanceId) -> Vec<(i64, i64)> {
+        protocol_component_holds_contract::table
+            .filter(protocol_component_holds_contract::instance_id.eq(instance))
+            .order_by((
+                protocol_component_holds_contract::protocol_component_id,
+                protocol_component_holds_contract::account_id,
+            ))
+            .select((
+                protocol_component_holds_contract::protocol_component_id,
+                protocol_component_holds_contract::account_id,
+            ))
+            .load(conn)
+            .await
+            .expect("loading the contract links failed")
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_stores_the_component() {
+        let (mut conn, gateway, instance) = setup().await;
+        let mut with_fee = component("a", vec![token(0)], vec![], 0xb2);
+        with_fee.static_attributes = HashMap::from([("fee".to_string(), Bytes::from(100u8))]);
+        let without_attributes = component("b", vec![token(0)], vec![], 0xa1);
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[with_fee, without_attributes],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let stored = stored(&mut conn, instance).await;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].external_id, "a");
+        assert_eq!(stored[0].protocol_type, "pool");
+        assert_eq!(stored[0].creation_block, 11);
+        assert_eq!(stored[0].creation_tx_hash, Bytes::from(vec![0xb2]));
+        assert_eq!(stored[0].created_at, ts(1));
+        assert_eq!(stored[0].attributes, Some(json!({"fee": "0x64"})));
+        assert_eq!(stored[0].deleted_at, None);
+        assert_eq!((stored[1].creation_block, stored[1].attributes.as_ref()), (10, None));
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_links_tokens_in_order() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(1), token(0)], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let id = stored(&mut conn, instance).await[0].id;
+        assert_eq!(
+            token_links(&mut conn, instance).await,
+            vec![(id, token(1), 0), (id, token(0), 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_links_the_instance_account() {
+        let (mut conn, gateway, instance) = setup().await;
+        let account = gateway
+            .account_ids(instance, &[&contract(1)], &mut conn)
+            .await
+            .unwrap()[&contract(1)];
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![contract(1)], 0xa1)],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let id = stored(&mut conn, instance).await[0].id;
+        assert_eq!(contract_links(&mut conn, instance).await, vec![(id, account)]);
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_without_tokens_has_no_token_link() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stored(&mut conn, instance).await.len(), 1);
+        assert_eq!(token_links(&mut conn, instance).await, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_resent_component_keeps_the_first_row_and_links() {
+        let (mut conn, gateway, instance) = setup().await;
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        // Sent again in a later batch: its creation transaction `0xff` is not in this batch, and
+        // its protocol type is not stored.
+        let mut again = component("a", vec![token(1)], vec![contract(1)], 0xff);
+        again.protocol_type_name = "missing".to_string();
+        gateway
+            .insert_protocol_components(instance, &origins(), &[again], &mut conn)
+            .await
+            .unwrap();
+
+        let stored = stored(&mut conn, instance).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].creation_tx_hash, Bytes::from(vec![0xa1]));
+        assert_eq!(token_links(&mut conn, instance).await, vec![(stored[0].id, token(0), 0)]);
+        assert_eq!(contract_links(&mut conn, instance).await, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_same_component_twice_in_one_op_is_stored_once() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[
+                    component("a", vec![token(0)], vec![], 0xa1),
+                    component("a", vec![token(1)], vec![contract(1)], 0xb2),
+                ],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let stored = stored(&mut conn, instance).await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].creation_tx_hash, Bytes::from(vec![0xa1]));
+        assert_eq!(token_links(&mut conn, instance).await, vec![(stored[0].id, token(0), 0)]);
+        assert_eq!(contract_links(&mut conn, instance).await, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_an_unknown_type() {
+        let (mut conn, gateway, instance) = setup().await;
+        let mut unknown = component("a", vec![token(0)], vec![], 0xa1);
+        unknown.protocol_type_name = "missing".to_string();
+
+        let result = gateway
+            .insert_protocol_components(instance, &origins(), &[unknown], &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("ProtocolType".to_string(), "missing".to_string()))
+        );
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_an_unknown_token() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(9)], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(result, Err(StorageError::NotFound("Token".to_string(), token(9).to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_another_protocol_system() {
+        let (mut conn, gateway, instance) = setup().await;
+        let mut other = component("a", vec![token(0)], vec![], 0xa1);
+        other.protocol_system = "vm:other".to_string();
+
+        let result = gateway
+            .insert_protocol_components(instance, &origins(), &[other], &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::Unexpected(format!(
+                "Component a of vm:other cannot go into instance {instance} of vm:curve"
+            )))
+        );
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_a_token_listed_twice() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0), token(1), token(0)], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::Unexpected(format!(
+                "Component a lists the token {} twice",
+                token(0)
+            )))
+        );
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_a_contract_listed_twice() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![contract(1), contract(1)], 0xa1)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::Unexpected(format!(
+                "Component a lists the contract {} twice",
+                contract(1)
+            )))
+        );
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_an_account_of_another_instance() {
+        let (mut conn, gateway, instance) = setup().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:other".to_string()).await;
+        let other = db_fixtures::insert_instance(&mut conn, system, "0.0.1").await;
+        db_fixtures::insert_instance_account(&mut conn, other, contract(2)).await;
+
+        let result = gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![contract(2)], 0xa1)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Account".to_string(), contract(2).to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_fails_for_a_tx_outside_the_batch() {
+        let (mut conn, gateway, instance) = setup().await;
+
+        let result = gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![], 0xff)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound(
+                "Transaction".to_string(),
+                Bytes::from(vec![0xff]).to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_protocol_components_writes_only_its_instance() {
+        let (mut conn, gateway, instance) = setup().await;
+        let system = db_fixtures::insert_protocol_system(&mut conn, "vm:other".to_string()).await;
+        let other = db_fixtures::insert_instance(&mut conn, system, "0.0.1").await;
+        let other_pool =
+            db_fixtures::insert_instance_component(&mut conn, other, "a", &[token(1)]).await;
+
+        gateway
+            .insert_protocol_components(
+                instance,
+                &origins(),
+                &[component("a", vec![token(0)], vec![], 0xa1)],
+                &mut conn,
+            )
+            .await
+            .unwrap();
+
+        let ours = stored(&mut conn, instance).await;
+        assert_eq!(ours.len(), 1);
+        assert_eq!(token_links(&mut conn, instance).await, vec![(ours[0].id, token(0), 0)]);
+        let theirs = stored(&mut conn, other).await;
+        assert_eq!((theirs.len(), theirs[0].id), (1, other_pool));
+        assert_eq!(token_links(&mut conn, other).await, vec![(other_pool, token(1), 0)]);
     }
 }
