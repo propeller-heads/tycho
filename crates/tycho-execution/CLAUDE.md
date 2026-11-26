@@ -284,9 +284,8 @@ quoter there is the cheaper option. The pAMM quote is a low-level call whose ret
 is at least 32 bytes; the fallback quote runs in the self-only external `quoteFallback` under try/catch. A fallback
 quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero, and equal quotes keep
 the pAMM. A pAMM that quotes zero skips the fallback quote and its own swap, so the fallback runs straight away. The
-fallback quote costs gas on every other leg, including the ones the pAMM fills: about 107k for a Uniswap V4
-simulation, about 44k for Fluid, about 39k for Curve, about 31k for Uniswap V3, about 11k for Uniswap V2 (router
-call, cold state, mainnet fork).
+fallback quote costs gas on every other leg, including the ones the pAMM fills; `fallback_quote_gas` in
+`gas_estimator.rs` gives the measured cost and the budget per protocol.
 
 `FallbackSwap(primary, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
@@ -579,8 +578,10 @@ same `FallbackSwapData` `user_data`:
 
 The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum, Polygon and Elysium, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
-The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
-Hashflow, Native or Liquorice leg the router's approval and output forward.
+The gas estimator charges every leg whose router quotes the fallback a budget for that quote, by fallback protocol
+and chain (`fallback_quote_gas`). It also charges a Metric leg its pool gas twice (the simulation runs the pool's
+swap), a BaiBai leg the entrypoint's `quoteFor`, and a Bebop, Hashflow, Native or Liquorice leg the router's
+approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
