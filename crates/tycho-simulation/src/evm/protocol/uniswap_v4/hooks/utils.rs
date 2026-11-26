@@ -1,4 +1,5 @@
 use alloy::primitives::{Address, I128, I256};
+use tycho_common::simulation::errors::SimulationError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -46,6 +47,21 @@ pub fn get_lower_i128(value: I256) -> I128 {
         bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
         bytes[24], bytes[25], bytes[26], bytes[27], bytes[28], bytes[29], bytes[30], bytes[31],
     ])
+}
+
+/// `value` as an `int128`, as v4-core's `SafeCast.toInt128` casts an amount a swap moves. Past
+/// `int128` that cast reverts `SafeCastOverflow` and the swap with it, so this refuses with
+/// `InvalidInput`, naming `what` the value is.
+pub fn to_int128(value: I256, what: &str) -> Result<I128, SimulationError> {
+    i128::try_from(value)
+        .ok()
+        .and_then(|value| I128::try_from(value).ok())
+        .ok_or_else(|| {
+            SimulationError::InvalidInput(
+                format!("{what} {value} does not fit an int128: the pool manager reverts"),
+                None,
+            )
+        })
 }
 
 #[cfg(test)]

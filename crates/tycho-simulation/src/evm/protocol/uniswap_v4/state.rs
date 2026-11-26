@@ -32,6 +32,7 @@ use crate::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
                     StateContext, SwapOutcome, SwapParams,
                 },
+                utils::to_int128,
             },
             utils::{
                 add_fee_markup,
@@ -1049,8 +1050,10 @@ impl ProtocolSim for UniswapV4State {
             .map_or(Ok(None), |hook| hook.handler_after_swap(&state_context, &swap_params))
             .map_err(|e| hook_call_error("HandlerAfterSwap", e))?;
 
-        // Create BalanceDelta from swap result using the proper constructor
-        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
+        // `Pool.swap` casts the input it took and the output with `toInt128`, reverting past it.
+        to_int128(amount_to_swap - result.amount_remaining, "The swap's input")?;
+        let mut swap_delta =
+            BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one)?;
 
         // Get deltas (change in the specified/given and unspecified/computed token balances after
         // calling before swap)
@@ -1089,8 +1092,7 @@ impl ProtocolSim for UniswapV4State {
             } else {
                 BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
             };
-            // This is a BalanceDelta subtraction
-            swap_delta = swap_delta - hook_delta
+            swap_delta = swap_delta.checked_sub(hook_delta)?;
         }
 
         let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
@@ -4709,6 +4711,60 @@ mod tests {
                 .contains("must be positive"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A hookless, feeless pool at tick 46_080 (a price of about 100 token1 per token0) with
+    /// full-range liquidity of 2^126, deep enough that one swap moves more than an `int128` of
+    /// either token.
+    fn pool_moving_past_int128() -> UniswapV4State {
+        let liquidity = 1u128 << 126;
+        let net = i128::try_from(liquidity).unwrap();
+        let tick = 46_080;
+        UniswapV4State::new(
+            liquidity,
+            get_sqrt_ratio_at_tick(tick).unwrap(),
+            UniswapV4Fees::new(0, 0, 0),
+            tick,
+            60,
+            vec![TickInfo::new(-887_220, net).unwrap(), TickInfo::new(887_220, -net).unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// v4's `Pool.swap` casts the amounts a swap moves with `toInt128`, which reverts past
+    /// `int128`. Selling 2^122 token0 moves the square-root price from about 10 to about 6.2,
+    /// paying about 3.8 * 2^126 token1, past `int128`, for an input that fits one.
+    #[test]
+    fn test_get_amount_out_refuses_an_output_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.get_amount_out(BigUint::from(1u8) << 122, &token_x(), &token_y());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    /// Selling 2^200 token1 walks the price to the top of the range, which takes about 2^190
+    /// token1, past `int128`, while it pays out less than 2^126 token0.
+    #[test]
+    fn test_get_amount_out_refuses_an_input_taken_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.get_amount_out(BigUint::from(1u8) << 200, &token_y(), &token_x());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    #[test]
+    fn test_get_amount_out_quotes_amounts_within_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool
+            .get_amount_out(BigUint::from(1u8) << 100, &token_x(), &token_y())
+            .unwrap();
+
+        // About 100 token1 per token0 this close to the start of the walk.
+        assert!(result.amount > BigUint::from(99u8) << 100, "{}", result.amount);
+        assert!(result.amount < BigUint::from(101u8) << 100, "{}", result.amount);
     }
 }
 
