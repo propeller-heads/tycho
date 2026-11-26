@@ -87,10 +87,10 @@ for any protocol indexed by Tycho.
   complete book rather than as chain state. A feed publishes `BookSnapshot<A>` (a provider's whole
   set of `Book`s at one anchor — `ReceivedAt` for every feed here; a block-anchored feed would pick
   another `A`), and a `Book` is one book's simulate-ready component + state, plus the provider's
-  `updated_at` where it reports one: a pair for Bebop, Euclid, Native, Metric and BaiBai, a pair and one
-  market maker for Hashflow and Liquorice, whose firm quote comes from the maker it is asked of. A
-  provider's `*Feed` implements `SnapshotFeed` directly, with a `run` that calls one of the two
-  loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
+  `updated_at` where it reports one: a pair for Bebop, Euclid, Native, Metric and BaiBai, a market
+  (one proxy orderbook) for Hanji, a pair and one market maker for Hashflow and Liquorice, whose
+  firm quote comes from the maker it is asked of. A provider's `*Feed` implements `SnapshotFeed`
+  directly, with a `run` that calls one of the two loops and nothing else. `BookFeedConfig` (chain, tokens, minimum book TVL in USD) is what every
   book feed needs whatever transport it runs on, and is the first argument of every feed builder;
   `BookFeedStreams`/`BookFeedEvent` are `SnapshotFeedStreams`/`SnapshotFeedEvent` with the book
   types filled in
@@ -155,7 +155,7 @@ for any protocol indexed by Tycho.
   fallback router; off by default. The Native and Liquorice routers are not deployed yet. The
   fallback routers trade ERC20s only, so Native's fallback feed offers no native-token books
 - **`pamm/`**: book feeds for pAMMs — venues priced off-chain but executed directly against
-  the pool, no binding quote (Metric and BaiBai; their states do not implement
+  the pool, no binding quote (Metric, BaiBai and Hanji; their states do not implement
   `IndicativelyPriced`, and each client is held by the feed alone rather than by every state).
   Metric polls the venue's API; BaiBai reads its on-chain curve over JSON-RPC (one batch per
   poll: a Multicall3 call, and each proxy's implementation slot, checked against the
@@ -166,6 +166,9 @@ for any protocol indexed by Tycho.
   its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
+  Hanji follows the same layout without `math.rs` (its level walk lives in `state.rs`), plus
+  `market.rs` for the market list it fetches from Hanji's API; `hanji/mod.rs` documents which
+  book it reads for which taker and the markets it leaves out.
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the

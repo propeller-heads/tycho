@@ -18,7 +18,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 
 - **On-chain Protocols**: All DEX protocols supported by Tycho (Uniswap V2/V3, Curve, Balancer, etc.)
 - **RFQ Protocols**: Request-for-Quote venues (Bebop, Hashflow, Liquorice, Native), each run when its credentials are set, and Euclid, whose gateway is public and which runs on Ethereum without credentials.
-- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai on Base when listed). BaiBai's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`
+- **pAMM Book Feeds**: venues selected by `--pamm` (default: Metric; BaiBai and Hanji on Base when listed). BaiBai's swaps are simulated, but fail to encode and are skipped with a warning until its executor is deployed and listed in `executor_addresses.json`; the same holds for Hanji
 - **Price Level Stream**: Titan pAMM price level stream venues (`pricelevelstream:*`, Ethereum only)
 
 ## Configuration
@@ -29,7 +29,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 |-----------------|----------------------------|--------------------------------------------|
 | `RUST_LOG`      | Logging configuration      | `tycho_integration_test=info,error`        |
 | `TYCHO_URL`     | Tycho indexer endpoint     | `tycho-dev.propellerheads.xyz`             |
-| `RPC_URL`       | Blockchain RPC endpoint; BaiBai's feed polls it too, so it must be a Base node with `--pamm baibai` | `https://eth-mainnet.alchemyapi.io/v2/...` |
+| `RPC_URL`       | Blockchain RPC endpoint; BaiBai's and Hanji's feeds poll it too, so it must be a Base node with `--pamm baibai` or `--pamm hanji` | `https://eth-mainnet.alchemyapi.io/v2/...` |
 | `TYCHO_API_KEY` | API key for Tycho services; defaults to `sampletoken` | `your-api-key`                             |
 | `TYCHO_NO_TLS`  | Connect to Tycho over plain HTTP/WS (a local instance) | `true`                     |
 | `BEBOP_KEY`, `HASHFLOW_USER` + `HASHFLOW_KEY`, `LIQUORICE_USER` + `LIQUORICE_KEY`, `NATIVE_API_KEY` | RFQ venue credentials; a venue without them is skipped. Euclid needs none and runs on Ethereum | |
@@ -52,7 +52,7 @@ This test runs continuously in the cluster but it can also be run locally for de
 | `--disable-onchain`        | `false`    | Skip on-chain protocol testing                                                                                   |
 | `--disable-rfq`            | `false`    | Skip the RFQ book feeds (Bebop, Hashflow, Liquorice, Native, Euclid)                                             |
 | `--disable-pamm`           | `false`    | Skip the pAMM book feeds. Conflicts with `--pamm`                                                                |
-| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run (`metric`, `baibai`); replaces the default list. `baibai` runs on Base only and reads its books over `RPC_URL`. A listed venue missing its credentials, or whose feed fails to build, fails the run |
+| `--pamm`                   | `metric`   | Comma-separated pAMM venues to run (`metric`, `baibai`, `hanji`); replaces the default list. `baibai` and `hanji` run on Base only and read their books over `RPC_URL`. A listed venue missing its credentials, or whose feed fails to build, fails the run |
 | `--rfq-all-pairs`          | `false`    | Publish each RFQ venue as one component for every pair it prices                                                 |
 | `--disable-price-level-stream` | `false` | Skip Titan pAMM price level stream testing (only active on Ethereum)                                            |
 | `--price-level-stream-block-interval` | `1` | Emit one sampled price level update per this many blocks                                                    |

@@ -3,7 +3,7 @@ use num_bigint::BigUint;
 use super::{
     constants::{
         BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
-        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        HANJI_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
         SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
@@ -128,8 +128,15 @@ pub const SUBSIDY_GAS: u64 = 65_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
-pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4", "rfq:euclid"];
+pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] = &[
+    "vm:curve",
+    "rocketpool",
+    "fluid_v1",
+    "native_wrapper",
+    "lido_v4",
+    "rfq:euclid",
+    HANJI_PROTOCOL_SYSTEM,
+];
 
 /// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
 /// configured on mainnet only, so a plain constant is enough.
@@ -143,6 +150,15 @@ fn lido_leg_needs_approval(
     token_in: &tycho_common::models::token::Token,
 ) -> bool {
     protocol_system == "lido_v4" && token_in.address.as_ref() == LIDO_STETH_ADDRESS
+}
+
+/// Hanji's orderbook debits an ERC20 input, which the router approves, and takes native ETH as
+/// `msg.value`, which needs no approval.
+fn hanji_leg_needs_approval(
+    protocol_system: &str,
+    token_in: &tycho_common::models::token::Token,
+) -> bool {
+    protocol_system == HANJI_PROTOCOL_SYSTEM && !token_in.address.is_zero()
 }
 
 pub const ROUTER_FEES_ACTIVE: bool = true;
@@ -303,7 +319,10 @@ pub fn estimate_transfer_overhead(
         overhead += transfer_token_gas(token_in);
     }
 
-    if needs_approval(protocol_system) || lido_leg_needs_approval(protocol_system, token_in) {
+    if needs_approval(protocol_system) ||
+        lido_leg_needs_approval(protocol_system, token_in) ||
+        hanji_leg_needs_approval(protocol_system, token_in)
+    {
         overhead += BigUint::from(TOKEN_APPROVAL_GAS);
     }
 
@@ -383,6 +402,50 @@ mod tests {
         assert_eq!(overhead(eth, wsteth.clone()), input_and_output);
         assert_eq!(overhead(wsteth.clone(), steth.clone()), input_and_output);
         assert_eq!(overhead(steth, wsteth), input_and_output + BigUint::from(TOKEN_APPROVAL_GAS));
+    }
+
+    fn hanji_overhead(token_in: &[u8], token_out: &[u8]) -> BigUint {
+        let swap = Swap::new(
+            ProtocolComponent {
+                protocol_system: HANJI_PROTOCOL_SYSTEM.to_string(),
+                ..Default::default()
+            },
+            default_token(Bytes::from(token_in.to_vec())),
+            default_token(Bytes::from(token_out.to_vec())),
+            BigUint::ZERO,
+        );
+        estimate_transfer_overhead(
+            HANJI_PROTOCOL_SYSTEM,
+            swap.token_in(),
+            swap.token_out(),
+            &Strategy::Single,
+        )
+    }
+
+    /// Every Hanji direction has `outputToRouter = true`, so each pays an output transfer on top
+    /// of the input transfer, each priced from the token's own measured gas.
+    fn hanji_input_and_output_transfers_gas() -> BigUint {
+        let one_transfer = transfer_token_gas(&default_token(Bytes::from(vec![0u8; 20])));
+        &one_transfer + &one_transfer
+    }
+
+    /// The orderbook debits an ERC20 input, which the router approves first.
+    #[test]
+    fn test_hanji_overhead_charges_an_erc20_input_its_approval() {
+        let overhead = hanji_overhead(&[0x83; 20], &[0; 20]);
+
+        assert_eq!(
+            overhead,
+            hanji_input_and_output_transfers_gas() + BigUint::from(TOKEN_APPROVAL_GAS)
+        );
+    }
+
+    /// Native ETH goes to the orderbook as `msg.value`, with no approval.
+    #[test]
+    fn test_hanji_overhead_charges_no_approval_for_a_native_input() {
+        let overhead = hanji_overhead(&[0; 20], &[0x83; 20]);
+
+        assert_eq!(overhead, hanji_input_and_output_transfers_gas());
     }
 
     fn make_swap(protocol: &str) -> Swap {

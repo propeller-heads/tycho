@@ -8,11 +8,12 @@ use crate::encoding::{
         constants::{
             BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
             BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
-            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
-            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
-            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            HANJI_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+            NATIVE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_WRAPPER_PROTOCOL_SYSTEM,
+            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
+            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, SUBSIDY_KEY,
+            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
@@ -23,7 +24,7 @@ use crate::encoding::{
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
+            fluid_v1::FluidV1SwapEncoder, hanji::HanjiSwapEncoder, hashflow::HashflowSwapEncoder,
             hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
             liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
             liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
@@ -292,6 +293,9 @@ impl SwapEncoderRegistry {
             }
             BAIBAI_PROTOCOL_SYSTEM => {
                 Ok(Box::new(BaibaiSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            HANJI_PROTOCOL_SYSTEM => {
+                Ok(Box::new(HanjiSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "sky" => Ok(Box::new(SkySwapEncoder::new(executor_address, self.chain, config)?)),
             "erc4626" => {

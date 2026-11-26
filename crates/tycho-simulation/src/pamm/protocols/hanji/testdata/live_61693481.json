@@ -1,0 +1,1222 @@
+{
+ "block": 61693481,
+ "timestamp": 1795529071,
+ "markets": [
+  {
+   "api": {
+    "orderbookAddress": "0x30bfa3b501c8f83114c1a789febb6281a0bcd751",
+    "baseToken": {
+     "contractAddress": "0xb20000000000000000000078ee7ce2fe4908108c",
+     "decimals": 8,
+     "symbol": "NVDAc",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "10000",
+    "scaling_y": "1",
+    "token_x": "0xb20000000000000000000078ee7ce2fe4908108c",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0x20b7e6493c21bad1fe4f3775ef4b40536fa3907f",
+    "quoter": "0x4f9c3d3ffc9c1b58be7579ed8a0f8337dcfd0f86",
+    "contract_quoter": "0x0000000000000000000000000000000000000000",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "15748",
+       "1"
+      ]
+     ],
+     "bids": [
+      [
+       "15729",
+       "62956"
+      ]
+     ]
+    },
+    "contract": null
+   },
+   "cases": []
+  },
+  {
+   "api": {
+    "orderbookAddress": "0x6a6951db3bb99f76a8ccb9f8a8399b613666298b",
+    "baseToken": {
+     "contractAddress": "0x4200000000000000000000000000000000000006",
+     "decimals": 18,
+     "symbol": "ETH",
+     "isNative": true
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "100000000000000",
+    "scaling_y": "1",
+    "token_x": "0x4200000000000000000000000000000000000006",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": true,
+    "is_token_x_weth": true,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0x7c976801c8589d924ce93bbcce6966d34edf91bf",
+    "quoter": "0x598877e528437c0b4429e910d0bba850708cd98c",
+    "contract_quoter": "0x611c491d84469c4498b2c4ffd56fd3adc7ce5a1f",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "169579",
+       "11793"
+      ],
+      [
+       "169582",
+       "29484"
+      ],
+      [
+       "169588",
+       "155472"
+      ],
+      [
+       "169594",
+       "233208"
+      ],
+      [
+       "184857",
+       "25912"
+      ]
+     ],
+     "bids": [
+      [
+       "169594",
+       "11792"
+      ],
+      [
+       "169591",
+       "29482"
+      ],
+      [
+       "169585",
+       "176902"
+      ],
+      [
+       "169579",
+       "353817"
+      ],
+      [
+       "154317",
+       "48526"
+      ]
+     ]
+    },
+    "contract": {
+     "asks": [
+      [
+       "169613",
+       "11791"
+      ],
+      [
+       "169616",
+       "29478"
+      ],
+      [
+       "169621",
+       "155472"
+      ],
+      [
+       "169628",
+       "233208"
+      ],
+      [
+       "184857",
+       "25912"
+      ]
+     ],
+     "bids": [
+      [
+       "169560",
+       "11795"
+      ],
+      [
+       "169557",
+       "29488"
+      ],
+      [
+       "169552",
+       "176936"
+      ],
+      [
+       "169545",
+       "353888"
+      ],
+      [
+       "154317",
+       "48526"
+      ]
+     ]
+    }
+   },
+   "cases": [
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "6205190000012345",
+     "shares": "62",
+     "amount_out": "10513776",
+     "gas": 883722
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "186155700000012345",
+     "shares": "1861",
+     "amount_out": "315582872",
+     "gas": 883722
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "3102595000000012345",
+     "shares": "31025",
+     "amount_out": "5261069991",
+     "gas": 1077541
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "18615570000000012345",
+     "shares": "186155",
+     "amount_out": "31566221757",
+     "gas": 1320089
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "55846710000000012345",
+     "shares": "558467",
+     "amount_out": "94696396882",
+     "gas": 1547032
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "74462280000000012345",
+     "shares": "620519",
+     "amount_out": "104477530967",
+     "gas": 1763973
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "7783012",
+     "shares": "45",
+     "amount_out": "4500000000000000",
+     "gas": 884626
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "233132380",
+     "shares": "1374",
+     "amount_out": "137400000000000000",
+     "gas": 884626
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "3885346270",
+     "shares": "22909",
+     "amount_out": "2290900000000000000",
+     "gas": 1094591
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "23312015897",
+     "shares": "137450",
+     "amount_out": "13745000000000000000",
+     "gas": 1296152
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "69936023001",
+     "shares": "412340",
+     "amount_out": "41234000000000000000",
+     "gas": 1521786
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "93248026553",
+     "shares": "455869",
+     "amount_out": "45586900000000000000",
+     "gas": 1721381
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "6206330000012345",
+     "shares": "62",
+     "amount_out": "10511668",
+     "gas": 1046021
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "186189900000012345",
+     "shares": "1861",
+     "amount_out": "315519604",
+     "gas": 1046021
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "3103165000000012345",
+     "shares": "31031",
+     "amount_out": "5261032496",
+     "gas": 1271170
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "18618990000000012345",
+     "shares": "186189",
+     "amount_out": "31565802232",
+     "gas": 1533548
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "55856970000000012345",
+     "shares": "558569",
+     "amount_out": "94694880002",
+     "gas": 1766130
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "74475960000000012345",
+     "shares": "620633",
+     "amount_out": "104477588586",
+     "gas": 2003004
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "7784323",
+     "shares": "45",
+     "amount_out": "4500000000000000",
+     "gas": 1027044
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "233171698",
+     "shares": "1374",
+     "amount_out": "137400000000000000",
+     "gas": 1027044
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "3886001577",
+     "shares": "22908",
+     "amount_out": "2290800000000000000",
+     "gas": 1234139
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "23315947740",
+     "shares": "137446",
+     "amount_out": "13744600000000000000",
+     "gas": 1462782
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "69947818530",
+     "shares": "412328",
+     "amount_out": "41232800000000000000",
+     "gas": 1697591
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "93263753926",
+     "shares": "455861",
+     "amount_out": "45586100000000000000",
+     "gas": 1916825
+    }
+   ]
+  },
+  {
+   "api": {
+    "orderbookAddress": "0x15c8cb4e336b1e478d155d813830129fb225eee3",
+    "baseToken": {
+     "contractAddress": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+     "decimals": 8,
+     "symbol": "cbBTC",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "100",
+    "scaling_y": "1",
+    "token_x": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0x84792a7e7d80e20404d8ebb77574cfdf91093bfd",
+    "quoter": "0x598877e528437c0b4429e910d0bba850708cd98c",
+    "contract_quoter": "0x611c491d84469c4498b2c4ffd56fd3adc7ce5a1f",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "60221",
+       "33211"
+      ],
+      [
+       "60223",
+       "83024"
+      ],
+      [
+       "60225",
+       "478632"
+      ],
+      [
+       "60228",
+       "717949"
+      ],
+      [
+       "65647",
+       "79772"
+      ]
+     ],
+     "bids": [
+      [
+       "60226",
+       "33208"
+      ],
+      [
+       "60223",
+       "83024"
+      ],
+      [
+       "60221",
+       "498165"
+      ],
+      [
+       "60218",
+       "996379"
+      ],
+      [
+       "54800",
+       "136649"
+      ]
+     ]
+    },
+    "contract": {
+     "asks": [
+      [
+       "60233",
+       "33204"
+      ],
+      [
+       "60235",
+       "83008"
+      ],
+      [
+       "60237",
+       "478632"
+      ],
+      [
+       "60240",
+       "717949"
+      ],
+      [
+       "65647",
+       "79772"
+      ]
+     ],
+     "bids": [
+      [
+       "60213",
+       "33215"
+      ],
+      [
+       "60211",
+       "83041"
+      ],
+      [
+       "60209",
+       "498264"
+      ],
+      [
+       "60206",
+       "996578"
+      ],
+      [
+       "54800",
+       "136649"
+      ]
+     ]
+    }
+   },
+   "cases": [
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "29819",
+     "shares": "298",
+     "amount_out": "17945553",
+     "gas": 987169
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "536572",
+     "shares": "5365",
+     "amount_out": "323080178",
+     "gas": 987169
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "8749470",
+     "shares": "87494",
+     "amount_out": "5268723860",
+     "gas": 1242340
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "52435095",
+     "shares": "524350",
+     "amount_out": "31574055716",
+     "gas": 1495037
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "157280595",
+     "shares": "1572805",
+     "amount_out": "94703875434",
+     "gas": 1740718
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "209703345",
+     "shares": "1747425",
+     "amount_out": "104477800822",
+     "gas": 1970547
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "8442644",
+     "shares": "140",
+     "amount_out": "14000",
+     "gas": 988571
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "252921318",
+     "shares": "4199",
+     "amount_out": "419900",
+     "gas": 988571
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "4215161896",
+     "shares": "69986",
+     "amount_out": "6998600",
+     "gas": 1227850
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "25290909656",
+     "shares": "419903",
+     "amount_out": "41990300",
+     "gas": 1472831
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "75872704280",
+     "shares": "1259666",
+     "amount_out": "125966600",
+     "gas": 1727876
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "101163601591",
+     "shares": "1392588",
+     "amount_out": "139258800",
+     "gas": 1955013
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "29822",
+     "shares": "298",
+     "amount_out": "17941679",
+     "gas": 1149468
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "536669",
+     "shares": "5366",
+     "amount_out": "323070647",
+     "gas": 1149468
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "8751080",
+     "shares": "87510",
+     "amount_out": "5268604126",
+     "gas": 1401788
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "52444755",
+     "shares": "524447",
+     "amount_out": "31573570692",
+     "gas": 1674315
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "157309575",
+     "shares": "1573095",
+     "amount_out": "94702428881",
+     "gas": 1951246
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "209741985",
+     "shares": "1747747",
+     "amount_out": "104477825062",
+     "gas": 2208473
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "8444080",
+     "shares": "140",
+     "amount_out": "14000",
+     "gas": 1150851
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "252964423",
+     "shares": "4199",
+     "amount_out": "419900",
+     "gas": 1150851
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "4215880317",
+     "shares": "69984",
+     "amount_out": "6998400",
+     "gas": 1387260
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "25295220177",
+     "shares": "419891",
+     "amount_out": "41989100",
+     "gas": 1671990
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "75885635841",
+     "shares": "1259630",
+     "amount_out": "125963000",
+     "gas": 1939721
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "101180843673",
+     "shares": "1392565",
+     "amount_out": "139256500",
+     "gas": 2197626
+    }
+   ]
+  },
+  {
+   "api": {
+    "orderbookAddress": "0xf455b3c0756908c6a2f44a7f7390053cfe354eea",
+    "baseToken": {
+     "contractAddress": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+     "decimals": 8,
+     "symbol": "cbBTC",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x4200000000000000000000000000000000000006",
+     "decimals": 18,
+     "symbol": "ETH",
+     "isNative": true
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "1",
+    "scaling_y": "1000000",
+    "token_x": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+    "token_y": "0x4200000000000000000000000000000000000006",
+    "supports_native_eth": true,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0xb6e72302898ec065038cefacf014b45f0b7e8498",
+    "quoter": "0x598877e528437c0b4429e910d0bba850708cd98c",
+    "contract_quoter": "0x611c491d84469c4498b2c4ffd56fd3adc7ce5a1f",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "355115",
+       "3320810"
+      ],
+      [
+       "355124",
+       "8301815"
+      ],
+      [
+       "355142",
+       "47863293"
+      ],
+      [
+       "355165",
+       "71794940"
+      ],
+      [
+       "387049",
+       "7977215"
+      ]
+     ],
+     "bids": [
+      [
+       "355125",
+       "3320716"
+      ],
+      [
+       "355116",
+       "8302002"
+      ],
+      [
+       "355098",
+       "43782919"
+      ],
+      [
+       "355075",
+       "65678633"
+      ],
+      [
+       "323186",
+       "8017688"
+      ]
+     ]
+    },
+    "contract": {
+     "asks": [
+      [
+       "355328",
+       "3318819"
+      ],
+      [
+       "355337",
+       "8296839"
+      ],
+      [
+       "355355",
+       "47863293"
+      ],
+      [
+       "355378",
+       "71794940"
+      ],
+      [
+       "387203",
+       "7977215"
+      ]
+     ],
+     "bids": [
+      [
+       "354906",
+       "3322766"
+      ],
+      [
+       "354897",
+       "8307125"
+      ],
+      [
+       "354879",
+       "43809938"
+      ],
+      [
+       "354856",
+       "65719167"
+      ],
+      [
+       "323051",
+       "8021038"
+      ]
+     ]
+    }
+   },
+   "cases": [
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "25255",
+     "shares": "25255",
+     "amount_out": "8967785006000000",
+     "gas": 1203263
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "399650",
+     "shares": "399650",
+     "amount_out": "141911513679000000",
+     "gas": 1203263
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "6467442",
+     "shares": "6467442",
+     "amount_out": "2296492347514000000",
+     "gas": 1409174
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "38742932",
+     "shares": "38742932",
+     "amount_out": "13756400985027000000",
+     "gas": 1623762
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "116204107",
+     "shares": "116204107",
+     "amount_out": "41258560449372000000",
+     "gas": 1844095
+    },
+    {
+     "caller": "direct",
+     "sell_base": true,
+     "amount_in": "154934694",
+     "shares": "129101958",
+     "amount_out": "45582156437726000000",
+     "gas": 2049150
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "4971233174957445",
+     "shares": "13997",
+     "amount_out": "13997",
+     "gas": 1218020
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "149136995248365337",
+     "shares": "419926",
+     "amount_out": "419926",
+     "gas": 1218020
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "2485616587472562233",
+     "shares": "6998676",
+     "amount_out": "6998676",
+     "gas": 1409892
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "14913699524835311673",
+     "shares": "41990098",
+     "amount_out": "41990098",
+     "gas": 1624565
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "44741098574505914425",
+     "shares": "125964642",
+     "amount_out": "125964642",
+     "gas": 1849493
+    },
+    {
+     "caller": "direct",
+     "sell_base": false,
+     "amount_in": "59654798099341209657",
+     "shares": "139258073",
+     "amount_out": "139258073",
+     "gas": 2046444
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "25263",
+     "shares": "25263",
+     "amount_out": "8965093678000000",
+     "gas": 1351218
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "399885",
+     "shares": "399885",
+     "amount_out": "141907393651000000",
+     "gas": 1351218
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "6471346",
+     "shares": "6471346",
+     "amount_out": "2296461517137000000",
+     "gas": 1571450
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "38766355",
+     "shares": "38766355",
+     "amount_out": "13756228778523000000",
+     "gas": 1805978
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "116274375",
+     "shares": "116274375",
+     "amount_out": "41258047756601000000",
+     "gas": 2046251
+    },
+    {
+     "caller": "contract",
+     "sell_base": true,
+     "amount_in": "155028385",
+     "shares": "129180034",
+     "amount_out": "45582156718973000000",
+     "gas": 2266421
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "4973904744847845",
+     "shares": "13996",
+     "amount_out": "13996",
+     "gas": 1381075
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "149217142345077337",
+     "shares": "419899",
+     "amount_out": "419899",
+     "gas": 1381075
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "2486952372417762361",
+     "shares": "6998239",
+     "amount_out": "6998239",
+     "gas": 1587268
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "14921714234506510393",
+     "shares": "41987480",
+     "amount_out": "41987480",
+     "gas": 1824700
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "44765142703519510585",
+     "shares": "125956794",
+     "amount_out": "125956794",
+     "gas": 2062296
+    },
+    {
+     "caller": "contract",
+     "sell_base": false,
+     "amount_in": "59686856938026004537",
+     "shares": "139251106",
+     "amount_out": "139251106",
+     "gas": 2290016
+    }
+   ]
+  },
+  {
+   "api": {
+    "orderbookAddress": "0xb2cfad3880801012ca1beba290f095ebc0087c4b",
+    "baseToken": {
+     "contractAddress": "0xb2000000000000000000008bc8786b856e61707c",
+     "decimals": 8,
+     "symbol": "METAc",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "10000",
+    "scaling_y": "1",
+    "token_x": "0xb2000000000000000000008bc8786b856e61707c",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0xc5a15bceeda90c487610b4c7254e352dfe4341f8",
+    "quoter": "0x05a5d0be3586021de9f9a0598f8bfb0554c3d89a",
+    "contract_quoter": "0x0000000000000000000000000000000000000000",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "58678",
+       "1"
+      ]
+     ],
+     "bids": [
+      [
+       "58615",
+       "16020"
+      ]
+     ]
+    },
+    "contract": null
+   },
+   "cases": []
+  },
+  {
+   "api": {
+    "orderbookAddress": "0xde1eb3cd7f55c71ccc312fdf257fb73a73c72d7f",
+    "baseToken": {
+     "contractAddress": "0xb2000000000000000000002d0ba3164cc74f58b7",
+     "decimals": 8,
+     "symbol": "GOOGLc",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "10000",
+    "scaling_y": "1",
+    "token_x": "0xb2000000000000000000002d0ba3164cc74f58b7",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0xf0835b53a1bbf71e0f7a4330ad0cfe7955529d1a",
+    "quoter": "0x229b23f8ad60bd84387430dee86c2e4516f5887c",
+    "contract_quoter": "0x0000000000000000000000000000000000000000",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "28043",
+       "26925"
+      ]
+     ],
+     "bids": [
+      [
+       "28010",
+       "7021"
+      ]
+     ]
+    },
+    "contract": null
+   },
+   "cases": []
+  },
+  {
+   "api": {
+    "orderbookAddress": "0x44330b61f492dbebc137bd2e4f6c3f19855320e9",
+    "baseToken": {
+     "contractAddress": "0xb200000000000000000000397293cb8cda9a10c5",
+     "decimals": 8,
+     "symbol": "SNDKc",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "10000",
+    "scaling_y": "1",
+    "token_x": "0xb200000000000000000000397293cb8cda9a10c5",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0xf8f8f74a0f3d3b2fa947d5e5bbfa7a4b7cf309a9",
+    "quoter": "0xeab55681ef69f62ceffd9f7e103485c6d9fdecc9",
+    "contract_quoter": "0x0000000000000000000000000000000000000000",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [],
+     "bids": []
+    },
+    "contract": null
+   },
+   "cases": []
+  },
+  {
+   "api": {
+    "orderbookAddress": "0x1ae89451919cf82a5e83580f57f3856f5508f1c8",
+    "baseToken": {
+     "contractAddress": "0xb2000000000000000000007b9fcbd005511acbd5",
+     "decimals": 8,
+     "symbol": "SPCXc",
+     "isNative": false
+    },
+    "quoteToken": {
+     "contractAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+     "decimals": 6,
+     "symbol": "USDC",
+     "isNative": false
+    },
+    "aggressiveFee": 0.0001
+   },
+   "config": {
+    "scaling_x": "10000",
+    "scaling_y": "1",
+    "token_x": "0xb2000000000000000000007b9fcbd005511acbd5",
+    "token_y": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "supports_native_eth": false,
+    "is_token_x_weth": false,
+    "aggressive_commission_rate": "100000000000000",
+    "passive_order_payout_rate": "0"
+   },
+   "wiring": {
+    "lob": "0xfba50305727189f86faa4cf1e9b6882e07b756e1",
+    "quoter": "0x17b565b47fe0992e7edd6573017494d2c0fa2242",
+    "contract_quoter": "0x0000000000000000000000000000000000000000",
+    "router_whitelisted": false
+   },
+   "books": {
+    "direct": {
+     "asks": [
+      [
+       "13088",
+       "8721"
+      ]
+     ],
+     "bids": [
+      [
+       "13072",
+       "62654"
+      ]
+     ]
+    },
+    "contract": null
+   },
+   "cases": []
+  }
+ ]
+}

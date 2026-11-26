@@ -309,6 +309,20 @@ BaiBai books do not include it, because the priority fee is set when the transac
 These values were measured on Base at block 53,545,000. The venue owner can change the threshold and the cap without a contract upgrade, and Tycho does not read them.
 {% endhint %}
 
+{% hint style="warning" %}
+**Hanji: books depend on the caller**
+
+A Hanji orderbook fills the transaction's sender, and any contract it whitelists, against a narrower book than any other contract. At Base block 61,693,481 the other contracts' best bid sat 2 bps under the narrow book's on ETH/USDC and cbBTC/USDC, and 6 bps under on cbBTC/ETH. `FastQuoterHelper`, which Hanji's documentation points aggregators to, reports only the narrow book. Hanji whitelisted Tycho's router on every Base market on 2026-11-26. Hanji's feed reads both books and whether the taker is whitelisted, and publishes the one the orderbook fills the taker against. The taker defaults to Tycho's router on Base. Set `HanjiFeedBuilder::taker` when your swaps reach Hanji through another contract.
+
+Hanji's quoters place their orders inside each swap, so a swap costs far more gas than a pool swap. Hanji's documentation quotes about 90k gas, which is the order match alone; the quoter computing, placing and removing its orders costs most of the rest. Tycho charges 1.10M to 1.57M for the first price level, by market, plus 0.30M for each further level: 5% to 14% over the most it measured on Base at block 61,693,481.
+
+Hanji quotes empty books about 3 seconds after its keepers last pushed a price (measured at block 61,595,000). The feed withdraws a book at most about 3.5 seconds after its block's timestamp. The orderbook does not revert when its book cannot fill your input, so the executor does: a sell must fill every share, and a buy must leave unspent less than two shares' cost at the fill's average price. This also refuses a route that lands after the book went empty. Within that, the orderbook fills whole shares, and what it does not spend stays in the router, where you lose it. That is less than one share of a sell's input (0.0001 ETH on ETH/USDC), and less than two shares' cost of a buy's (0.0002 ETH's worth of USDC on ETH/USDC).
+
+Hanji's contracts are upgradeable, and Hanji adjusts their on-chain quoting logic from time to time. Once a minute the feed sends each market a swap as an `eth_call` from the taker and compares the fill with its book, and it withholds a market whose fills disagree until they agree again.
+
+The ETH/USDC, cbBTC/USDC and cbBTC/ETH markets share one inventory, and after every fill Hanji re-prices all three books, worse for a second fill that takes the same token out. On a fork of Base block 61,711,413, a second hop selling for USDC filled about 0.75 bps lower per $1k of USDC the first hop took (10.8 bps after $18k). The simulation leaves the side a swap walked empty, so a route cannot use one market twice in the same direction. It does not model the re-pricing of the other two markets: give a route through two of them that takes the same token out of both a slippage tolerance that covers it.
+{% endhint %}
+
 ## pAMM Price Level Stream
 
 Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.

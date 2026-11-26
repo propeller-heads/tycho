@@ -46,6 +46,9 @@ pub enum Executor {
     LiquidityParty,
     LunarBase,
     PropAMM,
+    /// The caller names the proxy orderbook and the tokens, which the orderbook's config must
+    /// match.
+    Hanji,
     TychoSubsidizing,
 }
 
@@ -67,7 +70,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 13] = [
+    pub const VARIANTS: [Executor; 14] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -80,6 +83,7 @@ impl Executor {
         Executor::LiquidityParty,
         Executor::LunarBase,
         Executor::PropAMM,
+        Executor::Hanji,
         Executor::TychoSubsidizing,
     ];
 
@@ -361,6 +365,21 @@ impl Executor {
                 )?,
                 output_to_router: false,
             }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/HanjiExecutor.sol
+            Self::Hanji => {
+                let (orderbook, token_in, token_out) = hanji_market(params, swap_index)?;
+                Ok(TransferData {
+                    transfer_type: if token_in == Address::NativeETH {
+                        TransferType::TransferNativeInExecutor
+                    } else {
+                        TransferType::ProtocolWillDebit
+                    },
+                    receiver: orderbook,
+                    token_in,
+                    token_out,
+                    output_to_router: true,
+                })
+            }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
             Self::TychoSubsidizing => {
                 subsidizing_inner(params, swap_index)?.get_transfer_data(params, _state, swap_index)
@@ -672,6 +691,26 @@ impl Executor {
                     })
                 }
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/HanjiExecutor.sol
+            Self::Hanji => {
+                let (orderbook, token_in, _) = hanji_market(params, swap_index)?;
+                // this simulates the native input sent to the orderbook as msg.value: the input
+                // rounded down to whole units of the scaling the orderbook reports, which the
+                // sender controls, leaving any remainder at the router
+                if token_in == Address::NativeETH {
+                    let rounded_down = params.request(
+                        ParamKey::SwapIndexed {
+                            prefix: "IHanjiOrderbook.getConfig() scaling rounds the input down",
+                            swap_index,
+                        },
+                        [false, true],
+                    )?;
+                    let sent = if rounded_down && amount > 0 { amount - 1 } else { amount };
+                    state.eth_send_value(Address::Router, orderbook, sent)?;
+                }
+                // the orderbook is sender controlled, so the actual swap logic doesn't matter
+                Ok(())
+            }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
             // The subsidy payer is not modeled: it pays from its own balance.
             Self::TychoSubsidizing => {
@@ -733,6 +772,7 @@ impl Executor {
             Self::PropAMM => {
                 Err(Error::warning("PropAMM.get_callback_transfer_data is not modeled"))
             }
+            Self::Hanji => Err(Error::warning("Hanji.get_callback_transfer_data is not modeled")),
             Self::TychoSubsidizing => Err(Error::warning(
                 "TychoSubsidizing points the callback slot at its inner executor",
             )),
@@ -768,6 +808,7 @@ impl Executor {
             Self::LiquidityParty => Err(Error::warning("LiquidityParty doesn't use callbacks")),
             Self::LunarBase => Err(Error::warning("LunarBase doesn't use callbacks")),
             Self::PropAMM => Err(Error::warning("PropAMM doesn't use callbacks")),
+            Self::Hanji => Err(Error::warning("Hanji doesn't use callbacks")),
             Self::TychoSubsidizing => Err(Error::warning(
                 "TychoSubsidizing points the callback slot at its inner executor",
             )),
@@ -839,11 +880,42 @@ impl Executor {
                 // and currently is ignored anyway
                 Address::SENDER_CONTROLLED,
             )?,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/HanjiExecutor.sol
+            Self::Hanji => Address::Router,
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/TychoSubsidizingExecutor.sol
             Self::TychoSubsidizing => subsidizing_inner(params, swap_index)?
                 .funds_expected_address(params, _state, swap_index)?,
         })
     }
+}
+
+/// The orderbook and the tokens the caller names in a [Executor::Hanji] swap's data. The executor
+/// takes the tokens, and whether the input is native, from the data alone, and reverts unless the
+/// orderbook's `getConfig()` names the same pair; a sender-controlled orderbook's config agrees
+/// with whatever the data says, so the data decides here too. Only a sender-controlled orderbook
+/// is modeled: its swap logic does not matter.
+fn hanji_market(params: &Params, swap_index: u8) -> Result<(Address, Address, Address), Error> {
+    let orderbook = params.request(
+        ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+        // trying more variants might find some very obscure bugs
+        // in the future but slows down simulation a lot
+        // and currently is ignored anyway
+        Address::SENDER_CONTROLLED,
+    )?;
+    if !orderbook.is_sender_controlled() {
+        return Err(Error::Ignore {
+            reason: "hanji orderbook not sender controlled. not low hanging fruit. would require simulating real orderbook".into(),
+        });
+    }
+    let token_in = params.request(
+        ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+        Address::POSSIBLY_ERC20_AND_NATIVE,
+    )?;
+    let token_out = params.request(
+        ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+        Address::POSSIBLY_ERC20_AND_NATIVE,
+    )?;
+    Ok((orderbook, token_in, token_out))
 }
 
 /// The inner executor the caller names in a [Executor::TychoSubsidizing] swap's data. The

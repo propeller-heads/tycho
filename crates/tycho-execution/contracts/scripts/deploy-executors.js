@@ -61,6 +61,7 @@ const deploy_protocols = {
         "lunarbase",
         "biconomy",
         "pamm:baibai",
+        "pamm:hanji",
         "rfq:metric",
         "rfq:native",
         "fallback",
