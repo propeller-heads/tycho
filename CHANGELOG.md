@@ -1,3 +1,15 @@
+## [0.541.0](https://github.com/propeller-heads/tycho/compare/0.540.1...0.541.0) (2026-11-26)
+
+
+### Features
+
+* **execution:** list the grant-capable Curve executor on Ethereum ([a25beb5](https://github.com/propeller-heads/tycho/commit/a25beb5862c45de16832e32b770875b025c81965))
+
+
+### Bug Fixes
+
+* **execution:** remove conflict markers from calldata fixture ([82f02e1](https://github.com/propeller-heads/tycho/commit/82f02e1cefddfdc0839a094f553d90a9a362bc61))
+
 ## [0.540.1](https://github.com/propeller-heads/tycho/compare/0.540.0...0.540.1) (2026-11-25)
 
 
