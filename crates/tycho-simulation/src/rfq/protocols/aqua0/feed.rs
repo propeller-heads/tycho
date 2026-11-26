@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    num::NonZeroUsize,
     sync::Arc,
     time::Duration,
 };
@@ -12,7 +13,11 @@ use crate::{
     book::{chain_id, BookFeedConfig, BookSnapshot, ReceivedAt},
     rfq::{
         constants::DEFAULT_QUOTE_TIMEOUT,
-        protocols::aqua0::{client::Aqua0Client, source::Aqua0BookSource, AQUA0_API_URL},
+        protocols::aqua0::{
+            client::Aqua0Client,
+            source::{Aqua0BookSource, DEFAULT_STATE_CONCURRENCY},
+            AQUA0_API_URL,
+        },
     },
     snapshot_feed::{
         errors::FeedError,
@@ -38,6 +43,7 @@ pub struct Aqua0FeedBuilder {
     feed_config: HttpFeedConfig,
     quote_timeout: Duration,
     markets_refresh: Duration,
+    state_concurrency: NonZeroUsize,
     sample_sizes: HashMap<Bytes, Vec<BigUint>>,
 }
 
@@ -54,6 +60,7 @@ impl Aqua0FeedBuilder {
             feed_config: Self::default_feed_config(),
             quote_timeout: DEFAULT_QUOTE_TIMEOUT,
             markets_refresh: Duration::from_secs(60),
+            state_concurrency: DEFAULT_STATE_CONCURRENCY,
             sample_sizes: HashMap::new(),
         }
     }
@@ -85,6 +92,14 @@ impl Aqua0FeedBuilder {
     /// default.
     pub fn markets_refresh(mut self, refresh: Duration) -> Self {
         self.markets_refresh = refresh;
+        self
+    }
+
+    /// How many of a poll's `/state` requests run at once; four by default. Aqua0 prices each pool
+    /// when asked, so more at once makes each answer slower, and a poll reading many pools can
+    /// run past its `request_timeout`. Lower it to be gentler on the API.
+    pub fn state_concurrency(mut self, requests_in_flight: NonZeroUsize) -> Self {
+        self.state_concurrency = requests_in_flight;
         self
     }
 
@@ -120,7 +135,7 @@ impl Aqua0FeedBuilder {
             chain_id,
             self.feed_config.request_timeout / 2,
             self.quote_timeout,
-        );
+        )?;
         Ok(Aqua0Feed {
             feed_config: self.feed_config,
             source: Aqua0BookSource::new(
@@ -129,6 +144,7 @@ impl Aqua0FeedBuilder {
                 self.usd_quote_tokens,
                 Arc::new(self.sample_sizes),
                 self.markets_refresh,
+                self.state_concurrency,
             ),
         })
     }

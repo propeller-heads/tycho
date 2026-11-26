@@ -21,7 +21,8 @@ contract Aqua0RecordedQuoteTest is TestUtils {
     address constant ALICE = 0xcd09f75E2BF2A4d11F3AB23f1389FcC1621c0cc2;
     address constant UNISWAP_V4_EXECUTOR =
         0xdb696336F7A5F9048252664A3475C194dAe0e62f;
-    address constant FEE_CALCULATOR = 0x9ca59BD78aAB97Db9692E43684b12072e910F0b7;
+    address constant FEE_CALCULATOR =
+        0x9ca59BD78aAB97Db9692E43684b12072e910F0b7;
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     uint256 constant AMOUNT_IN = 10_000_000;
 

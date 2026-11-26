@@ -433,6 +433,13 @@ mod tests {
     }
 
     fn state_with(zero_for_one: Vec<Aqua0Level>) -> Result<Aqua0State, String> {
+        let client = Aqua0Client::new(
+            "http://localhost",
+            8453,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .map_err(|error| error.to_string())?;
         Aqua0State::new(
             token("0x4200000000000000000000000000000000000006", "WETH", 18),
             token("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "USDC", 6),
@@ -447,12 +454,7 @@ mod tests {
             u64::MAX,
             zero_for_one,
             vec![level("100", "25", 1)],
-            Arc::new(Aqua0Client::new(
-                "http://localhost",
-                8453,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-            )),
+            Arc::new(client),
         )
     }
 

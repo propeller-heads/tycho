@@ -17,7 +17,7 @@ use crate::{
     rfq::{
         errors::RFQError,
         protocols::aqua0::models::{
-            Aqua0ErrorBody, Aqua0Market, Aqua0MarketsResponse, Aqua0QuoteRequest,
+            Aqua0ErrorBody, Aqua0Level, Aqua0Market, Aqua0MarketsResponse, Aqua0QuoteRequest,
             Aqua0QuoteResponse, Aqua0StateResponse,
         },
     },
@@ -26,6 +26,9 @@ use crate::{
 
 /// Aqua0's production Tycho RFQ API.
 pub const AQUA0_API_URL: &str = "https://api.aqua0.xyz/api/tycho/rfq";
+
+/// Sent on every request. Aqua0's production API refuses requests that carry no `User-Agent`.
+const USER_AGENT: &str = concat!("tycho-simulation/", env!("CARGO_PKG_VERSION"), " (rfq:aqua0)");
 
 /// How long approvals stay paused after a 429 that names no wait of its own.
 const DEFAULT_PAUSE: Duration = Duration::from_secs(60);
@@ -92,17 +95,21 @@ impl Aqua0Client {
         chain_id: u64,
         request_timeout: Duration,
         quote_timeout: Duration,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, FeedError> {
+        let http = Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(|error| FeedError::InvalidInput(format!("Aqua0 HTTP client: {error}")))?;
+        Ok(Self {
             chain_id,
             base_url: base_url
                 .trim_end_matches('/')
                 .to_string(),
-            http: Client::new(),
+            http,
             request_timeout,
             quote_timeout,
             paused_until: Mutex::new(None),
-        }
+        })
     }
 
     pub(crate) fn chain_id(&self) -> u64 {
@@ -171,11 +178,16 @@ impl Aqua0Client {
         if status.is_success() {
             let state: Aqua0StateResponse = serde_json::from_slice(&body)
                 .map_err(|error| FeedError::Parsing(format!("Aqua0 state: {error}")))?;
-            // `quotable: false`, or no level in either direction, is the same answer as the
-            // refusal older backends send below.
+            // `quotable: false`, or no fully backed level in either direction, is the same
+            // answer as the refusal older backends send below.
+            let backed = |levels: &[Aqua0Level]| {
+                levels
+                    .iter()
+                    .any(|level| level.fully_supported)
+            };
             if state.quotable == Some(false) ||
-                (state.directions.zero_for_one.is_empty() &&
-                    state.directions.one_for_zero.is_empty())
+                !(backed(&state.directions.zero_for_one) ||
+                    backed(&state.directions.one_for_zero))
             {
                 return Ok(StateAnswer::NoLiquidity);
             }
@@ -525,7 +537,8 @@ mod tests {
         })
         .await;
         let client =
-            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5));
+            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap();
 
         let first = client
             .request_binding_quote(&params(), &pool())
@@ -554,7 +567,8 @@ mod tests {
         })
         .await;
         let client =
-            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5));
+            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap();
         let error = client
             .request_binding_quote(&params(), &pool())
             .await
@@ -584,12 +598,101 @@ mod tests {
         })
         .await;
         let client =
-            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5));
+            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap();
         let signed = client
             .request_binding_quote(&params(), &pool())
             .await
             .unwrap();
         assert_eq!(signed.amount_out, BigUint::from(200u32));
         assert_eq!(server.request_count(), 1);
+    }
+
+    /// Aqua0's production API refuses requests without a `User-Agent`, so the feed's market list
+    /// and pool reads and the binding quote must each carry one.
+    #[tokio::test]
+    async fn every_request_carries_a_user_agent() {
+        let mut server = mockito::Server::new_async().await;
+        let user_agent = mockito::Matcher::Regex("^tycho-simulation/".into());
+        let markets = server
+            .mock("GET", "/markets")
+            .match_query(mockito::Matcher::UrlEncoded("chainId".into(), "42161".into()))
+            .match_header("user-agent", user_agent.clone())
+            .with_body(
+                serde_json::json!({
+                    "markets": [{
+                        "chainId": 42161,
+                        "poolId": format!("0x{}", "11".repeat(32)),
+                        "classId": "1",
+                        "tokens": [
+                            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                            "0xb96aa6babccd738d6644add4912fe5efbebf5a25",
+                        ],
+                    }],
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let state = server
+            .mock("GET", "/state")
+            .match_query(mockito::Matcher::Any)
+            .match_header("user-agent", user_agent.clone())
+            .with_body(include_str!("testdata/polygon_state.json"))
+            .create_async()
+            .await;
+        let (params, pool) = (params(), pool());
+        let quote = server
+            .mock("POST", "/quote")
+            .match_header("user-agent", user_agent)
+            .with_body_from_request(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                serde_json::json!({
+                    "schemaVersion": "aqua0-rfq-quote-v1", "requestId": body["requestId"],
+                    "componentId": body["componentId"], "chainId": 42161,
+                    "tokenIn": body["tokenIn"], "tokenOut": body["tokenOut"],
+                    "amountIn": body["amountIn"], "amountOut": "200",
+                    "router": body["expectedRouter"], "executor": body["expectedRouter"],
+                    "hookData": "0xdeadbeef", "deadline": "4102444800",
+                })
+                .to_string()
+                .into()
+            })
+            .create_async()
+            .await;
+        let client =
+            Aqua0Client::new(&server.url(), 42161, Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap();
+
+        assert_eq!(
+            client
+                .fetch_markets()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let market = Aqua0Market {
+            chain_id: 42161,
+            pool_id: pool.pool_id.clone(),
+            class_id: pool.class_id.clone(),
+            tokens: [params.token_in.to_string(), params.token_out.to_string()],
+        };
+        assert!(matches!(
+            client
+                .fetch_state(&market, "1", "1")
+                .await
+                .unwrap(),
+            StateAnswer::Quotable(_)
+        ));
+        let signed = client
+            .request_binding_quote(&params, &pool)
+            .await
+            .unwrap();
+        assert_eq!(signed.amount_out, BigUint::from(200u32));
+        markets.assert_async().await;
+        state.assert_async().await;
+        quote.assert_async().await;
     }
 }

@@ -48,6 +48,7 @@ use tycho_simulation::{
     pamm::protocols::metric::{self, feed::MetricFeedBuilder},
     protocol::models::ProtocolComponent,
     rfq::protocols::{
+        aqua0::{self, feed::Aqua0FeedBuilder},
         bebop::{self, feed::BebopFeedBuilder},
         euclid::{self, feed::EuclidFeedBuilder},
         hashflow::{self, feed::HashflowFeedBuilder},
@@ -173,14 +174,17 @@ async fn main() {
     let native_key = env::var("NATIVE_API_KEY").ok();
     // Euclid's gateway is public, so it takes no credentials: EUCLID_ENABLED=true opts in.
     let euclid_enabled = env::var("EUCLID_ENABLED").is_ok_and(|enabled| enabled == "true");
+    // Aqua0's API is public too: AQUA0_ENABLED=true opts in.
+    let aqua0_enabled = env::var("AQUA0_ENABLED").is_ok_and(|enabled| enabled == "true");
     if bebop_key.is_none() &&
         (hashflow_user.is_none() || hashflow_key.is_none()) &&
         (liquorice_user.is_none() || liquorice_key.is_none()) &&
         native_key.is_none() &&
-        !euclid_enabled
+        !euclid_enabled &&
+        !aqua0_enabled
     {
         if cli.disable_pamm {
-            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, set EUCLID_ENABLED=true, or drop --disable-pamm to run Metric on its own.");
+            panic!("No RFQ credentials found. Please set BEBOP_KEY, HASHFLOW_USER and HASHFLOW_KEY, LIQUORICE_USER and LIQUORICE_KEY, or NATIVE_API_KEY environment variables, set EUCLID_ENABLED=true or AQUA0_ENABLED=true, or drop --disable-pamm to run Metric on its own.");
         }
         println!("No authenticated RFQ credentials found. Continuing with the pAMM feeds only.\n");
     }
@@ -282,6 +286,24 @@ async fn main() {
         feeds
             .add(bebop::PROTOCOL_SYSTEM, bebop_feed)
             .expect("each provider is added once");
+    }
+
+    if let (true, Some(usd_quote_tokens)) = (aqua0_enabled, &usd_quote_tokens) {
+        println!("Setting up Aqua0 feed...\n");
+        let mut builder = Aqua0FeedBuilder::new(book_config.clone(), Arc::clone(usd_quote_tokens));
+        if let Ok(api_url) = env::var("AQUA0_API_URL") {
+            builder = builder.base_url(api_url);
+        }
+        // Aqua0 serves Base, Arbitrum, Polygon, Robinhood and Arc; elsewhere its first poll
+        // ends the feed.
+        match builder.build() {
+            Ok(aqua0_feed) => {
+                feeds
+                    .add(aqua0::PROTOCOL_SYSTEM, aqua0_feed)
+                    .expect("each provider is added once");
+            }
+            Err(e) => eprintln!("Skipping Aqua0 feed: {e}"),
+        }
     }
 
     if let (true, Some(usd_quote_tokens)) = (euclid_enabled, &usd_quote_tokens) {

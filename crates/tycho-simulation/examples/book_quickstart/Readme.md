@@ -28,6 +28,9 @@ export NATIVE_API_KEY=<your-native-api-key>
 # Euclid's gateway is public and needs no key
 export EUCLID_ENABLED=true
 
+# Aqua0's API is public and needs no key
+export AQUA0_ENABLED=true
+
 export METRIC_API_KEY=<your-metric-trading-key>
 ```
 
@@ -78,13 +81,15 @@ export RPC_URL=<your-rpc-url>
 
 - **Credentials**: Contact each venue directly to obtain API credentials for accessing its live
   book. Euclid's is public: `EUCLID_ENABLED=true` turns it on, and `EUCLID_API_URL` points it
-  at another gateway. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
+  at another gateway. Aqua0's is public too: `AQUA0_ENABLED=true` turns it on, and
+  `AQUA0_API_URL` points it at another deployment. The pAMM feeds need only `METRIC_API_KEY`; `--disable-pamm` leaves them out.
 
 ## What you'll see
 
 The example will:
 
-1. Open a feed per venue you have credentials for, and Euclid's when `EUCLID_ENABLED=true`
+1. Open a feed per venue you have credentials for, Euclid's when `EUCLID_ENABLED=true`, and
+   Aqua0's when `AQUA0_ENABLED=true`
 2. Stream each venue's complete book for your specified token pair, republished whenever it
    changes
 3. Display the best available quotes with pricing information

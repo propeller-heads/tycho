@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroUsize,
     str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -7,7 +8,7 @@ use std::{
 
 use alloy::primitives::keccak256;
 use chrono::{DateTime, NaiveDateTime};
-use futures::future::join_all;
+use futures::{stream, StreamExt};
 use num_bigint::BigUint;
 use tracing::{debug, warn};
 use tycho_common::{models::token::Token, Bytes};
@@ -34,6 +35,11 @@ const STALE_MARKETS_FACTOR: u32 = 5;
 /// The first wait before reading a failed market list again; it doubles up to `markets_refresh`.
 const MARKETS_RETRY: Duration = Duration::from_secs(5);
 
+/// How many `/state` requests a poll runs at once unless the builder says otherwise. Aqua0 prices
+/// each pool when asked, so asking for every listed pool at once slows each answer past its
+/// deadline.
+pub const DEFAULT_STATE_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+
 /// V4's largest static LP fee. A pool key fee above it is the dynamic-fee flag or invalid.
 const MAX_LP_FEE: u32 = 1_000_000;
 
@@ -51,6 +57,8 @@ pub struct Aqua0BookSource {
     #[debug(skip)]
     pub(crate) sample_sizes: Arc<HashMap<Bytes, Vec<BigUint>>>,
     pub(crate) markets_refresh: Duration,
+    /// `/state` requests in flight at once.
+    pub(crate) state_concurrency: NonZeroUsize,
     #[debug(skip)]
     pub(crate) markets: Mutex<Option<(Instant, Vec<Aqua0Market>)>>,
     /// Failed market list reads in a row, and when the next read may go out.
@@ -65,6 +73,7 @@ impl Aqua0BookSource {
         usd_quote_tokens: Arc<HashSet<Bytes>>,
         sample_sizes: Arc<HashMap<Bytes, Vec<BigUint>>>,
         markets_refresh: Duration,
+        state_concurrency: NonZeroUsize,
     ) -> Self {
         Self {
             client,
@@ -72,6 +81,7 @@ impl Aqua0BookSource {
             usd_quote_tokens,
             sample_sizes,
             markets_refresh,
+            state_concurrency,
             markets: Mutex::new(None),
             markets_retry: Mutex::new((0, None)),
         }
@@ -162,6 +172,15 @@ impl Aqua0BookSource {
         }
     }
 
+    async fn state_of(
+        &self,
+        (market, token0, token1): (Aqua0Market, Token, Token),
+    ) -> Result<StateAnswer, FeedError> {
+        self.client
+            .fetch_state(&market, &self.samples(&token0), &self.samples(&token1))
+            .await
+    }
+
     fn samples(&self, token: &Token) -> String {
         match self.sample_sizes.get(&token.address) {
             Some(sizes) if !sizes.is_empty() => sizes
@@ -209,19 +228,12 @@ impl HttpSource for Aqua0BookSource {
             })
             .collect();
 
-        let answers = join_all(
-            wanted
-                .iter()
-                .map(|(market, token0, token1)| {
-                    let (samples0, samples1) = (self.samples(token0), self.samples(token1));
-                    async move {
-                        self.client
-                            .fetch_state(market, &samples0, &samples1)
-                            .await
-                    }
-                }),
-        )
-        .await;
+        // In order, so each answer lines up with its market below.
+        let answers: Vec<_> = stream::iter(wanted.clone())
+            .map(|market| self.state_of(market))
+            .buffered(self.state_concurrency.get())
+            .collect()
+            .await;
 
         let now = unix_now().map_err(|error| FeedError::Fatal(error.to_string()))?;
         let mut books = Books::new();
@@ -443,7 +455,8 @@ pub mod tests {
 
     use super::*;
     use crate::{
-        book::decode_swap_directions, snapshot_feed::http::test_support::spawn_http_server,
+        book::decode_swap_directions,
+        snapshot_feed::http::test_support::{spawn_http_server, MockResponse},
     };
 
     /// The backend's `componentId` in the recorded Polygon `/state` answer.
@@ -472,7 +485,10 @@ pub mod tests {
     }
 
     fn client(url: &str, chain_id: u64) -> Arc<Aqua0Client> {
-        Arc::new(Aqua0Client::new(url, chain_id, Duration::from_secs(5), Duration::from_secs(5)))
+        Arc::new(
+            Aqua0Client::new(url, chain_id, Duration::from_secs(5), Duration::from_secs(5))
+                .unwrap(),
+        )
     }
 
     fn polygon_book(state: Aqua0StateResponse) -> Result<Book, String> {
@@ -599,6 +615,7 @@ pub mod tests {
             Arc::new(HashSet::new()),
             Arc::new(HashMap::new()),
             Duration::from_secs(60),
+            DEFAULT_STATE_CONCURRENCY,
         );
 
         let books = source.fetch().await.unwrap().books;
@@ -651,6 +668,7 @@ pub mod tests {
             Arc::new(HashSet::new()),
             Arc::new(HashMap::new()),
             Duration::from_secs(60),
+            DEFAULT_STATE_CONCURRENCY,
         );
         assert!(source
             .fetch()
@@ -679,6 +697,7 @@ pub mod tests {
             Arc::new(usd),
             Arc::new(HashMap::new()),
             refresh,
+            DEFAULT_STATE_CONCURRENCY,
         )
     }
 
@@ -706,6 +725,78 @@ pub mod tests {
         .await;
         let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
         assert!(matches!(source.fetch().await, Err(FeedError::Connection(_))));
+    }
+
+    /// Levels that are listed but not fully backed are no liquidity: the market is left out,
+    /// not published with no direction to quote, and the poll still succeeds.
+    #[tokio::test]
+    async fn a_market_with_no_fully_backed_level_is_left_out() {
+        let markets = polygon_markets();
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                return Some(("200 OK", markets.clone()));
+            }
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["expiresAt"] = u64::MAX.into();
+            for direction in ["zeroForOne", "oneForZero"] {
+                for level in state["directions"][direction]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    level["fullySupported"] = false.into();
+                }
+            }
+            Some(("200 OK", state.to_string()))
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
+        assert!(source
+            .fetch()
+            .await
+            .unwrap()
+            .books
+            .is_empty());
+    }
+
+    /// A poll asks for at most `state_concurrency` pools at once, and still reads every pool.
+    #[tokio::test]
+    async fn a_poll_bounds_its_state_requests_in_flight() {
+        let good = market_of(&recorded(POLYGON_STATE));
+        let pools: Vec<String> = (0..10)
+            .map(|index| format!("0x{index:064x}"))
+            .collect();
+        let markets = serde_json::json!({ "markets": pools
+            .iter()
+            .map(|pool| serde_json::json!({
+                "chainId": 137, "poolId": pool, "classId": "1", "tokens": good.tokens,
+            }))
+            .collect::<Vec<_>>() })
+        .to_string();
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&arrivals);
+        let delay = Duration::from_millis(300);
+        let server = spawn_http_server(move |request| {
+            if request.target.starts_with("/markets") {
+                return Some(("200 OK", markets.clone()).into());
+            }
+            seen.lock()
+                .unwrap()
+                .push(Instant::now());
+            let mut state: serde_json::Value = serde_json::from_str(POLYGON_STATE).unwrap();
+            state["quotable"] = false.into();
+            state["directions"] = serde_json::json!({ "zeroForOne": [], "oneForZero": [] });
+            Some(MockResponse { status: "200 OK", body: state.to_string(), delay })
+        })
+        .await;
+        let source = polygon_source(&server.url(), 0.0, HashSet::new(), Duration::from_secs(60));
+        source.fetch().await.unwrap();
+
+        let arrivals = arrivals.lock().unwrap();
+        assert_eq!(arrivals.len(), pools.len(), "every pool is read");
+        // The request after the first `limit` waits for one of them to answer, which load can only
+        // delay further.
+        let limit = DEFAULT_STATE_CONCURRENCY.get();
+        assert!(arrivals[limit].duration_since(arrivals[0]) >= delay);
     }
 
     /// Markets with no liquidity do not count: one empty market and one that fails its checks
@@ -883,6 +974,7 @@ pub mod tests {
             Arc::new(HashSet::new()),
             Arc::new(HashMap::from([(Bytes::zero(20), vec![BigUint::from(5u32)])])),
             Duration::from_secs(60),
+            DEFAULT_STATE_CONCURRENCY,
         );
         assert_eq!(
             source.samples(&token("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", Chain::Polygon)),

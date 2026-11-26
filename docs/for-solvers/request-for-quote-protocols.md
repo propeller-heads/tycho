@@ -36,6 +36,7 @@ export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
 export NATIVE_API_KEY=<your-native-api-key>
+export AQUA0_ENABLED=true # Aqua0's API is public and needs no key
 export METRIC_API_KEY=<your-metric-trading-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
@@ -242,7 +243,9 @@ After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution mu
 
 A route that breaks one of these still encodes and reserves Aqua0 liquidity, then reverts on chain.
 
-Aqua0's quote is valid for 45 seconds and reserves Aqua0 liquidity until then, so encode an Aqua0 route only to execute it. Reservations compete, also between quotes from the same caller, and Tycho encodes the solutions of one `encode_solutions` call in parallel. Put at most one solution through a given Aqua0 market in one call. Otherwise the second quote is refused, the call fails, and the first quote's liquidity stays reserved for 45 seconds.
+Aqua0's quote is valid for 45 seconds and holds Aqua0 liquidity until 15 seconds after that, so about 60 seconds. Encode an Aqua0 route only to execute it.
+
+Several open quotes on one Aqua0 market are fine, from one `encode_solutions` call or several. Each new quote is priced as if the open quotes before it on that market fill, so a later quote in the same direction is priced past the earlier ones, and each can fill when they land in the order they were signed. Two cases still revert in the hook's `beforeSwap`: an earlier same-direction quote that lands after a later one, and a quote in the other direction that lands after a fill it was signed before. Quotes also compete for liquidity, also from the same caller, and Tycho encodes the solutions of one `encode_solutions` call in parallel. A quote that does not fit the liquidity the open quotes leave is refused, and then the whole call fails. A quote that reverts or goes unused keeps its liquidity held until its hold ends. The Aqua0 module's README lists the hook's errors, and `aqua0::revert::decode_revert` names the error in a failed fill's revert data.
 
 Set the gas limit at least 30% above Tycho's gas estimate, or use `eth_estimateGas` on the encoded transaction. The fill adds and removes its liquidity inside the swap, so it needs more gas while it runs than it is billed for after the refund. The recorded one-range fill on Arbitrum is estimated at about 758k gas and billed about 731k, but reverts with a gas limit below about 920k. For fills with more ranges, `eth_estimateGas` is safer.
 {% endhint %}
