@@ -64,9 +64,19 @@ jobs:
           export MAIN_SHA="$(git -C main rev-parse HEAD)"
           python3 workflow/scripts/protocol_dashboard/build.py
 
-      - name: Upload the dashboard
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: protocol-dashboard
-          path: out/
-          retention-days: 30
+      - name: Publish the dashboard
+        if: github.event_name != 'pull_request'
+        env:
+          TOKEN: ${{ secrets.ARTIFACT_TOKEN }}
+          ARTIFACT_HOST: ${{ vars.ARTIFACT_HOST }}
+          ARTIFACT_SLUG: ${{ vars.ARTIFACT_SLUG }}
+        run: |
+          cd out
+          zip -r ../integrations.zip .
+          cd ..
+
+          curl --fail --show-error \
+            -X PUT \
+            -H "Authorization: Bearer $TOKEN" \
+            --data-binary @integrations.zip \
+            "https://${ARTIFACT_HOST}/artifacts/${ARTIFACT_SLUG}"
