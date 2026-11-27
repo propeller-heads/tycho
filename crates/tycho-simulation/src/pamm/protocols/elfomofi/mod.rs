@@ -23,10 +23,11 @@
 //!
 //! # Known limits
 //!
-//! - Quotes decay within seconds of the operator's last price push, and a pair following a
-//!   reference AMM pool drops to zero when that pool moves about 1%. The feed withdraws books that
-//!   are a few seconds old, and the executor's floor turns a quote that went stale in flight into a
-//!   revert.
+//! - Quotes worsen in steps from 4-5 s after the block a poll reads and empty after 10-16 s
+//!   (`models::ElfomofiSupportedChain::max_read_lag` has the per-chain figures), and a pair
+//!   following a reference AMM pool drops to zero when that pool moves about 1%. The feed withdraws
+//!   books that are 2 s old, and the executor's floor turns a quote that went stale in flight into
+//!   a revert.
 //! - Every pair's ladder is cut at the vault's whole balance of its output token, so pairs that
 //!   share a token each claim all of it. When two fills in one block together exceed it, the second
 //!   pays only what is left of the balance and reverts on its floor; with the vault empty, the

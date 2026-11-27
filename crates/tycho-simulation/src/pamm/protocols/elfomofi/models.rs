@@ -107,10 +107,18 @@ impl ElfomofiSupportedChain {
 
     /// How far behind the local clock a read's block may be before the poll is refused.
     ///
-    /// Placeholder until measured per chain. The bound it must respect: this lag, plus
-    /// [`Self::max_snapshot_age`], plus the time a transaction takes to land, stays below the
-    /// time a quote holds after the operator's last push (6-9 s measured in 2026-10) less the
-    /// operator's push interval (0-4 s then).
+    /// The venue worsens its prices in steps as the operator's last push ages. Measured on
+    /// 2026-11-27 from the timestamp of the block a poll reads, prices hold for 4 s on Base and
+    /// BSC and 5 s on Robinhood. Past that, the next step costs Base and Robinhood about 25 bps,
+    /// inside the encoder's default 50 bps floor, and BSC 75 bps, past it. Books empty at 14-16 s
+    /// (Base), 10-12 s (BSC) and 12-16 s (Robinhood).
+    ///
+    /// This lag, plus [`Self::max_snapshot_age`], plus the time a transaction takes to land, should
+    /// stay inside that hold. A typical fill takes about 1 s of lag, 0.5 s of snapshot age and
+    /// 1 s to land, and does. One at both limits does not: on Base and Robinhood it fills about
+    /// 25 bps below the quote, and on BSC it reverts on its floor. A tighter bound costs reads:
+    /// read lag was p50/p99 0.66/1.43 s on Base, 1.09/2.09 s on BSC and 0.91/3.85 s on Robinhood,
+    /// so 1.5 s refuses 12% of BSC reads where 2 s refuses 1.2%.
     pub(super) fn max_read_lag(self) -> Duration {
         match self {
             ElfomofiSupportedChain::Base |
@@ -120,7 +128,8 @@ impl ElfomofiSupportedChain {
     }
 
     /// The longest a published snapshot may serve without a refresh, and the feed's default.
-    /// A placeholder under the same bound as [`Self::max_read_lag`].
+    /// Under the same bound as [`Self::max_read_lag`]. It cannot go much lower: a poll every
+    /// second, with a p99 round trip of about 1.2 s, already leaves up to 2 s between snapshots.
     pub fn max_snapshot_age(self) -> Duration {
         match self {
             ElfomofiSupportedChain::Base |
