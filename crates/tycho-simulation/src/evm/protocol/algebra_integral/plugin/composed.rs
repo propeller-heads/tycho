@@ -35,6 +35,11 @@ pub trait GasModule: Debug + Send + Sync + 'static {
     /// Gas the module adds to a swap in the given direction.
     fn gas(&self, zero_for_one: bool) -> u64;
 
+    /// Gas the module adds for each initialized tick a swap in the given direction crosses.
+    fn gas_per_crossed_tick(&self, _zero_for_one: bool) -> u64 {
+        0
+    }
+
     fn clone_box(&self) -> Box<dyn GasModule>;
 }
 
@@ -59,11 +64,12 @@ impl ComposedPlugin {
         Self { fee, gates, gas, block }
     }
 
-    fn hook_gas(&self, zero_for_one: bool) -> Result<u64, SimulationError> {
+    /// Sums `cost` over the gas modules.
+    fn sum_gas(&self, cost: impl Fn(&dyn GasModule) -> u64) -> Result<u64, SimulationError> {
         let mut total = 0u64;
         for module in &self.gas {
             total = total
-                .checked_add(module.gas(zero_for_one))
+                .checked_add(cost(module.as_ref()))
                 .ok_or_else(|| {
                     SimulationError::FatalError("plugin hook gas overflows u64".to_string())
                 })?;
@@ -114,7 +120,9 @@ impl PluginHandler for ComposedPlugin {
         Ok(PluginQuote {
             override_fee: fees.override_fee,
             plugin_fee: fees.plugin_fee,
-            gas: self.hook_gas(swap.zero_for_one)?,
+            gas: self.sum_gas(|module| module.gas(swap.zero_for_one))?,
+            gas_per_crossed_tick: self
+                .sum_gas(|module| module.gas_per_crossed_tick(swap.zero_for_one))?,
             storage_writes: StorageOverrides::new(),
         })
     }
@@ -211,6 +219,10 @@ mod tests {
             }
         }
 
+        fn gas_per_crossed_tick(&self, _zero_for_one: bool) -> u64 {
+            self.0 * 100
+        }
+
         fn clone_box(&self) -> Box<dyn GasModule> {
             Box::new(self.clone())
         }
@@ -259,6 +271,7 @@ mod tests {
                 override_fee: Some(fee),
                 plugin_fee: 0,
                 gas,
+                gas_per_crossed_tick: 3_000,
                 storage_writes: StorageOverrides::new(),
             }
         );
@@ -273,6 +286,7 @@ mod tests {
             .expect("an open plugin should quote");
 
         assert_eq!(quote.gas, 0);
+        assert_eq!(quote.gas_per_crossed_tick, 0);
     }
 
     #[test]

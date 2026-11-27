@@ -69,6 +69,9 @@ pub struct PluginQuote {
     /// Gas of the plugin's `beforeSwap` and `afterSwap`, including what the pool spends calling
     /// them.
     pub gas: u64,
+    /// Gas the plugin adds for each initialized tick the swap crosses, on top of the pool's own
+    /// crossing cost.
+    pub gas_per_crossed_tick: u64,
     /// Storage the hooks wrote, which a later swap in the same block must run against. Native
     /// handlers leave it empty: nothing they read is written during a swap.
     pub storage_writes: StorageOverrides,

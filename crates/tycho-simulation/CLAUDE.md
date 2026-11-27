@@ -48,11 +48,12 @@ for any protocol indexed by Tycho.
   - **Algebra Integral** (`algebra_integral/`): native state shared by every DEX built on
     Algebra Integral 1.2, each under its own protocol system (`nami_v4` is the first).
     `AlgebraIntegralState` walks the tick list in `state.rs` with the step math of
-    `swap_math.rs`; a pool whose `plugin_config` has `BEFORE_SWAP` takes its fee and hook gas
-    from a `PluginHandler` (`plugin/`), otherwise it charges its stored fee. Handlers register
-    per `(Chain, plugin implementation)` in `plugin/registry.rs`, with a generic VM fallback on
-    Ethereum only (`plugin/vm.rs`, which runs the plugin's own `beforeSwap` in `revm` and
-    estimates `afterSwap`); `plugin/deployments/<dex>.rs` holds each DEX's implementations and
+    `swap_math.rs`; a pool whose `plugin_config` has `BEFORE_SWAP` takes its fee, its hook gas
+    and the gas its plugin adds per crossed tick from a `PluginHandler` (`plugin/`), otherwise
+    it charges its stored fee. Handlers register per `(Chain, plugin implementation)` in
+    `plugin/registry.rs`, with a generic VM fallback on Ethereum only (`plugin/vm.rs`, which
+    runs the plugin's own `beforeSwap` in `revm` and estimates `afterSwap`);
+    `plugin/deployments/<dex>.rs` holds each DEX's implementations and
     `initialize_plugin_handlers` registers them when a stream is built. A native handler is a
     `ComposedPlugin` of fee, gate and gas modules. `plugin/modules/<vendor>/<module>.rs` decodes
     the `<module>/<field>` attributes that the file of the same path in

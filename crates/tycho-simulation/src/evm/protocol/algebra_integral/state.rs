@@ -93,10 +93,17 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 /// Plugin costs a swap can carry, `beforeSwap` and `afterSwap` together. Set aside before
 /// counting ticks.
 const MAX_PLUGIN_GAS: u64 = 250_000;
-/// Initialized ticks one swap can cross within `MAX_SWAP_GAS`.
-const MAX_TICKS_CROSSED: u64 =
-    (MAX_SWAP_GAS - SWAP_BASE_GAS - SWAP_SETTLEMENT_GAS - SWAP_CALLBACK_GAS - MAX_PLUGIN_GAS) /
-        (GAS_PER_INITIALIZED_TICK_CROSS + GAS_PER_SWAP_MATH_STEP);
+/// Gas a swap can spend crossing ticks within `MAX_SWAP_GAS`.
+const TICK_CROSSING_GAS_BUDGET: u64 =
+    MAX_SWAP_GAS - SWAP_BASE_GAS - SWAP_SETTLEMENT_GAS - SWAP_CALLBACK_GAS - MAX_PLUGIN_GAS;
+
+/// Initialized ticks one swap can cross within `MAX_SWAP_GAS`, when the plugin adds
+/// `plugin_gas_per_crossed_tick` to each crossing.
+fn max_ticks_crossed(plugin_gas_per_crossed_tick: u64) -> u64 {
+    TICK_CROSSING_GAS_BUDGET /
+        (GAS_PER_INITIALIZED_TICK_CROSS + GAS_PER_SWAP_MATH_STEP)
+            .saturating_add(plugin_gas_per_crossed_tick)
+}
 
 /// Attribute holding the implementation a pool's plugin runs.
 const PLUGIN_IMPL_ATTRIBUTE: &str = "plugin_impl";
@@ -239,11 +246,14 @@ impl PartialEq for AlgebraIntegralState {
 
 impl Eq for AlgebraIntegralState {}
 
-/// Fee a swap pays and the gas the plugin's hooks spend on it.
+/// Fee a swap pays and the gas the plugin spends on it.
 #[derive(Clone, Copy)]
 struct ResolvedFee {
     fee: u32,
+    /// Gas of the plugin's hooks.
     gas: u64,
+    /// Gas the plugin adds for each initialized tick the swap crosses.
+    gas_per_crossed_tick: u64,
 }
 
 /// Combines the pool's stored fee with the plugin's answer the way `AlgebraPool` does.
@@ -403,7 +413,10 @@ impl AlgebraIntegralState {
                 } else {
                     0
                 };
-                Ok((ResolvedFee { fee: self.last_fee, gas }, StorageOverrides::new()))
+                Ok((
+                    ResolvedFee { fee: self.last_fee, gas, gas_per_crossed_tick: 0 },
+                    StorageOverrides::new(),
+                ))
             }
             PluginSlot::Unsupported(reason) => Err(SimulationError::RecoverableError(format!(
                 "algebra pool {} is not quoted: {reason}",
@@ -419,6 +432,7 @@ impl AlgebraIntegralState {
                         quote.plugin_fee,
                     )?,
                     gas: quote.gas,
+                    gas_per_crossed_tick: quote.gas_per_crossed_tick,
                 };
                 Ok((resolved_fee, quote.storage_writes))
             }
@@ -522,6 +536,8 @@ impl AlgebraIntegralState {
         let mut prev_tick = self.prev_initialized_tick(self.tick);
         let mut next_tick = self.next_initialized_tick(self.tick);
         let mut gas_used = SWAP_BASE_GAS + resolved_fee.gas;
+        let gas_per_crossed_tick =
+            GAS_PER_INITIALIZED_TICK_CROSS + resolved_fee.gas_per_crossed_tick;
 
         loop {
             let step_tick = if zero_for_one { prev_tick } else { next_tick };
@@ -580,7 +596,7 @@ impl AlgebraIntegralState {
                     net_liquidity
                 };
                 current_liquidity = add_liquidity_delta(current_liquidity, liquidity_delta)?;
-                gas_used += GAS_PER_INITIALIZED_TICK_CROSS;
+                gas_used += gas_per_crossed_tick;
             } else if current_price != step_start_price {
                 current_tick = get_tick_at_sqrt_ratio(current_price)?;
                 break;
@@ -725,14 +741,15 @@ impl ProtocolSim for AlgebraIntegralState {
             }
         }
         // The fee comes out of the input.
-        let (ResolvedFee { fee, .. }, _) = self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
+        let (ResolvedFee { fee, gas_per_crossed_tick, .. }, _) =
+            self.resolve_fee(&self.fee_probe(zero_for_one)?)?;
         let mut current_tick = self.tick;
         let mut current_price = self.sqrt_price;
         let mut current_liquidity = self.liquidity;
         let mut total_in = U256::ZERO;
         let mut total_out = U256::ZERO;
 
-        for _ in 0..MAX_TICKS_CROSSED {
+        for _ in 0..max_ticks_crossed(gas_per_crossed_tick) {
             let step_tick = if zero_for_one {
                 self.prev_initialized_tick(current_tick)
             } else {
@@ -1394,6 +1411,26 @@ mod tests {
         // The plugin's fee is below the stored 0.3%, so the swap returns more.
         assert!(quote.amount > stored_fee_quote.amount);
         assert_eq!(quote.gas, stored_fee_quote.gas + BigUint::from(ROBINHOOD_HOOK_GAS));
+    }
+
+    #[test]
+    fn farming_incentive_charges_each_crossed_tick() {
+        // Both swaps cross tick -600 once, then walk the empty range to the price limit.
+        let amount_in = BigUint::from(10u64).pow(30);
+        let partial_gas = |pool: AlgebraIntegralState| {
+            let err = pool
+                .get_amount_out(amount_in.clone(), &token0(), &token1())
+                .expect_err("the price limit should be reached");
+            let SimulationError::InvalidInput(_, Some(partial)) = err else {
+                panic!("expected a partial result, got {err:?}");
+            };
+            partial.gas
+        };
+
+        let with_incentive = partial_gas(robinhood_pool(SESSION));
+        let without_plugin = partial_gas(static_fee_pool());
+
+        assert_eq!(with_incentive, without_plugin + BigUint::from(ROBINHOOD_HOOK_GAS + 25_000));
     }
 
     #[test]

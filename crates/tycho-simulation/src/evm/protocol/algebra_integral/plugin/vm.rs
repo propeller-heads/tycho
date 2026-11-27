@@ -215,6 +215,9 @@ impl VmPlugin {
                 .saturating_sub(intrinsic_gas) +
                 PLUGIN_CALL_OVERHEAD_GAS +
                 after_swap_gas,
+            // The hooks run here; the pool's tick crossings, and any plugin calls they make, do
+            // not.
+            gas_per_crossed_tick: 0,
             storage_writes,
         })
     }
