@@ -47,6 +47,8 @@ const ROUTERS = {
 
 // Eden Network's Uniswap V3 static quoter, per chain:
 // https://github.com/eden-network/uniswap-v3-static-quoter#deployments
+// `FALLBACK_STATIC_QUOTER_CHAINS` in the Rust gas estimator lists these chains, to budget
+// the Uniswap V3 fallback quote; change it with this map.
 const STATIC_QUOTERS = {
     ethereum: "0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE",
     base: "0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb",

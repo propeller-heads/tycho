@@ -1,4 +1,5 @@
 use num_bigint::BigUint;
+use tycho_common::models::Chain;
 
 use super::{
     constants::{
@@ -8,8 +9,9 @@ use super::{
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
+    swap_encoder::FallbackProtocol,
 };
-use crate::encoding::models::{Solution, Strategy, UserTransferType};
+use crate::encoding::models::{Solution, Strategy, Swap, UserTransferType};
 
 /// Default gas usage for an ERC-20 `transferFrom` or `transfer`. Used as fallback when the token
 /// has no measured gas usage.
@@ -108,20 +110,61 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// Extra gas a fallback router adds around a primary fill: the `executePrimary` try/catch
 /// self-call, paying the primary, the `nonReentrant` guard and the no-output balance check. The
 /// router is push-funded, so the input transfer is charged separately and this sits on top of it.
-/// Metric and Bebop legs add their own extras on top.
+/// `estimate_gas_usage` adds on top the fallback quote, budgeted by fallback protocol, Metric's
+/// and BaiBai's primary quotes, and the signed-quote routers' approval and output forward.
 ///
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
-/// Gas for `MetricFallbackRouter`'s `quoteFallback` call, which prices the fallback protocol
-/// before the router picks a side. The cost depends on how much of the fallback pool's liquidity
-/// the quote walks; this covers most quotes on a concentrated-liquidity pool.
-pub const METRIC_FALLBACK_QUOTE_GAS: u64 = 100_000;
+/// Gas for a `quoteFallback` call that simulates a Uniswap V3 swap, also charged when the fallback
+/// protocol is unknown. A 10 USDC simulation costs about 108k on a Base fork.
+const FALLBACK_SIMULATED_QUOTE_GAS: u64 = 110_000;
 
-/// Gas for `BaibaiFallbackRouter`'s quotes before it picks a side: the entrypoint's `quoteFor`
-/// and the fallback quote, budgeted as `METRIC_FALLBACK_QUOTE_GAS`. On a Base fork `quoteFor`
-/// costs about 40k but warms the entrypoint, so the BaiBai swap after it costs about 30k less.
-pub const BAIBAI_FALLBACK_QUOTE_GAS: u64 = 10_000 + METRIC_FALLBACK_QUOTE_GAS;
+/// Chains whose `TychoFallbackRouter` has a Uniswap V3 static quoter (`STATIC_QUOTERS` in
+/// `deploy-fallback-router.js`, which points back here). Elsewhere it quotes a Uniswap V3 fallback
+/// by simulation.
+const FALLBACK_STATIC_QUOTER_CHAINS: &[Chain] = &[Chain::Ethereum, Chain::Base, Chain::Polygon];
+
+/// Gas for the `quoteFallback` call a fallback router makes before it picks a side, by the
+/// fallback protocol the swap's `user_data` names, on the chain of the swap's input token.
+/// Each budget is the typical cost, not an upper bound: the estimate ranks routes against each
+/// other, so a padded budget would rank fallback legs below what they cost. Measured with the pool
+/// cold, for quotes that cross few ticks; a quote that walks many ticks costs more.
+///
+/// A `user_data` that does not parse into a fallback swap does not encode; it gets the simulated
+/// budget.
+fn fallback_quote_gas(swap: &Swap) -> u64 {
+    let protocol = FallbackProtocol::from_user_data(swap.user_data().as_ref());
+    let has_static_quoter = FALLBACK_STATIC_QUOTER_CHAINS.contains(&swap.token_in().chain);
+    match protocol {
+        // 7.9k in executed quotes on Ethereum, 7.4k in live Base swaps.
+        Some(FallbackProtocol::UniswapV2) => 8_000,
+        // Through the static quoter: a median of 27k to 29k over 347 executed quotes on Uniswap V3
+        // and PancakeSwap V3 pools on Ethereum and Base.
+        Some(FallbackProtocol::UniswapV3) if has_static_quoter => 30_000,
+        // About 35k on 3pool and 71k on tricrypto on a Mainnet fork.
+        Some(FallbackProtocol::Curve) => 50_000,
+        // Simulated: a median of 87k over 121 executed quotes on Ethereum and 83k over 93 on Base.
+        Some(FallbackProtocol::UniswapV4) => 85_000,
+        // A median of 36.1k over 13 executed quotes on Ethereum.
+        Some(FallbackProtocol::FluidV1) => 36_000,
+        // 27.1k in executed quotes on Base, about 26k for 0.01 tBTC on a Base fork.
+        Some(FallbackProtocol::AerodromeV1) => 27_000,
+        Some(FallbackProtocol::UniswapV3) | None => FALLBACK_SIMULATED_QUOTE_GAS,
+    }
+}
+
+/// Whether the fallback router quotes the fallback before it picks a side. The signed-quote
+/// routers run their primary first, unquoted.
+fn quotes_fallback(protocol_system: &str) -> bool {
+    protocol_system.starts_with(FALLBACK_PREFIX) &&
+        !SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS.contains(&protocol_system)
+}
+
+/// Gas for the entrypoint's `quoteFor`, which `BaibaiFallbackRouter` calls on top of the fallback
+/// quote. It costs about 40k on Base but warms the entrypoint, so the BaiBai swap after it costs
+/// about 30k less.
+const BAIBAI_QUOTE_FOR_GAS: u64 = 10_000;
 
 /// Extra gas of a subsidized swap.
 pub const SUBSIDY_GAS: u64 = 65_000;
@@ -164,6 +207,10 @@ pub const ROUTER_FEES_ACTIVE: bool = true;
 ///   pay nothing extra. Non-callback protocols add the full user transfer cost. For split swaps,
 ///   funds always go through the router first, so the full user input transfer is always added
 ///   regardless of protocol type.
+/// - **Fallback quotes**: the fallback quote of every fallback router that quotes before it picks a
+///   side, budgeted by fallback protocol and by the chain of the swap's input token (Uniswap V3
+///   quotes cheaply only where the router has a static quoter), plus Metric's and BaiBai's primary
+///   quotes.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "public API; taking `&Strategy` is a breaking change"
@@ -181,13 +228,15 @@ pub fn estimate_gas_usage(solution: &Solution, strategy: Strategy) -> BigUint {
             &strategy,
         );
         total_gas += group_transfer_overhead + &group.estimated_gas;
-        // `MetricFallbackRouter` quotes the pool by running its swap, then quotes the fallback.
+        if quotes_fallback(&group.protocol_system) {
+            total_gas += BigUint::from(fallback_quote_gas(first_swap));
+        }
+        // `MetricFallbackRouter` quotes the pool by running its swap.
         if group.protocol_system == METRIC_FALLBACK_PROTOCOL_SYSTEM {
             total_gas += &group.estimated_gas;
-            total_gas += BigUint::from(METRIC_FALLBACK_QUOTE_GAS);
         }
         if group.protocol_system == BAIBAI_FALLBACK_PROTOCOL_SYSTEM {
-            total_gas += BigUint::from(BAIBAI_FALLBACK_QUOTE_GAS);
+            total_gas += BigUint::from(BAIBAI_QUOTE_FOR_GAS);
         }
     }
     if encoded_subsidy(solution).is_some() {
@@ -341,9 +390,12 @@ mod tests {
 
     use super::*;
     use crate::encoding::{
-        evm::constants::{
-            BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
-            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+        evm::{
+            constants::{
+                BEBOP_FALLBACK_PROTOCOL_SYSTEM, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+                LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
+            },
+            swap_encoder::FallbackSwapData,
         },
         models::{default_token, Solution, Strategy, Swap, UserTransferType},
     };
@@ -392,6 +444,16 @@ mod tests {
             default_token(Bytes::from(vec![0x02u8; 20])),
             BigUint::from(100_000u64), // pool gas
         )
+    }
+
+    fn uniswap_v3_fallback() -> FallbackSwapData {
+        FallbackSwapData::UniswapV3 { pool: Bytes::from(vec![0x0au8; 20]) }
+    }
+
+    /// A `protocol` leg whose `user_data` names `fallback` as its fallback pool.
+    fn make_fallback_swap(protocol: &str, fallback: &FallbackSwapData) -> Swap {
+        let user_data = serde_json::to_vec(fallback).expect("fallback data serializes");
+        make_swap(protocol).with_user_data(Bytes::from(user_data))
     }
 
     fn make_solution(swaps: Vec<Swap>) -> Solution {
@@ -460,43 +522,117 @@ mod tests {
     fn test_single_fallback_router() {
         // Routing a pAMM through the TychoFallbackRouter keeps the leg push-payment (the funded
         // address is the fallback router), so no input transfer; the wrapper overhead is extra.
-        let solution = make_solution(vec![make_swap("fallback:fermiswap")]);
+        let solution =
+            make_solution(vec![make_fallback_swap("fallback:fermiswap", &uniswap_v3_fallback())]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // input transfer                            0  ← push-payment, funds sent directly
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
-        assert_eq!(gas, BigUint::from(240_000u64));
+        assert_eq!(gas, BigUint::from(270_000u64));
     }
 
     #[test]
     fn test_single_metric_fallback_router() {
-        let solution = make_solution(vec![make_swap(METRIC_FALLBACK_PROTOCOL_SYSTEM)]);
+        let solution = make_solution(vec![make_fallback_swap(
+            METRIC_FALLBACK_PROTOCOL_SYSTEM,
+            &uniswap_v3_fallback(),
+        )]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
-        // fallback quote                      100_000  ← METRIC_FALLBACK_QUOTE_GAS
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // simulated quote                     100_000  ← the pool gas again
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(440_000u64));
+        assert_eq!(gas, BigUint::from(370_000u64));
+    }
+
+    #[rstest]
+    #[case::uniswap_v2(
+        FallbackSwapData::UniswapV2 { pair: Bytes::from(vec![0x0au8; 20]), fee_bps: 30 },
+        8_000
+    )]
+    #[case::uniswap_v3(uniswap_v3_fallback(), 30_000)]
+    #[case::uniswap_v4(
+        FallbackSwapData::UniswapV4 {
+            fee: 500,
+            tick_spacing: 10,
+            hook: Bytes::default(),
+            hook_data: Bytes::default(),
+        },
+        85_000
+    )]
+    #[case::curve(
+        FallbackSwapData::Curve { pool: Bytes::from(vec![0x0au8; 20]), pool_type: 1, i: 0, j: 1 },
+        50_000
+    )]
+    #[case::fluid_v1(
+        FallbackSwapData::FluidV1 { dex: Bytes::from(vec![0x0au8; 20]), zero2one: true },
+        36_000
+    )]
+    #[case::aerodrome_v1(
+        FallbackSwapData::AerodromeV1 { pool: Bytes::from(vec![0x0au8; 20]) },
+        27_000
+    )]
+    fn test_fallback_quote_gas_by_protocol(
+        #[case] fallback: FallbackSwapData,
+        #[case] expected: u64,
+    ) {
+        let swap = make_fallback_swap("fallback:fermiswap", &fallback);
+
+        assert_eq!(fallback_quote_gas(&swap), expected);
+    }
+
+    #[test]
+    fn test_uniswap_v3_fallback_quote_simulated_without_static_quoter() {
+        let mut token_in = default_token(token_a());
+        token_in.chain = Chain::Arbitrum;
+        let user_data =
+            serde_json::to_vec(&uniswap_v3_fallback()).expect("fallback data serializes");
+        let swap = Swap::new(
+            ProtocolComponent {
+                protocol_system: "fallback:fermiswap".to_string(),
+                ..Default::default()
+            },
+            token_in,
+            default_token(token_b()),
+            BigUint::from(100_000u64),
+        )
+        .with_user_data(Bytes::from(user_data));
+
+        assert_eq!(fallback_quote_gas(&swap), 110_000);
+    }
+
+    #[test]
+    fn test_fallback_quote_without_fallback_protocol_takes_highest_budget() {
+        assert_eq!(fallback_quote_gas(&make_swap("fallback:fermiswap")), 110_000);
+
+        let unknown = make_swap("fallback:fermiswap")
+            .with_user_data(Bytes::from(br#"{"fallback_protocol":"balancer_v2"}"#.to_vec()));
+        assert_eq!(fallback_quote_gas(&unknown), 110_000);
     }
 
     #[test]
     fn test_single_baibai_fallback_router() {
-        let solution = make_solution(vec![make_swap(BAIBAI_FALLBACK_PROTOCOL_SYSTEM)]);
+        let solution = make_solution(vec![make_fallback_swap(
+            BAIBAI_FALLBACK_PROTOCOL_SYSTEM,
+            &uniswap_v3_fallback(),
+        )]);
         let gas = estimate_gas_usage(&solution, Strategy::Single);
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // entrypoint approval                  25_000  ← TOKEN_APPROVAL_GAS
-        // quoteFor + fallback quote           110_000  ← BAIBAI_FALLBACK_QUOTE_GAS
+        // quoteFor                             10_000  ← BAIBAI_QUOTE_FOR_GAS
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(375_000u64));
+        assert_eq!(gas, BigUint::from(305_000u64));
     }
 
     #[test]
@@ -530,7 +666,7 @@ mod tests {
         // Split funds always route through the router first, so the router→fallback-router
         // transfer is back on top of the wrapper overhead.
         let solution = make_solution(vec![
-            make_swap("fallback:fermiswap").with_split(0.5),
+            make_fallback_swap("fallback:fermiswap", &uniswap_v3_fallback()).with_split(0.5),
             make_swap("uniswap_v2").with_split(0.5),
         ]);
         let gas = estimate_gas_usage(&solution, Strategy::Split);
@@ -538,11 +674,12 @@ mod tests {
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // leg1 input transfer                  60_000  ← Split reintroduces the router hop
         // leg1 fallback router overhead        40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
+        // leg1 fallback quote (Uniswap V3)     30_000  ← fallback_quote_gas
         // leg1 pool gas                       100_000
         // leg2 input transfer                  60_000  ← Split reintroduces the router hop
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
-        assert_eq!(gas, BigUint::from(460_000u64));
+        assert_eq!(gas, BigUint::from(490_000u64));
     }
 
     #[test]
