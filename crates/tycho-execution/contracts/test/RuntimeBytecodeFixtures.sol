@@ -81,7 +81,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // Listed by fixture name.
         _executor("AeroBasic", "base", "aero_basic");
         // The constructor reads the entrypoint's quote token, deployed after Base's pinned block.
-        _executor("Baibai", "base", "baibai", 53_545_000);
+        _executor("Baibai", "base", "pamm:baibai", 53_545_000);
         _executor("BalancerV2", "ethereum", "vm:balancer_v2");
         _executor("BalancerV3", "ethereum", "vm:balancer_v3");
         _executor("Biconomy", "base", "biconomy");
@@ -107,6 +107,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("UniswapV2", "ethereum", "uniswap_v2");
         _executor("UniswapV3", "ethereum", "uniswap_v3");
         _executor("UniswapV4", "ethereum", "uniswap_v4");
+        _executor("UniswapV4Elysium", "elysium", "uniswap_v4");
         // Stands in for whichever hook executor uniswap_v4_hooks is tested against.
         _executor("UniswapV4Angstrom", "ethereum", "uniswap_v4");
         _executor("UniswapV4Robinhood", "robinhood", "uniswap_v4");
@@ -137,6 +138,13 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         if (chain.eq("base")) return 46_500_000;
         if (chain.eq("bsc")) return 46_793_446;
         if (chain.eq("robinhood")) return 80_000_000;
+        // No Elysium constructor among the fixtures (UniswapV4Executor alone) reads chain state;
+        // the block only pins the fork, past the PoolManager the fixture is built with. The
+        // executor's Angstrom argument from the elysium section of
+        // config/executor_deployments.json has no code on Elysium: the constructor only stores
+        // it, and the executor calls it only for a pool whose hook is that address, which no
+        // Elysium pool has.
+        if (chain.eq("elysium")) return 6_024_400;
         revert(
             string.concat(chain, " has no fork block; add one to _forkBlock")
         );

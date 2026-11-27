@@ -153,7 +153,7 @@ where
 
     /// The block a quote produced from `header` is expected to execute in.
     ///
-    /// A partial (flashblock) header describes a block that is still open, so a quote can still
+    /// A partial header describes a block that is still open, so a quote can still
     /// land in it. A confirmed header describes a closed block, so the quote targets the next one.
     fn execution_block(&self, header: &BlockHeader) -> BlockContext {
         if header.partial_block_index.is_some() {
@@ -394,6 +394,9 @@ where
 
     /// Decodes a `FeedMessage` into a `BlockUpdate` containing the updated states of protocol
     /// components
+    ///
+    /// Fails with [`StreamDecodeError::Fatal`] when `msg.state_msgs` is empty: the update takes its
+    /// block from them.
     pub async fn decode(&self, msg: &FeedMessage<H>) -> Result<Update, StreamDecodeError> {
         // stores all states updated in this tick/msg
         let mut updated_states = HashMap::new();

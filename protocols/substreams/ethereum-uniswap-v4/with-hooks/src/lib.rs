@@ -1,6 +1,10 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod abi;
+mod address_list;
+mod ascend;
+mod launchpad;
+mod montra;
 pub mod pb;
 pub mod pons;
 pub mod storage;

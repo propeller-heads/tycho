@@ -49,3 +49,7 @@
 [submodule "protocols/adapter-integration/evm/lib/openzeppelin-contracts"]
     path = protocols/adapter-integration/evm/lib/openzeppelin-contracts
     url = https://github.com/OpenZeppelin/openzeppelin-contracts
+
+[submodule "protocols/adapter-integration/evm/lib/v4-core"]
+    path = protocols/adapter-integration/evm/lib/v4-core
+    url = https://github.com/Uniswap/v4-core

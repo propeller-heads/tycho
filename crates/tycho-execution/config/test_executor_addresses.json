@@ -32,7 +32,7 @@
     "fallback": "0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36"
   },
   "base": {
-    "baibai": "0x59605549B978cAd5473A72c077FC6b5d113c6264",
+    "pamm:baibai": "0x59605549B978cAd5473A72c077FC6b5d113c6264",
     "aerodrome_slipstreams": "0x2a07706473244BC757E10F2a9E86fB532828afe3",
     "aero_cl": "0x2a07706473244BC757E10F2a9E86fB532828afe3",
     "aerodrome_v1": "0x1aF7f588A501EA2B5bB3feeFA744892aA2CF00e6",
@@ -53,5 +53,8 @@
   "bsc": {
     "uniswap_v3": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",
     "rfq:native": "0xDA5A5ADC64C8013d334A0DA9e711B364Af7A4C2d"
+  },
+  "elysium": {
+    "uniswap_v4": "0xFEFA6fB37240041c741Fa1B6466EB2426BEB8B1f"
   }
 }

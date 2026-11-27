@@ -11,7 +11,9 @@ for any protocol indexed by Tycho.
 - **`evm/engine_db/`**: Database backends (`SimulationDB` in-memory, `TychoDB` RPC-backed)
 - **`evm/decoder.rs`**: `TychoStreamDecoder` — turns feed snapshots into `ProtocolSim` instances.
   **A new protocol must be registered here** to be decodable
-- **`evm/stream.rs`**: Tycho feed integration — wires the decoder onto a live `FeedMessage` stream
+- **`evm/stream.rs`**: Tycho feed integration — wires the decoder onto a live `FeedMessage` stream.
+  Rounds that carry no block (empty `state_msgs`) are skipped after the `StreamEndPolicy` check
+  and never reach the decoder, which fails on them
 - **`evm/pending.rs`**: `TxDeltaIndexer` implementation — replays in-flight blocks to produce
   pending-state deltas
 - **`evm/protocol/filters.rs`**: Public pool filters consumers pass when registering protocols
@@ -31,8 +33,15 @@ for any protocol indexed by Tycho.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
     not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
     `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
-    Unichain, Pons V2 is the native handler for Robinhood, and PancakeSwap Infinity's
-    `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC. A registered handler is
+    Unichain, Pons V2 is the native handler for Robinhood, PancakeSwap Infinity's
+    `CLAlphaHook` (`pancakeswap_clalpha/`) is the native handler on BSC, and Montra's
+    `LaunchHook` (`montra/`, `uniswap_v4_hooks` pools of the with-hooks package's Elysium
+    manifest) is a native handler on Elysium, as is the Ascend launchpad hook (`ascend/`).
+    A handler can price itself without simulation
+    through the optional `HookHandler` methods `spot_fees`, `max_amount_in`, `check_swap_outcome`
+    and `swaps_from_empty_range`; their contracts, and which of them must be answered together,
+    are in `hooks/hook_handler.rs`, as is `handler_after_swap`, which carries a hook's own
+    storage writes into the state a quote returns. A registered handler is
     instantiated whatever the hook address bits say, and decides which callbacks run through
     `HookHandler::has_permission`, because Infinity keeps permissions in the pool key. The
     `pancakeswap_infinity_cl_hooks` system skips the address-bit check entirely, so its pools fail

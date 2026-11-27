@@ -85,6 +85,7 @@ jobs:
       BSC_RPC_URL: ${{ secrets.BSC_RPC_URL_ARCHIVE }}
       POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL_ARCHIVE }}
       ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL_ARCHIVE }}
+      ELYSIUM_RPC_URL: ${{ secrets.ELYSIUM_RPC_URL_ARCHIVE }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -113,11 +114,16 @@ jobs:
         run: forge lint --report-unused-suppressions --deny notes
 
       - name: Run tests
+        if: matrix.project.path != 'crates/tycho-execution/contracts'
         run: forge test -vvv
 
-      - name: Gas snapshot
-        run: NO_COLOR=1 forge snapshot >> "$GITHUB_STEP_SUMMARY"
+      # forge snapshot runs the whole suite and fails if any test fails, so it
+      # replaces forge test here instead of running the suite a second time.
+      - name: Run tests and gas snapshot
         if: matrix.project.path == 'crates/tycho-execution/contracts'
+        # bash adds pipefail, so a failing test still fails the step through tee.
+        shell: bash
+        run: NO_COLOR=1 forge snapshot -vvv | tee -a "$GITHUB_STEP_SUMMARY"
 
   # One skip job per matrix entry so each check name matches exactly what branch
   # protection requires ("Foundry CI / Forge build, fmt, test (<path>)").
