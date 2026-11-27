@@ -20,7 +20,7 @@ use tycho_common::{
 
 use super::fee_tier::{fee_serde, FeeTier};
 use crate::evm::protocol::{
-    clmm::clmm_swap_to_price,
+    clmm::{clmm_swap_to_price, clmm_swap_to_price_u256},
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::u256_to_biguint,
     utils::{
@@ -155,10 +155,9 @@ impl UniswapV3State {
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
 
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() {
+        // Only exact-input swaps use the step cache. The cache finds a step by its input and
+        // optional price limit, which an exact-output swap does not know.
+        let cache_key = if exact_input {
             StepCacheKey::new(
                 self.sqrt_price,
                 state.tick.value(),
@@ -174,6 +173,7 @@ impl UniswapV3State {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;
@@ -583,6 +583,31 @@ impl ProtocolSim for UniswapV3State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        if self.liquidity == 0 {
+            return Ok(None);
+        }
+        let res = clmm_swap_to_price_u256(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            self.fee,
+            Sign::Positive,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
+            },
+        )?;
+        Ok(res.map(|(ai, ao)| (*ai.as_limbs(), *ao.as_limbs())))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -1849,5 +1874,103 @@ mod step_cache_tests {
             format_quote_result(&cached, &large, &wbtc, &weth),
             format_quote_result(&fresh, &large, &wbtc, &weth)
         );
+    }
+
+    #[test]
+    fn test_step_cache_swap_to_price_matches_fresh_state() {
+        let (wbtc, weth) = wbtc_weth();
+        let cached = test_pool();
+
+        // Quote a mix of far and near price limits in both directions; the first far limit warms
+        // the cache across multiple ticks, and subsequent nearer limits must stop before crossing.
+        let targets: &[(&Token, &Token, &[u64])] = &[
+            (&wbtc, &weth, &[10_000_000, 12_000_000, 14_000_000, 11_000_000]),
+            (&weth, &wbtc, &[1, 2, 4, 3]),
+        ];
+
+        for (sell, buy, nums) in targets {
+            for &num in *nums {
+                let target = tycho_common::simulation::protocol_sim::Price::new(
+                    BigUint::from(num),
+                    BigUint::from(1_000_000u64),
+                );
+                let params = QueryPoolSwapParams::new(
+                    (*sell).clone(),
+                    (*buy).clone(),
+                    SwapConstraint::PoolTargetPrice {
+                        target,
+                        tolerance: 0.0,
+                        min_amount_in: None,
+                        max_amount_in: None,
+                    },
+                );
+                let fresh = test_pool();
+                let res_cached = cached.query_pool_swap(&params);
+                let res_fresh = fresh.query_pool_swap(&params);
+                match (res_cached, res_fresh) {
+                    (Ok(c), Ok(f)) => {
+                        assert_eq!(c.amount_in(), f.amount_in());
+                        assert_eq!(c.amount_out(), f.amount_out());
+                        assert!(c.new_state().eq(f.new_state()));
+                    }
+                    (Err(_), Err(_)) => {}
+                    (c, f) => panic!("cached vs fresh mismatch: {c:?} vs {f:?}"),
+                }
+            }
+        }
+        // Confirm the cache actually populated from price-limited swaps.
+        assert!(!cached
+            .step_cache
+            .min_inputs(true)
+            .is_empty());
+    }
+
+    #[test]
+    fn test_query_supply_to_price_matches_query_pool_swap() {
+        let (wbtc, weth) = wbtc_weth();
+        let pool = test_pool();
+
+        let cases: &[(&Token, &Token, u128, u128)] = &[
+            (&wbtc, &weth, 10_000_000 * 1_000_000, 1_000_000),
+            (&wbtc, &weth, 14_000_000 * 1_000_000, 1_000_000),
+            (&wbtc, &weth, 50_000_000 * 1_000_000, 1_000_000), // unreachable
+            (&weth, &wbtc, 1_000_000, 16_000_000 * 1_000_000),
+            (&weth, &wbtc, 3_000_000, 16_000_000 * 1_000_000),
+            (&weth, &wbtc, 100_000_000, 16_000_000 * 1_000_000), // unreachable
+        ];
+        for &(token_in, token_out, num, den) in cases {
+            let params = QueryPoolSwapParams::new(
+                token_in.clone(),
+                token_out.clone(),
+                SwapConstraint::PoolTargetPrice {
+                    target: tycho_common::simulation::protocol_sim::Price::new(
+                        BigUint::from(num),
+                        BigUint::from(den),
+                    ),
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            );
+            let legacy = pool.query_pool_swap(&params);
+            let fast = pool.query_supply_to_price(
+                token_in,
+                token_out,
+                *U256::from(num).as_limbs(),
+                *U256::from(den).as_limbs(),
+            );
+            match (legacy, fast) {
+                (Ok(swap), Ok(Some((ai, ao)))) => {
+                    assert_eq!(u256_to_biguint(U256::from_limbs(ai)), *swap.amount_in());
+                    assert_eq!(u256_to_biguint(U256::from_limbs(ao)), *swap.amount_out());
+                }
+                (Ok(swap), Ok(None)) => assert!(swap.amount_in().is_zero()),
+                (Err(SimulationError::InvalidInput(msg, None)), Ok(None)) => {
+                    assert!(msg.contains("unreachable"), "unexpected error: {msg}");
+                }
+                (Err(_), Err(_)) => {}
+                (l, f) => panic!("mismatch for {num}/{den}: legacy={l:?} fast={f:?}"),
+            }
+        }
     }
 }

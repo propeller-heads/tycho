@@ -406,6 +406,61 @@ pub trait ProtocolSim: fmt::Debug + Send + Sync + 'static {
         Err(SimulationError::FatalError("query_pool_swap not implemented".into()))
     }
 
+    /// Computes `(amount_in, amount_out)` required to move the pool's marginal price to
+    /// `target_num / target_den` (`token_out / token_in` in raw atomic units), without cloning
+    /// tokens or allocating a post-swap `Box<dyn ProtocolSim>`.
+    ///
+    /// Returns `Ok(None)` when the target price is unreachable or yields zero output.
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        let mut num_bytes = [0u8; 32];
+        let mut den_bytes = [0u8; 32];
+        for i in 0..4 {
+            num_bytes[i * 8..(i + 1) * 8].copy_from_slice(&target_num[i].to_le_bytes());
+            den_bytes[i * 8..(i + 1) * 8].copy_from_slice(&target_den[i].to_le_bytes());
+        }
+        let price = Price::new(
+            BigUint::from_bytes_le(&num_bytes),
+            BigUint::from_bytes_le(&den_bytes),
+        );
+        let params = QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::PoolTargetPrice {
+                target: price,
+                tolerance: 0.0,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+        match self.query_pool_swap(&params) {
+            Ok(swap) => {
+                let to_limbs = |v: &BigUint| -> [u64; 4] {
+                    let bytes = v.to_bytes_le();
+                    if bytes.len() > 32 {
+                        return [u64::MAX; 4];
+                    }
+                    let mut buf = [0u8; 32];
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    [
+                        u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+                        u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+                        u64::from_le_bytes(buf[16..24].try_into().unwrap()),
+                        u64::from_le_bytes(buf[24..32].try_into().unwrap()),
+                    ]
+                };
+                Ok(Some((to_limbs(swap.amount_in()), to_limbs(swap.amount_out()))))
+            }
+            Err(SimulationError::InvalidInput(_, _)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Clones the protocol state as a trait object.
     /// This allows the state to be cloned when it is being used as a `Box<dyn ProtocolSim>`.
     fn clone_box(&self) -> Box<dyn ProtocolSim>;

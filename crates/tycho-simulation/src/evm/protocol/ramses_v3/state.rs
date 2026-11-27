@@ -18,7 +18,7 @@ use tycho_common::{
 };
 
 use crate::evm::protocol::{
-    clmm::clmm_swap_to_price,
+    clmm::{clmm_swap_to_price, clmm_swap_to_price_u256},
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::u256_to_biguint,
     utils::{
@@ -169,10 +169,9 @@ impl RamsesV3State {
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
 
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() {
+        // Only exact-input swaps use the step cache. The cache finds a step by its input and
+        // optional price limit, which an exact-output swap does not know.
+        let cache_key = if exact_input {
             StepCacheKey::new(
                 self.sqrt_price,
                 state.tick.value(),
@@ -188,6 +187,7 @@ impl RamsesV3State {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;
@@ -566,6 +566,31 @@ impl ProtocolSim for RamsesV3State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        if !self.ticks.has_initialized_ticks() {
+            return Ok(None);
+        }
+        let res = clmm_swap_to_price_u256(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            self.fee,
+            Sign::Positive,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
+            },
+        )?;
+        Ok(res.map(|(ai, ao)| (*ai.as_limbs(), *ao.as_limbs())))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {

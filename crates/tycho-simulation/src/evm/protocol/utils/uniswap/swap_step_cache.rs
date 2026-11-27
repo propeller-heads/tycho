@@ -164,13 +164,14 @@ impl SwapStepCache {
             .collect()
     }
 
-    /// The furthest cached progress that `input` reaches, or `None` when `input` reaches no cached
-    /// step or the cache holds progress from another key.
+    /// The furthest cached progress that `input` reaches without crossing `sqrt_price_limit`,
+    /// or `None` when `input` reaches no cached step or the cache holds progress from another key.
     pub(crate) fn get(
         &self,
         zero_for_one: bool,
         key: StepCacheKey,
         input: U256,
+        sqrt_price_limit: Option<U256>,
     ) -> Option<CachedSwapProgress> {
         let cache = self.direction(zero_for_one);
         if cache.key != Some(key) {
@@ -178,7 +179,14 @@ impl SwapStepCache {
         }
         let reached = cache
             .progress
-            .partition_point(|progress| progress.min_input <= input);
+            .partition_point(|progress| {
+                progress.min_input <= input &&
+                    match sqrt_price_limit {
+                        Some(limit) if zero_for_one => progress.sqrt_price >= limit,
+                        Some(limit) => progress.sqrt_price <= limit,
+                        None => true,
+                    }
+            });
         reached
             .checked_sub(1)
             .map(|last| cache.progress[last].clone())
@@ -231,15 +239,16 @@ pub struct StepCacheRun<'a> {
 }
 
 impl<'a> StepCacheRun<'a> {
-    /// Finds the furthest cached progress that `input` reaches. A `None` key turns the cache off
-    /// for this swap.
+    /// Finds the furthest cached progress that `input` reaches without crossing `sqrt_price_limit`.
+    /// A `None` key turns the cache off for this swap.
     pub(crate) fn new(
         cache: &'a SwapStepCache,
         zero_for_one: bool,
         key: Option<StepCacheKey>,
         input: U256,
+        sqrt_price_limit: Option<U256>,
     ) -> Self {
-        let last = key.and_then(|key| cache.get(zero_for_one, key, input));
+        let last = key.and_then(|key| cache.get(zero_for_one, key, input, sqrt_price_limit));
         StepCacheRun { cache, zero_for_one, key, input, last }
     }
 
@@ -485,7 +494,7 @@ mod tests {
     fn test_get_empty_cache() {
         let cache = SwapStepCache::default();
 
-        let progress = cache.get(true, key(), U256::MAX);
+        let progress = cache.get(true, key(), U256::MAX, None);
 
         assert!(progress.is_none());
     }
@@ -498,10 +507,10 @@ mod tests {
         cache.insert(true, key(), &first);
         cache.insert(true, key(), &second);
 
-        let below = cache.get(true, key(), U256::from(999u64));
-        let at_first = cache.get(true, key(), U256::from(1_000u64));
-        let at_second = cache.get(true, key(), U256::from(1_001u64));
-        let other_direction = cache.get(false, key(), U256::from(1_001u64));
+        let below = cache.get(true, key(), U256::from(999u64), None);
+        let at_first = cache.get(true, key(), U256::from(1_000u64), None);
+        let at_second = cache.get(true, key(), U256::from(1_001u64), None);
+        let other_direction = cache.get(false, key(), U256::from(1_001u64), None);
 
         assert!(below.is_none());
         assert_eq!(at_first.unwrap().steps_taken, 1);
@@ -521,9 +530,9 @@ mod tests {
             StepCacheKey::new(U256::from(1_000u64), 10, 5_000, FEE_PIPS, start_gas + start_gas)
                 .unwrap();
 
-        let from_moved = cache.get(true, moved, U256::MAX);
-        let with_other_fee = cache.get(true, other_fee, U256::MAX);
-        let with_other_gas = cache.get(true, other_gas, U256::MAX);
+        let from_moved = cache.get(true, moved, U256::MAX, None);
+        let with_other_fee = cache.get(true, other_fee, U256::MAX, None);
+        let with_other_gas = cache.get(true, other_gas, U256::MAX, None);
 
         assert!(from_moved.is_none());
         assert!(with_other_fee.is_none());
@@ -586,7 +595,7 @@ mod tests {
     #[test]
     fn test_run_caches_until_a_step_cannot_be_cached() {
         let cache = SwapStepCache::default();
-        let mut run = StepCacheRun::new(&cache, true, Some(key()), U256::from(1_000u64));
+        let mut run = StepCacheRun::new(&cache, true, Some(key()), U256::from(1_000u64), None);
 
         run.cache_progress(&step(900, 1_000, 1_994), &state_at(900, 9), U256::from(150u64));
         run.cache_progress(&step(800, 0, 0), &state_at(800, 8), U256::from(200u64));
@@ -599,7 +608,7 @@ mod tests {
     fn test_run_applies_the_furthest_cached_progress() {
         let cache = SwapStepCache::default();
         cache.insert(true, key(), &first_step(1_000).unwrap());
-        let run = StepCacheRun::new(&cache, true, Some(key()), U256::from(5_000u64));
+        let run = StepCacheRun::new(&cache, true, Some(key()), U256::from(5_000u64), None);
         let mut state = state_at(1_000, 10);
         state.amount_remaining = I256::try_from(5_000).unwrap();
 
@@ -614,12 +623,79 @@ mod tests {
     fn test_run_without_key() {
         let cache = SwapStepCache::default();
         cache.insert(true, key(), &first_step(1_000).unwrap());
-        let run = StepCacheRun::new(&cache, true, None, U256::from(5_000u64));
+        let run = StepCacheRun::new(&cache, true, None, U256::from(5_000u64), None);
         let mut state = state_at(1_000, 10);
 
         let progress = run.apply_cached_progress(&mut state);
 
         assert!(progress.is_none());
         assert_eq!(state.sqrt_price, U256::from(1_000u64));
+    }
+
+    #[test]
+    fn test_get_with_price_limit_zero_for_one() {
+        let cache = SwapStepCache::default();
+        let first = first_step(1_000).unwrap(); // sqrt_price = 900
+        let second = next_progress(
+            Some(&first),
+            U256::from(3_000u64),
+            &step(800, 1_500, 2_500),
+            &state_at(800, 8),
+            U256::from(200u64),
+        )
+        .unwrap(); // sqrt_price = 800
+        cache.insert(true, key(), &first);
+        cache.insert(true, key(), &second);
+
+        assert!(cache
+            .get(true, key(), U256::from(5_000u64), Some(U256::from(950u64)))
+            .is_none());
+        let hit = cache
+            .get(true, key(), U256::from(5_000u64), Some(U256::from(850u64)))
+            .unwrap();
+        assert_eq!(hit.steps_taken, 1);
+        assert_eq!(hit.sqrt_price, U256::from(900u64));
+        let exact = cache
+            .get(true, key(), U256::from(5_000u64), Some(U256::from(800u64)))
+            .unwrap();
+        assert_eq!(exact.steps_taken, 2);
+        assert_eq!(exact.sqrt_price, U256::from(800u64));
+    }
+
+    #[test]
+    fn test_get_with_price_limit_one_for_zero() {
+        let cache = SwapStepCache::default();
+        let first = next_progress(
+            None,
+            U256::from(1_000u64),
+            &step(1_100, 1_000, 1_994),
+            &state_at(1_100, 11),
+            U256::from(150u64),
+        )
+        .unwrap();
+        let second = next_progress(
+            Some(&first),
+            U256::from(3_000u64),
+            &step(1_200, 1_500, 2_500),
+            &state_at(1_200, 12),
+            U256::from(200u64),
+        )
+        .unwrap();
+        cache.insert(false, key(), &first);
+        cache.insert(false, key(), &second);
+
+        assert!(cache
+            .get(false, key(), U256::from(5_000u64), Some(U256::from(1_050u64)))
+            .is_none());
+        let hit = cache
+            .get(false, key(), U256::from(5_000u64), Some(U256::from(1_150u64)))
+            .unwrap();
+        assert_eq!(hit.steps_taken, 1);
+        assert_eq!(hit.sqrt_price, U256::from(1_100u64));
+        let exact = cache
+            .get(false, key(), U256::from(5_000u64), Some(U256::from(1_200u64)))
+            .unwrap();
+        assert_eq!(exact.steps_taken, 2);
+        assert_eq!(exact.sqrt_price, U256::from(1_200u64));
     }
 }

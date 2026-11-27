@@ -20,7 +20,7 @@ use tycho_common::{
 use crate::evm::protocol::{
     cpmm::protocol::{
         cpmm_delta_transition, cpmm_fee, cpmm_get_amount_out, cpmm_get_limits, cpmm_spot_price,
-        cpmm_swap_to_price, ProtocolFee,
+        cpmm_swap_to_price, cpmm_swap_to_price_u256, ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::{biguint_to_u256, u256_to_biguint},
@@ -143,6 +143,31 @@ impl ProtocolSim for PancakeswapV2State {
                 None,
             )),
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        let zero2one = token_in.address < token_out.address;
+        let (reserve_in, reserve_out) =
+            if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };
+        let fee = ProtocolFee::new(FEE_NUMERATOR, FEE_PRECISION);
+        let Some(amount_in) = cpmm_swap_to_price_u256(
+            reserve_in,
+            reserve_out,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            fee,
+        )?
+        else {
+            return Ok(None);
+        };
+        let amount_out = cpmm_get_amount_out(amount_in, reserve_in, reserve_out, fee)?;
+        Ok(Some((*amount_in.as_limbs(), *amount_out.as_limbs())))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {

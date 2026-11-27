@@ -23,7 +23,7 @@ use super::hooks::utils::HookOptions;
 use crate::{
     evm::{
         protocol::{
-            clmm::clmm_swap_to_price,
+            clmm::{clmm_swap_to_price, clmm_swap_to_price_u256},
             safe_math::{safe_add_u256, safe_sub_u256},
             u256_num::{u256_to_biguint, u256_to_f64},
             uniswap_v4::hooks::{
@@ -408,11 +408,9 @@ impl UniswapV4State {
         let mut gas_used = U256::from(self.gas_costs.base);
 
         // A hook's fee override holds for one swap only, so those swaps neither use nor add to the
-        // step cache.
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
+        // step cache. Only exact-input swaps use the step cache, which finds a step by its input
+        // and optional price limit.
+        let cache_key = if exact_input && lp_fee_override.is_none() {
             let fee_pips = self
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, None)?;
@@ -431,6 +429,7 @@ impl UniswapV4State {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;
@@ -1450,6 +1449,40 @@ impl ProtocolSim for UniswapV4State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        let zero_for_one = token_in.address < token_out.address;
+        if let Some(hook) = &self.hook {
+            if !hook.swaps_enabled() || hook.spot_fees(zero_for_one)?.is_some() {
+                return Ok(None);
+            }
+        }
+        if self.liquidity == 0 {
+            return Ok(None);
+        }
+        let fee_pips = self
+            .fees
+            .calculate_swap_fees_pips(zero_for_one, None)?;
+        let res = clmm_swap_to_price_u256(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            fee_pips,
+            Sign::Negative,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
+            },
+        )?;
+        Ok(res.map(|(ai, ao)| (*ai.as_limbs(), *ao.as_limbs())))
     }
 
     /// Forwards the execution block to the pool's hook, the only part of a V4 pool whose quoting
