@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeCastLib} from "@solady/utils/SafeCastLib.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {
@@ -179,6 +180,17 @@ contract MetricFallbackRouterTest is FallbackRouterAssertions {
     function testSimulatePrimaryRejectsExternalCaller() public {
         vm.expectRevert(TychoFallbackRouter__NotSelf.selector);
         router.simulatePrimary(_swapStruct(), address(pool), hex"01");
+    }
+
+    /// Truncating to 128 bits would swap a small part of the declared input.
+    function testExecutePrimaryAmountInAboveInt128Max() public {
+        pool.set(4 ether, false);
+        TychoFallbackRouter.Swap memory swap_ =
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, (1 << 128) + USDC_IN, BOB);
+
+        vm.expectRevert(SafeCastLib.Overflow.selector);
+        vm.prank(address(router));
+        router.executePrimary(swap_, address(pool), hex"01");
     }
 
     function testExecutorSwap() public {

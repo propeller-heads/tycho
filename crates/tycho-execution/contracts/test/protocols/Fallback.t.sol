@@ -2,6 +2,7 @@ pragma solidity ^0.8.26;
 
 import "../TychoRouterTestSetup.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {MockPropAMM} from "./PropAMM.t.sol";
 import {IPropAMM} from "@interfaces/IPropAMM.sol";
@@ -771,6 +772,37 @@ contract PropAMMFallbackRouterTest is PropAMMFallbackRouterTestBase {
         // The transfer to the pAMM reverted with it.
         assertEq(IERC20(USDC_ADDR).balanceOf(address(pamm)), 0);
         _assertRouterDrained(USDC_ADDR, WETH_ADDR);
+    }
+
+    /// A negative amount would make the pool run an exact-output swap.
+    function testUniswapV3AmountInAboveInt256Max() public {
+        uint256 amountIn = 1 << 255;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafeCast.SafeCastOverflowedUintToInt.selector, amountIn
+            )
+        );
+        router.swap(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, amountIn, BOB),
+            address(pamm),
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
+    }
+
+    /// A negative amount would quote an exact-output swap.
+    function testUniswapV3QuoteAmountInAboveInt256Max() public {
+        uint256 amountIn = 1 << 255;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SafeCast.SafeCastOverflowedUintToInt.selector, amountIn
+            )
+        );
+        _quoteFallback(
+            FallbackSwaps.swap(USDC_ADDR, WETH_ADDR, amountIn, BOB),
+            FallbackSwaps.uniswapV3(USDC_WETH_USV3)
+        );
     }
 
     /// A real PancakeSwap V3 pool fills through byte 1: its pool calls

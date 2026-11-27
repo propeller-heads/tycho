@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeCastLib} from "@solady/utils/SafeCastLib.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IMetricPool} from "../executors/MetricExecutor.sol";
 import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
@@ -92,8 +93,7 @@ contract MetricFallbackRouter is TychoFallbackRouter {
             .swap(
                 swap_.receiver,
                 zeroForOne,
-                // forge-lint: disable-next-line(unsafe-typecast) _quotePrimary quotes zero above int128's maximum, so no swap runs.
-                int128(uint128(swap_.amountIn)),
+                SafeCastLib.toInt128(swap_.amountIn),
                 _priceLimit(zeroForOne),
                 "",
                 ""
