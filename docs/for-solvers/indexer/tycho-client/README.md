@@ -49,6 +49,8 @@ Note: _While Tycho takes **chain** as a parameter, it is designed to support str
 
 You can request individual pools or use a minimum TVL threshold to filter the components. If you choose minimum TVL tracking, Tycho-client will automatically add snapshots for any components that exceed the TVL threshold, e.g., because more liquidity was provided. It will also notify you and remove any components that fall below the TVL threshold. Note that the TVL values are estimates intended solely for filtering the most relevant components.
 
+Tycho-client also removes a component when Tycho pauses it, with either filter, and lists it in `removed_components`. When Tycho unpauses the component, Tycho-client adds it back with a new snapshot if it still passes your filter.
+
 #### TVL Filtering <a href="#tvl-filtering" id="tvl-filtering"></a>
 
 {% hint style="info" %}

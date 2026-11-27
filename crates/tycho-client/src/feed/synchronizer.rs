@@ -178,6 +178,14 @@ pub struct ProtocolStateSynchronizer<R: RPCClient, D: DeltasClient> {
     /// successful one. It covers the whole extractor because a stale snapshot block or a rate
     /// limit fails every component's request, not only the one that failed.
     snapshot_backoff: Option<SnapshotBackoff>,
+    /// Components unpaused while starting, by a consumed message or during the gap before a
+    /// restart, that the synchronizer has not acted on yet. It keeps them until it sends the first
+    /// message, so a failed start attempt does not lose them. The tracker skips the ones a later
+    /// message paused again.
+    unpaused_while_starting: HashSet<String>,
+    /// Components a restart stopped tracking because they are paused, which no sent message has
+    /// reported as removed yet.
+    removed_while_starting: HashMap<String, ProtocolComponent>,
 }
 
 /// An extractor's background snapshot backoff.
@@ -284,6 +292,9 @@ enum SnapshotStatus {
 
 struct SnapshotFetchResult {
     components: HashMap<String, ProtocolComponent>,
+    /// Ids of the requested components the server reported as paused. `components` leaves
+    /// them out.
+    paused_component_ids: HashSet<String>,
     contract_ids: HashSet<Bytes>,
     dci_update: DCIUpdate,
     snapshot: Snapshot,
@@ -411,14 +422,19 @@ async fn fetch_snapshot<R: RPCClient>(
 
 /// Fetches a snapshot for new components not yet in the tracker. Calls `get_protocol_components`
 /// to resolve the components, then delegates to `fetch_snapshot`.
+///
+/// Leaves out the components the server reports as paused, except those in `unpaused_by_event`:
+/// an unpause event is at least as new as the server's answer.
 async fn fetch_snapshot_background<R: RPCClient>(
     rpc_client: R,
     component_ids: Vec<String>,
+    unpaused_by_event: HashSet<String>,
     params: FetchSnapshotParams,
 ) -> Result<SnapshotFetchResult, SynchronizerError> {
     if component_ids.is_empty() {
         return Ok(SnapshotFetchResult {
             components: HashMap::new(),
+            paused_component_ids: HashSet::new(),
             contract_ids: HashSet::new(),
             dci_update: DCIUpdate::default(),
             snapshot: Snapshot::default(),
@@ -428,11 +444,20 @@ async fn fetch_snapshot_background<R: RPCClient>(
 
     let request = crate::rpc::ProtocolComponentsParams::new(params.chain, &params.protocol_system)
         .with_component_ids(component_ids);
-    let components: HashMap<String, ProtocolComponent> = rpc_client
+    let response = rpc_client
         .get_protocol_components(request)
         .await?
-        .into_data()
+        .into_data();
+    let paused_component_ids: HashSet<String> = response
+        .paused_component_ids()
+        .iter()
+        .filter(|id| !unpaused_by_event.contains(*id))
+        .cloned()
+        .collect();
+    let components: HashMap<String, ProtocolComponent> = response
+        .into_components()
         .into_iter()
+        .filter(|pc| !paused_component_ids.contains(&pc.id))
         .map(|pc| (pc.id.clone(), pc))
         .collect();
 
@@ -445,7 +470,14 @@ async fn fetch_snapshot_background<R: RPCClient>(
     let (snapshot, dci_update, contract_ids) =
         fetch_snapshot(&rpc_client, components.clone(), contract_ids, &params).await?;
 
-    Ok(SnapshotFetchResult { components, contract_ids, dci_update, snapshot, snapshot_block })
+    Ok(SnapshotFetchResult {
+        components,
+        paused_component_ids,
+        contract_ids,
+        dci_update,
+        snapshot,
+        snapshot_block,
+    })
 }
 
 impl<R, D> ProtocolStateSynchronizer<R, D>
@@ -503,6 +535,8 @@ where
             buffered_deltas: Vec::new(),
             snapshot_queue: HashMap::new(),
             snapshot_backoff: None,
+            unpaused_while_starting: HashSet::new(),
+            removed_while_starting: HashMap::new(),
         }
     }
 
@@ -572,6 +606,8 @@ where
             Ok(result) => result,
             Err(e) => return Err(Box::new((e.into(), Some(end_rx)))),
         };
+        self.component_tracker
+            .forget_pause_events();
 
         let result = async {
             info!("Waiting for deltas...");
@@ -588,7 +624,7 @@ where
             // Messages keep arriving during the delay, so we discard them instead of sleeping:
             // a sleep would overflow the subscription buffer on fast chains.
             let mut snapshot_not_before: Option<Instant> = None;
-            let (msg, header) = 'init: loop {
+            let (mut msg, header) = 'init: loop {
                 let mut warned_waiting_for_new_block = false;
                 let mut warned_skipping_synced = false;
                 let mut first_msg = loop {
@@ -612,6 +648,11 @@ where
                             return Ok(());
                         }
                     };
+
+                    // The server sends each pause once, so record it even from a skipped message.
+                    self.component_tracker.record_pause_events(&msg);
+                    self.unpaused_while_starting
+                        .extend(msg.unpaused_components.iter().cloned());
 
                     let incoming: BlockHeader = (&msg).into();
 
@@ -677,16 +718,17 @@ where
                     break msg;
                 };
 
+                let header: BlockHeader = (&first_msg).into();
+                self.apply_missed_pauses(&header).await?;
                 self.filter_deltas(&mut first_msg);
 
                 // initial snapshot
                 info!(height = first_msg.get_block().number, "First deltas received");
-                let header: BlockHeader = (&first_msg).into();
                 let deltas_msg = StateSyncMessage {
                     header: header.clone(),
                     snapshots: Default::default(),
                     deltas: Some(first_msg),
-                    removed_components: Default::default(),
+                    removed_components: HashMap::new(),
                 };
 
                 // If possible skip retrieving snapshots
@@ -787,6 +829,9 @@ where
                 break 'init (deltas_msg, header);
             };
 
+            msg.removed_components
+                .extend(std::mem::take(&mut self.removed_while_starting));
+            self.unpaused_while_starting.clear();
             block_tx.send(Ok(msg)).await?;
             self.last_synced_block = Some(header);
             loop {
@@ -795,6 +840,11 @@ where
                         if let Some(mut deltas) = deltas_opt {
                             let header: BlockHeader = (&deltas).into();
                             debug!(block_number=?header.number, "Received delta message");
+
+                            // Filter before draining: it records the block's pauses, so the drain
+                            // drops a snapshot whose component this block pauses.
+                            let (to_add, to_remove) =
+                                self.component_tracker.filter_updated_components(&deltas);
 
                             // Buffer unfiltered delta while any snapshot task is in-flight.
                             if !self.snapshot_tasks.is_empty() {
@@ -818,9 +868,6 @@ where
                             }
 
                             let (snapshots, removed_components) = {
-                                let (to_add, to_remove) =
-                                    self.component_tracker.filter_updated_components(&deltas);
-
                                 self.remove_from_backoff(&to_remove);
 
                                 // Once the backoff has ended, take the waiting components out of
@@ -1103,12 +1150,21 @@ where
             include_tvl: self.include_tvl,
         };
         let ids = component_ids.clone();
+        let unpaused_by_event: HashSet<String> = component_ids
+            .iter()
+            .filter(|id| {
+                self.component_tracker
+                    .unpaused_by_event(id)
+            })
+            .cloned()
+            .collect();
         tokio::spawn(async move {
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "the receiver is dropped only when the synchronizer has shut down"
             )]
-            let _ = tx.send(fetch_snapshot_background(rpc, ids, bg_params).await);
+            let _ =
+                tx.send(fetch_snapshot_background(rpc, ids, unpaused_by_event, bg_params).await);
         });
         for id in &component_ids {
             self.snapshot_queue
@@ -1130,7 +1186,7 @@ where
 
         for mut p in pending {
             match p.receiver.try_recv() {
-                Ok(Ok(fetch_result)) => {
+                Ok(Ok(mut fetch_result)) => {
                     debug!(
                         components = ?p.component_ids,
                         extractor = %self.extractor_id.name,
@@ -1147,6 +1203,7 @@ where
                     {
                         self.snapshot_backoff = None;
                     }
+                    self.apply_fetch_pauses(&mut fetch_result);
                     let new_component_ids: Vec<String> = fetch_result
                         .components
                         .keys()
@@ -1224,6 +1281,92 @@ where
         }
 
         result
+    }
+
+    /// Applies the pauses and unpauses the synchronizer has not acted on before its first message.
+    /// They come from the messages consumed while looking for the first block, whose unpauses are
+    /// in `unpaused_while_starting`. On a restart after a gap, it also asks the server, because the
+    /// pauses of the missed blocks never reached the client.
+    ///
+    /// Starts tracking the unpaused components that pass the filter, and stops tracking the paused
+    /// ones. When no snapshot follows the first message, it queues the unpaused components instead,
+    /// so the next block fetches their snapshot in the background. On a restart, it adds the
+    /// stopped components to `removed_while_starting`, so the first message reports them as
+    /// removed. On the first start it does not, because the consumer never received them.
+    async fn apply_missed_pauses(
+        &mut self,
+        first_header: &BlockHeader,
+    ) -> Result<(), SynchronizerError> {
+        if self.last_synced_block.is_some() && !self.is_next_expected(first_header) {
+            let unpaused = self
+                .component_tracker
+                .refresh_paused()
+                .await?;
+            self.unpaused_while_starting
+                .extend(unpaused);
+        }
+
+        let to_add = self
+            .component_tracker
+            .unpaused_to_track(&self.unpaused_while_starting)
+            .await?;
+        if self.is_next_expected(first_header) {
+            // No snapshot follows, so queue them like components whose backoff has ended: the
+            // next block fetches their snapshot in the background.
+            for id in to_add {
+                self.snapshot_queue
+                    .insert(id, SnapshotStatus::Backoff);
+            }
+        } else if !to_add.is_empty() {
+            self.component_tracker
+                .start_tracking(&to_add.iter().collect::<Vec<_>>())
+                .await?;
+        }
+
+        let removed = self
+            .component_tracker
+            .stop_tracking_paused();
+        if self.last_synced_block.is_some() {
+            // An earlier attempt may have stopped a component that this attempt tracks again.
+            let tracked = &self.component_tracker.components;
+            self.removed_while_starting
+                .retain(|id, _| !tracked.contains_key(id));
+            self.removed_while_starting
+                .extend(removed);
+        }
+        Ok(())
+    }
+
+    /// Records the components a finished background fetch found paused, and removes every paused
+    /// component from the result's components and states. Their contract storage stays in the
+    /// result.
+    ///
+    /// While the fetch ran, a block may have paused a component it returned, or unpaused one it
+    /// found paused. It queues the components unpaused that way, so the next block fetches them
+    /// again.
+    fn apply_fetch_pauses(&mut self, fetch_result: &mut SnapshotFetchResult) {
+        let (refetch, paused): (HashSet<String>, HashSet<String>) =
+            std::mem::take(&mut fetch_result.paused_component_ids)
+                .into_iter()
+                .partition(|id| {
+                    self.component_tracker
+                        .unpaused_by_event(id)
+                });
+        self.component_tracker
+            .record_paused(paused);
+        // The fetch left these out and the event that unpaused them found them in flight, so
+        // queue them like components whose backoff has ended: the next block fetches them again.
+        for id in refetch {
+            self.snapshot_queue
+                .insert(id, SnapshotStatus::Backoff);
+        }
+
+        let dropped = self
+            .component_tracker
+            .drop_paused_from(&mut fetch_result.components);
+        for id in &dropped {
+            fetch_result.snapshot.states.remove(id);
+        }
     }
 
     fn is_next_expected(&self, incoming: &BlockHeader) -> bool {
@@ -1406,7 +1549,7 @@ mod test {
     use super::*;
     use crate::{
         deltas::MockDeltasClient,
-        rpc::{MockRPCClient, Page},
+        rpc::{none_paused, ComponentsWithPauses, MockRPCClient, Page},
         DeltasError, RPCError,
     };
 
@@ -1442,7 +1585,7 @@ mod test {
         async fn get_protocol_components(
             &self,
             params: crate::rpc::ProtocolComponentsParams,
-        ) -> Result<crate::rpc::Page<Vec<ProtocolComponent>>, RPCError> {
+        ) -> Result<Page<ComponentsWithPauses>, RPCError> {
             self.0
                 .get_protocol_components(params)
                 .await
@@ -2171,10 +2314,10 @@ mod test {
             .returning(|_| {
                 // return Component3
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         // this component shall have a tvl update above threshold
                         ProtocolComponent { id: "Component3".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     1,
                     0,
                     100,
@@ -2226,13 +2369,13 @@ mod test {
             .returning(|_| {
                 // Initial sync of components
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         // this component shall have a tvl update above threshold
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         // this component shall have a tvl update below threshold.
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
                         // a third component will have a tvl update above threshold
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -2589,7 +2732,10 @@ mod test {
             })
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component3".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component3".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -2639,10 +2785,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -2917,7 +3063,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Set up deltas client that will wait for messages (blocking in state_sync)
         let (_tx, rx) = channel(1);
@@ -2976,7 +3122,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Mock to fail during snapshot retrieval (this will cause an error during processing)
         rpc_client
@@ -3088,7 +3234,7 @@ mod test {
 
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         let (_tx, rx) = channel(1);
         deltas_client
@@ -3160,7 +3306,7 @@ mod test {
         // Mock the initial components call
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Mock the snapshot retrieval that happens after first message
         rpc_client
@@ -3285,7 +3431,7 @@ mod test {
         // Mock the initial components call to succeed
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         // Set up deltas client to consistently fail after subscription
         // This will cause connection errors and trigger retries
@@ -3352,7 +3498,7 @@ mod test {
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 0)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 0)));
 
         let mut deltas_client = MockDeltasClient::new();
         let (resubscribed_tx, resubscribed_rx) = oneshot::channel();
@@ -3492,7 +3638,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3639,7 +3788,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3859,7 +4011,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -3881,20 +4036,28 @@ mod test {
 
     /// Returns a deltas client whose subscription emits `blocks` 50 ms apart.
     fn mock_deltas_emitting(blocks: Vec<u64>) -> MockDeltasClient {
+        mock_deltas_emitting_messages(
+            blocks
+                .into_iter()
+                .map(|block| make_block_changes(block, None))
+                .collect(),
+        )
+    }
+
+    /// Returns a deltas client whose subscription emits `messages` 50 ms apart.
+    fn mock_deltas_emitting_messages(messages: Vec<BlockAggregatedChanges>) -> MockDeltasClient {
         let mut deltas_client = MockDeltasClient::new();
         let (tx, rx) = channel(128);
         deltas_client
             .expect_subscribe()
             .return_once(move |_, _| {
                 tokio::spawn(async move {
-                    for block in blocks {
+                    for message in messages {
                         #[expect(
                             clippy::let_underscore_must_use,
                             reason = "the outcome is not under test"
                         )]
-                        let _ = tx
-                            .send(make_block_changes(block, None))
-                            .await;
+                        let _ = tx.send(message).await;
                         sleep(Duration::from_millis(50)).await;
                     }
                 });
@@ -3965,7 +4128,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -4143,7 +4309,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![ProtocolComponent { id: "Component1".to_string(), ..Default::default() }],
+                    none_paused(vec![ProtocolComponent {
+                        id: "Component1".to_string(),
+                        ..Default::default()
+                    }]),
                     1,
                     0,
                     100,
@@ -4165,7 +4334,7 @@ mod test {
         let mut rpc_client = make_mock_client();
         rpc_client
             .expect_get_protocol_components()
-            .returning(|_| Ok(Page::new(vec![], 0, 0, 100)));
+            .returning(|_| Ok(Page::new(none_paused(vec![]), 0, 0, 100)));
         rpc_client
             .expect_get_snapshots()
             .never();
@@ -4529,10 +4698,10 @@ mod test {
             })
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "BrandNew".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Preexisting".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -4543,10 +4712,10 @@ mod test {
             .expect_get_protocol_components()
             .returning(|_| {
                 Ok(Page::new(
-                    vec![
+                    none_paused(vec![
                         ProtocolComponent { id: "Component1".to_string(), ..Default::default() },
                         ProtocolComponent { id: "Component2".to_string(), ..Default::default() },
-                    ],
+                    ]),
                     2,
                     0,
                     100,
@@ -4859,16 +5028,16 @@ mod test {
                         .map(|id| ProtocolComponent { id, ..Default::default() })
                         .collect();
                     let total = i64::try_from(components.len()).unwrap();
-                    Ok(Page::new(components, total, 0, 100))
+                    Ok(Page::new(none_paused(components), total, 0, 100))
                 });
             rpc_client
                 .expect_get_protocol_components()
                 .returning(|_| {
                     Ok(Page::new(
-                        vec![ProtocolComponent {
+                        none_paused(vec![ProtocolComponent {
                             id: "Component1".to_string(),
                             ..Default::default()
-                        }],
+                        }]),
                         1,
                         0,
                         100,
@@ -5101,6 +5270,363 @@ mod test {
         );
     }
 
+    /// Timeline: block 2 pauses "Pool"; block 3 reports its TVL above the add threshold, which
+    /// must not fetch it; block 4 lets a wrongly spawned fetch run before the check.
+    #[test_log::test(tokio::test)]
+    async fn test_delta_loop_skips_pool_paused_in_earlier_block() {
+        let mut harness = BackoffHarness::start(|_| false).await;
+
+        let mut pause = make_block_changes(2, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        harness.sync_block(pause).await;
+        harness
+            .sync_block_with_tvl(3, &[("Pool", 100.0)])
+            .await;
+        harness
+            .sync_block(make_block_changes(4, None))
+            .await;
+        let fetched_batches = harness.fetched_batches();
+        harness.close().await;
+
+        assert!(fetched_batches.is_empty());
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_partial_mode_applies_pause_from_skipped_message() {
+        let (rpc_client, _, _) = mock_clients_for_state_sync(None);
+        let mut pause = make_block_changes(1, Some(0));
+        pause.paused_components = HashSet::from(["Component1".to_string()]);
+        let mut first = make_block_changes(2, Some(0));
+        first.component_tvl =
+            HashMap::from([("Component1".to_string(), 100.0), ("Component2".to_string(), 100.0)]);
+        let deltas_client = mock_deltas_emitting_messages(vec![pause, first]);
+        let mut state_sync = with_mocked_clients(true, true, Some(rpc_client), Some(deltas_client))
+            .with_partial_blocks(true);
+        state_sync
+            .initialize()
+            .await
+            .expect("Init failed");
+
+        let msg = first_message(state_sync).await;
+
+        let tvl = msg
+            .deltas
+            .expect("First message has deltas")
+            .component_tvl;
+        assert_eq!(tvl.keys().collect::<Vec<_>>(), vec!["Component2"]);
+    }
+
+    fn with_filter(
+        filter: ComponentFilter,
+        rpc_client: MockRPCClient,
+        deltas_client: MockDeltasClient,
+    ) -> ProtocolStateSynchronizer<ArcRPCClient<MockRPCClient>, ArcDeltasClient<MockDeltasClient>>
+    {
+        ProtocolStateSynchronizer::new(
+            ExtractorIdentity::new(Chain::Ethereum, "uniswap-v2"),
+            true,
+            filter,
+            1,
+            Duration::from_secs(0),
+            true,
+            false,
+            true,
+            ArcRPCClient(Arc::new(rpc_client)),
+            ArcDeltasClient(Arc::new(deltas_client)),
+            10_u64,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_apply_missed_pauses_first_start() {
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            MockRPCClient::new(),
+            MockDeltasClient::new(),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        let mut pause = make_block_changes(1, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(1, None)))
+            .await
+            .expect("apply missed pauses");
+
+        assert!(state_sync
+            .removed_while_starting
+            .is_empty());
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+    }
+
+    /// A component unpaused during the gap before a restart is tracked again.
+    #[rstest::rstest]
+    #[case::ids(ComponentFilter::Ids(vec!["pool".to_string()]))]
+    #[case::tvl(ComponentFilter::with_tvl_range(5.0, 10.0))]
+    #[tokio::test]
+    async fn test_apply_missed_pauses_restart_tracks_unpaused(#[case] filter: ComponentFilter) {
+        let pool = || ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+        // Answers every components request: the restart's pause check, the TVL check and the
+        // request to start tracking.
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(move |_| Ok(Page::new(none_paused(vec![pool()]), 1, 0, 100)));
+        let mut state_sync = with_filter(filter, rpc_client, MockDeltasClient::new());
+        let mut pause = make_block_changes(1, None);
+        pause.paused_components = HashSet::from(["pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+        // The restart subscribes again, so the pause event belongs to the earlier subscription.
+        state_sync
+            .component_tracker
+            .forget_pause_events();
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(5, None)))
+            .await
+            .expect("apply missed pauses");
+
+        assert_eq!(
+            state_sync
+                .component_tracker
+                .get_tracked_component_ids(),
+            vec!["pool"]
+        );
+    }
+
+    /// On a restart without a gap no snapshot follows, so an unpaused component waits in the
+    /// snapshot queue instead of being tracked without state.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_restart_without_gap_queues_unpaused() {
+        let mut state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            MockRPCClient::new(),
+            MockDeltasClient::new(),
+        );
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+        state_sync.unpaused_while_starting = HashSet::from(["pool".to_string()]);
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(2, None)))
+            .await
+            .expect("apply missed pauses");
+
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+        assert_eq!(state_sync.snapshot_queue.get("pool"), Some(&SnapshotStatus::Backoff));
+    }
+
+    /// A restart stops tracking "Pool", which the server reports as paused, and its first attempt
+    /// fails. The retry finds "Pool" already stopped, yet still reports it as removed.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_retry_keeps_removed() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+                let components =
+                    ComponentsWithPauses::new(vec![pool], HashSet::from(["Pool".to_string()]));
+                Ok(Page::new(components, 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            rpc_client,
+            MockDeltasClient::new(),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(1, None)));
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(5, None)))
+            .await
+            .expect("first attempt");
+
+        state_sync
+            .apply_missed_pauses(&header_of(&make_block_changes(6, None)))
+            .await
+            .expect("retry");
+
+        assert_eq!(
+            state_sync
+                .removed_while_starting
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["Pool"]
+        );
+    }
+
+    /// "pool" was unpaused while starting, and the first attempt fails to start tracking it. The
+    /// retry tracks it.
+    #[tokio::test]
+    async fn test_apply_missed_pauses_retry_keeps_unpaused() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .times(1)
+            .returning(|_| Err(RPCError::Fatal("server unreachable".to_string())));
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                Ok(Page::new(none_paused(vec![pool]), 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            rpc_client,
+            MockDeltasClient::new(),
+        );
+        state_sync.unpaused_while_starting = HashSet::from(["pool".to_string()]);
+        let first_header = header_of(&make_block_changes(1, None));
+        state_sync
+            .apply_missed_pauses(&first_header)
+            .await
+            .expect_err("first attempt fails");
+
+        state_sync
+            .apply_missed_pauses(&first_header)
+            .await
+            .expect("retry");
+
+        assert_eq!(
+            state_sync
+                .component_tracker
+                .get_tracked_component_ids(),
+            vec!["pool"]
+        );
+    }
+
+    /// Runs `state_sync` until its first message, then shuts it down.
+    async fn first_message(
+        mut state_sync: ProtocolStateSynchronizer<
+            ArcRPCClient<MockRPCClient>,
+            ArcDeltasClient<MockDeltasClient>,
+        >,
+    ) -> StateSyncMessage<BlockHeader> {
+        let (block_tx, mut block_rx) = channel(10);
+        let (end_tx, end_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            state_sync
+                .state_sync(&block_tx, end_rx, Duration::ZERO)
+                .await
+        });
+        let msg = timeout(Duration::from_millis(500), block_rx.recv())
+            .await
+            .expect("Should receive the first message")
+            .expect("Channel should be open")
+            .expect("Should not be an error");
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the synchronizer may already have exited; the test only requests shutdown"
+        )]
+        let _ = end_tx.send(());
+        handle
+            .await
+            .expect("Task should not panic")
+            .expect("state sync should end without an error");
+        msg
+    }
+
+    #[tokio::test]
+    async fn test_restart_reports_pool_paused_during_gap() {
+        let mut rpc_client = make_mock_client();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+                let components =
+                    ComponentsWithPauses::new(vec![pool], HashSet::from(["Pool".to_string()]));
+                Ok(Page::new(components, 1, 0, 100))
+            });
+        let mut state_sync = with_filter(
+            ComponentFilter::with_tvl_range(5.0, 10.0),
+            rpc_client,
+            mock_deltas_emitting(vec![10]),
+        );
+        let pool = ProtocolComponent { id: "Pool".to_string(), ..Default::default() };
+        state_sync
+            .component_tracker
+            .components
+            .insert("Pool".to_string(), pool);
+        state_sync.last_synced_block = Some(header_of(&make_block_changes(5, None)));
+
+        let msg = first_message(state_sync).await;
+
+        assert_eq!(
+            msg.removed_components
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["Pool"]
+        );
+    }
+
+    /// A skipped message unpauses "pool". With `re_paused`, a later skipped message pauses it
+    /// again, so the synchronizer must not request it.
+    #[rstest::rstest]
+    #[case::unpaused(false, &["pool"])]
+    #[case::re_paused(true, &[])]
+    #[tokio::test]
+    async fn test_partial_mode_applies_unpause_from_skipped_message(
+        #[case] re_paused: bool,
+        #[case] expected_tvl: &[&str],
+    ) {
+        let mut rpc_client = make_mock_client();
+        if !re_paused {
+            rpc_client
+                .expect_get_protocol_components()
+                .returning(|_| {
+                    let pool = ProtocolComponent { id: "pool".to_string(), ..Default::default() };
+                    Ok(Page::new(none_paused(vec![pool]), 1, 0, 100))
+                });
+            rpc_client
+                .expect_get_snapshots()
+                .returning(|_, _, _| Ok(Snapshot::default()));
+        }
+        let mut unpause = make_block_changes(1, Some(0));
+        unpause.unpaused_components = HashSet::from(["pool".to_string()]);
+        let mut messages = vec![unpause];
+        if re_paused {
+            let mut pause = make_block_changes(1, Some(1));
+            pause.paused_components = HashSet::from(["pool".to_string()]);
+            messages.push(pause);
+        }
+        let mut first = make_block_changes(2, Some(0));
+        first.component_tvl = HashMap::from([("pool".to_string(), 1.0)]);
+        messages.push(first);
+        let state_sync = with_filter(
+            ComponentFilter::Ids(vec!["pool".to_string()]),
+            rpc_client,
+            mock_deltas_emitting_messages(messages),
+        )
+        .with_partial_blocks(true);
+
+        let msg = first_message(state_sync).await;
+
+        let tvl = msg
+            .deltas
+            .expect("First message has deltas")
+            .component_tvl;
+        assert_eq!(tvl.keys().collect::<Vec<_>>(), expected_tvl);
+    }
+
     /// A snapshot task in flight for `component_id`, spawned now, and the sender that completes
     /// it.
     fn snapshot_task_in_flight(
@@ -5152,6 +5678,7 @@ mod test {
         )]
         let _ = old_ok_tx.send(Ok(SnapshotFetchResult {
             components: HashMap::new(),
+            paused_component_ids: HashSet::new(),
             contract_ids: HashSet::new(),
             dci_update: DCIUpdate::default(),
             snapshot: Snapshot::default(),
@@ -5169,6 +5696,99 @@ mod test {
             .expect("Results of older tasks do not reset the backoff");
         assert_eq!(backoff.failures, 1);
         assert_eq!(backoff.retry_at, backoff_started.retry_at);
+    }
+
+    /// A successful fetch at block 1 of `fetched`, with `paused` reported as paused.
+    fn fetch_result(fetched: &str, paused: &[&str]) -> SnapshotFetchResult {
+        let component = ProtocolComponent { id: fetched.to_string(), ..Default::default() };
+        let state = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: fetched.to_string(),
+                attributes: HashMap::new(),
+                balances: HashMap::new(),
+            },
+            component: component.clone(),
+            component_tvl: None,
+            entrypoints: vec![],
+        };
+        SnapshotFetchResult {
+            components: HashMap::from([(fetched.to_string(), component)]),
+            paused_component_ids: paused
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            contract_ids: HashSet::new(),
+            dci_update: DCIUpdate::default(),
+            snapshot: Snapshot {
+                states: HashMap::from([(fetched.to_string(), state)]),
+                vm_storage: HashMap::new(),
+            },
+            snapshot_block: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_snapshot_paused_in_flight() {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (task, tx) = snapshot_task_in_flight("Pool");
+        state_sync.snapshot_tasks.push(task);
+        let mut pause = make_block_changes(2, None);
+        pause.paused_components = HashSet::from(["Pool".to_string()]);
+        state_sync
+            .component_tracker
+            .record_pause_events(&pause);
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = tx.send(Ok(fetch_result("Pool", &[])));
+        let snapshot = state_sync.drain_completed_snapshots();
+
+        assert!(snapshot.states.is_empty());
+        assert!(state_sync
+            .component_tracker
+            .components
+            .is_empty());
+    }
+
+    /// The fetch ran at block 1 and reported "Paused" as paused. A block may unpause it, at the
+    /// snapshot block or after it.
+    #[rstest::rstest]
+    #[case::still_paused(None, true)]
+    #[case::unpaused_at_snapshot_block(Some(1), false)]
+    #[case::unpaused_since(Some(2), false)]
+    #[tokio::test]
+    async fn test_drain_snapshot_records_paused(
+        #[case] unpaused_at: Option<u64>,
+        #[case] expect_paused: bool,
+    ) {
+        let mut state_sync = with_mocked_clients(true, false, None, None);
+        let (task, tx) = snapshot_task_in_flight("Pool");
+        state_sync.snapshot_tasks.push(task);
+        if let Some(block) = unpaused_at {
+            let mut unpause = make_block_changes(block, None);
+            unpause.unpaused_components = HashSet::from(["Paused".to_string()]);
+            state_sync
+                .component_tracker
+                .record_pause_events(&unpause);
+        }
+
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the snapshot task result is only consumed if the receiver is still held"
+        )]
+        let _ = tx.send(Ok(fetch_result("Pool", &["Paused"])));
+        state_sync.drain_completed_snapshots();
+
+        let paused = ProtocolComponent { id: "Paused".to_string(), ..Default::default() };
+        let mut later_fetch = HashMap::from([("Paused".to_string(), paused)]);
+        state_sync
+            .component_tracker
+            .drop_paused_from(&mut later_fetch);
+        assert_eq!(later_fetch.is_empty(), expect_paused);
+        let queued = state_sync.snapshot_queue.get("Paused");
+        assert_eq!(queued == Some(&SnapshotStatus::Backoff), !expect_paused);
     }
 
     /// Directly exercises all four mutation paths of `apply_deltas_to_snapshot`:
@@ -5331,5 +5951,101 @@ mod test {
         assert_eq!(account.native_balance, Bytes::from("0x20"));
         // Code updated
         assert_eq!(account.code, Bytes::from("0x0c0d"));
+    }
+
+    /// The server reports "Paused" as paused; an event may have unpaused it.
+    #[rstest::rstest]
+    #[case::no_event(false)]
+    #[case::unpaused_by_event(true)]
+    #[tokio::test]
+    async fn test_fetch_snapshot_background_skips_paused(#[case] unpaused_by_event: bool) {
+        let mut rpc_client = MockRPCClient::new();
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_, _, _| Ok(Snapshot::default()));
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    ComponentsWithPauses::new(
+                        vec![ProtocolComponent { id: "Paused".to_string(), ..Default::default() }],
+                        HashSet::from(["Paused".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        let params = FetchSnapshotParams {
+            chain: Chain::Ethereum,
+            protocol_system: "uniswap-v2".to_string(),
+            block_number: 1,
+            uses_dci: false,
+            retrieve_balances: true,
+            include_tvl: false,
+        };
+
+        let unpaused =
+            if unpaused_by_event { HashSet::from(["Paused".to_string()]) } else { HashSet::new() };
+
+        let result =
+            fetch_snapshot_background(rpc_client, vec!["Paused".to_string()], unpaused, params)
+                .await
+                .expect("fetch snapshot");
+
+        assert_eq!(result.components.contains_key("Paused"), unpaused_by_event);
+        assert_eq!(result.paused_component_ids.is_empty(), unpaused_by_event);
+    }
+
+    /// Block 1 may unpause "pool", whose snapshot the synchronizer then fetches at block 1 from a
+    /// server that still reports it as paused.
+    #[rstest::rstest]
+    #[case::no_event(false)]
+    #[case::unpaused_at_snapshot_block(true)]
+    #[tokio::test]
+    async fn test_snapshot_unpaused_by_event(#[case] unpaused_by_event: bool) {
+        let mut rpc_client = MockRPCClient::new();
+        rpc_client
+            .expect_get_protocol_components()
+            .returning(|_| {
+                Ok(Page::new(
+                    ComponentsWithPauses::new(
+                        vec![ProtocolComponent { id: "pool".to_string(), ..Default::default() }],
+                        HashSet::from(["pool".to_string()]),
+                    ),
+                    1,
+                    0,
+                    100,
+                ))
+            });
+        rpc_client
+            .expect_get_snapshots()
+            .returning(|_, _, _| Ok(Snapshot::default()));
+        let mut state_sync = with_mocked_clients(true, false, Some(rpc_client), None);
+        let mut block = make_block_changes(1, None);
+        if unpaused_by_event {
+            block.unpaused_components = HashSet::from(["pool".to_string()]);
+        }
+        state_sync
+            .component_tracker
+            .record_pause_events(&block);
+
+        state_sync.spawn_snapshot_task(
+            vec!["pool".to_string()],
+            &BlockHeader { number: 1, ..Default::default() },
+            &block,
+        );
+        for _ in 0..100 {
+            if state_sync.snapshot_tasks.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            state_sync.drain_completed_snapshots();
+        }
+
+        assert!(state_sync.snapshot_tasks.is_empty());
+        let tracker = &state_sync.component_tracker;
+        assert_eq!(tracker.components.contains_key("pool"), unpaused_by_event);
+        assert_eq!(tracker.unpaused_by_event(&"pool".to_string()), unpaused_by_event);
     }
 }
