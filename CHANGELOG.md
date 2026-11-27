@@ -1,3 +1,11 @@
+## [0.544.1](https://github.com/propeller-heads/tycho/compare/0.544.0...0.544.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **curve:** estimate NG crypto swaps and grants at their measured gas ([45ccde1](https://github.com/propeller-heads/tycho/commit/45ccde18ae0b9833b7c7f937faf3f4f69ca1103c))
+* **tycho-test:** retry on "block 0x<n> not found" node errors ([97b7fa5](https://github.com/propeller-heads/tycho/commit/97b7fa5b08c812b25a07456e41898905a31d6099))
+
 ## [0.544.0](https://github.com/propeller-heads/tycho/compare/0.543.0...0.544.0) (2026-11-27)
 
 
