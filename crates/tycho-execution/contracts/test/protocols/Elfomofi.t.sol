@@ -167,7 +167,7 @@ contract ElfomofiExecutorTest is TestUtils, Constants {
         assertEq(router.fromToken(), TOKEN_IN);
         assertEq(router.toToken(), TOKEN_OUT);
         assertEq(router.receiver(), BOB);
-        assertEq(router.partnerId(), executor.PARTNER_ID());
+        assertEq(router.partnerId(), 299);
         assertEq(router.amountIn(), 3);
         assertEq(IERC20(TOKEN_OUT).balanceOf(BOB), 7);
     }
