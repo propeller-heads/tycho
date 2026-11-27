@@ -8,12 +8,10 @@
 //! `afterSwap` is not run: it needs the pool's state after the swap, which a quote does not
 //! write anywhere. Its gas is a fixed estimate.
 //!
-//! The engine holds only the accounts the indexer traced `beforeSwap` into. The indexer does not
-//! retrace an entrypoint whose trace succeeded, so a plugin that starts calling another contract
-//! later (a fee source enabled after the first trace, say) fails every quote with a missing
-//! account until its entrypoint is traced again. Nothing causes that short of a change of the
-//! plugin's beacon: the first trace did not read the slot that names the new contract, so a
-//! write to it is no retrigger, and the same trace parameters are not traced twice.
+//! The engine holds only the accounts the indexer traced `beforeSwap` into, so a plugin that
+//! starts calling another contract after its first trace (a fee source enabled later, say) fails
+//! every quote with a missing account until its entrypoint is traced again. The upgrade boundary
+//! of `protocols/substreams/ethereum-algebra-integral/README.md` says what retraces it.
 
 use alloy::{
     core::sol,

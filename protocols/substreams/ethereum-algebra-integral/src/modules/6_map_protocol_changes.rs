@@ -196,9 +196,7 @@ pub fn map_protocol_changes(
     // plugin's oracle is only initialized once the pool is, and a trace before that reverts.
     // `setPlugin` resets the config to zero, so a new plugin always gets a `PluginConfig` of its
     // own. When the trace fails, as for a plugin that refuses swaps until a start time, the
-    // indexer writes `paused = 2` on the pool and the DCI never clears it, not even after a
-    // later trace that succeeds. The unpause of a pool that names another plugin deletes
-    // `paused` whatever its value.
+    // indexer writes `paused = 2` on the pool; the README's `paused` row says what clears it.
     add_plugin_changes(
         &mut transaction_changes,
         &block,
