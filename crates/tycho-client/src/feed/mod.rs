@@ -231,7 +231,8 @@ pub enum SynchronizerState {
     Delayed(BlockHeader),
     /// The synchronizer hasn't emitted messages for > `max_missed_blocks` or has
     /// fallen far behind. At this point we do not wait for it anymore but it can
-    /// still eventually recover.
+    /// still eventually recover. While it is more than `max_missed_blocks` behind the tip, its
+    /// messages are held and the feed sends nothing for it.
     Stale(BlockHeader),
     /// The synchronizer is on future not connected block.
     // For this to happen we must have a gap, and a gap usually means a new snapshot from the
@@ -260,8 +261,8 @@ impl Display for SynchronizerState {
 struct StaleLimits {
     /// How long a synchronizer may make no progress before it is marked stale.
     threshold: Duration,
-    /// How many blocks behind the round's tip a stale synchronizer's block may be and still
-    /// keep it stale. A replay further behind would hold every round if it went Delayed.
+    /// How many blocks a synchronizer's block may be behind the round's tip before it counts as
+    /// stale. A replay further behind would hold every round if it went Delayed.
     max_missed_blocks: u64,
 }
 
@@ -272,12 +273,21 @@ fn blocks_behind_tip(block_history: &BlockHistory, block: &BlockHeader) -> u64 {
         .map_or(0, |tip| tip.number.saturating_sub(block.number))
 }
 
+/// Returns true when `block` is more than `max_missed_blocks` behind the tip of `block_history`.
+/// A stream that far behind cannot catch up within one round.
+fn is_replaying(block_history: &BlockHistory, block: &BlockHeader, max_missed_blocks: u64) -> bool {
+    blocks_behind_tip(block_history, block) > max_missed_blocks
+}
+
 pub struct SynchronizerStream {
     extractor_id: ExtractorIdentity,
     state: SynchronizerState,
     error: Option<SynchronizerError>,
     modify_ts: NaiveDateTime,
     rx: Receiver<SyncResult<StateSyncMessage<BlockHeader>>>,
+    /// Messages received while replaying, merged into one. The consumer gets them when the
+    /// stream is no longer replaying.
+    held: Option<StateSyncMessage<BlockHeader>>,
 }
 
 impl SynchronizerStream {
@@ -291,6 +301,30 @@ impl SynchronizerStream {
             error: None,
             modify_ts: Local::now().naive_utc(),
             rx,
+            held: None,
+        }
+    }
+
+    /// Merges `msg` into the held messages. Returns them all as one message once `msg` is no more
+    /// than `max_missed_blocks` behind the tip; holds them while it is further behind.
+    ///
+    /// A replay's old blocks never reach the consumer, but its snapshot and deltas are kept, so
+    /// the consumer's state is complete when the stream catches up.
+    fn release(
+        &mut self,
+        msg: StateSyncMessage<BlockHeader>,
+        block_history: &BlockHistory,
+        max_missed_blocks: u64,
+    ) -> Option<StateSyncMessage<BlockHeader>> {
+        let msg = match self.held.take() {
+            Some(held) => held.merge(msg),
+            None => msg,
+        };
+        if is_replaying(block_history, &msg.header, max_missed_blocks) {
+            self.held = Some(msg);
+            None
+        } else {
+            Some(msg)
         }
     }
 
@@ -531,8 +565,7 @@ impl SynchronizerStream {
     /// Updates the synchronizer's state according to the position of the received block:
     /// - Next expected block -> Ready state
     /// - Latest/Delayed block -> Either Delayed or Stale (if no progress for `stale.threshold`)
-    /// - Latest/Delayed block on a Stale stream more than `stale.max_missed_blocks` behind the tip
-    ///   -> stays Stale
+    /// - Latest/Delayed block more than `stale.max_missed_blocks` behind the tip -> Stale
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
@@ -553,12 +586,12 @@ impl SynchronizerStream {
                 self.state = SynchronizerState::Ready(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed
-                if self.is_stale() &&
-                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
+                if is_replaying(block_history, &block, stale.max_missed_blocks) =>
             {
-                // A stream replaying blocks this old would hold every round while Delayed, so it
-                // catches up in the stale pass instead.
-                debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
+                // A replaying stream sends a message every round, so the stale timeout never
+                // fires. While Delayed it would hold every round, so it catches up in the stale
+                // pass instead.
+                debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
                 self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
@@ -879,7 +912,16 @@ where
         // latest one
         for stream in sync_streams.iter_mut() {
             if let SynchronizerState::Ready(header) = stream.state.clone() {
-                if header.number < start_header.number {
+                if is_replaying(&block_history, &header, self.max_missed_blocks) {
+                    debug!(
+                        extractor_id=%stream.extractor_id,
+                        synchronizer_block=header.number,
+                        current_block=start_header.number,
+                        "Marking synchronizer as stale during initialization"
+                    );
+                    stream.state = SynchronizerState::Stale(header);
+                    stream.held = ready_sync_msgs.remove(&stream.extractor_id.name);
+                } else if header.number < start_header.number {
                     debug!(
                         extractor_id=%stream.extractor_id,
                         synchronizer_block=header.number,
@@ -1046,8 +1088,10 @@ where
                         skip_wait,
                     )
                     .await?;
+                let released =
+                    res.and_then(|msg| stream.release(msg, block_history, self.max_missed_blocks));
                 Ok::<_, BlockSynchronizerError>(
-                    res.map(|msg| (stream.extractor_id.name.clone(), msg)),
+                    released.map(|msg| (stream.extractor_id.name.clone(), msg)),
                 )
             });
         ready_sync_msgs.extend(
@@ -2290,6 +2334,236 @@ mod tests {
         let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
 
         assert_ready_at(&feed, "uniswap-v3", u64::from(block), None);
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// Starts a block synchronizer over two mocks, uniswap-v2 and uniswap-v3, whose first
+    /// messages carry blocks `v2_start` and `v3_start`. Returns the mocks, the nanny handle, the
+    /// feed receiver and the first feed.
+    async fn setup_block_sync_from(
+        block_time: Duration,
+        max_missed_blocks: u64,
+        v2_start: u8,
+        v3_start: u8,
+    ) -> (
+        MockStateSync,
+        MockStateSync,
+        JoinHandle<()>,
+        Receiver<BlockSyncResult<FeedMessage>>,
+        FeedMessage,
+    ) {
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync =
+            BlockSynchronizer::new(block_time, Duration::from_millis(10), max_missed_blocks)
+                .register_synchronizer(
+                    ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                    v2_sync.clone(),
+                )
+                .register_synchronizer(
+                    ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                    v3_sync.clone(),
+                );
+        v2_sync
+            .send_header(header_message(v2_start))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(header_message(v3_start))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let first = receive_message(&mut rx).await;
+        (v2_sync, v3_sync, nanny_handle, rx, first)
+    }
+
+    /// A Ready stream that starts to replay blocks more than `max_missed_blocks` behind the tip
+    /// goes stale at once. A replay sends a message every round, so the stale timeout never
+    /// fires, and as Delayed the stream would hold every round for its `block_time` wait.
+    #[test(tokio::test)]
+    async fn test_ready_synchronizer_replaying_old_blocks_goes_stale() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, first) =
+            setup_block_sync_from(block_time, 2, 10, 10).await;
+        assert_ready_at(&first, "uniswap-v3", 10, None);
+
+        for (block, old) in [(11, 5), (12, 6), (13, 7)] {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+
+            assert_ready_at(&feed, "uniswap-v2", u64::from(block), None);
+            assert!(
+                matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+                "v3 not stale at block {block}: {:?}",
+                feed.sync_states
+            );
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream that starts more than `max_missed_blocks` behind the others starts stale, so its
+    /// replay does not hold the first rounds. It turns Ready once the replay reaches the tip.
+    #[test(tokio::test)]
+    async fn test_synchronizer_far_behind_at_startup_starts_stale() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, first) =
+            setup_block_sync_from(block_time, 2, 10, 5).await;
+        assert!(
+            matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+            "v3 not stale at startup: {:?}",
+            first.sync_states
+        );
+
+        v3_sync
+            .send_header(header_message(6))
+            .await
+            .expect("send failed");
+        let feed = v2_round(&v2_sync, &mut rx, 11, block_time / 2).await;
+        assert!(
+            matches!(feed.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))),
+            "v3 not stale while replaying: {:?}",
+            feed.sync_states
+        );
+
+        for old in 7..=12 {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+        }
+        let feed = v2_round(&v2_sync, &mut rx, 12, block_time / 2).await;
+
+        assert_ready_at(&feed, "uniswap-v3", 12, None);
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream exactly `max_missed_blocks` behind at startup can still catch up within a round,
+    /// so it starts Delayed, not stale.
+    #[test(tokio::test)]
+    async fn test_synchronizer_max_missed_blocks_behind_at_startup_starts_delayed() {
+        let (_v2_sync, _v3_sync, nanny_handle, rx, first) =
+            setup_block_sync_from(Duration::from_millis(300), 2, 10, 8).await;
+
+        assert!(
+            matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Delayed(_))),
+            "v3 not delayed at startup: {:?}",
+            first.sync_states
+        );
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A header message that marks itself with a removed component named `marker`, so a test can
+    /// see which messages a merged message holds.
+    fn marked_message(block: u8, marker: &str) -> StateSyncMessage<BlockHeader> {
+        let mut msg = header_message(block);
+        msg.removed_components.insert(
+            marker.to_string(),
+            tycho_common::models::protocol::ProtocolComponent::default(),
+        );
+        msg
+    }
+
+    /// A Ready stream that starts to replay old blocks sends nothing to the consumer.
+    #[test(tokio::test)]
+    async fn test_replayed_blocks_not_delivered() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx, _first) =
+            setup_block_sync_from(block_time, 2, 10, 10).await;
+
+        for (block, old) in [(11, 5), (12, 6), (13, 7)] {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+
+            assert!(
+                !feed
+                    .state_msgs
+                    .contains_key("uniswap-v3"),
+                "replayed block {old} delivered at block {block}"
+            );
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream far behind at startup sends nothing until it is within `max_missed_blocks`. Then
+    /// it sends every message it received, its first one too, merged into one at its latest
+    /// block.
+    #[test(tokio::test)]
+    async fn test_replay_held_until_caught_up() {
+        let block_time = Duration::from_millis(300);
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync = BlockSynchronizer::new(block_time, Duration::from_millis(10), 2)
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                v2_sync.clone(),
+            )
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                v3_sync.clone(),
+            );
+        v2_sync
+            .send_header(header_message(10))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(marked_message(5, "5"))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+        let first = receive_message(&mut rx).await;
+        assert!(
+            !first
+                .state_msgs
+                .contains_key("uniswap-v3"),
+            "first message delivered"
+        );
+
+        v3_sync
+            .send_header(marked_message(6, "6"))
+            .await
+            .expect("send failed");
+        let feed = v2_round(&v2_sync, &mut rx, 11, block_time / 2).await;
+        assert!(
+            !feed
+                .state_msgs
+                .contains_key("uniswap-v3"),
+            "replayed block 6 delivered"
+        );
+
+        for old in 7..=12 {
+            v3_sync
+                .send_header(marked_message(old, &old.to_string()))
+                .await
+                .expect("send failed");
+        }
+        let feed = v2_round(&v2_sync, &mut rx, 12, block_time / 2).await;
+
+        let v3_msg = feed
+            .state_msgs
+            .get("uniswap-v3")
+            .expect("caught-up stream delivered");
+        assert_eq!(v3_msg.header.number, 12);
+        let mut markers: Vec<u8> = v3_msg
+            .removed_components
+            .keys()
+            .map(|marker| marker.parse().unwrap())
+            .collect();
+        markers.sort_unstable();
+        assert_eq!(markers, (5..=12).collect::<Vec<_>>());
         shutdown_block_synchronizer(nanny_handle, rx).await;
     }
 
