@@ -51,6 +51,10 @@ pub mod writer_status;
 
 #[cfg(test)]
 mod protobuf_conversion_tests;
+#[cfg(test)]
+mod recorded_extractors;
+#[cfg(test)]
+mod replay_determinism_tests;
 
 #[derive(Error, Debug, PartialEq)]
 #[expect(clippy::enum_variant_names, reason = "public API; renaming is a breaking change")]
