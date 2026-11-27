@@ -62,6 +62,14 @@ sol! {
 pub const POOL_RESERVES_ADJUSTED_ATTRIBUTE: &str = "pool_reserves_adjusted";
 /// Attribute carrying the target block's timestamp as an eight-byte big-endian `u64`.
 pub const BLOCK_TIMESTAMP_ATTRIBUTE: &str = "block_timestamp";
+/// Tycho's pause flag, set by Fluid's swap-and-arbitrage pause or by the indexer.
+pub const PAUSED_ATTRIBUTE: &str = "paused";
+
+/// Reads Tycho's pause flag: an empty value or `[0]` is not paused, and any other value is paused,
+/// whichever reason set it.
+pub fn decode_paused(value: &Bytes) -> bool {
+    !matches!(value.as_ref(), [] | [0])
+}
 
 /// Encodes Fluid resolver output and its block timestamp as pending-state attributes.
 pub fn pending_state_attributes(reserves: Vec<u8>, block_timestamp: u64) -> [(String, Bytes); 2] {

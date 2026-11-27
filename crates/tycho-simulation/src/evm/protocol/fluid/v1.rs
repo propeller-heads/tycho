@@ -36,10 +36,12 @@ use tycho_common::{
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
-        fluid::{v1::constant::RESERVES_RESOLVER, vm},
+        fluid::{
+            v1::constant::RESERVES_RESOLVER,
+            vm::{self, decode_paused, PAUSED_ATTRIBUTE},
+        },
         safe_math::sqrt_u512,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
-        uniswap_v4::hooks::montra::{decode_paused, PAUSED_ATTRIBUTE},
         utils::add_fee_markup,
     },
     query_pool_swap::price_to_f64_with_decimals,
@@ -77,7 +79,7 @@ pub struct FluidV1 {
     /// Tycho's pause flag, set by Fluid's swap-and-arbitrage pause or by the indexer. A paused
     /// pool reverts every swap, so it quotes nothing.
     #[serde(default)]
-    pub(super) paused: bool,
+    paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,6 +191,12 @@ impl FluidV1 {
             pool_reserve1,
             paused: false,
         }
+    }
+
+    /// Sets Tycho's pause flag of the pool.
+    pub(super) fn with_paused(mut self, paused: bool) -> Self {
+        self.paused = paused;
+        self
     }
 
     fn paused_error(&self) -> SimulationError {
