@@ -23,6 +23,7 @@ Reusable build/deploy steps are delegated to [propeller-heads/ci-cd-templates](h
 | `promote-to-prod.yaml` | Manual | Promote a tagged dev image to production |
 | `release.yaml` | GitHub Release published, manual | Upload binaries to GitHub + S3, publish crates to crates.io |
 | `release-substreams.yaml` | Tag `substreams/v*`, manual | Publish substreams crates, build and release substreams packages |
+| `protocol-dashboard.yaml` | Nightly 03:00 UTC, manual, PR (its own files) | Build the protocol integration dashboard from the org project, main and the dev and prod indexers; attached to the run as the `protocol-dashboard` artifact |
 
 ---
 
