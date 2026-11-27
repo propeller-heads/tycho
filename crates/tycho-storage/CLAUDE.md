@@ -54,7 +54,7 @@ postgres/
     │   ├── account_balance.rs — account balances (native and token): their key, history row and table writes for versioning
     │   ├── balance.rs  — component balances of a batch, and their key, history row and table writes for versioning
     │   ├── block.rs    — blocks, in the shared `public.block` table; the old gateway calls its SQL too
-    │   ├── component.rs — components of a batch with their token and contract links (a re-sent component is skipped with its links); the component id of each external id, in one instance; the protocol type and protocol system checks
+    │   ├── component.rs — components of a batch with their token and contract links (a re-sent component is skipped with its links; one with another creation tx is logged and counted); the component id of each external id, in one instance; the protocol type and protocol system checks
     │   ├── contract.rs — accounts of a batch (the first creation wins), account deltas and token balances; the account id of each address, in one instance
     │   ├── contract_code.rs — contract code rows: their key, history row and table writes for versioning; the same hash adds no version
     │   ├── contract_storage.rs — contract storage rows: their key, history row and table writes for versioning

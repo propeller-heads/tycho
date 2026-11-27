@@ -3,6 +3,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use metrics::counter;
+use tracing::warn;
 use tycho_common::{models::protocol::ProtocolComponent, storage::StorageError, Bytes};
 
 use super::token::check_tokens_stored;
@@ -67,7 +69,8 @@ impl PostgresGatewayNew {
     ///
     /// A component whose external id is stored already, or comes earlier in `components`, is
     /// then skipped with its links, with no error. It is skipped before the other checks, so its
-    /// creation transaction can come from an earlier batch.
+    /// creation transaction can come from an earlier batch. A stored component sent again with
+    /// another creation transaction is logged and counted, as the skip drops that change.
     ///
     /// `NotFound` for a protocol type or token that is not stored, a contract with no account in
     /// the instance, or a creation transaction that is not in the batch. `Unexpected` for a
@@ -90,18 +93,37 @@ impl PostgresGatewayNew {
             .iter()
             .map(|component| component.id.as_str())
             .collect();
-        let stored: HashSet<String> = protocol_component::table
+        let stored: HashMap<String, Bytes> = protocol_component::table
             .filter(protocol_component::instance_id.eq(instance))
             .filter(protocol_component::external_id.eq_any(&external_ids))
-            .select(protocol_component::external_id)
-            .load::<String>(conn)
+            .select((protocol_component::external_id, protocol_component::creation_tx_hash))
+            .load::<(String, Bytes)>(conn)
             .await
             .map_err(|err| {
                 storage_error_from_diesel(err, "ProtocolComponent", &instance.to_string(), None)
             })?
             .into_iter()
             .collect();
-        unique.retain(|component| !stored.contains(&component.id));
+        for component in &unique {
+            if let Some(stored_tx) = stored
+                .get(&component.id)
+                .filter(|tx| **tx != component.creation_tx)
+            {
+                warn!(
+                    %instance,
+                    component = component.id,
+                    %stored_tx,
+                    sent_tx = %component.creation_tx,
+                    "Skipped a stored component sent again with another creation transaction"
+                );
+                counter!(
+                    "protocol_component_resent_with_other_creation_tx",
+                    "protocol_system" => component.protocol_system.clone()
+                )
+                .increment(1);
+            }
+        }
+        unique.retain(|component| !stored.contains_key(&component.id));
         if unique.is_empty() {
             return Ok(());
         }
