@@ -4573,6 +4573,64 @@ fn test_single_encoding_strategy_elfomofi() {
     write_calldata_to_file("test_single_encoding_strategy_elfomofi", &encode(calldata));
 }
 
+/// Sells 0.01 cbBTC for USDC on ElFomoFi's Base cbBTC book, then that USDC for WETH on its WETH
+/// book. Each hop's floor is priced for its `estimated_amount_in`. The second hop's estimate,
+/// 600 USDC, is above the 596.71 USDC the first hop pays at the Foundry test's fork block, and
+/// its floor, 0.358 WETH, is above the 0.35648 WETH that input buys: the swap fills only because
+/// the executor scales the floor down to the input that arrives.
+#[test]
+fn test_sequential_encoding_strategy_elfomofi() {
+    let cbbtc = Bytes::from("0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf");
+    let usdc = Bytes::from("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+    let weth = Bytes::from("0x4200000000000000000000000000000000000006");
+    let hop =
+        |base: &Bytes, token_in: &Bytes, token_out: &Bytes, estimated_in: u64, floor: &str| {
+            let floor = ElfomofiFloor::MinAmountOut(floor.to_string());
+            Swap::new(
+                ProtocolComponent {
+                    protocol_system: "pamm:elfomofi".into(),
+                    chain: Chain::Base,
+                    tokens: vec![base.clone(), usdc.clone()],
+                    ..Default::default()
+                },
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            )
+            .with_estimated_amount_in(BigUint::from(estimated_in))
+            .with_user_data(Bytes::from(serde_json::to_vec(&floor).unwrap()))
+        };
+    let sell_cbbtc = hop(&cbbtc, &cbbtc, &usdc, 1_000_000, "590000000");
+    let buy_weth = hop(&weth, &usdc, &weth, 600_000_000, "358000000000000000");
+    let solution = Solution::new(
+        bob_address(),
+        bob_address(),
+        cbbtc,
+        weth,
+        BigUint::from(1_000_000u64),
+        BigUint::from(1u8),
+        BigUint::from(1u8),
+        vec![sell_cbbtc, buy_weth],
+    );
+    let encoded = get_tycho_router_encoder(Chain::Base)
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()
+        .remove(0);
+    let calldata = encode_tycho_router_call(
+        Chain::Base.id(),
+        &encoded,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    write_calldata_to_file("test_sequential_encoding_strategy_elfomofi", &encode(calldata));
+}
+
 /// Writes the calldata of a single BaiBai swap on the WETH pair under `name`.
 fn write_baibai_single_swap(name: &str, sell_base: bool, amount: u64) {
     let base = Bytes::from("0x4200000000000000000000000000000000000006");

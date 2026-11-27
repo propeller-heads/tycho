@@ -12,7 +12,7 @@ import {
     IElfomofiRouter
 } from "@src/executors/ElfomofiExecutor.sol";
 import {TransferManager} from "@src/TransferManager.sol";
-import {ClientFeeParams} from "@src/TychoRouterV3.sol";
+import {ClientFeeParams, TychoRouterV3} from "@src/TychoRouterV3.sol";
 
 /// @dev Records the call it gets and pays a fixed output from its own
 /// balance, reverting below the floor like ElFomoFi's router.
@@ -222,9 +222,9 @@ interface IElfomofiErrors {
     error ExecutionFailed();
 }
 
-/// @dev Swaps through a fresh TychoRouter on a fork, and checks each output
-/// against the helper's ladder at the fork block, interpolated as the
-/// simulation interpolates it.
+/// @dev Swaps through a TychoRouter on a fork, the shared setup's fresh one or
+/// the chain's production one, and checks each output against the helper's
+/// ladder at the fork block, interpolated as the simulation interpolates it.
 abstract contract ElfomofiForkTest is TychoRouterTestSetup {
     address internal constant ELFOMOFI_ROUTER =
         0xf0f0F0F0FB0d738452EfD03A28e8be14C76d5f73;
@@ -237,9 +237,20 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
     address internal constant ELFOMOFI_EXECUTOR =
         address(uint160(uint256(keccak256("tycho.test.ElfomofiExecutor"))));
 
+    /// @dev Holds EXECUTOR_SETTER_ROLE on the production TychoRouter of each
+    /// chain these tests fork, at their fork blocks.
+    address internal constant PRODUCTION_EXECUTOR_SETTER =
+        0x613112ACD43d95d4bE257Dae562Fb8Ea4d7ED455;
+
     ElfomofiExecutor internal elfomofiExecutor;
 
+    /// @dev The router the swaps go through.
+    TychoRouterV3 internal router;
+
     function helper() internal pure virtual returns (address);
+
+    /// @dev The chain's TychoRouter, as config/router_addresses.json lists it.
+    function productionRouter() internal pure virtual returns (address);
 
     function setUp() public virtual override {
         super.setUp();
@@ -249,14 +260,29 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
             ELFOMOFI_EXECUTOR
         );
         elfomofiExecutor = ElfomofiExecutor(ELFOMOFI_EXECUTOR);
+        _useRouter(TychoRouterV3(payable(tychoRouterAddr)), EXECUTOR_SETTER);
+    }
+
+    /// @dev Registers the executor on `target`, before the fork's timestamp so
+    /// its activation delay has passed when the tests swap at it, and swaps
+    /// through `target` from then on.
+    function _useRouter(TychoRouterV3 target, address executorSetter) internal {
         address[] memory executors = new address[](1);
         executors[0] = ELFOMOFI_EXECUTOR;
-        // Registered before the fork's timestamp, so the executor's activation
-        // delay has passed when the tests swap at it.
         vm.warp(forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR);
-        vm.prank(EXECUTOR_SETTER);
-        tychoRouter.setExecutors(executors);
+        vm.prank(executorSetter);
+        target.setExecutors(executors);
         vm.warp(forkTimestamp);
+        router = target;
+    }
+
+    /// @dev The production router is the caller the venue's pricing sees in
+    /// production, and the pricing contract takes the caller as an input.
+    function _useProductionRouter() internal {
+        _useRouter(
+            TychoRouterV3(payable(productionRouter())),
+            PRODUCTION_EXECUTOR_SETTER
+        );
     }
 
     /// @dev One pair's book, as `getAllOrderbooks` reports it. The feed reads
@@ -289,32 +315,66 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
         revert("past the ladder");
     }
 
-    /// @dev Sells `amountIn` through the router with the given floor and
-    /// returns what BOB received; checks nothing stays at the TychoRouter.
+    /// @dev Sells `amountIn` through `router` with the given floor and a
+    /// signed 1% client fee, the path most routes take, and returns what the
+    /// venue paid out of its vault. Checks the venue paid the router, BOB got
+    /// that less the fees, the router kept only the fees, and none of the
+    /// input stayed with it.
     function _routerSwap(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 floor
-    ) internal returns (uint256 received) {
-        deal(tokenIn, BOB, amountIn);
-        uint256 before = IERC20(tokenOut).balanceOf(BOB);
-        vm.startPrank(BOB);
-        IERC20(tokenIn).approve(tychoRouterAddr, amountIn);
+    ) internal returns (uint256 paid) {
         bytes memory swap = encodeSingleSwap(
             ELFOMOFI_EXECUTOR,
             abi.encodePacked(tokenIn, tokenOut, amountIn, floor)
         );
-        tychoRouter.singleSwap(
-            amountIn, tokenIn, tokenOut, floor, floor, BOB, noClientFee(), swap
+        uint256 minAmountOut = floor * 98 / 100;
+        ClientFeeParams memory feeParams = makeClientFeeParams(
+            1_000_000,
+            0,
+            amountIn,
+            tokenIn,
+            tokenOut,
+            floor,
+            minAmountOut,
+            BOB,
+            swap,
+            address(router),
+            ALICE_PK
+        );
+        deal(tokenIn, BOB, amountIn);
+        uint256 vaultBefore = IERC20(tokenOut).balanceOf(VAULT);
+        uint256 bobBefore = IERC20(tokenOut).balanceOf(BOB);
+        uint256 routerInBefore = IERC20(tokenIn).balanceOf(address(router));
+        uint256 routerOutBefore = IERC20(tokenOut).balanceOf(address(router));
+        vm.startPrank(BOB);
+        IERC20(tokenIn).approve(address(router), amountIn);
+        uint256 received = router.singleSwap(
+            amountIn,
+            tokenIn,
+            tokenOut,
+            floor,
+            minAmountOut,
+            BOB,
+            feeParams,
+            swap
         );
         vm.stopPrank();
-        received = IERC20(tokenOut).balanceOf(BOB) - before;
-        assertEq(IERC20(tokenIn).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(tokenOut).balanceOf(tychoRouterAddr), 0);
+
+        paid = vaultBefore - IERC20(tokenOut).balanceOf(VAULT);
+        assertEq(IERC20(tokenOut).balanceOf(BOB) - bobBefore, received);
+        assertLt(received, paid);
+        assertGe(received, minAmountOut);
+        assertEq(
+            IERC20(tokenOut).balanceOf(address(router)) - routerOutBefore,
+            paid - received
+        );
+        assertEq(IERC20(tokenIn).balanceOf(address(router)), routerInBefore);
     }
 
-    /// @dev Both directions of `base`/`quote` fill at least the ladder's
+    /// @dev Both directions of `base`/`quote` pay at least the ladder's
     /// interpolation, for a part of the first level, and at most `maxExcess`
     /// (1e18 = 100%) above it: the simulation never over-quotes.
     function _assertBothDirections(
@@ -325,16 +385,15 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
         IElfomofiHelper.PairOrderbook memory book = _book(base, quote);
         uint256 sellBase = book.bidCumulativeLevels[0].amountIn / 3;
         uint256 expectedQuote = _interpolate(book.bidCumulativeLevels, sellBase);
-        uint256 receivedQuote =
-            _routerSwap(base, quote, sellBase, expectedQuote);
-        assertGe(receivedQuote, expectedQuote);
-        assertApproxEqRel(receivedQuote, expectedQuote, maxExcess);
+        uint256 paidQuote = _routerSwap(base, quote, sellBase, expectedQuote);
+        assertGe(paidQuote, expectedQuote);
+        assertApproxEqRel(paidQuote, expectedQuote, maxExcess);
 
         uint256 sellQuote = book.askCumulativeLevels[0].amountIn / 3;
         uint256 expectedBase = _interpolate(book.askCumulativeLevels, sellQuote);
-        uint256 receivedBase = _routerSwap(quote, base, sellQuote, expectedBase);
-        assertGe(receivedBase, expectedBase);
-        assertApproxEqRel(receivedBase, expectedBase, maxExcess);
+        uint256 paidBase = _routerSwap(quote, base, sellQuote, expectedBase);
+        assertGe(paidBase, expectedBase);
+        assertApproxEqRel(paidBase, expectedBase, maxExcess);
     }
 
     /// @dev A floor one unit above the book reverts the whole swap and the
@@ -345,7 +404,7 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
         uint256 floor = _interpolate(book.bidCumulativeLevels, amountIn) + 1;
         deal(base, BOB, amountIn);
         vm.startPrank(BOB);
-        IERC20(base).approve(tychoRouterAddr, amountIn);
+        IERC20(base).approve(address(router), amountIn);
         bytes memory swap = encodeSingleSwap(
             ELFOMOFI_EXECUTOR, abi.encodePacked(base, quote, amountIn, floor)
         );
@@ -354,9 +413,7 @@ abstract contract ElfomofiForkTest is TychoRouterTestSetup {
                 IElfomofiErrors.InsufficientAmount.selector, floor, floor - 1
             )
         );
-        tychoRouter.singleSwap(
-            amountIn, base, quote, 1, 1, BOB, noClientFee(), swap
-        );
+        router.singleSwap(amountIn, base, quote, 1, 1, BOB, noClientFee(), swap);
         vm.stopPrank();
         assertEq(IERC20(base).balanceOf(BOB), amountIn);
     }
@@ -384,9 +441,17 @@ contract ElfomofiBaseTest is ElfomofiForkTest {
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant CBBTC =
         0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    /// @dev Uniswap V3's WETH/cbBTC pool at 0.05%.
+    address internal constant WETH_CBBTC_USV3 =
+        0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1;
+    uint24 internal constant HALF = 0x7fffff;
 
     function getChain() public pure override returns (string memory) {
         return "base";
+    }
+
+    function productionRouter() internal pure override returns (address) {
+        return 0xd374c00614f95492D816b5957E3797ce3f0c445C;
     }
 
     /// @dev After the pricing upgrade of 2026-11-20 (59,985,486), with WETH
@@ -413,73 +478,162 @@ contract ElfomofiBaseTest is ElfomofiForkTest {
         _measureGas(WETH, USDC);
     }
 
-    /// @dev The WETH and cbBTC bids each reach the vault's whole USDC balance.
-    /// Filling one to the end empties the vault's USDC, and the other's sale
-    /// then reverts in the same block: the vault cannot pay it.
-    function testPairsShareTheVault() public {
-        IElfomofiHelper.PairOrderbook memory weth = _book(WETH, USDC);
-        IElfomofiHelper.PairOrderbook memory cbbtc = _book(CBBTC, USDC);
-        uint256 wethIn =
-            weth.bidCumulativeLevels[weth.bidCumulativeLevels.length
-                - 1].amountIn;
-        uint256 cbbtcIn =
-            cbbtc.bidCumulativeLevels[cbbtc.bidCumulativeLevels.length
-                - 1].amountIn;
-        uint256 wethOut = _interpolate(weth.bidCumulativeLevels, wethIn);
-        assertEq(_routerSwap(WETH, USDC, wethIn, wethOut), wethOut);
-        assertLt(IERC20(USDC).balanceOf(VAULT), 10);
-
-        uint256 cbbtcOut = _interpolate(cbbtc.bidCumulativeLevels, cbbtcIn);
-        deal(CBBTC, BOB, cbbtcIn);
-        vm.startPrank(BOB);
-        IERC20(CBBTC).approve(tychoRouterAddr, cbbtcIn);
-        bytes memory swap = encodeSingleSwap(
-            ELFOMOFI_EXECUTOR, abi.encodePacked(CBBTC, USDC, cbbtcIn, cbbtcOut)
-        );
-        vm.expectRevert(IElfomofiErrors.ExecutionFailed.selector);
-        tychoRouter.singleSwap(
-            cbbtcIn, CBBTC, USDC, cbbtcOut, cbbtcOut, BOB, noClientFee(), swap
-        );
-        vm.stopPrank();
+    function testProductionRouterBothDirections() public {
+        _useProductionRouter();
+        _assertBothDirections(WETH, USDC, 0);
     }
 
-    /// @dev With a signed 1% client fee, the venue still pays the whole quote
-    /// out of its vault against the executor's floor, and the fees come out of
-    /// that output after the swap.
-    function testClientFeePath() public {
-        IElfomofiHelper.PairOrderbook memory book = _book(WETH, USDC);
-        uint256 amountIn = book.bidCumulativeLevels[0].amountIn / 3;
-        uint256 quoted = _interpolate(book.bidCumulativeLevels, amountIn);
-        uint256 minAmountOut = quoted * 97 / 100;
-        bytes memory swap = encodeSingleSwap(
-            ELFOMOFI_EXECUTOR, abi.encodePacked(WETH, USDC, amountIn, quoted)
-        );
-        ClientFeeParams memory feeParams = makeClientFeeParams(
-            100,
+    /// @dev WETH split in two: `HALF` of it sold on the WETH book, the rest
+    /// swapped to cbBTC on Uniswap V3 and sold on the cbBTC book. Both legs pay
+    /// USDC out of the one vault in the same transaction, the cbBTC leg funded
+    /// only by the Uniswap leg's output.
+    function _splitSwaps(bytes memory wethLeg, bytes memory cbbtcLeg)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes[] memory swaps = new bytes[](3);
+        swaps[0] = encodeSplitSwap(0, 2, HALF, ELFOMOFI_EXECUTOR, wethLeg);
+        swaps[1] = encodeSplitSwap(
             0,
-            amountIn,
-            WETH,
-            USDC,
-            quoted,
-            minAmountOut,
-            BOB,
-            swap,
-            tychoRouterAddr,
-            ALICE_PK
+            1,
+            0,
+            address(usv3Executor),
+            encodeUniswapV3Swap(WETH, CBBTC, WETH_CBBTC_USV3, true)
         );
-        uint256 vaultBefore = IERC20(USDC).balanceOf(VAULT);
+        swaps[2] = encodeSplitSwap(1, 2, 0, ELFOMOFI_EXECUTOR, cbbtcLeg);
+        return pleEncode(swaps);
+    }
+
+    function _fundBob(uint256 amountIn) internal {
         deal(WETH, BOB, amountIn);
-        vm.startPrank(BOB);
+        vm.prank(BOB);
         IERC20(WETH).approve(tychoRouterAddr, amountIn);
-        uint256 received = tychoRouter.singleSwap(
-            amountIn, WETH, USDC, quoted, minAmountOut, BOB, feeParams, swap
+    }
+
+    /// @dev The cbBTC leg's floor is priced for 0.02 cbBTC, more than the
+    /// Uniswap leg delivers, so the executor scales it down to what arrives.
+    /// The vault pays each book's interpolation for the input it got.
+    function testSplitRouteThroughBothBooks() public {
+        IElfomofiHelper.PairOrderbook memory weth = _book(WETH, USDC);
+        IElfomofiHelper.PairOrderbook memory cbbtc = _book(CBBTC, USDC);
+        uint256 amountIn = 1 ether;
+        uint256 wethIn = amountIn * HALF / 0xffffff;
+        uint256 wethOut = _interpolate(weth.bidCumulativeLevels, wethIn);
+        uint256 cbbtcReference = 2e6;
+        uint256 cbbtcFloor =
+            _interpolate(cbbtc.bidCumulativeLevels, cbbtcReference) * 99 / 100;
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(VAULT);
+        uint256 vaultCbbtc = IERC20(CBBTC).balanceOf(VAULT);
+
+        bytes memory swaps = _splitSwaps(
+            abi.encodePacked(WETH, USDC, wethIn, wethOut),
+            abi.encodePacked(CBBTC, USDC, cbbtcReference, cbbtcFloor)
+        );
+        _fundBob(amountIn);
+        vm.prank(BOB);
+        uint256 received = tychoRouter.splitSwap(
+            amountIn, WETH, USDC, 1, 1, 3, BOB, noClientFee(), swaps
+        );
+
+        uint256 cbbtcIn = IERC20(CBBTC).balanceOf(VAULT) - vaultCbbtc;
+        assertGt(cbbtcIn, 0);
+        assertLt(cbbtcIn, cbbtcReference);
+        uint256 paid = vaultUsdc - IERC20(USDC).balanceOf(VAULT);
+        assertEq(
+            paid, wethOut + _interpolate(cbbtc.bidCumulativeLevels, cbbtcIn)
+        );
+        assertEq(received, paid);
+        assertEq(IERC20(USDC).balanceOf(BOB), received);
+        assertEq(IERC20(WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(CBBTC).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC).balanceOf(tychoRouterAddr), 0);
+    }
+
+    /// @dev Each book counts the vault's whole USDC balance. Split 10 WETH:
+    /// each leg alone fits in that balance but the two together do not. The
+    /// second leg the router runs then pays only what is left in the vault,
+    /// below its floor, and the whole transaction reverts on that floor.
+    function testSplitRoutePastTheSharedVaultRevertsOnTheFloor() public {
+        IElfomofiHelper.PairOrderbook memory weth = _book(WETH, USDC);
+        IElfomofiHelper.PairOrderbook memory cbbtc = _book(CBBTC, USDC);
+        uint256 amountIn = 10 ether;
+        uint256 wethIn = amountIn * HALF / 0xffffff;
+        uint256 cbbtcIn = _usv3CbbtcFor(amountIn - wethIn);
+        uint256 wethOut = _interpolate(weth.bidCumulativeLevels, wethIn);
+        uint256 cbbtcOut = _interpolate(cbbtc.bidCumulativeLevels, cbbtcIn);
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(VAULT);
+        assertLt(wethOut, vaultUsdc);
+        assertLt(cbbtcOut, vaultUsdc);
+        assertGt(wethOut + cbbtcOut, vaultUsdc);
+
+        bytes memory swaps = _splitSwaps(
+            abi.encodePacked(WETH, USDC, wethIn, wethOut),
+            abi.encodePacked(CBBTC, USDC, cbbtcIn, cbbtcOut * 99 / 100)
+        );
+        _fundBob(amountIn);
+        vm.prank(BOB);
+        vm.expectPartialRevert(IElfomofiErrors.InsufficientAmount.selector);
+        tychoRouter.splitSwap(
+            amountIn, WETH, USDC, 1, 1, 3, BOB, noClientFee(), swaps
+        );
+    }
+
+    /// @dev The cbBTC that `wethIn` buys on the Uniswap leg, from a swap that
+    /// is rolled back.
+    function _usv3CbbtcFor(uint256 wethIn) internal returns (uint256 out) {
+        uint256 snapshot = vm.snapshotState();
+        deal(WETH, BOB, wethIn);
+        vm.startPrank(BOB);
+        IERC20(WETH).approve(tychoRouterAddr, wethIn);
+        out = tychoRouter.singleSwap(
+            wethIn,
+            WETH,
+            CBBTC,
+            1,
+            1,
+            BOB,
+            noClientFee(),
+            encodeSingleSwap(
+                address(usv3Executor),
+                encodeUniswapV3Swap(WETH, CBBTC, WETH_CBBTC_USV3, true)
+            )
+        );
+        vm.stopPrank();
+        vm.revertToState(snapshot);
+    }
+
+    /// @dev The Rust-encoded route sells 0.01 cbBTC on the cbBTC book and
+    /// buys WETH with the USDC on the WETH book. The second hop is funded only
+    /// by the first one's output, less than the 600 USDC its floor was priced
+    /// for: it fills because the executor scales that floor down. The USDC the
+    /// vault pays on the first hop comes straight back on the second.
+    function testRustEncodedSequentialRoute() public {
+        IElfomofiHelper.PairOrderbook memory cbbtc = _book(CBBTC, USDC);
+        IElfomofiHelper.PairOrderbook memory weth = _book(WETH, USDC);
+        uint256 usdc = _interpolate(cbbtc.bidCumulativeLevels, 1e6);
+        uint256 expected = _interpolate(weth.askCumulativeLevels, usdc);
+        assertLt(usdc, 600e6);
+        assertGt(0.358 ether, expected);
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(VAULT);
+        uint256 vaultWeth = IERC20(WETH).balanceOf(VAULT);
+        uint256 bobWeth = IERC20(WETH).balanceOf(BOB);
+        deal(CBBTC, BOB, 1e6);
+        vm.startPrank(BOB);
+        IERC20(CBBTC).approve(tychoRouterAddr, 1e6);
+        (bool success, bytes memory result) = tychoRouterAddr.call(
+            loadCallDataFromFile("test_sequential_encoding_strategy_elfomofi")
         );
         vm.stopPrank();
 
-        assertEq(vaultBefore - IERC20(USDC).balanceOf(VAULT), quoted);
-        assertEq(IERC20(USDC).balanceOf(BOB), received);
-        assertLt(received, quoted);
-        assertGe(received, minAmountOut);
+        assertTrue(success, "Rust-encoded ElFomoFi route failed");
+        assertEq(abi.decode(result, (uint256)), expected);
+        assertEq(IERC20(WETH).balanceOf(BOB) - bobWeth, expected);
+        assertEq(IERC20(USDC).balanceOf(VAULT), vaultUsdc);
+        assertEq(vaultWeth - IERC20(WETH).balanceOf(VAULT), expected);
+        assertEq(IERC20(CBBTC).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(USDC).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(WETH).balanceOf(tychoRouterAddr), 0);
     }
 
     /// @dev The Rust-encoded router call sells 0.1 WETH with a floor the
@@ -520,8 +674,17 @@ contract ElfomofiBscTest is ElfomofiForkTest {
         return 0x78015E3544d989f0712a0b9986cB05838c3fE06D;
     }
 
+    function productionRouter() internal pure override returns (address) {
+        return 0xEe7eCe626064BDA1c6aFDb8A281afe44Eabd3242;
+    }
+
     function testBothDirections() public {
         // Exact to the wei on BSC.
+        _assertBothDirections(ETH, USDT, 0);
+    }
+
+    function testProductionRouterBothDirections() public {
+        _useProductionRouter();
         _assertBothDirections(ETH, USDT, 0);
     }
 
@@ -564,9 +727,18 @@ contract ElfomofiRobinhoodTest is ElfomofiForkTest {
         return 0x20D24Ee45c9b338Ef7ACf2eEde75183B9E2C9E3c;
     }
 
+    function productionRouter() internal pure override returns (address) {
+        return 0x6F460540B03651d2Ad0ec28f777e4A0480A756a5;
+    }
+
     function testBothDirections() public {
         // Buying NVDA pays about 1.5e-9 more than the interpolation at this
         // block; selling it is exact.
+        _assertBothDirections(NVDA, USDG, 1e10);
+    }
+
+    function testProductionRouterBothDirections() public {
+        _useProductionRouter();
         _assertBothDirections(NVDA, USDG, 1e10);
     }
 

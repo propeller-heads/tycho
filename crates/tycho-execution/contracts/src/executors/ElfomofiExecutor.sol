@@ -41,9 +41,8 @@ contract ElfomofiExecutor is IExecutor {
     /// @dev The partner id passed with each swap. The router hands it, with the
     /// caller, to the venue's pricing contract when it quotes and settles the
     /// swap, and logs it in its swap events. The pricing contract is not
-    /// verified, so how it uses the id is unknown; on 2026-11-26 ids 0, 1, 7
-    /// and 1000 got the same quote on Base. Placeholder until ElFomoFi assigns
-    /// one.
+    /// verified, so how it uses the id is unknown. Placeholder until ElFomoFi
+    /// assigns one.
     uint256 public constant PARTNER_ID = 0;
 
     /// @dev The native-token marker of the TychoRouter. ElFomoFi trades ERC20s

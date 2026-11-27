@@ -151,8 +151,9 @@ What to expect from the venue:
   fails and publishes nothing rather than wrong books.
 - A quote can lapse within its block, for example when the reference pool a pair follows moves. The swap then reverts
   on its floor.
-- All pairs pay out of one vault. Each book counts the vault's whole balance of its output token, so several ElFomoFi
-  swaps in one solution or block that together exceed that balance revert after the first ones fill.
+- All pairs pay out of one vault. Each book counts the vault's whole balance of its output token, so when several
+  ElFomoFi swaps in one solution or block together exceed that balance, the first ones fill and a later one pays only
+  what is left, below its floor, and reverts the transaction.
 - A fill makes the next levels of the same direction slightly worse (about 0.1% measured), which a continued quote does
   not include; the floor absorbs it. A book that the solution already filled in one direction refuses to quote the
   other.
