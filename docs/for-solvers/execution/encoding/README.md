@@ -128,6 +128,40 @@ via `.with_split(...)` on the builder.
 
 </details>
 
+#### ElFomoFi swaps <a href="#elfomofi-swaps" id="elfomofi-swaps"></a>
+
+ElFomoFi (`pamm:elfomofi`, on Base, BSC and Robinhood) fills an input larger than its book at the book's capped output
+and keeps the whole input, so every ElFomoFi swap carries its own minimum output. The encoder prices that floor for the
+swap's `estimated_amount_in`, which it requires, and the executor scales it down, rounding up, when less input arrives.
+Set the rule in the swap's `user_data` as JSON (`ElfomofiFloor` in `tycho_execution::encoding::evm::swap_encoder`):
+
+- `{"slippage_bps":30}`: the encoder re-quotes `estimated_amount_in` on the swap's `protocol_state` and allows that many
+  basis points below the quote. Without `user_data`, the encoder applies this rule with 50 basis points; set
+  `user_data` on the swap to use another value.
+- `{"min_amount_out":"1250000000"}`: the floor itself, in raw units of the output token. It must be positive, and the
+  encoder rejects it when the swap's `protocol_state` quotes less.
+
+`Swap` skips `protocol_state` when it serializes, so a swap you send to the encoder as JSON (the binary, or any other
+process) arrives without it: use `min_amount_out` there.
+
+What to expect from the venue:
+
+- ElFomoFi prices in unverified contracts that its operator can replace without an event. Tycho reads the books the
+  venue's helper publishes and does not model the pricing; if a helper upgrade changes its answer's layout, the feed
+  fails and publishes nothing rather than wrong books.
+- A quote can lapse within its block, for example when the reference pool a pair follows moves. The swap then reverts
+  on its floor.
+- All pairs pay out of one vault. Each book counts the vault's whole balance of its output token, so when several
+  ElFomoFi swaps in one solution or block together exceed that balance, the first ones fill and a later one pays only
+  what is left, below its floor, and reverts the transaction.
+- A fill makes the next levels of the same direction slightly worse (about 0.1% measured), which a continued quote does
+  not include; the floor absorbs it. A book that the solution already filled in one direction refuses to quote the
+  other.
+- The venue can charge an extra, caller-dependent price term; it was zero on all three chains when last measured, and
+  fills deviate from the books while it is not.
+- A load-balanced or reorging RPC can briefly serve an older block. The feed refuses blocks older than one it already
+  read and withdraws books after a few seconds, and the floor covers the rest.
+
 ### Swap Group <a href="#swap-group" id="swap-group"></a>
 
 Protocols like Uniswap V4 eliminate token transfers between consecutive swaps through flash accounting. If your solution

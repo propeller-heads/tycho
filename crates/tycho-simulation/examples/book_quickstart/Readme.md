@@ -47,6 +47,14 @@ so the example works with no RFQ credentials at all. Pass `--disable-pamm` to le
 cargo run --release --example book_quickstart -- --disable-pamm
 ```
 
+`--elfomofi` adds ElFomoFi's pAMM feed on Base, BSC or Robinhood. It needs no credentials but
+reads its books over `RPC_URL`, which must be a node of the chosen chain; it cannot be combined
+with `--disable-pamm`:
+
+```bash
+RPC_URL=<base-rpc-url> cargo run --release --example book_quickstart -- --chain base --elfomofi
+```
+
 `--all-pairs` builds the five RFQ venues as one component per venue instead of one per book, which
 is the layout a router uses to hold a route to the quotes a venue will sign for it:
 

@@ -3,8 +3,8 @@ use tycho_common::models::Chain;
 
 use super::{
     constants::{
-        BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
-        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM, ELFOMOFI_PROTOCOL_SYSTEM,
+        FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
         SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
@@ -64,6 +64,7 @@ pub fn is_callback_protocol(protocol_system: &str) -> bool {
 /// [`optimizable_transfer_in`] for the full classification.
 pub const PROTOCOLS_OPTIMIZABLE_TRANSFER_IN: &[&str] = &[
     "biconomy",
+    ELFOMOFI_PROTOCOL_SYSTEM,
     "erc4626",
     "maverick_v2",
     "uniswap_v2",

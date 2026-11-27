@@ -45,7 +45,10 @@ use tycho_simulation::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
         BookFeedEvent, BookFeedOutcome, BookFeedStreams, BookSnapshot,
     },
-    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    pamm::protocols::{
+        elfomofi::{self, feed::ElfomofiFeedBuilder},
+        metric::{self, feed::MetricFeedBuilder},
+    },
     protocol::models::ProtocolComponent,
     rfq::protocols::{
         bebop::{self, feed::BebopFeedBuilder},
@@ -82,6 +85,10 @@ struct Cli {
     /// Disable the pAMM book feeds (Metric), keeping the RFQ venues
     #[arg(long, default_value_t = false)]
     disable_pamm: bool,
+    /// Also run ElFomoFi's pAMM feed (Base, BSC or Robinhood), which reads its books over
+    /// RPC_URL
+    #[arg(long, default_value_t = false, conflicts_with = "disable_pamm")]
+    elfomofi: bool,
     /// Publish each RFQ venue as one component for every pair it prices, which a route may take
     /// one quote from, rather than one component per pair
     #[arg(long, default_value_t = false)]
@@ -353,6 +360,18 @@ async fn main() {
             }
             Err(e) => eprintln!("Skipping Native feed: {e}"),
         }
+    }
+
+    if cli.elfomofi {
+        println!("Setting up ElFomoFi feed...\n");
+        let rpc_url =
+            env::var("RPC_URL").expect("--elfomofi reads its books over RPC_URL, which is not set");
+        let elfomofi_feed = ElfomofiFeedBuilder::new(book_config.clone(), rpc_url)
+            .build()
+            .expect("--elfomofi asked for the ElFomoFi feed, which failed to build");
+        feeds
+            .add(elfomofi::PROTOCOL_SYSTEM, elfomofi_feed)
+            .expect("each provider is added once");
     }
 
     if !cli.disable_pamm {

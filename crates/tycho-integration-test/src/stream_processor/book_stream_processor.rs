@@ -18,6 +18,7 @@ use tycho_simulation::{
     },
     pamm::protocols::{
         baibai::{self, BaibaiFeedBuilder},
+        elfomofi::{self, feed::ElfomofiFeedBuilder},
         metric::{self, feed::MetricFeedBuilder},
     },
     rfq::protocols::{
@@ -66,6 +67,9 @@ pub enum PammVenue {
     Metric,
     /// Base only. Reads its books from the chain over `--rpc-url`, so it needs no credentials.
     Baibai,
+    /// Base, BSC and Robinhood. Reads its books from the chain over `--rpc-url`, so it needs no
+    /// credentials.
+    Elfomofi,
 }
 
 impl PammVenue {
@@ -88,6 +92,7 @@ impl Display for PammVenue {
         match self {
             PammVenue::Metric => write!(f, "{}", metric::PROTOCOL_SYSTEM),
             PammVenue::Baibai => write!(f, "{}", baibai::PROTOCOL_SYSTEM),
+            PammVenue::Elfomofi => write!(f, "{}", elfomofi::PROTOCOL_SYSTEM),
         }
     }
 }
@@ -601,6 +606,16 @@ fn add_pamm_feeds(
                         .add(venue.to_string(), feed)
                         .is_ok()
                 }),
+            PammVenue::Elfomofi => {
+                ElfomofiFeedBuilder::new(book_config.clone(), rpc_url.to_string())
+                    .build()
+                    .map_err(|e| Unavailable::BuildFailed(e.to_string()))
+                    .map(|feed| {
+                        feeds
+                            .add(venue.to_string(), feed)
+                            .is_ok()
+                    })
+            }
         };
         match added {
             Ok(true) => info!("Added {venue} feed"),
@@ -708,6 +723,8 @@ mod tests {
         assert_eq!(PammVenue::Metric.to_string(), metric::PROTOCOL_SYSTEM);
         assert_eq!(PammVenue::Baibai.cli_name(), "baibai");
         assert_eq!(PammVenue::Baibai.to_string(), baibai::PROTOCOL_SYSTEM);
+        assert_eq!(PammVenue::Elfomofi.cli_name(), "elfomofi");
+        assert_eq!(PammVenue::Elfomofi.to_string(), elfomofi::PROTOCOL_SYSTEM);
     }
 
     #[tokio::test]
@@ -770,6 +787,18 @@ mod tests {
             .to_string();
         assert!(message.contains("--pamm"), "{message}");
         assert!(message.contains(baibai::PROTOCOL_SYSTEM), "{message}");
+    }
+
+    #[tokio::test]
+    async fn elfomofi_is_added_on_its_chains_and_fails_the_run_elsewhere() {
+        let listed = PammSelection::Listed(vec![PammVenue::Elfomofi]);
+        for chain in [Chain::Base, Chain::Bsc, Chain::Robinhood] {
+            assert_eq!(added_on(chain, &listed, None).unwrap(), [elfomofi::PROTOCOL_SYSTEM]);
+        }
+        let message = added_on(Chain::Ethereum, &listed, None)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(elfomofi::PROTOCOL_SYSTEM), "{message}");
     }
 
     #[tokio::test]
