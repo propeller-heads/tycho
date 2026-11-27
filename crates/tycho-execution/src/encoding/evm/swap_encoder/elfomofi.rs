@@ -17,18 +17,14 @@ use crate::encoding::{
 /// The chains ElFomoFi's router is deployed on, all at one address.
 pub const ELFOMOFI_CHAINS: [Chain; 3] = [Chain::Base, Chain::Bsc, Chain::Robinhood];
 
-/// Slippage applied to the re-quoted output when neither the swap nor the encoder config names
-/// another floor rule.
+/// Slippage applied to the re-quoted output when the swap names no floor rule.
 const DEFAULT_SLIPPAGE_BPS: u32 = 50;
-
-/// Encoder config key overriding [`DEFAULT_SLIPPAGE_BPS`].
-const SLIPPAGE_BPS_CONFIG_KEY: &str = "slippage_bps";
 
 const BPS_DENOMINATOR: u32 = 10_000;
 
 /// How the minimum output of an ElFomoFi swap is set, passed as the swap's `user_data` JSON,
 /// e.g. `{"slippage_bps":30}` or `{"min_amount_out":"1250000000"}`. Without `user_data` the
-/// encoder uses `slippage_bps` from its config (50 by default).
+/// encoder applies `slippage_bps` of 50.
 ///
 /// The venue fills an input past its book at the book's capped output and keeps the whole input,
 /// so every swap carries a floor, priced for the swap's `estimated_amount_in` and scaled by the
@@ -50,33 +46,20 @@ pub enum ElfomofiFloor {
 pub struct ElfomofiSwapEncoder {
     executor_address: Bytes,
     chain: Chain,
-    slippage_bps: u32,
 }
 
 impl SwapEncoder for ElfomofiSwapEncoder {
     fn new(
         executor_address: Bytes,
         chain: Chain,
-        config: Option<HashMap<String, String>>,
+        _config: Option<HashMap<String, String>>,
     ) -> Result<Self, EncodingError> {
         if !ELFOMOFI_CHAINS.contains(&chain) {
             return Err(EncodingError::FatalError(format!(
                 "ElFomoFi swaps are not supported on {chain}"
             )));
         }
-        let slippage_bps = match config
-            .as_ref()
-            .and_then(|config| config.get(SLIPPAGE_BPS_CONFIG_KEY))
-        {
-            Some(value) => value.parse().map_err(|e| {
-                EncodingError::FatalError(format!(
-                    "ElFomoFi {SLIPPAGE_BPS_CONFIG_KEY} {value}: {e}"
-                ))
-            })?,
-            None => DEFAULT_SLIPPAGE_BPS,
-        };
-        check_slippage(slippage_bps).map_err(EncodingError::FatalError)?;
-        Ok(Self { executor_address, chain, slippage_bps })
+        Ok(Self { executor_address, chain })
     }
 
     fn encode_swap(
@@ -92,7 +75,7 @@ impl SwapEncoder for ElfomofiSwapEncoder {
             .ok_or_else(|| {
                 invalid(swap, "needs a positive estimated_amount_in to price its floor")
             })?;
-        let floor = self.floor(swap, &reference_in)?;
+        let floor = Self::floor(swap, &reference_in)?;
 
         let mut data = Vec::with_capacity(104);
         data.extend_from_slice(&swap.token_in().address);
@@ -143,7 +126,7 @@ impl ElfomofiSwapEncoder {
     }
 
     /// The minimum output for `reference_in`, by the rule the swap names.
-    fn floor(&self, swap: &Swap, reference_in: &BigUint) -> Result<BigUint, EncodingError> {
+    fn floor(swap: &Swap, reference_in: &BigUint) -> Result<BigUint, EncodingError> {
         let rule = match swap
             .user_data()
             .as_ref()
@@ -152,7 +135,7 @@ impl ElfomofiSwapEncoder {
             Some(bytes) => serde_json::from_slice(bytes).map_err(|e| {
                 invalid(swap, format!("user_data is not an ElFomoFi floor rule: {e}"))
             })?,
-            None => ElfomofiFloor::SlippageBps(self.slippage_bps),
+            None => ElfomofiFloor::SlippageBps(DEFAULT_SLIPPAGE_BPS),
         };
         match rule {
             ElfomofiFloor::SlippageBps(bps) => {
@@ -270,20 +253,13 @@ mod tests {
     }
 
     fn encode(swap: &Swap) -> Result<Vec<u8>, EncodingError> {
-        encode_with(swap, None)
-    }
-
-    fn encode_with(
-        swap: &Swap,
-        config: Option<HashMap<String, String>>,
-    ) -> Result<Vec<u8>, EncodingError> {
         let context = EncodingContext {
             router_address: None,
             group_token_in: swap.token_in().address.clone(),
             group_token_out: swap.token_out().address.clone(),
             origin: None,
         };
-        ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Base, config)?.encode_swap(swap, &context)
+        ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Base, None)?.encode_swap(swap, &context)
     }
 
     fn reason(result: Result<Vec<u8>, EncodingError>) -> String {
@@ -314,15 +290,6 @@ mod tests {
         let swap = with_rule(weth_for_usdc(), &ElfomofiFloor::SlippageBps(100));
 
         let encoded = encode(&swap).unwrap();
-
-        assert_eq!(hex::encode(&encoded[72..]), format!("{:064x}", 2_970_000_000u64));
-    }
-
-    #[test]
-    fn test_encode_elfomofi_slippage_from_config() {
-        let config = HashMap::from([(SLIPPAGE_BPS_CONFIG_KEY.to_string(), "100".to_string())]);
-
-        let encoded = encode_with(&weth_for_usdc(), Some(config)).unwrap();
 
         assert_eq!(hex::encode(&encoded[72..]), format!("{:064x}", 2_970_000_000u64));
     }
@@ -426,15 +393,9 @@ mod tests {
         assert!(reason.contains(expected), "{reason}");
     }
 
-    #[rstest]
-    #[case::ethereum(Chain::Ethereum, None)]
-    #[case::slippage_past_the_whole(Chain::Base, Some("10000"))]
-    #[case::slippage_not_a_number(Chain::Base, Some("half"))]
-    fn test_elfomofi_encoder_refuses_config(#[case] chain: Chain, #[case] slippage: Option<&str>) {
-        let config = slippage
-            .map(|bps| HashMap::from([(SLIPPAGE_BPS_CONFIG_KEY.to_string(), bps.to_string())]));
-
-        assert!(ElfomofiSwapEncoder::new(Bytes::zero(20), chain, config).is_err());
+    #[test]
+    fn test_elfomofi_encoder_refuses_other_chains() {
+        assert!(ElfomofiSwapEncoder::new(Bytes::zero(20), Chain::Ethereum, None).is_err());
     }
 
     #[test]

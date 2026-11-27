@@ -136,8 +136,8 @@ swap's `estimated_amount_in`, which it requires, and the executor scales it down
 Set the rule in the swap's `user_data` as JSON (`ElfomofiFloor` in `tycho_execution::encoding::evm::swap_encoder`):
 
 - `{"slippage_bps":30}`: the encoder re-quotes `estimated_amount_in` on the swap's `protocol_state` and allows that many
-  basis points below the quote. Without `user_data`, the encoder applies this rule with its configured `slippage_bps`
-  (50 by default).
+  basis points below the quote. Without `user_data`, the encoder applies this rule with 50 basis points; set
+  `user_data` on the swap to use another value.
 - `{"min_amount_out":"1250000000"}`: the floor itself, in raw units of the output token. It must be positive, and the
   encoder rejects it when the swap's `protocol_state` quotes less.
 
