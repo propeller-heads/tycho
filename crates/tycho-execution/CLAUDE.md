@@ -327,8 +327,11 @@ so it cannot share byte 0's constant-fee V2 formula and has its own byte.
 Byte 1 (Uniswap V3) serves every V3-style fork, not just canonical Uniswap V3. A V3 pool pulls its input through a
 callback whose name it picks itself, and forks rename it (`pancakeV3SwapCallback`, `algebraSwapCallback`). The router
 answers all of them through a catch-all `fallback` -- the same selector-agnostic trick `TychoRouterV3.fallback` uses --
-guarded by the transient callback context so only the pool the swap called can be paid. So the solver may map any V3
-fork to byte 1.
+guarded by the transient callback context so only the pool the swap called can be paid. So any V3 fork swaps through
+byte 1. Quoting is narrower: on chains with a static quoter (Ethereum, Base, Polygon) Eden's quoter decodes Uniswap
+V3's seven-word `slot0()`, and Aerodrome Slipstreams, Velodrome Slipstreams and AERO CL pools return six, so their quote
+always reverts and the router never picks the fallback. `FallbackProtocol::for_pool` and the quoting routers' encoders
+refuse those forks there.
 
 Swap direction for Uniswap V2/V3/V4 and Aerodrome V1 comes from the sort order of `tokenIn` and `tokenOut`, so it is not encoded. Fluid's
 `zero2one` is the dex's own token order, which is not the address sort order, so it is. A `zero2one` that contradicts
@@ -548,7 +551,9 @@ static attribute. The public `FallbackProtocol` enum (`swap_encoder::FallbackPro
 list other projects import: `from_protocol_system` maps a Tycho protocol name to the variant it
 encodes as (`UNISWAP_V2_FORKS`, `UNISWAP_V3_FORKS` and the Slipstreams deployments resolve to
 their base variant, `vm:curve` to Curve), `supported_on(chain)` says whether the chain's
-`TychoFallbackRouter` runs it, and `user_data_name` is the tag to write. `FallbackSwapData`
+`TychoFallbackRouter` runs it, `for_pool(protocol_system, chain)` combines both and also refuses a
+fork the chain's static quoter cannot read (what a solver uses to pick fallback pools), and
+`user_data_name` is the tag to write. `FallbackSwapData`
 (`swap_encoder::FallbackSwapData`) is public too, one variant per protocol with the pool
 parameters the contract decodes: a solver builds the variant for the pool it picked and
 `serde_json` serializes it into the `user_data` the encoder reads back, so the JSON shape is

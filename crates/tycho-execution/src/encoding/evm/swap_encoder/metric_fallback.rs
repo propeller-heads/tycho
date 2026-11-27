@@ -44,6 +44,7 @@ impl SwapEncoder for MetricFallbackSwapEncoder {
                 self.chain
             )));
         }
+        fallback.reject_unquotable(self.chain, "MetricFallbackRouter")?;
 
         let mut data = self
             .metric
@@ -177,5 +178,18 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, EncodingError::InvalidInput(message) if message.contains("base")));
+    }
+
+    #[test]
+    fn test_rejects_fallback_the_static_quoter_cannot_read() {
+        let err = encode_weth_usdc(
+            Chain::Ethereum,
+            Some(&format!(r#"{{"fallback_protocol":"aero_cl","pool":"0x{USDC_WETH_USV3}"}}"#)),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EncodingError::InvalidInput(message) if message.contains("static quoter"))
+        );
     }
 }
