@@ -22,7 +22,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use num_bigint::BigUint;
-use num_traits::{CheckedSub, Zero};
+use num_traits::Zero;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tycho_common::{
     models::{token::Token, Chain},
@@ -39,6 +39,7 @@ use crate::{
         Book, Books,
     },
     protocol::models::ProtocolComponent,
+    utils::saturating_sub,
 };
 
 /// Which components a feed publishes for its venue. The venue's feed builder picks the layout.
@@ -308,13 +309,6 @@ impl<P: PairState, S> From<Vec<VenueBook<P, S>>> for VenueBooks<P, S> {
 
 /// A book and what it answered to a swap.
 type Answered<'a, P, S> = (&'a VenueBook<P, S>, Result<GetAmountOutResult, SimulationError>);
-
-/// `amount` less `taken`, or nothing where `taken` is more.
-fn saturating_sub(amount: &BigUint, taken: &BigUint) -> BigUint {
-    amount
-        .checked_sub(taken)
-        .unwrap_or_default()
-}
 
 impl<P: PairState + PricesAfterFill, T: Turns> AllPairs<P, T> {
     pub fn new(books: Vec<VenueBook<P, T::Signer>>, rule: T::Rule) -> Self {

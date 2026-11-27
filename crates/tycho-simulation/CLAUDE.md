@@ -174,7 +174,9 @@ for any protocol indexed by Tycho.
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
-  it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
+  it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM.
+  `MetricState` records each swap's fill, as `PriceLevelStreamState` does (see
+  `MetricState::get_amount_out`).
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's
