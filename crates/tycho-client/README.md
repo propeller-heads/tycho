@@ -168,7 +168,7 @@ allows consumers to handle delayed extractors gracefully. Extractors can have an
 - `Ready`: the extractor is in sync with the expected block
 - `Advanced`: the extractor is ahead of the expected block
 - `Delayed`: the extractor has fallen behind on recent blocks, but is still active and trying to catch up
-- `Stale`: the extractor has made no progress for a significant amount of time and is flagged to be deactivated
+- `Stale`: the extractor has made no progress for a significant amount of time, or is more than `max_missed_blocks` blocks behind the other extractors. The feed no longer waits for it, but it can still recover
 - `Ended`: the synchronizer has ended, usually due to a termination or an error
 
 [Link to structs](https://github.com/propeller-heads/tycho-indexer/blob/main/tycho-client/src/feed/mod.rs#L106)

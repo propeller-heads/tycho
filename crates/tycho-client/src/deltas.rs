@@ -178,7 +178,8 @@ pub struct WsDeltasClient {
     uri: Uri,
     /// Authorization key for the websocket connection.
     auth_key: Option<String>,
-    /// Maximum amount of reconnects to try before giving up.
+    /// Maximum amount of consecutive failed connections before giving up. A connection that
+    /// receives a frame other than a close starts the count again.
     max_reconnects: u64,
     /// Duration to wait before attempting to reconnect
     retry_cooldown: Duration,
@@ -449,7 +450,7 @@ fn build_ws_handshake_request(
 
 /// Tycho client websocket implementation.
 impl WsDeltasClient {
-    // Construct a new client with 5 reconnection attempts.
+    /// Constructs a client that gives up after 5 consecutive failed connections.
     pub fn new(ws_uri: &str, auth_key: Option<&str>) -> Result<Self, DeltasError> {
         let uri = ws_uri
             .parse::<Uri>()
@@ -468,7 +469,8 @@ impl WsDeltasClient {
         })
     }
 
-    // Construct a new client with a custom number of reconnection attempts.
+    /// Constructs a client that gives up after `max_reconnects` consecutive failed connections,
+    /// starting at most one attempt per `retry_cooldown`.
     pub fn new_with_reconnects(
         ws_uri: &str,
         auth_key: Option<&str>,
@@ -994,29 +996,33 @@ impl DeltasClient for WsDeltasClient {
                         },
                         _ = cmd_rx.recv() => {break 'retry},
                     };
-                    if let Err(error) = res {
-                        debug!(?error, "WsError");
-                        if matches!(
-                            error,
-                            DeltasError::ConnectionClosed | DeltasError::ConnectionError { .. }
-                        ) {
-                            // Prepare for reconnection
-                            retry_count += 1;
-                            let mut guard = this.inner.as_ref().lock().await;
-                            *guard = None;
+                    let Err(error) = res else {
+                        // A connection that delivers frames is healthy, so a server that
+                        // closes it later does not use up the reconnect budget.
+                        retry_count = 0;
+                        continue;
+                    };
+                    debug!(?error, "WsError");
+                    if matches!(
+                        error,
+                        DeltasError::ConnectionClosed | DeltasError::ConnectionError { .. }
+                    ) {
+                        // Prepare for reconnection
+                        retry_count += 1;
+                        let mut guard = this.inner.as_ref().lock().await;
+                        *guard = None;
 
-                            warn!(
-                                ?error,
-                                ?retry_count,
-                                "Connection dropped unexpectedly; Reconnecting..."
-                            );
-                            break;
-                        }
-                        // Other errors are considered fatal
-                        error!(?error, "Fatal error; Exiting");
-                        result = Err(error);
-                        break 'retry;
+                        warn!(
+                            ?error,
+                            ?retry_count,
+                            "Connection dropped unexpectedly; Reconnecting..."
+                        );
+                        break;
                     }
+                    // Other errors are considered fatal
+                    error!(?error, "Fatal error; Exiting");
+                    result = Err(error);
+                    break 'retry;
                 }
             }
             debug!(
@@ -1704,6 +1710,104 @@ mod tests {
         // The connection outlived the cooldown, so the reconnect does not wait for it.
         let gap = second - first;
         assert!(gap < hold + hold / 2, "reconnect waited {:?}", gap - hold);
+    }
+
+    /// `max_reconnects` counts consecutive failed connections. A server that closes connections
+    /// after they delivered frames, as one does when it drops a slow subscriber, must not use it
+    /// up over time.
+    #[test_log::test(tokio::test)]
+    async fn test_reconnect_count_resets_after_delivered_frame() {
+        let max_reconnects = 3;
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let mut stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                stream
+                    .send(tungstenite::protocol::Message::Ping(Vec::new()))
+                    .await
+                    .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
+                let _ = accepted_tx.send(());
+                sleep(Duration::from_millis(20)).await;
+                drop(stream);
+            }
+        });
+        let client = WsDeltasClient::new_with_reconnects(
+            &format!("ws://{addr}"),
+            None,
+            max_reconnects,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        let _jh = client.connect().await.unwrap();
+
+        for _ in 0..(max_reconnects * 2) {
+            timeout(Duration::from_secs(2), accepted_rx.recv())
+                .await
+                .expect("client stopped reconnecting")
+                .unwrap();
+        }
+    }
+
+    /// A close frame ends the connection, so it does not reset the reconnect count: a server that
+    /// accepts each connection and closes it at once uses up `max_reconnects`.
+    #[test_log::test(tokio::test)]
+    async fn test_close_frame_does_not_reset_reconnect_count() {
+        let max_reconnects = 3;
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = server.accept().await {
+                let mut stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the test may have stopped listening for accepted connections"
+                )]
+                let _ = accepted_tx.send(());
+                // Lets `connect()` see the connection before it closes.
+                sleep(Duration::from_millis(10)).await;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "the client may already have dropped the connection"
+                )]
+                let _ = stream.close(None).await;
+            }
+        });
+        let client = WsDeltasClient::new_with_reconnects(
+            &format!("ws://{addr}"),
+            None,
+            max_reconnects,
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        let jh = client.connect().await.unwrap();
+
+        let res = timeout(Duration::from_secs(5), jh)
+            .await
+            .expect("client kept reconnecting")
+            .unwrap();
+        assert!(matches!(res, Err(DeltasError::ConnectionClosed)));
+        let mut accepted = 0;
+        while accepted_rx.try_recv().is_ok() {
+            accepted += 1;
+        }
+        assert_eq!(accepted, max_reconnects);
     }
 
     #[test_log::test(tokio::test)]

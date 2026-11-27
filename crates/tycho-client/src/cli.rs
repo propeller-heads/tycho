@@ -90,8 +90,9 @@ struct CliArgs {
     #[clap(short='n', long, default_value=None)]
     max_messages: Option<usize>,
 
-    /// Maximum blocks an exchange can be absent for before it is marked as stale. Used
-    /// in conjunction with block_time to calculate a timeout: block_time * max_missed_blocks.
+    /// Maximum blocks an exchange can be absent for, or fall behind the other exchanges,
+    /// before it is marked as stale. Used with block_time to calculate the absence timeout:
+    /// block_time * max_missed_blocks.
     /// Defaults to a chain-appropriate value.
     #[clap(long)]
     max_missed_blocks: Option<u64>,

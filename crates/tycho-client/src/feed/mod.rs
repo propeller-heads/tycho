@@ -260,8 +260,8 @@ impl Display for SynchronizerState {
 struct StaleLimits {
     /// How long a synchronizer may make no progress before it is marked stale.
     threshold: Duration,
-    /// How many blocks behind the round's tip a stale synchronizer's block may be and still
-    /// keep it stale. A replay further behind would hold every round if it went Delayed.
+    /// How many blocks a synchronizer may fall behind the round's tip. A synchronizer further
+    /// behind is stale: as Delayed, its replay would hold every round.
     max_missed_blocks: u64,
 }
 
@@ -531,8 +531,7 @@ impl SynchronizerStream {
     /// Updates the synchronizer's state according to the position of the received block:
     /// - Next expected block -> Ready state
     /// - Latest/Delayed block -> Either Delayed or Stale (if no progress for `stale.threshold`)
-    /// - Latest/Delayed block on a Stale stream more than `stale.max_missed_blocks` behind the tip
-    ///   -> stays Stale
+    /// - Latest/Delayed block more than `stale.max_missed_blocks` behind the tip -> Stale
     /// - Advanced block -> Advanced state (block ahead of expected position)
     fn transition(
         &mut self,
@@ -553,12 +552,22 @@ impl SynchronizerStream {
                 self.state = SynchronizerState::Ready(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed
-                if self.is_stale() &&
-                    blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
+                if blocks_behind_tip(block_history, &block) > stale.max_missed_blocks =>
             {
                 // A stream replaying blocks this old would hold every round while Delayed, so it
-                // catches up in the stale pass instead.
-                debug!(%extractor_id, %block, "Stale synchronizer still replaying old blocks");
+                // catches up in the stale pass instead. This covers a stream that comes back from
+                // a gap and one that restarts behind the tip, such as a subscription to an
+                // extractor that is still syncing.
+                if self.is_stale() {
+                    debug!(%extractor_id, %block, "Synchronizer replaying old blocks");
+                } else {
+                    warn!(
+                        %extractor_id,
+                        %block,
+                        blocks_behind = blocks_behind_tip(block_history, &block),
+                        "SynchronizerStream transition to stale: too far behind tip"
+                    );
+                }
                 self.state = SynchronizerState::Stale(block);
             }
             BlockPosition::Latest | BlockPosition::Delayed => {
@@ -615,6 +624,23 @@ impl SynchronizerStream {
     fn mark_stale(&mut self, header: &BlockHeader) {
         self.state = SynchronizerState::Stale(header.clone());
         self.modify_ts = Local::now().naive_utc();
+    }
+
+    /// Marks a stream whose `header` is behind `tip` as Delayed, or as Stale when it is more than
+    /// `max_missed_blocks` behind: as Delayed, its replay would hold the next round.
+    fn mark_behind(&mut self, header: BlockHeader, tip: &BlockHeader, max_missed_blocks: u64) {
+        let blocks_behind = tip.number.saturating_sub(header.number);
+        if blocks_behind > max_missed_blocks {
+            warn!(
+                extractor_id = %self.extractor_id,
+                block = %header,
+                blocks_behind,
+                "SynchronizerStream transition to stale: too far behind tip"
+            );
+            self.state = SynchronizerState::Stale(header);
+        } else {
+            self.state = SynchronizerState::Delayed(header);
+        }
     }
 
     /// Marks this stream as ready.
@@ -884,9 +910,9 @@ where
                         extractor_id=%stream.extractor_id,
                         synchronizer_block=header.number,
                         current_block=start_header.number,
-                        "Marking synchronizer as delayed during initialization"
+                        "Synchronizer behind the start block during initialization"
                     );
-                    stream.state = SynchronizerState::Delayed(header);
+                    stream.mark_behind(header, start_header, self.max_missed_blocks);
                 }
             }
         }
@@ -996,7 +1022,8 @@ where
             .iter()
             .any(SynchronizerStream::is_advanced)
         {
-            *block_history = Self::reinit_block_history(sync_streams, block_history)?;
+            *block_history =
+                Self::reinit_block_history(sync_streams, block_history, self.max_missed_blocks)?;
         } else if let Some(header) = Self::round_header(sync_streams) {
             if header.revert {
                 info!(%header, "RevertApplied");
@@ -1064,7 +1091,8 @@ where
     /// Reinitialise block history and reclassifies active synchronizers states.
     ///
     /// We call this if we detect a future detached block. This usually only happens if
-    /// a synchronizer has a restart.
+    /// a synchronizer has a restart. A stream more than `max_missed_blocks` behind the new tip
+    /// becomes Stale.
     ///
     /// ## Note
     /// This method assumes that at least one synchronizer is in Advanced, Ready or
@@ -1072,6 +1100,7 @@ where
     fn reinit_block_history(
         sync_streams: &mut [SynchronizerStream],
         block_history: &BlockHistory,
+        max_missed_blocks: u64,
     ) -> Result<BlockHistory, BlockSynchronizerError> {
         let previous = block_history
             .latest()
@@ -1112,7 +1141,7 @@ where
                 // or ended streams are not considered here
                 if let Some(header) = stream.get_current_header() {
                     if header.number < latest.number {
-                        stream.state = SynchronizerState::Delayed(header.clone());
+                        stream.mark_behind(header.clone(), latest, max_missed_blocks);
                     } else if header.number == latest.number {
                         stream.state = SynchronizerState::Ready(header.clone());
                     }
@@ -1478,6 +1507,9 @@ mod tests {
         }
     }
 
+    /// `max_missed_blocks` for the reinit tests, larger than any gap they build.
+    const REINIT_MAX_MISSED_BLOCKS: u64 = 10;
+
     /// Builds a `SynchronizerStream` pinned to a given state, for exercising state-transition
     /// logic without a live synchronizer. The receiver is never polled by these tests.
     fn stream_in_state(name: &str, state: SynchronizerState) -> SynchronizerStream {
@@ -1669,9 +1701,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(325, 325, 324))),
         ];
 
-        let mut new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         // A revert to block 325 must still find its fork point (324) in the retained history.
         let revert = BlockHeader {
@@ -1706,9 +1741,12 @@ mod tests {
             SynchronizerState::Advanced(full_header(400, 400, 399)),
         )];
 
-        let new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1756,9 +1794,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         let retained: Vec<u64> = new_history
             .blocks()
@@ -1785,9 +1826,12 @@ mod tests {
             stream_in_state("uniswap_v3", SynchronizerState::Delayed(partial_header(325, 2, 324))),
         ];
 
-        let mut new_history =
-            BlockSynchronizer::<MockStateSync>::reinit_block_history(&mut streams, &old_history)
-                .expect("reinit failed");
+        let mut new_history = BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
 
         // The stream proceeds normally: the last partial seals 326 with the correct hash, then
         // the first partial of 327 arrives on top of it.
@@ -2291,6 +2335,107 @@ mod tests {
 
         assert_ready_at(&feed, "uniswap-v3", u64::from(block), None);
         shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A Ready stream that restarts behind the tip, as one subscribed to an extractor that is
+    /// still syncing does, goes stale while it replays. As Delayed it would hold every round of
+    /// the other streams to its `block_time` wait.
+    #[test(tokio::test)]
+    async fn test_ready_synchronizer_restarting_behind_tip() {
+        let block_time = Duration::from_millis(300);
+        let (v2_sync, v3_sync, nanny_handle, mut rx) =
+            setup_fast_stale_block_sync(block_time).await;
+        let mut block: u8 = 1;
+        for _ in 0..4 {
+            block += 1;
+            v3_sync
+                .send_header(header_message(block))
+                .await
+                .expect("send failed");
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert_ready_at(&feed, "uniswap-v3", u64::from(block), None);
+        }
+
+        // v3 restarts at block 2 and replays one block per round.
+        for old in 2..=4 {
+            v3_sync
+                .send_header(header_message(old))
+                .await
+                .expect("send failed");
+            block += 1;
+            let feed = v2_round(&v2_sync, &mut rx, block, block_time / 2).await;
+            assert_ready_at(&feed, "uniswap-v2", u64::from(block), None);
+            assert!(matches!(
+                feed.sync_states.get("uniswap-v3"),
+                Some(SynchronizerState::Stale(_))
+            ));
+        }
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// A stream that starts more than `max_missed_blocks` behind the start block is stale from
+    /// the first feed, so its replay does not hold the first round.
+    #[test(tokio::test)]
+    async fn test_synchronizer_starting_behind_tip() {
+        let block_time = Duration::from_millis(300);
+        let v2_sync = MockStateSync::new();
+        let v3_sync = MockStateSync::new();
+        let block_sync = BlockSynchronizer::new(block_time, Duration::from_millis(10), 1)
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v2".to_string() },
+                v2_sync.clone(),
+            )
+            .register_synchronizer(
+                ExtractorIdentity { chain: Chain::Ethereum, name: "uniswap-v3".to_string() },
+                v3_sync.clone(),
+            );
+        v2_sync
+            .send_header(header_message(5))
+            .await
+            .expect("send failed");
+        v3_sync
+            .send_header(header_message(2))
+            .await
+            .expect("send failed");
+        let (nanny_handle, mut rx) = block_sync
+            .run()
+            .await
+            .expect("BlockSynchronizer failed to start");
+
+        let first = receive_message(&mut rx).await;
+        assert!(matches!(first.sync_states.get("uniswap-v3"), Some(SynchronizerState::Stale(_))));
+        let feed = v2_round(&v2_sync, &mut rx, 6, block_time / 2).await;
+        assert_ready_at(&feed, "uniswap-v2", 6, None);
+
+        shutdown_block_synchronizer(nanny_handle, rx).await;
+    }
+
+    /// When the block history is rebuilt, a stream more than `max_missed_blocks` behind the new
+    /// tip becomes stale, and one within that distance becomes delayed.
+    #[test]
+    fn test_reinit_with_streams_behind_tip() {
+        let old_history = BlockHistory::new(
+            vec![full_header(323, 323, 322), full_header(324, 324, 323)],
+            BLOCK_HISTORY_SIZE,
+        )
+        .unwrap();
+        let mut streams = vec![
+            stream_in_state("aerodrome", SynchronizerState::Advanced(full_header(400, 400, 399))),
+            stream_in_state("uniswap_v2", SynchronizerState::Delayed(full_header(395, 395, 394))),
+            stream_in_state("uniswap_v3", SynchronizerState::Delayed(full_header(324, 324, 323))),
+        ];
+
+        BlockSynchronizer::<MockStateSync>::reinit_block_history(
+            &mut streams,
+            &old_history,
+            REINIT_MAX_MISSED_BLOCKS,
+        )
+        .expect("reinit failed");
+
+        assert!(matches!(streams[0].state, SynchronizerState::Ready(_)));
+        assert!(matches!(streams[1].state, SynchronizerState::Delayed(_)));
+        assert!(matches!(streams[2].state, SynchronizerState::Stale(_)));
     }
 
     /// With every stream stale there is no round to keep up with, so each round still waits
