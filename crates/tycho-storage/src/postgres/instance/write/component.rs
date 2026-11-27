@@ -71,8 +71,8 @@ impl PostgresGatewayNew {
     ///
     /// `NotFound` for a protocol type or token that is not stored, a contract with no account in
     /// the instance, or a creation transaction that is not in the batch. `Unexpected` for a
-    /// component that lists a token or a contract twice. The caller's transaction then rolls back
-    /// the rows this method stored.
+    /// component that lists a token or a contract twice. Every check runs before the first insert,
+    /// so a failed check stores nothing.
     pub(crate) async fn insert_protocol_components(
         &self,
         instance: InstanceId,
@@ -113,6 +113,26 @@ impl PostgresGatewayNew {
         for component in &unique {
             check_links_unique(component)?;
         }
+        // Checked before the insert, so that a failure stores no component without its links.
+        let tokens: Vec<&Bytes> = unique
+            .iter()
+            .flat_map(|component| &component.tokens)
+            .collect();
+        if !tokens.is_empty() {
+            check_tokens_stored(&tokens, conn).await?;
+        }
+        let addresses: Vec<&Bytes> = unique
+            .iter()
+            .flat_map(|component| &component.contract_addresses)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let account_ids = if addresses.is_empty() {
+            HashMap::new()
+        } else {
+            self.account_ids(instance, &addresses, conn)
+                .await?
+        };
 
         let rows = unique
             .iter()
@@ -143,7 +163,7 @@ impl PostgresGatewayNew {
 
         self.insert_token_links(instance, &new, conn)
             .await?;
-        self.insert_contract_links(instance, &new, conn)
+        self.insert_contract_links(instance, &new, &account_ids, conn)
             .await
     }
 
@@ -154,15 +174,7 @@ impl PostgresGatewayNew {
         new: &[(&ProtocolComponent, i64)],
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        let tokens: Vec<&Bytes> = new
-            .iter()
-            .flat_map(|(component, _)| &component.tokens)
-            .collect();
-        if tokens.is_empty() {
-            return Ok(());
-        }
-        check_tokens_stored(&tokens, conn).await?;
-        let mut links = Vec::with_capacity(tokens.len());
+        let mut links = Vec::new();
         for (component, id) in new {
             for (index, token) in component.tokens.iter().enumerate() {
                 links.push(NewProtocolComponentHoldsToken {
@@ -190,25 +202,15 @@ impl PostgresGatewayNew {
         Ok(())
     }
 
-    /// Links each new component to the accounts of its contracts, in the same instance.
+    /// Links each new component to the accounts of its contracts, by their `account_ids` in the
+    /// same instance.
     async fn insert_contract_links(
         &self,
         instance: InstanceId,
         new: &[(&ProtocolComponent, i64)],
+        account_ids: &HashMap<Bytes, i64>,
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        let addresses: Vec<&Bytes> = new
-            .iter()
-            .flat_map(|(component, _)| &component.contract_addresses)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if addresses.is_empty() {
-            return Ok(());
-        }
-        let account_ids = self
-            .account_ids(instance, &addresses, conn)
-            .await?;
         let links: Vec<NewProtocolComponentHoldsContract> = new
             .iter()
             .flat_map(|(component, id)| {
