@@ -117,9 +117,10 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
 /// Gas for a `quoteFallback` call that simulates the fallback swap, also charged when the
-/// fallback protocol is unknown. A 100 USDe Uniswap V4 quote costs about 113k on a Mainnet fork,
-/// a 10 USDC Uniswap V3 simulation about 108k on a Base fork.
-const FALLBACK_SIMULATED_QUOTE_GAS: u64 = 120_000;
+/// fallback protocol is unknown. Uniswap V4 quotes cost 80k to 100k in live Base swaps of 10 to
+/// 2,000 USDC and about 113k for 100 USDe on a Mainnet fork; a 10 USDC Uniswap V3 simulation costs
+/// about 108k on a Base fork.
+const FALLBACK_SIMULATED_QUOTE_GAS: u64 = 100_000;
 
 /// Chains whose `TychoFallbackRouter` has a Uniswap V3 static quoter (`STATIC_QUOTERS` in
 /// `deploy-fallback-router.js`, which points back here). Elsewhere it quotes a Uniswap V3 fallback
@@ -128,26 +129,27 @@ const FALLBACK_STATIC_QUOTER_CHAINS: &[Chain] = &[Chain::Ethereum, Chain::Base, 
 
 /// Gas for the `quoteFallback` call a fallback router makes before it picks a side, by the
 /// fallback protocol the swap's `user_data` names, on the chain of the swap's input token.
-/// Measured with the pool cold, for quotes that cross few ticks; a quote that walks many ticks
-/// costs more.
+/// Each budget is the typical cost, not an upper bound: the estimate ranks routes against each
+/// other, so a padded budget would rank fallback legs below what they cost. Measured with the pool
+/// cold, for quotes that cross few ticks; a quote that walks many ticks costs more.
 ///
-/// A `user_data` that does not parse into a fallback swap does not encode, so it gets the highest
+/// A `user_data` that does not parse into a fallback swap does not encode; it gets the simulated
 /// budget.
 fn fallback_quote_gas(swap: &Swap) -> u64 {
     let protocol = FallbackProtocol::from_user_data(swap.user_data().as_ref());
     let has_static_quoter = FALLBACK_STATIC_QUOTER_CHAINS.contains(&swap.token_in().chain);
     match protocol {
-        // About 7k for 10k USDC on a Mainnet fork.
-        Some(FallbackProtocol::UniswapV2) => 10_000,
+        // About 7k for 10k USDC on a Mainnet fork, 7.4k in live Base swaps.
+        Some(FallbackProtocol::UniswapV2) => 8_000,
         // Through the static quoter: about 27k on Mainnet and Base forks, and 26.5k to 41.6k in
-        // live Base swaps of 10 to 2,000 USDC.
-        Some(FallbackProtocol::UniswapV3) if has_static_quoter => 45_000,
+        // live Base swaps of 10 to 2,000 USDC, with a median of 26.8k.
+        Some(FallbackProtocol::UniswapV3) if has_static_quoter => 30_000,
         // About 35k on 3pool and 71k on tricrypto on a Mainnet fork.
-        Some(FallbackProtocol::Curve) => 75_000,
+        Some(FallbackProtocol::Curve) => 50_000,
         // About 39k for 10 sUSDe on a Mainnet fork.
-        Some(FallbackProtocol::FluidV1) => 45_000,
+        Some(FallbackProtocol::FluidV1) => 40_000,
         // About 26k for 0.01 tBTC on a Base fork.
-        Some(FallbackProtocol::AerodromeV1) => 30_000,
+        Some(FallbackProtocol::AerodromeV1) => 25_000,
         Some(FallbackProtocol::UniswapV3 | FallbackProtocol::UniswapV4) | None => {
             FALLBACK_SIMULATED_QUOTE_GAS
         }
@@ -529,10 +531,10 @@ mod tests {
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // input transfer                            0  ← push-payment, funds sent directly
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
-        // fallback quote (Uniswap V3)          45_000  ← fallback_quote_gas
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // fee output transfer                  60_000  ← not in OUTPUT_TO_ROUTER
-        assert_eq!(gas, BigUint::from(285_000u64));
+        assert_eq!(gas, BigUint::from(270_000u64));
     }
 
     #[test]
@@ -545,19 +547,19 @@ mod tests {
 
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
-        // fallback quote (Uniswap V3)          45_000  ← fallback_quote_gas
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // simulated quote                     100_000  ← the pool gas again
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(385_000u64));
+        assert_eq!(gas, BigUint::from(370_000u64));
     }
 
     #[rstest]
     #[case::uniswap_v2(
         FallbackSwapData::UniswapV2 { pair: Bytes::from(vec![0x0au8; 20]), fee_bps: 30 },
-        10_000
+        8_000
     )]
-    #[case::uniswap_v3(uniswap_v3_fallback(), 45_000)]
+    #[case::uniswap_v3(uniswap_v3_fallback(), 30_000)]
     #[case::uniswap_v4(
         FallbackSwapData::UniswapV4 {
             fee: 500,
@@ -565,19 +567,19 @@ mod tests {
             hook: Bytes::default(),
             hook_data: Bytes::default(),
         },
-        120_000
+        100_000
     )]
     #[case::curve(
         FallbackSwapData::Curve { pool: Bytes::from(vec![0x0au8; 20]), pool_type: 1, i: 0, j: 1 },
-        75_000
+        50_000
     )]
     #[case::fluid_v1(
         FallbackSwapData::FluidV1 { dex: Bytes::from(vec![0x0au8; 20]), zero2one: true },
-        45_000
+        40_000
     )]
     #[case::aerodrome_v1(
         FallbackSwapData::AerodromeV1 { pool: Bytes::from(vec![0x0au8; 20]) },
-        30_000
+        25_000
     )]
     fn test_fallback_quote_gas_by_protocol(
         #[case] fallback: FallbackSwapData,
@@ -605,16 +607,16 @@ mod tests {
         )
         .with_user_data(Bytes::from(user_data));
 
-        assert_eq!(fallback_quote_gas(&swap), 120_000);
+        assert_eq!(fallback_quote_gas(&swap), 100_000);
     }
 
     #[test]
     fn test_fallback_quote_without_fallback_protocol_takes_highest_budget() {
-        assert_eq!(fallback_quote_gas(&make_swap("fallback:fermiswap")), 120_000);
+        assert_eq!(fallback_quote_gas(&make_swap("fallback:fermiswap")), 100_000);
 
         let unknown = make_swap("fallback:fermiswap")
             .with_user_data(Bytes::from(br#"{"fallback_protocol":"balancer_v2"}"#.to_vec()));
-        assert_eq!(fallback_quote_gas(&unknown), 120_000);
+        assert_eq!(fallback_quote_gas(&unknown), 100_000);
     }
 
     #[test]
@@ -629,10 +631,10 @@ mod tests {
         // fallback router overhead             40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
         // entrypoint approval                  25_000  ← TOKEN_APPROVAL_GAS
         // quoteFor                             10_000  ← BAIBAI_QUOTE_FOR_GAS
-        // fallback quote (Uniswap V3)          45_000  ← fallback_quote_gas
+        // fallback quote (Uniswap V3)          30_000  ← fallback_quote_gas
         // pool gas                            100_000
         // fee output transfer                  60_000
-        assert_eq!(gas, BigUint::from(320_000u64));
+        assert_eq!(gas, BigUint::from(305_000u64));
     }
 
     #[test]
@@ -674,12 +676,12 @@ mod tests {
         // user transfer (TransferFrom)         40_000  ← DEFAULT_TOKEN_TRANSFER_GAS
         // leg1 input transfer                  60_000  ← Split reintroduces the router hop
         // leg1 fallback router overhead        40_000  ← FALLBACK_ROUTER_OVERHEAD_GAS
-        // leg1 fallback quote (Uniswap V3)     45_000  ← fallback_quote_gas
+        // leg1 fallback quote (Uniswap V3)     30_000  ← fallback_quote_gas
         // leg1 pool gas                       100_000
         // leg2 input transfer                  60_000  ← Split reintroduces the router hop
         // leg2 pool gas                       100_000
         // extra output transfer (→ router)     60_000  ← TOKEN_GAS
-        assert_eq!(gas, BigUint::from(505_000u64));
+        assert_eq!(gas, BigUint::from(490_000u64));
     }
 
     #[test]
