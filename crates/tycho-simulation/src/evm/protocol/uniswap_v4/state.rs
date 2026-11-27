@@ -32,6 +32,7 @@ use crate::{
                     AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
                     StateContext, SwapOutcome, SwapParams,
                 },
+                utils::to_int128,
             },
             utils::{
                 add_fee_markup,
@@ -112,6 +113,12 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 // 1e30 makes the rounding smaller than an f64 can hold and still leaves room under U256::MAX for
 // the hook's own intermediate products.
 const HOOK_FEE_PROBE_EXP: u64 = 30;
+/// The largest output a swap can pay, the largest `int128`: v4 casts the output, positive in the
+/// swapper's delta, with `toInt128`.
+const MAX_SWAP_OUTPUT: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
+/// The largest input a swap can take, 2^127: negative in the swapper's delta, it is cast with
+/// `toInt128` too, down to the smallest `int128`.
+const MAX_SWAP_INPUT: U256 = U256::from_limbs([0, 1 << 63, 0, 0]);
 /// The exact input `amount_in_to_price` offers its walk: 2^200. Net of the swap fee, either
 /// token's amount over the whole tick range is at most a uint128 liquidity times 2^96 divided by
 /// the smallest sqrt price (about 2^32), below 2^192. The gross input is that net times
@@ -647,6 +654,38 @@ impl UniswapV4State {
             .calculate_swap_fees_pips(zero_for_one, lp_fee_override)
     }
 
+    /// The largest exact input up to `upper`, [`MAX_SWAP_INPUT`] at most, whose swap takes at most
+    /// [`MAX_SWAP_INPUT`] and pays at most [`MAX_SWAP_OUTPUT`], with that swap's output: past
+    /// either v4's `Pool.swap` reverts. Bisects over [`Self::swap`], whose input taken and output
+    /// both grow with the input. No closed form serves here: at extreme prices the rounding of a
+    /// square-root price moves an output by far more than a unit.
+    fn largest_swap_within_int128(
+        &self,
+        zero_for_one: bool,
+        upper: U256,
+    ) -> Result<(U256, U256), SimulationError> {
+        // The output of a swap of `amount`, when it stays within `int128`.
+        let output_within = |amount: U256| -> Result<Option<U256>, SimulationError> {
+            let specified = -I256::from_raw(amount);
+            let result = self.swap(zero_for_one, specified, None, None)?;
+            let taken = (specified - result.amount_remaining).unsigned_abs();
+            let output = result.amount_calculated.unsigned_abs();
+            Ok((taken <= MAX_SWAP_INPUT && output <= MAX_SWAP_OUTPUT).then_some(output))
+        };
+        if let Some(output) = output_within(upper)? {
+            return Ok((upper, output));
+        }
+        let (mut low, mut low_output, mut high) = (U256::ZERO, U256::ZERO, upper);
+        while high - low > U256::ONE {
+            let mid = low + (high - low) / U256::from(2u8);
+            match output_within(mid)? {
+                Some(output) => (low, low_output) = (mid, output),
+                None => high = mid,
+            }
+        }
+        Ok((low, low_output))
+    }
+
     /// The exact input that moves the pool's price from where it is to `sqrt_price_target` in
     /// the direction given by `zero_for_one`, at the LP fee `lp_fee_override` (`None`: the pool's
     /// own), the output of that input before any hook fee, and the active liquidity once the
@@ -1049,8 +1088,10 @@ impl ProtocolSim for UniswapV4State {
             .map_or(Ok(None), |hook| hook.handler_after_swap(&state_context, &swap_params))
             .map_err(|e| hook_call_error("HandlerAfterSwap", e))?;
 
-        // Create BalanceDelta from swap result using the proper constructor
-        let mut swap_delta = BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one);
+        // `Pool.swap` casts the input it took and the output with `toInt128`, reverting past it.
+        to_int128(amount_to_swap - result.amount_remaining, "The swap's input")?;
+        let mut swap_delta =
+            BalanceDelta::try_from_swap_result(result.amount_calculated, zero_for_one)?;
 
         // Get deltas (change in the specified/given and unspecified/computed token balances after
         // calling before swap)
@@ -1076,7 +1117,19 @@ impl ProtocolSim for UniswapV4State {
                 // permission the PoolManager discards the return value, so the hook still costs
                 // gas but cannot move the swapper's balance.
                 if hook.has_permission(HookOptions::AfterSwapReturnsDelta) {
-                    hook_delta_unspecified += after_swap_result.result;
+                    // `Hooks.sol` adds the two in checked `int128` and reverts past it.
+                    hook_delta_unspecified = hook_delta_unspecified
+                        .checked_add(after_swap_result.result)
+                        .ok_or_else(|| {
+                            SimulationError::InvalidInput(
+                                format!(
+                                    "the hook's deltas {hook_delta_unspecified} and {} do not \
+                                     sum within an int128: the pool manager reverts",
+                                    after_swap_result.result
+                                ),
+                                None,
+                            )
+                        })?;
                 }
             }
         }
@@ -1089,8 +1142,7 @@ impl ProtocolSim for UniswapV4State {
             } else {
                 BalanceDelta::new(hook_delta_unspecified, hook_delta_specified)
             };
-            // This is a BalanceDelta subtraction
-            swap_delta = swap_delta - hook_delta
+            swap_delta = swap_delta.checked_sub(hook_delta)?;
         }
 
         let amount_out = if (amount_specified < I256::ZERO) == zero_for_one {
@@ -1098,6 +1150,14 @@ impl ProtocolSim for UniswapV4State {
         } else {
             swap_delta.amount0()
         };
+        // A hook that takes more than the swap's output leaves the swapper owing the difference,
+        // which no exact-input trade settles.
+        if amount_out.is_negative() {
+            return Err(SimulationError::InvalidInput(
+                format!("the hooks take {} more than the swap's output", amount_out.unsigned_abs()),
+                None,
+            ));
+        }
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
         let mut new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
@@ -1276,6 +1336,13 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
+        // v4 refuses a swap that takes or pays more than an int128 of either token, which the
+        // walk above does not see.
+        if total_amount_in > MAX_SWAP_INPUT || total_amount_out > MAX_SWAP_OUTPUT {
+            (total_amount_in, total_amount_out) =
+                self.largest_swap_within_int128(zero_for_one, total_amount_in.min(MAX_SWAP_INPUT))?;
+        }
+
         // A hook that charges the output reduces what a swapper can actually receive, so the
         // limit has to be reported net of its cut.
         if let Some(hook) = &self.hook {
@@ -1440,6 +1507,13 @@ impl ProtocolSim for UniswapV4State {
                         self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
                     },
                 )?;
+
+                // `Pool.swap` casts both amounts with `toInt128`, reverting past it.
+                to_int128(
+                    swap_result.amount_specified - swap_result.amount_remaining,
+                    "The swap's input",
+                )?;
+                to_int128(-swap_result.amount_calculated, "The swap's output")?;
 
                 let new_state = self.clone_post_swap(
                     swap_result.sqrt_price,
@@ -2796,6 +2870,43 @@ mod tests {
             with_delta.gas,
             hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
         );
+    }
+
+    /// A hook delta larger than the swap's output leaves the swapper owing the hook, which is
+    /// refused rather than quoted as a positive amount; one equal to the output quotes 0.
+    #[rstest]
+    #[case::one_unit_more(1, false)]
+    #[case::far_more(1_000_000_000_000_000_000, false)]
+    #[case::all_of_it(0, true)]
+    fn test_a_hook_taking_more_than_the_output_is_refused(
+        #[case] beyond_output: u64,
+        #[case] quotes: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .unwrap();
+        let output = i128::try_from(hookless.amount).unwrap();
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(AfterSwapTestHook {
+            address: construct_hook_address(&[
+                HookOptions::AfterSwap,
+                HookOptions::AfterSwapReturnsDelta,
+            ]),
+            delta: I128::try_from(output + i128::from(beyond_output)).unwrap(),
+            analytic_fee_bps: None,
+            spot_price_override: None,
+            after_swap_failure: None,
+        }));
+
+        let result = pool.get_amount_out(amount_in, &token_in, &token_out);
+
+        if quotes {
+            assert_eq!(result.unwrap().amount, BigUint::ZERO);
+        } else {
+            assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+        }
     }
 
     /// A hook's `after_swap` refusal reaches the caller as `InvalidInput`, as a `before_swap` one
@@ -4709,6 +4820,103 @@ mod tests {
                 .contains("must be positive"),
             "unexpected error: {err}"
         );
+    }
+
+    /// A hookless, feeless pool at tick 46_080 (a price of about 100 token1 per token0) with
+    /// full-range liquidity of 2^126, deep enough that one swap moves more than an `int128` of
+    /// either token.
+    fn pool_moving_past_int128() -> UniswapV4State {
+        let liquidity = 1u128 << 126;
+        let net = i128::try_from(liquidity).unwrap();
+        let tick = 46_080;
+        UniswapV4State::new(
+            liquidity,
+            get_sqrt_ratio_at_tick(tick).unwrap(),
+            UniswapV4Fees::new(0, 0, 0),
+            tick,
+            60,
+            vec![TickInfo::new(-887_220, net).unwrap(), TickInfo::new(887_220, -net).unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// v4's `Pool.swap` casts the amounts a swap moves with `toInt128`, which reverts past
+    /// `int128`. Selling 2^122 token0 moves the square-root price from about 10 to about 6.2,
+    /// paying about 3.8 * 2^126 token1, past `int128`, for an input that fits one.
+    #[test]
+    fn test_get_amount_out_refuses_an_output_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.get_amount_out(BigUint::from(1u8) << 122, &token_x(), &token_y());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    /// Selling 2^200 token1 walks the price to the top of the range, which takes about 2^190
+    /// token1, past `int128`, while it pays out less than 2^126 token0.
+    #[test]
+    fn test_get_amount_out_refuses_an_input_taken_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.get_amount_out(BigUint::from(1u8) << 200, &token_y(), &token_x());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    /// The limit is the largest input whose swap stays within `int128`: it quotes, and one unit
+    /// more is refused. Selling token0 the output binds, selling token1 the input does.
+    #[rstest]
+    #[case::output_binds(true)]
+    #[case::input_binds(false)]
+    fn test_get_limits_stop_where_a_swap_leaves_int128(#[case] zero_for_one: bool) {
+        let pool = pool_moving_past_int128();
+        let (token_in, token_out) =
+            if zero_for_one { (token_x(), token_y()) } else { (token_y(), token_x()) };
+        let (max_in, max_out) = pool
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+
+        assert!(max_in <= u256_to_biguint(MAX_SWAP_INPUT), "{max_in}");
+        assert!(max_out <= u256_to_biguint(MAX_SWAP_OUTPUT), "{max_out}");
+        let at_limit = pool
+            .get_amount_out(max_in.clone(), &token_in, &token_out)
+            .unwrap();
+        assert_eq!(at_limit.amount, max_out);
+        let past = pool.get_amount_out(max_in + 1u8, &token_in, &token_out);
+        assert!(matches!(past, Err(SimulationError::InvalidInput(..))), "{past:?}");
+    }
+
+    /// `query_pool_swap` casts the amounts as `get_amount_out` does: walking the price to near
+    /// the bottom of the range takes and pays more than an `int128`.
+    #[test]
+    fn test_query_pool_swap_refuses_a_swap_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.query_pool_swap(&QueryPoolSwapParams::new(
+            token_x(),
+            token_y(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(BigUint::from(1u8), BigUint::from(1_000_000_000_000u64)),
+                tolerance: 0f64,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        ));
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    #[test]
+    fn test_get_amount_out_quotes_amounts_within_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool
+            .get_amount_out(BigUint::from(1u8) << 100, &token_x(), &token_y())
+            .unwrap();
+
+        // About 100 token1 per token0 this close to the start of the walk.
+        assert!(result.amount > BigUint::from(99u8) << 100, "{}", result.amount);
+        assert!(result.amount < BigUint::from(101u8) << 100, "{}", result.amount);
     }
 }
 

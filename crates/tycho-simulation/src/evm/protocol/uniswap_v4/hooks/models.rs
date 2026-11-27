@@ -4,10 +4,10 @@ use alloy::{
     primitives::{aliases::U24, Address, I128, I256, U256},
     sol,
 };
-use tycho_common::Bytes;
+use tycho_common::{simulation::errors::SimulationError, Bytes};
 
 use crate::evm::protocol::uniswap_v4::{
-    hooks::utils::{get_lower_i128, get_upper_i128},
+    hooks::utils::{get_lower_i128, get_upper_i128, to_int128},
     state::UniswapV4Fees,
 };
 
@@ -80,6 +80,9 @@ impl BalanceDelta {
     /// - amount_calculated is negative (amount of output token received)
     /// - We convert it to positive for the appropriate amount field
     /// - The other amount field is set to zero
+    ///
+    /// An output past `int128` keeps only its low 128 bits, where v4's `Pool.swap` reverts;
+    /// [`Self::try_from_swap_result`] refuses it.
     pub fn from_swap_result(amount_calculated: I256, zero_for_one: bool) -> BalanceDelta {
         // For exact input swaps, amount_calculated is negative (output amount from pool's
         // perspective) We negate it to convert to positive amount from user's perspective
@@ -90,6 +93,23 @@ impl BalanceDelta {
             // Swapping token1 for token0: amount_calculated represents change in token0
             BalanceDelta::new(get_lower_i128(-amount_calculated), I128::ZERO)
         }
+    }
+
+    /// The balance delta of an exact-input swap whose output, from the pool's side, is
+    /// `amount_calculated` (negative): the output, positive, in the bought token's lane and 0 in
+    /// the other.
+    ///
+    /// Refuses with `InvalidInput` an output past `int128`, on which v4's `Pool.swap` reverts.
+    pub fn try_from_swap_result(
+        amount_calculated: I256,
+        zero_for_one: bool,
+    ) -> Result<BalanceDelta, SimulationError> {
+        let amount_out = to_int128(-amount_calculated, "The swap's output")?;
+        Ok(if zero_for_one {
+            BalanceDelta::new(I128::ZERO, amount_out)
+        } else {
+            BalanceDelta::new(amount_out, I128::ZERO)
+        })
     }
 
     pub fn as_i256(&self) -> I256 {
@@ -103,8 +123,29 @@ impl BalanceDelta {
     pub fn amount1(self) -> I128 {
         get_lower_i128(self.0)
     }
+
+    /// `self - rhs`, lane by lane, as v4-core's `BalanceDelta` `sub` computes it.
+    ///
+    /// Refuses with `InvalidInput` a lane whose difference is past `int128`, on which that
+    /// `sub` reverts `SafeCastOverflow`.
+    pub fn checked_sub(self, rhs: BalanceDelta) -> Result<BalanceDelta, SimulationError> {
+        let lane = |a: I128, b: I128, name: &str| {
+            a.checked_sub(b).ok_or_else(|| {
+                SimulationError::InvalidInput(
+                    format!("{name} of {a} - {b} does not fit an int128: the pool manager reverts"),
+                    None,
+                )
+            })
+        };
+        Ok(BalanceDelta::new(
+            lane(self.amount0(), rhs.amount0(), "amount0")?,
+            lane(self.amount1(), rhs.amount1(), "amount1")?,
+        ))
+    }
 }
 
+/// Lane by lane, wrapping a lane past `int128` where v4-core's `sub` reverts;
+/// [`BalanceDelta::checked_sub`] refuses it.
 impl Sub for BalanceDelta {
     type Output = BalanceDelta;
 
@@ -218,5 +259,45 @@ sol! {
     struct GetLimitsSolReturn {
         uint256 amount_in_upper_limit;
         uint256 amount_out_upper_limit;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delta(amount0: i128, amount1: i128) -> BalanceDelta {
+        BalanceDelta::new(I128::try_from(amount0).unwrap(), I128::try_from(amount1).unwrap())
+    }
+
+    /// A negative `amount1` difference leaves `amount0` as it is: v4-core masks each lane.
+    #[test]
+    fn test_checked_sub_subtracts_each_lane_apart() {
+        let result = delta(5, 0)
+            .checked_sub(delta(2, 3))
+            .unwrap();
+
+        assert_eq!(result, delta(3, -3));
+    }
+
+    #[test]
+    fn test_checked_sub_refuses_a_lane_past_int128() {
+        assert!(delta(i128::MIN, 0)
+            .checked_sub(delta(1, 0))
+            .is_err());
+        assert!(delta(0, i128::MAX)
+            .checked_sub(delta(0, -1))
+            .is_err());
+    }
+
+    #[test]
+    fn test_try_from_swap_result_refuses_an_output_past_int128() {
+        let past_int128 = -(I256::from(I128::MAX) + I256::ONE);
+
+        assert!(BalanceDelta::try_from_swap_result(past_int128, true).is_err());
+        assert_eq!(
+            BalanceDelta::try_from_swap_result(-I256::from(I128::MAX), false).unwrap(),
+            BalanceDelta::new(I128::MAX, I128::ZERO)
+        );
     }
 }

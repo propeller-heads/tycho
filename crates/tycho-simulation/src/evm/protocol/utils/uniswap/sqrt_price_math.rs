@@ -6,11 +6,11 @@ use tycho_common::{
 
 use crate::{
     evm::protocol::{
-        safe_math::{
-            div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
-        },
+        safe_math::{div_mod_u256, safe_add_u256, safe_div_u256, safe_sub_u256, sqrt_u256},
         u256_num::{biguint_to_u256, u256_to_f64},
-        utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
+        utils::solidity_math::{
+            mul_div, mul_div_q96, mul_div_q96_rounding_up, mul_div_rounding_up,
+        },
     },
     utils::decimals_exponent,
 };
@@ -73,7 +73,7 @@ pub fn get_amount1_delta(
     if round_up {
         mul_div_q96_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     } else {
-        Ok(safe_mul_u256(U256::from(liquidity), safe_sub_u256(sqrt_ratio_b, sqrt_ratio_a)?)? >> 96)
+        mul_div_q96(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     }
 }
 
@@ -272,6 +272,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::evm::protocol::utils::uniswap::tick_math::{MAX_SQRT_RATIO, MIN_SQRT_RATIO};
 
     fn u256(s: &str) -> U256 {
         U256::from_str(s).unwrap()
@@ -355,6 +356,22 @@ mod tests {
         1000000000000u128,
         false,
         u256("7170299838964")
+    )]
+    // The full price range at the largest liquidity: the product is past 2^256, and v4's
+    // `FullMath.mulDiv` still returns the quotient, which fits.
+    #[case(
+        MIN_SQRT_RATIO,
+        MAX_SQRT_RATIO,
+        u128::MAX,
+        true,
+        u256("6276865796315986613307619852238232712829278890652951511958")
+    )]
+    #[case(
+        MIN_SQRT_RATIO,
+        MAX_SQRT_RATIO,
+        u128::MAX,
+        false,
+        u256("6276865796315986613307619852238232712829278890652951511957")
     )]
     fn test_get_amount1_delta(
         #[case] a: U256,

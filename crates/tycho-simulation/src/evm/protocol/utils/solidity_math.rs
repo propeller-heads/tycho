@@ -28,6 +28,12 @@ pub fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, SimulationError> {
     truncate_to_u256(result)
 }
 
+/// `floor(a * b / 2^96)`: [`mul_div`] with `Q96` as the denominator, where a shift does the
+/// division.
+pub fn mul_div_q96(a: U256, b: U256) -> Result<U256, SimulationError> {
+    truncate_to_u256(a.widening_mul(b) >> 96)
+}
+
 /// `ceil(a * b / 2^96)`: [`mul_div_rounding_up`] with `Q96` as the denominator, where a shift
 /// does the division.
 pub fn mul_div_q96_rounding_up(a: U256, b: U256) -> Result<U256, SimulationError> {
