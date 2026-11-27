@@ -1,3 +1,10 @@
+## [0.544.2](https://github.com/propeller-heads/tycho/compare/0.544.1...0.544.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **tycho-simulation:** block the Fluid ETH/USDC pool with paused swaps ([7edfcd6](https://github.com/propeller-heads/tycho/commit/7edfcd60037fbe31deb4abc9af86a1564eb7e1f4))
+
 ## [0.544.1](https://github.com/propeller-heads/tycho/compare/0.544.0...0.544.1) (2026-11-27)
 
 
