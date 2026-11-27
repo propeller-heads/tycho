@@ -1,7 +1,7 @@
 use std::collections::{hash_map::Entry::Vacant, HashMap};
 
 use alloy::primitives::{Address, U256};
-use revm::state::AccountInfo;
+use revm::state::{AccountInfo, Bytecode};
 use tracing::{debug, trace, warn};
 
 /// Represents an account in the account storage.
@@ -118,6 +118,23 @@ impl AccountStorage {
             if mocked { "mocked" } else { "non-mocked" },
             address
         );
+    }
+
+    /// Replaces the code of the account at `address`, keeping its balance, nonce and storage.
+    ///
+    /// # Returns
+    ///
+    /// The account's previous `AccountInfo`, or `None` if there is no account at `address`, in
+    /// which case nothing changes.
+    pub(crate) fn replace_code(
+        &mut self,
+        address: &Address,
+        code: Bytecode,
+    ) -> Option<AccountInfo> {
+        let account = self.accounts.get_mut(address)?;
+        let info =
+            AccountInfo::new(account.info.balance, account.info.nonce, code.hash_slow(), code);
+        Some(std::mem::replace(&mut account.info, info))
     }
 
     /// Updates the account information and storage associated with the given address.

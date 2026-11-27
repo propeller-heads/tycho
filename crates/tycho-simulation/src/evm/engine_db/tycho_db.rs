@@ -156,6 +156,63 @@ impl PreCachedDB {
         Ok(())
     }
 
+    /// Puts a proxy in front of the contract at `address`, keeping the contract working.
+    ///
+    /// The contract's code moves to `implementation`, `proxy_code` takes its place at `address`,
+    /// and `implementation_slot` of `address` is set to `implementation`. The contract's storage
+    /// and balance stay at `address`, where a proxy that delegates to `implementation` reads them.
+    ///
+    /// # Returns
+    ///
+    /// `false`, changing nothing, if `address` holds no code or already runs `proxy_code`.
+    pub(crate) fn put_behind_proxy(
+        &self,
+        address: Address,
+        implementation: Address,
+        proxy_code: &[u8],
+        implementation_slot: U256,
+    ) -> Result<bool, PreCachedDBError> {
+        let mut write_guard = self.write_inner()?;
+
+        let holds_contract = write_guard
+            .accounts
+            .get_account_info(&address)
+            .and_then(|info| info.code.as_ref())
+            .is_some_and(|code| !code.is_empty() && code.original_byte_slice() != proxy_code);
+        if !holds_contract {
+            return Ok(false);
+        }
+
+        let proxy = Bytecode::new_raw(AlloyBytes::copy_from_slice(proxy_code));
+        let Some(contract) = write_guard
+            .accounts
+            .replace_code(&address, proxy)
+        else {
+            return Ok(false);
+        };
+        let Some(code) = contract.code else {
+            return Ok(false);
+        };
+        write_guard.accounts.overwrite_account(
+            implementation,
+            AccountInfo::new(U256::ZERO, 0, contract.code_hash, code),
+            None,
+            true,
+        );
+        write_guard.accounts.update_account(
+            &address,
+            &StateUpdate {
+                storage: Some(HashMap::from([(
+                    implementation_slot,
+                    U256::from_be_slice(implementation.as_slice()),
+                )])),
+                balance: None,
+            },
+        );
+        debug!(%address, %implementation, "Put contract behind a proxy");
+        Ok(true)
+    }
+
     /// Like [`update()`](Self::update) restricted to `Creation` updates, but leaves the stored
     /// block header untouched. Used for proxy-token accounts written outside the regular
     /// snapshot/delta flow; generic callers should use [`update()`](Self::update).
@@ -750,6 +807,94 @@ mod tests {
                 .number,
             1
         );
+    }
+
+    /// An account holding `code`, with 42 in slot 1 and a native balance of 7.
+    fn init_contract(db: &PreCachedDB, address: Address, code: &[u8]) {
+        let code = Bytecode::new_raw(AlloyBytes::copy_from_slice(code));
+        db.init_account(
+            address,
+            AccountInfo::new(U256::from(7), 0, code.hash_slow(), code),
+            Some(HashMap::from([(U256::from(1), U256::from(42))])),
+            true,
+        )
+        .expect("init should succeed");
+    }
+
+    fn code_at(db: &PreCachedDB, address: Address) -> Vec<u8> {
+        db.basic_ref(address)
+            .unwrap()
+            .unwrap()
+            .code
+            .unwrap()
+            .original_byte_slice()
+            .to_vec()
+    }
+
+    #[rstest]
+    fn test_put_behind_proxy_moves_code_and_keeps_storage(mock_db: PreCachedDB) {
+        let address = Address::repeat_byte(0x11);
+        let implementation = Address::repeat_byte(0x22);
+        let implementation_slot = U256::from(99);
+        init_contract(&mock_db, address, &[0x60, 0x00]);
+
+        let proxied = mock_db
+            .put_behind_proxy(address, implementation, &[0x5f, 0x5f], implementation_slot)
+            .unwrap();
+
+        assert!(proxied);
+        assert_eq!(code_at(&mock_db, address), vec![0x5f, 0x5f]);
+        assert_eq!(code_at(&mock_db, implementation), vec![0x60, 0x00]);
+        assert_eq!(
+            mock_db
+                .get_storage(&address, &U256::from(1))
+                .unwrap(),
+            U256::from(42)
+        );
+        assert_eq!(
+            mock_db
+                .get_storage(&address, &implementation_slot)
+                .unwrap(),
+            U256::from_be_slice(implementation.as_slice())
+        );
+        assert_eq!(
+            mock_db
+                .basic_ref(address)
+                .unwrap()
+                .unwrap()
+                .balance,
+            U256::from(7)
+        );
+    }
+
+    #[rstest]
+    #[case::no_account(None)]
+    #[case::account_without_code(Some(vec![]))]
+    #[case::already_the_proxy(Some(vec![0x5f, 0x5f]))]
+    fn test_put_behind_proxy_leaves_other_accounts_alone(
+        mock_db: PreCachedDB,
+        #[case] code: Option<Vec<u8>>,
+    ) {
+        let address = Address::repeat_byte(0x11);
+        let implementation = Address::repeat_byte(0x22);
+        if let Some(code) = &code {
+            init_contract(&mock_db, address, code);
+        }
+
+        let proxied = mock_db
+            .put_behind_proxy(address, implementation, &[0x5f, 0x5f], U256::from(99))
+            .unwrap();
+
+        assert!(!proxied);
+        assert!(mock_db
+            .basic_ref(implementation)
+            .is_err());
+        assert!(mock_db
+            .get_storage(&address, &U256::from(99))
+            .is_none());
+        if let Some(code) = code {
+            assert_eq!(code_at(&mock_db, address), code);
+        }
     }
 
     #[rstest]

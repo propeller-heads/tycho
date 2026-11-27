@@ -442,6 +442,9 @@ where
 
                 if !new_tokens.is_empty() {
                     debug!(n = new_tokens.len(), "NewTokens");
+                    for token in new_tokens.keys() {
+                        proxy_loaded_contract(&mut state_guard, token)?;
+                    }
                     state_guard.tokens.extend(new_tokens);
                 }
             }
@@ -1403,6 +1406,35 @@ fn generate_proxy_token_address(idx: usize) -> Result<Address, StreamDecodeError
 ///
 /// The proxy token account is created at the original token address and points to the new token
 /// address.
+/// Puts a token proxy in front of the contract the engine holds at `token`, if it holds one.
+///
+/// A contract loaded before its address was a known token is a plain account in the engine. Once
+/// the address is a token, every later write to it takes the token path, which would replace the
+/// contract's code and storage with a proxy that has no implementation. Moving the contract behind
+/// a proxy here leaves it in the state the snapshot path produces for a contract that was a token
+/// from the start.
+fn proxy_loaded_contract(state: &mut DecoderState, token: &Bytes) -> Result<(), StreamDecodeError> {
+    let Ok(address) = bytes_to_address(token) else {
+        return Ok(());
+    };
+    if state
+        .proxy_token_addresses
+        .contains_key(&address)
+    {
+        return Ok(());
+    }
+    let impl_addr = generate_proxy_token_address(state.proxy_token_addresses.len())?;
+    let proxied = SHARED_TYCHO_DB
+        .put_behind_proxy(address, impl_addr, ERC20_PROXY_BYTECODE, *IMPLEMENTATION_SLOT)
+        .map_err(|e| StreamDecodeError::Fatal(e.to_string()))?;
+    if proxied {
+        state
+            .proxy_token_addresses
+            .insert(address, impl_addr);
+    }
+    Ok(())
+}
+
 fn create_proxy_token_account(
     addr: Address,
     new_address: Option<Address>,
@@ -1572,6 +1604,7 @@ mod tests {
     use tycho_common::{models::Chain, Bytes};
 
     use super::*;
+    use crate::evm::{engine_db::create_engine, simulation::SimulationParameters};
 
     fn header_at(number: u64, timestamp: u64, partial: Option<u32>) -> BlockHeader {
         BlockHeader {
@@ -2443,6 +2476,167 @@ mod tests {
             .unwrap();
 
         assert!(!update.states.contains_key(pool_id));
+    }
+
+    /// Runtime code that answers any call with the value of storage slot 1.
+    const RETURNS_SLOT_ONE: [u8; 9] = [0x60, 0x01, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3];
+    const SLOT_ONE_VALUE: u8 = 42;
+
+    fn quality_token(address: &Bytes) -> Token {
+        Token::new(address, "LP", 18, 0, &[Some(100_000)], Chain::Ethereum, 100)
+    }
+
+    fn single_protocol_msg(
+        snapshots: tycho_client::feed::synchronizer::Snapshot,
+        deltas: Option<BlockAggregatedChanges>,
+        block: u64,
+    ) -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::StateSyncMessage;
+
+        FeedMessage {
+            state_msgs: HashMap::from([(
+                "test_protocol".to_string(),
+                StateSyncMessage {
+                    header: header_at(block, 1_000 + block, None),
+                    snapshots,
+                    deltas,
+                    removed_components: HashMap::new(),
+                },
+            )]),
+            sync_states: HashMap::new(),
+        }
+    }
+
+    /// A snapshot message that loads `contract` with [`RETURNS_SLOT_ONE`] as its code and
+    /// [`SLOT_ONE_VALUE`] in slot 1.
+    fn contract_snapshot_msg(contract: &Bytes) -> FeedMessage<BlockHeader> {
+        use tycho_client::feed::synchronizer::Snapshot;
+        use tycho_common::models::contract::Account;
+
+        let account = Account::new(
+            Chain::Ethereum,
+            contract.clone(),
+            "pool".to_string(),
+            HashMap::from([(Bytes::from(vec![1u8]), Bytes::from(vec![SLOT_ONE_VALUE]))]),
+            Bytes::default(),
+            HashMap::new(),
+            Bytes::from(RETURNS_SLOT_ONE.to_vec()),
+            Bytes::default(),
+            Bytes::default(),
+            Bytes::default(),
+            None,
+        );
+        let snapshots = Snapshot {
+            states: HashMap::new(),
+            vm_storage: HashMap::from([(contract.clone(), account)]),
+        };
+        single_protocol_msg(snapshots, None, 1)
+    }
+
+    /// Calls `contract` in the shared engine with a selector no ERC20 function uses.
+    fn call_contract(contract: &Bytes) -> Result<U256, String> {
+        let engine =
+            create_engine(SHARED_TYCHO_DB.clone(), false).map_err(|e| format!("engine: {e}"))?;
+        let params = SimulationParameters {
+            caller: Address::ZERO,
+            to: Address::from_slice(contract),
+            data: vec![0x12, 0x34, 0x56, 0x78],
+            ..Default::default()
+        };
+        let result = engine
+            .simulate(&params)
+            .map_err(|e| format!("call: {e:?}"))?;
+        Ok(U256::from_be_slice(result.result.as_ref()))
+    }
+
+    /// A contract that is a known token when its snapshot arrives is put behind a token proxy and
+    /// keeps answering calls.
+    #[tokio::test]
+    async fn test_contract_known_as_token_at_snapshot_stays_callable() {
+        let contract = Bytes::from(vec![0xa1; 20]);
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        decoder
+            .set_tokens(HashMap::from([(contract.clone(), quality_token(&contract))]))
+            .await;
+
+        decoder
+            .decode(&contract_snapshot_msg(&contract))
+            .await
+            .expect("snapshot decode failed");
+
+        assert_eq!(call_contract(&contract), Ok(U256::from(SLOT_ONE_VALUE)));
+    }
+
+    /// A contract loaded before its address became a token, then written by a storage-only delta,
+    /// keeps its code and storage.
+    #[tokio::test]
+    async fn test_storage_delta_keeps_contract_that_became_a_token() {
+        use tycho_client::feed::synchronizer::Snapshot;
+
+        let contract = Bytes::from(vec![0xa2; 20]);
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        decoder
+            .decode(&contract_snapshot_msg(&contract))
+            .await
+            .expect("snapshot decode failed");
+        assert_eq!(call_contract(&contract), Ok(U256::from(SLOT_ONE_VALUE)));
+
+        let deltas = BlockAggregatedChanges {
+            new_tokens: HashMap::from([(contract.clone(), quality_token(&contract))]),
+            account_deltas: account_write(&contract, 9),
+            ..Default::default()
+        };
+        decoder
+            .decode(&single_protocol_msg(Snapshot::default(), Some(deltas), 2))
+            .await
+            .expect("delta decode failed");
+
+        assert_eq!(call_contract(&contract), Ok(U256::from(SLOT_ONE_VALUE)));
+        let written = SHARED_TYCHO_DB.get_storage(&Address::from_slice(&contract), &U256::ZERO);
+        assert_eq!(written, Some(U256::from(9)), "the delta's own write is lost");
+    }
+
+    /// A contract loaded before its address became a token keeps its code and storage when a new
+    /// component lists it as one of its tokens.
+    #[tokio::test]
+    async fn test_new_component_keeps_contract_that_became_its_token() {
+        use tycho_client::feed::synchronizer::Snapshot;
+        use tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState};
+
+        let contract = Bytes::from(vec![0xa3; 20]);
+        let mut decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        // The component below has no registered decoder; only its token handling matters here.
+        decoder.skip_state_decode_failures(true);
+        decoder
+            .decode(&contract_snapshot_msg(&contract))
+            .await
+            .expect("snapshot decode failed");
+
+        let id = "0x00000000000000000000000000000000000000c5";
+        let component = ComponentWithState {
+            state: ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+            component: ProtocolComponent {
+                id: id.to_string(),
+                tokens: vec![contract.clone()],
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+        let snapshots = Snapshot {
+            states: HashMap::from([(id.to_string(), component)]),
+            vm_storage: HashMap::new(),
+        };
+        let deltas = BlockAggregatedChanges {
+            new_tokens: HashMap::from([(contract.clone(), quality_token(&contract))]),
+            ..Default::default()
+        };
+        decoder
+            .decode(&single_protocol_msg(snapshots, Some(deltas), 2))
+            .await
+            .expect("component decode failed");
+
+        assert_eq!(call_contract(&contract), Ok(U256::from(SLOT_ONE_VALUE)));
     }
 
     #[test]
