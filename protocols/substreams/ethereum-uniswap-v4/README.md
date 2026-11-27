@@ -12,9 +12,10 @@ Contains common logic shared between both substreams:
 - Mathematical utilities
 
 ### No-Hooks Variant (`no-hooks/`)
-Tracks Protocol Components **WITHOUT** swap hooks:
-- Filters out pools that have `beforeSwap` or `afterSwap` hook permissions
-- Uses `HookPermissionsDetector::has_swap_hooks() == false`
+Tracks Protocol Components **WITHOUT** a hook and with a static LP fee:
+- Filters out every pool whose `hooks` address is non-zero or whose fee carries the dynamic-fee flag
+  (`0x800000`). A hook without swap permissions can still set a dynamic fee through
+  `updateDynamicLPFee`, so such pools are in neither variant.
 - Configuration: `ethereum-uniswap-v4-no-hooks.yaml`
 
 ### With-Hooks Variant (`with-hooks/`)
