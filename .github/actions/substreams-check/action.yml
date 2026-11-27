@@ -17,9 +17,11 @@ runs:
     - name: Get changed directories and package names
       id: extract_package_names
       shell: bash
+      env:
+        CHANGED_FILES: ${{ inputs.changed-files }}
       run: |
         # Convert space-separated list to newline-separated list and process
-        echo '${{ inputs.changed-files }}' | tr ' ' '\n' | grep '^protocols/substreams/' | grep -v 'Cargo.lock$' > changed_files.txt
+        printf '%s\n' "$CHANGED_FILES" | tr ' ' '\n' | grep '^protocols/substreams/' | grep -v 'Cargo.lock$' > changed_files.txt
 
         # Initialize empty array for package names
         PACKAGE_NAMES=()
