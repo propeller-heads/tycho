@@ -728,6 +728,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_state_deltas_fail_for_a_tx_outside_the_batch() {
+        let mut setup = setup().await;
+
+        let result = upsert(
+            &mut setup,
+            db_fixtures::minutes_ago(1),
+            &[delta(0xff, "pool", &[("reserve", 2)], &[])],
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound(
+                "Transaction".to_string(),
+                Bytes::from(vec![0xff]).to_string()
+            ))
+        );
+        assert_eq!(current(&mut setup).await[0].attribute_value, value(1));
+    }
+
+    #[tokio::test]
     async fn test_state_deltas_fail_for_a_deleted_attribute_that_is_not_stored() {
         let mut setup = setup().await;
 

@@ -352,6 +352,7 @@ mod tests {
     use chrono::{NaiveDate, NaiveDateTime};
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
+    use rstest::rstest;
     use serde_json::json;
     use tycho_common::{
         models::{
@@ -767,6 +768,9 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(StorageError::NotFound("Token".to_string(), token(9).to_string())));
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -791,49 +795,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_protocol_components_fails_for_a_token_listed_twice() {
+    async fn test_resent_component_of_another_protocol_system_fails() {
         let (mut conn, gateway, instance) = setup().await;
-
-        let result = gateway
+        gateway
             .insert_protocol_components(
                 instance,
                 &origins(),
-                &[component("a", vec![token(0), token(1), token(0)], vec![], 0xa1)],
+                &[component("a", vec![token(0)], vec![], 0xa1)],
                 &mut conn,
             )
+            .await
+            .unwrap();
+        let mut other = component("a", vec![token(0)], vec![], 0xa1);
+        other.protocol_system = "vm:other".to_string();
+
+        let result = gateway
+            .insert_protocol_components(instance, &origins(), &[other], &mut conn)
             .await;
 
         assert_eq!(
             result,
             Err(StorageError::Unexpected(format!(
-                "Component a lists the token {} twice",
-                token(0)
+                "Component a of vm:other cannot go into instance {instance} of vm:curve"
             )))
         );
-        assert!(stored(&mut conn, instance)
-            .await
-            .is_empty());
     }
 
+    #[rstest]
+    #[case::token(vec![token(0), token(1), token(0)], vec![], "token", token(0))]
+    #[case::contract(vec![token(0)], vec![contract(1), contract(1)], "contract", contract(1))]
     #[tokio::test]
-    async fn test_insert_protocol_components_fails_for_a_contract_listed_twice() {
+    async fn test_insert_protocol_components_fails_for_a_link_listed_twice(
+        #[case] tokens: Vec<Bytes>,
+        #[case] contracts: Vec<Bytes>,
+        #[case] kind: &str,
+        #[case] repeated: Bytes,
+    ) {
         let (mut conn, gateway, instance) = setup().await;
 
         let result = gateway
             .insert_protocol_components(
                 instance,
                 &origins(),
-                &[component("a", vec![token(0)], vec![contract(1), contract(1)], 0xa1)],
+                &[component("a", tokens, contracts, 0xa1)],
                 &mut conn,
             )
             .await;
 
         assert_eq!(
             result,
-            Err(StorageError::Unexpected(format!(
-                "Component a lists the contract {} twice",
-                contract(1)
-            )))
+            Err(StorageError::Unexpected(format!("Component a lists the {kind} {repeated} twice")))
         );
         assert!(stored(&mut conn, instance)
             .await
@@ -860,6 +871,9 @@ mod tests {
             result,
             Err(StorageError::NotFound("Account".to_string(), contract(2).to_string()))
         );
+        assert!(stored(&mut conn, instance)
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
