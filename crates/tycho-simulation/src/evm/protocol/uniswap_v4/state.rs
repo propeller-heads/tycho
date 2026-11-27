@@ -1079,7 +1079,19 @@ impl ProtocolSim for UniswapV4State {
                 // permission the PoolManager discards the return value, so the hook still costs
                 // gas but cannot move the swapper's balance.
                 if hook.has_permission(HookOptions::AfterSwapReturnsDelta) {
-                    hook_delta_unspecified += after_swap_result.result;
+                    // `Hooks.sol` adds the two in checked `int128` and reverts past it.
+                    hook_delta_unspecified = hook_delta_unspecified
+                        .checked_add(after_swap_result.result)
+                        .ok_or_else(|| {
+                            SimulationError::InvalidInput(
+                                format!(
+                                    "the hook's deltas {hook_delta_unspecified} and {} do not \
+                                     sum within an int128: the pool manager reverts",
+                                    after_swap_result.result
+                                ),
+                                None,
+                            )
+                        })?;
                 }
             }
         }
@@ -1100,6 +1112,14 @@ impl ProtocolSim for UniswapV4State {
         } else {
             swap_delta.amount0()
         };
+        // A hook that takes more than the swap's output leaves the swapper owing the difference,
+        // which no exact-input trade settles.
+        if amount_out.is_negative() {
+            return Err(SimulationError::InvalidInput(
+                format!("the hooks take {} more than the swap's output", amount_out.unsigned_abs()),
+                None,
+            ));
+        }
 
         trace!(?amount_in, ?token_in, ?token_out, ?zero_for_one, ?result, "V4 SWAP");
         let mut new_state = self.clone_post_swap(result.sqrt_price, result.tick, result.liquidity);
@@ -2798,6 +2818,43 @@ mod tests {
             with_delta.gas,
             hookless.gas + BigUint::from(AFTER_SWAP_TEST_HOOK_GAS + PM_PER_HOOK_CALL_OVERHEAD)
         );
+    }
+
+    /// A hook delta larger than the swap's output leaves the swapper owing the hook, which is
+    /// refused rather than quoted as a positive amount; one equal to the output quotes 0.
+    #[rstest]
+    #[case::one_unit_more(1, false)]
+    #[case::far_more(1_000_000_000_000_000_000, false)]
+    #[case::all_of_it(0, true)]
+    fn test_a_hook_taking_more_than_the_output_is_refused(
+        #[case] beyond_output: u64,
+        #[case] quotes: bool,
+    ) {
+        let (token_in, token_out) = basic_v4_test_pool_tokens(true);
+        let amount_in = BigUint::from(1_000_000_000_000_000u64);
+        let hookless = create_basic_v4_test_pool()
+            .get_amount_out(amount_in.clone(), &token_in, &token_out)
+            .unwrap();
+        let output = i128::try_from(hookless.amount).unwrap();
+        let mut pool = create_basic_v4_test_pool();
+        pool.set_hook_handler(Box::new(AfterSwapTestHook {
+            address: construct_hook_address(&[
+                HookOptions::AfterSwap,
+                HookOptions::AfterSwapReturnsDelta,
+            ]),
+            delta: I128::try_from(output + i128::from(beyond_output)).unwrap(),
+            analytic_fee_bps: None,
+            spot_price_override: None,
+            after_swap_failure: None,
+        }));
+
+        let result = pool.get_amount_out(amount_in, &token_in, &token_out);
+
+        if quotes {
+            assert_eq!(result.unwrap().amount, BigUint::ZERO);
+        } else {
+            assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+        }
     }
 
     /// A hook's `after_swap` refusal reaches the caller as `InvalidInput`, as a `before_swap` one

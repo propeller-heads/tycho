@@ -52,7 +52,7 @@ pub fn get_lower_i128(value: I256) -> I128 {
 /// `value` as an `int128`, as v4-core's `SafeCast.toInt128` casts an amount a swap moves. Past
 /// `int128` that cast reverts `SafeCastOverflow` and the swap with it, so this refuses with
 /// `InvalidInput`, naming `what` the value is.
-pub fn to_int128(value: I256, what: &str) -> Result<I128, SimulationError> {
+pub(crate) fn to_int128(value: I256, what: &str) -> Result<I128, SimulationError> {
     i128::try_from(value)
         .ok()
         .and_then(|value| I128::try_from(value).ok())
