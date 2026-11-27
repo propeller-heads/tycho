@@ -448,7 +448,7 @@ mod tests {
     };
 
     const ONE_WETH: u128 = 1_000_000_000_000_000_000;
-    const BASE_GAS: u64 = 452_000;
+    const BASE_GAS: u64 = 353_000;
 
     fn sell_weth(
         state: &ElfomofiState,

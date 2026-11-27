@@ -132,14 +132,17 @@ impl ElfomofiSupportedChain {
     /// Gas of the protocol part of one swap: the executor and the router's
     /// `swapWithContractBalance`, as tycho-execution's gas estimator counts it.
     ///
-    /// Measured by tycho-execution's `Elfomofi.t.sol` (`testGas`, every account cold) on one pair
-    /// per chain: WETH/USDC on Base at 61,817,000 (451,930), ETH/USDT on BSC at 134,869,000
-    /// (469,523) and NVDA/USDG on Robinhood at 121,390,000 (375,375), rounded up. The venue's
-    /// pricing reads reference pools that differ per pair, so other pairs cost somewhat more or
-    /// less; re-measure after an upgrade of the pricing contract.
+    /// Measured by tycho-execution's `Elfomofi.t.sol` (`testGas`, every account cold) selling the
+    /// base token of one pair per chain, rounded up: WETH/USDC on Base, the highest of 345,778 to
+    /// 352,258 at blocks 62,300,000 to 62,863,000; ETH/USDT on BSC at 134,869,000 (469,523); and
+    /// NVDA/USDG on Robinhood at 121,390,000 (375,375). Selling the quote token costs 7k to 16k
+    /// less. The cost moves with the venue's state as well as its code: the same Base swap took
+    /// 451,930 at 61,817,000 with the same implementation. The venue's pricing reads reference
+    /// pools that differ per pair, so other pairs cost somewhat more or less; re-measure after an
+    /// upgrade of the pricing contract.
     pub(super) fn swap_gas(self) -> u64 {
         match self {
-            ElfomofiSupportedChain::Base => 452_000,
+            ElfomofiSupportedChain::Base => 353_000,
             ElfomofiSupportedChain::Bsc => 470_000,
             ElfomofiSupportedChain::Robinhood => 376_000,
         }

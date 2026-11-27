@@ -28,8 +28,9 @@
 //!   are a few seconds old, and the executor's floor turns a quote that went stale in flight into a
 //!   revert.
 //! - Every pair's ladder is cut at the vault's whole balance of its output token, so pairs that
-//!   share a token each claim all of it. Two fills that together exceed it in one block make the
-//!   second revert.
+//!   share a token each claim all of it. When two fills in one block together exceed it, the second
+//!   pays only what is left of the balance and reverts on its floor; with the vault empty, the
+//!   venue reverts it.
 //! - A fill moves the rest of the same-direction ladder about 0.1% worse at the next levels
 //!   (measured on a Base fork); a continued fill priced on the pre-fill ladder does not include
 //!   that, and the floor absorbs it. How the opposite direction moves after a fill is not known, so
