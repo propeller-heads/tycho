@@ -1053,7 +1053,7 @@ impl ProtocolSim for UniswapV4State {
         // `Pool.swap` casts the input it took and the output with `toInt128`, reverting past it.
         to_int128(amount_to_swap - result.amount_remaining, "The swap's input")?;
         let mut swap_delta =
-            BalanceDelta::from_swap_result(result.amount_calculated, zero_for_one)?;
+            BalanceDelta::try_from_swap_result(result.amount_calculated, zero_for_one)?;
 
         // Get deltas (change in the specified/given and unspecified/computed token balances after
         // calling before swap)

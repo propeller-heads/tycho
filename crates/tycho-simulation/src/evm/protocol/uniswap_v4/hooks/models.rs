@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Sub};
 
 use alloy::{
     primitives::{aliases::U24, Address, I128, I256, U256},
@@ -74,12 +74,33 @@ impl BalanceDelta {
         BalanceDelta(specified_shifted | unspecified_masked)
     }
 
+    /// Creates a BalanceDelta from swap result's amount_calculated based on swap direction
+    ///
+    /// For exact input swaps:
+    /// - amount_calculated is negative (amount of output token received)
+    /// - We convert it to positive for the appropriate amount field
+    /// - The other amount field is set to zero
+    ///
+    /// An output past `int128` keeps only its low 128 bits, where v4's `Pool.swap` reverts;
+    /// [`Self::try_from_swap_result`] refuses it.
+    pub fn from_swap_result(amount_calculated: I256, zero_for_one: bool) -> BalanceDelta {
+        // For exact input swaps, amount_calculated is negative (output amount from pool's
+        // perspective) We negate it to convert to positive amount from user's perspective
+        if zero_for_one {
+            // Swapping token0 for token1: amount_calculated represents change in token1
+            BalanceDelta::new(I128::ZERO, get_lower_i128(-amount_calculated))
+        } else {
+            // Swapping token1 for token0: amount_calculated represents change in token0
+            BalanceDelta::new(get_lower_i128(-amount_calculated), I128::ZERO)
+        }
+    }
+
     /// The balance delta of an exact-input swap whose output, from the pool's side, is
     /// `amount_calculated` (negative): the output, positive, in the bought token's lane and 0 in
     /// the other.
     ///
     /// Refuses with `InvalidInput` an output past `int128`, on which v4's `Pool.swap` reverts.
-    pub fn from_swap_result(
+    pub fn try_from_swap_result(
         amount_calculated: I256,
         zero_for_one: bool,
     ) -> Result<BalanceDelta, SimulationError> {
@@ -120,6 +141,33 @@ impl BalanceDelta {
             lane(self.amount0(), rhs.amount0(), "amount0")?,
             lane(self.amount1(), rhs.amount1(), "amount1")?,
         ))
+    }
+}
+
+/// Lane by lane, wrapping a lane past `int128` where v4-core's `sub` reverts;
+/// [`BalanceDelta::checked_sub`] refuses it.
+impl Sub for BalanceDelta {
+    type Output = BalanceDelta;
+
+    fn sub(self, rhs: BalanceDelta) -> BalanceDelta {
+        // Extract the high and low 128-bit parts and perform subtraction
+        let a = self.as_i256();
+        let b = rhs.as_i256();
+        // High 128 bits (arithmetic right shift)
+        let a0 = a >> 128;
+        let b0 = b >> 128;
+
+        // Low 128 bits (sign extension happens automatically with I256)
+        let a1 = a;
+        let b1 = b;
+
+        // Perform subtraction on each part
+        let res0 = a0 - b0;
+        let res1 = a1 - b1;
+
+        // Combine results: shift high part left by 128 bits and add low part
+        // The low part needs to be masked to 128 bits
+        BalanceDelta((res0 << 128) + (res1 << 128 >> 128))
     }
 }
 
@@ -243,12 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn test_from_swap_result_refuses_an_output_past_int128() {
+    fn test_try_from_swap_result_refuses_an_output_past_int128() {
         let past_int128 = -(I256::from(I128::MAX) + I256::ONE);
 
-        assert!(BalanceDelta::from_swap_result(past_int128, true).is_err());
+        assert!(BalanceDelta::try_from_swap_result(past_int128, true).is_err());
         assert_eq!(
-            BalanceDelta::from_swap_result(-I256::from(I128::MAX), false).unwrap(),
+            BalanceDelta::try_from_swap_result(-I256::from(I128::MAX), false).unwrap(),
             BalanceDelta::new(I128::MAX, I128::ZERO)
         );
     }
