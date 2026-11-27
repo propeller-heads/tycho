@@ -490,6 +490,8 @@ mod tests {
                     .unwrap(), // BUNNI
                 fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 1 },
                 tick_spacing: 60,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
             },
             sender: Address::from_str("0x66a9893cc07d91d95644aedd05d03f95e1dba8af").unwrap(),
             swap_params: SwapParams {
@@ -623,6 +625,8 @@ mod tests {
             currency_1: Address::from_str("0x000000c396558ffbab5ea628f39658bdf61345b3").unwrap(),
             fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 1 },
             tick_spacing: 60,
+            sqrt_price_x96: U256::ZERO,
+            tick: 0,
         };
         let swap_params = SwapParams {
             zero_for_one: true,
@@ -694,6 +698,8 @@ mod tests {
             currency_1: Address::from_str("0x7edc481366a345d7f9fcecb207408b5f2887ff99").unwrap(),
             fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 100 },
             tick_spacing: 1,
+            sqrt_price_x96: U256::ZERO,
+            tick: 0,
         };
         let swap_params = SwapParams {
             zero_for_one: true,

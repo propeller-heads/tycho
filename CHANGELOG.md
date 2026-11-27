@@ -1,3 +1,82 @@
+## [0.544.0](https://github.com/propeller-heads/tycho/compare/0.543.0...0.544.0) (2026-11-27)
+
+
+### Features
+
+* **execution:** budget the fallback quote gas by protocol ([3c9e267](https://github.com/propeller-heads/tycho/commit/3c9e26735dc824bee05f2320140b4d3cf98cf52f))
+* **execution:** charge BaiBai's fallback quote by protocol ([16b1c7b](https://github.com/propeller-heads/tycho/commit/16b1c7bea7ce9e4c888f046b276d6df7db1d56c8))
+
+
+### Bug Fixes
+
+* **execution:** budget fallback quotes at their typical cost ([1a583e5](https://github.com/propeller-heads/tycho/commit/1a583e5ecbe67dba9903e1832bdf8f90ef667f9e))
+* **execution:** budget fallback quotes from executed transactions ([9047471](https://github.com/propeller-heads/tycho/commit/9047471f4e0ee592cf13d7306c33074ec7dd8a27))
+* **execution:** cover the live Uniswap V3 fallback quote cost ([8f24f99](https://github.com/propeller-heads/tycho/commit/8f24f9972c9a86b6c883e7f136141ae489aca201))
+
+## [0.543.0](https://github.com/propeller-heads/tycho/compare/0.542.1...0.543.0) (2026-11-26)
+
+
+### Features
+
+* **ethereum-uniswap-v4-with-hooks:** index Ascend launchpad pools on Elysium ([ee6359e](https://github.com/propeller-heads/tycho/commit/ee6359ecd64d1c3bc7efe99bd6ffd4d98f2c89ce))
+* integrate Montra on Elysium as uniswap_v4_hooks ([c19af7b](https://github.com/propeller-heads/tycho/commit/c19af7bd000562c516d529453b7fb7d5ce38d800))
+* **simulation:** add spot fee, input bound and outcome hooks to HookHandler ([17e949d](https://github.com/propeller-heads/tycho/commit/17e949d89ae092b97ce1d647a93ccb8cf18d0b8e))
+* **simulation:** default HookHandler's spot_price and get_amount_ranges ([3cbab7f](https://github.com/propeller-heads/tycho/commit/3cbab7f56848aa78a5eb1c70d837570e16c49a91))
+* **simulation:** let a hook opt into swaps from an empty tick range ([00df5e8](https://github.com/propeller-heads/tycho/commit/00df5e85bf82975a8131e2aad2a183194a87b1c2))
+* **tycho-simulation:** simulate the Ascend launchpad hook on Elysium ([a89d749](https://github.com/propeller-heads/tycho/commit/a89d749a54b2bcf2e18a2fed3f0e946e1d251773))
+
+
+### Bug Fixes
+
+* **ethereum-uniswap-v4-with-hooks:** refuse the zero address in hook lists ([eb8925c](https://github.com/propeller-heads/tycho/commit/eb8925c090e4422e82ec8ea8670522b860e414ab))
+* **simulation:** classify check_swap_outcome errors like hook call errors ([620d4de](https://github.com/propeller-heads/tycho/commit/620d4de442fcaafaf8caf027e1e1c9f145ec5de2))
+* **simulation:** pass hook after_swap refusals through as InvalidInput ([1474c93](https://github.com/propeller-heads/tycho/commit/1474c93a3f4482a1abc54f012a39dd7eb93ab962))
+* **tycho-simulation:** charge the whole-input route only for Ascend fills ([4e43f23](https://github.com/propeller-heads/tycho/commit/4e43f23e07d1c9d91894085f40918a620ebad343))
+* **tycho-simulation:** close the Ascend review nits, pin the shared handler_after_swap path ([39357e6](https://github.com/propeller-heads/tycho/commit/39357e6f82cea95f62e46f61dbb59d5c1404f045))
+* **tycho-simulation:** close the Ascend round-4 findings, cover fees 0 and 1 ([0ad8215](https://github.com/propeller-heads/tycho/commit/0ad8215db0ded5a9ba82dc6d4f9f5453150d17a3))
+* **tycho-simulation:** close the Ascend round-5 findings, charge the route around a whole-input fill ([9fb6986](https://github.com/propeller-heads/tycho/commit/9fb69868855213d347caf5607c2328e460adeb64))
+* **tycho-simulation:** measure the Ascend hook's gas and pin its limits over random states ([5051366](https://github.com/propeller-heads/tycho/commit/50513667e87f4df9b06c8c1e8ce68bdaf75d926c))
+* **tycho-simulation:** price Ascend whole-input fills and same-second swaps as traced ([2aa921a](https://github.com/propeller-heads/tycho/commit/2aa921ae2e73a14bc80fdb9dd7a29bd9ee410032))
+* **tycho-simulation:** refuse the Ascend spot price with its quotes, close review nits ([c71a6ea](https://github.com/propeller-heads/tycho/commit/c71a6ead04e2e2974474e5447665dec1ec9dbb3d))
+
+## [0.542.1](https://github.com/propeller-heads/tycho/compare/0.542.0...0.542.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** drop config-less entries from the substreams matrix ([e894ba6](https://github.com/propeller-heads/tycho/commit/e894ba623c54ba6ca5e1a82996cacbce3042676c))
+* **ci:** run the protocols the substreams integration matrix claims to test ([132eac7](https://github.com/propeller-heads/tycho/commit/132eac7ac24dd3c06be660dc95bc355a01cad556))
+* **testing:** fail when a run tests nothing ([ba97848](https://github.com/propeller-heads/tycho/commit/ba978486f325914dd537959dce7a2b70e9aaec4d))
+* **testing:** let indexer errors through the default log filter ([6951d32](https://github.com/propeller-heads/tycho/commit/6951d323352e56f772fd6cb0ff4d01a9e45b36e7))
+
+## [0.542.0](https://github.com/propeller-heads/tycho/compare/0.541.0...0.542.0) (2026-11-26)
+
+
+### Features
+
+* **baibai:** rename the protocol system to pamm:baibai ([836a8c0](https://github.com/propeller-heads/tycho/commit/836a8c0ae73ba1f38182880a0ffc9488577fe5e7))
+* **execution:** execute BaiBai through a fallback router ([45c9166](https://github.com/propeller-heads/tycho/commit/45c9166d1873c70d344e475a5a62a8564e4ed558))
+* **simulation:** price BaiBai books for the fallback router ([b0ed53d](https://github.com/propeller-heads/tycho/commit/b0ed53d139eea7fe60a498220aa9486488fdd557))
+
+
+### Bug Fixes
+
+* **execution:** net BaiBai quoteFor gas of the warm entrypoint ([be983fc](https://github.com/propeller-heads/tycho/commit/be983fcc0c1c7b6adf22f043c462bc912db764f3))
+* **execution:** restore pancakeswap_infinity_cl in the Base deploy list ([8385ba2](https://github.com/propeller-heads/tycho/commit/8385ba2c08c42553a2233dc5542b1fc991e9f10c))
+* **execution:** return input BaiBai does not pull to the caller ([bb77313](https://github.com/propeller-heads/tycho/commit/bb77313d3a6d1d47de1155a61e40f2b15e2822a3))
+
+## [0.541.0](https://github.com/propeller-heads/tycho/compare/0.540.1...0.541.0) (2026-11-26)
+
+
+### Features
+
+* **execution:** list the grant-capable Curve executor on Ethereum ([a25beb5](https://github.com/propeller-heads/tycho/commit/a25beb5862c45de16832e32b770875b025c81965))
+
+
+### Bug Fixes
+
+* **execution:** remove conflict markers from calldata fixture ([82f02e1](https://github.com/propeller-heads/tycho/commit/82f02e1cefddfdc0839a094f553d90a9a362bc61))
+
 ## [0.540.1](https://github.com/propeller-heads/tycho/compare/0.540.0...0.540.1) (2026-11-25)
 
 

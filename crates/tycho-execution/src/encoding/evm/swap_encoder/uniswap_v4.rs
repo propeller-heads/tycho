@@ -519,6 +519,153 @@ mod tests {
         write_calldata_to_file("test_encode_uniswap_v4_sequential_swap", combined_hex.as_str());
     }
 
+    /// Montra launch pools on Elysium, protocol system `uniswap_v4_hooks`: Uniswap V4 pools whose
+    /// hook is Montra's `LaunchHook`, swapped through the Elysium `uniswap_v4` executor with empty
+    /// hook data. The hook ignores hook data: the swaps of `UniswapV4Montra.t.sol` settle with
+    /// empty hook data at the same amounts as the chain's V4Quoter quotes.
+    mod uniswap_v4_montra {
+        use rstest::rstest;
+
+        use super::*;
+
+        const MONTRA_HOOK: &str = "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec";
+
+        /// A Montra component with the static attributes in the byte format the Elysium
+        /// `uniswap_v4_hooks` extractor emits them: signed big-endian integers, so the dynamic-fee
+        /// flag 0x800000 carries a leading zero byte.
+        fn montra_pool(pool_id: &str) -> ProtocolComponent {
+            let static_attributes = HashMap::from([
+                ("key_lp_fee".to_string(), Bytes::from("0x00800000")),
+                ("tick_spacing".to_string(), Bytes::from("0x00c8")),
+                ("hooks".to_string(), Bytes::from(MONTRA_HOOK)),
+                ("pool_id".to_string(), Bytes::from(pool_id)),
+            ]);
+            ProtocolComponent {
+                id: pool_id.to_string(),
+                protocol_system: "uniswap_v4_hooks".to_string(),
+                static_attributes,
+                ..Default::default()
+            }
+        }
+
+        /// One single swap per pool kind and direction: native HYPE into and out of a
+        /// native-quoted pool, and a launch token sold for an ERC-20 quote. The encoder writes
+        /// the chain's native token as the router's native marker.
+        #[rstest]
+        #[case::native_quote_buy(
+            // pool 0x850fd929: HYPE is currency0, so the buy is zero-for-one
+            "0x850fd929fb9399c5d881c587a601e47b8eb20b361bb224651fcd2883852e22e9",
+            Chain::Elysium.native_token().address,
+            Bytes::from("0x95925e9c25fe28a046bcd43662b826afac06b22d"),
+            concat!(
+                // group token in: native HYPE as the router's marker
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                // group token out: the launch token
+                "95925e9c25fe28a046bcd43662b826afac06b22d",
+                // zero for one
+                "01",
+                // skip unlock
+                "00",
+                // pool params: intermediary token, the launch token
+                "95925e9c25fe28a046bcd43662b826afac06b22d",
+                // fee: the dynamic-fee flag
+                "800000",
+                // tick spacing 200
+                "0000c8",
+                // hook: Montra's LaunchHook
+                "6b1216a40b65c83e9c9e18a562c446697b8cf8ec",
+                // hook data length (0)
+                "0000"
+            ),
+            "test_encode_montra_native_quote_buy"
+        )]
+        #[case::native_quote_sell(
+            // pool 0x35bd0e6a: HYPE is currency0, so the sell is one-for-zero
+            "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2",
+            Bytes::from("0x32193afd14c53f12c45a4c04eca9f7ba98e3ec71"),
+            Chain::Elysium.native_token().address,
+            concat!(
+                // group token in: the launch token
+                "32193afd14c53f12c45a4c04eca9f7ba98e3ec71",
+                // group token out: native HYPE as the router's marker
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                // zero for one
+                "00",
+                // skip unlock
+                "00",
+                // pool params: intermediary token, native HYPE as the router's marker
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                // fee: the dynamic-fee flag
+                "800000",
+                // tick spacing 200
+                "0000c8",
+                // hook: Montra's LaunchHook
+                "6b1216a40b65c83e9c9e18a562c446697b8cf8ec",
+                // hook data length (0)
+                "0000"
+            ),
+            "test_encode_montra_native_quote_sell"
+        )]
+        #[case::erc20_quote_sell(
+            // pool 0x33f724fd: wNVDAx is currency0, so the sell is one-for-zero
+            "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a",
+            Bytes::from("0xec8a718f0bc06c25b92082f7ba595931e0d579dc"),
+            Bytes::from("0x11265018bf2d5a99fb71efae73ad670203c1df44"),
+            concat!(
+                // group token in: the launch token
+                "ec8a718f0bc06c25b92082f7ba595931e0d579dc",
+                // group token out: wNVDAx
+                "11265018bf2d5a99fb71efae73ad670203c1df44",
+                // zero for one
+                "00",
+                // skip unlock
+                "00",
+                // pool params: intermediary token, wNVDAx
+                "11265018bf2d5a99fb71efae73ad670203c1df44",
+                // fee: the dynamic-fee flag
+                "800000",
+                // tick spacing 200
+                "0000c8",
+                // hook: Montra's LaunchHook
+                "6b1216a40b65c83e9c9e18a562c446697b8cf8ec",
+                // hook data length (0)
+                "0000"
+            ),
+            "test_encode_montra_erc20_quote_sell"
+        )]
+        fn test_encode_montra_single_swap(
+            #[case] pool_id: &str,
+            #[case] token_in: Bytes,
+            #[case] token_out: Bytes,
+            #[case] expected: &str,
+            #[case] calldata_name: &str,
+        ) {
+            let swap = Swap::new(
+                montra_pool(pool_id),
+                default_token(token_in.clone()),
+                default_token(token_out.clone()),
+                BigUint::ZERO,
+            );
+            let context = EncodingContext {
+                router_address: Some(Bytes::from("0x6bc529DC7B81A031828dDCE2BC419d01FF268C66")),
+                group_token_in: token_in,
+                group_token_out: token_out,
+                origin: None,
+            };
+            // The swap bytes carry no executor address: the strategy encoder prepends it.
+            let encoder = UniswapV4SwapEncoder::new(Bytes::zero(20), Chain::Elysium, None).unwrap();
+
+            let hex_swap = encode(
+                encoder
+                    .encode_swap(&swap, &context)
+                    .unwrap(),
+            );
+
+            assert_eq!(hex_swap, expected);
+            write_calldata_to_file(calldata_name, hex_swap.as_str());
+        }
+    }
+
     mod uniswap_v4_angstrom {
         use super::*;
         use crate::encoding::evm::{
