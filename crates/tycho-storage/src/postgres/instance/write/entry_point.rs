@@ -7,15 +7,24 @@ use std::collections::{HashMap, HashSet};
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
-    models::{blockchain::EntryPoint, ComponentId},
+    models::{
+        blockchain::{EntryPoint, TracingParams},
+        ComponentId, EntryPointId,
+    },
     storage::StorageError,
 };
 
 use crate::postgres::{
     instance::{
         gateway::PostgresGatewayNew,
-        orm::{NewEntryPoint, ProtocolComponentUsesEntryPoint},
-        schema::tycho::{entry_point, protocol_component_uses_entry_point},
+        orm::{
+            EntryPointTracingType, NewEntryPoint, NewEntryPointTracingParams,
+            ProtocolComponentHasEntryPointTracingParams, ProtocolComponentUsesEntryPoint,
+        },
+        schema::tycho::{
+            entry_point, entry_point_tracing_params,
+            protocol_component_has_entry_point_tracing_params, protocol_component_uses_entry_point,
+        },
         InstanceId,
     },
     storage_error_from_diesel,
@@ -101,6 +110,107 @@ impl PostgresGatewayNew {
         }
         Ok(())
     }
+
+    /// Stores the tracing params of each entry point in the instance, and links each params to the
+    /// component that it was sent with.
+    ///
+    /// Params that are stored already are kept, with no error, and the new links are added. Links
+    /// are never removed.
+    ///
+    /// Fails with `NotFound` for an entry point or a component that the instance does not have.
+    pub(crate) async fn insert_entry_point_tracing_params(
+        &self,
+        instance: InstanceId,
+        new_data: &HashMap<EntryPointId, HashSet<(TracingParams, ComponentId)>>,
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        if new_data.is_empty() {
+            return Ok(());
+        }
+        let external_ids: Vec<&str> = new_data
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let entry_point_ids = entry_point_ids(instance, &external_ids, conn).await?;
+        let mut rows = Vec::new();
+        for (entry_point, params_set) in new_data {
+            for (params, _) in params_set {
+                rows.push(NewEntryPointTracingParams {
+                    instance_id: instance,
+                    entry_point_id: entry_point_ids[entry_point],
+                    tracing_type: EntryPointTracingType::from(params),
+                    data: Some(tracing_params_data(params)?),
+                });
+            }
+        }
+        for chunk in rows.chunks(NewEntryPointTracingParams::MAX_BATCH_SIZE) {
+            diesel::insert_into(entry_point_tracing_params::table)
+                .values(chunk)
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(
+                        err,
+                        "EntryPointTracingParams",
+                        &instance.to_string(),
+                        None,
+                    )
+                })?;
+        }
+
+        let wanted: Vec<(EntryPointId, TracingParams)> = new_data
+            .iter()
+            .flat_map(|(entry_point, params_set)| {
+                params_set
+                    .iter()
+                    .map(|(params, _)| (entry_point.clone(), params.clone()))
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let params_ids = tracing_params_ids(instance, &wanted, conn).await?;
+        let component_external_ids: Vec<&str> = new_data
+            .values()
+            .flatten()
+            .map(|(_, component)| component.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let component_ids = self
+            .component_ids(instance, &component_external_ids, conn)
+            .await?;
+
+        let links: Vec<ProtocolComponentHasEntryPointTracingParams> = new_data
+            .iter()
+            .flat_map(|(entry_point, params_set)| {
+                params_set
+                    .iter()
+                    .map(|(params, component)| ProtocolComponentHasEntryPointTracingParams {
+                        instance_id: instance,
+                        protocol_component_id: component_ids[component],
+                        entry_point_tracing_params_id: params_ids
+                            [&(entry_point.clone(), params.clone())],
+                    })
+            })
+            .collect();
+        for chunk in links.chunks(ProtocolComponentHasEntryPointTracingParams::MAX_BATCH_SIZE) {
+            diesel::insert_into(protocol_component_has_entry_point_tracing_params::table)
+                .values(chunk)
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(
+                        err,
+                        "ProtocolComponentHasEntryPointTracingParams",
+                        &instance.to_string(),
+                        None,
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 /// Returns the id of each entry point of the instance, by external id.
@@ -139,6 +249,89 @@ async fn entry_point_ids(
         return Err(StorageError::NotFound("EntryPoint".to_string(), (*missing).to_string()));
     }
     Ok(ids)
+}
+
+/// Stored tracing params as (data, id), by entry point id and tracing type.
+type StoredParams = HashMap<(i64, EntryPointTracingType), Vec<(Option<serde_json::Value>, i64)>>;
+
+/// Returns the id of the tracing params of each (entry point external id, params) pair, in the
+/// instance.
+///
+/// The params are found by their JSON, compared in Rust, because the unique key holds a hash
+/// that a trigger computes. `NotFound` for the first pair that the instance does not have.
+async fn tracing_params_ids(
+    instance: InstanceId,
+    wanted: &[(EntryPointId, TracingParams)],
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<(EntryPointId, TracingParams), i64>, StorageError> {
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let external_ids: Vec<&str> = wanted
+        .iter()
+        .map(|(entry_point, _)| entry_point.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let entry_point_ids = entry_point_ids(instance, &external_ids, conn).await?;
+    let rows: Vec<(i64, EntryPointTracingType, Option<serde_json::Value>, i64)> =
+        entry_point_tracing_params::table
+            .filter(entry_point_tracing_params::instance_id.eq(instance))
+            .filter(
+                entry_point_tracing_params::entry_point_id
+                    .eq_any(entry_point_ids.values().copied()),
+            )
+            .select((
+                entry_point_tracing_params::entry_point_id,
+                entry_point_tracing_params::tracing_type,
+                entry_point_tracing_params::data,
+                entry_point_tracing_params::id,
+            ))
+            .load(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(
+                    err,
+                    "EntryPointTracingParams",
+                    &instance.to_string(),
+                    None,
+                )
+            })?;
+    let mut stored: StoredParams = HashMap::new();
+    for (entry_point_id, tracing_type, data, id) in rows {
+        stored
+            .entry((entry_point_id, tracing_type))
+            .or_default()
+            .push((data, id));
+    }
+
+    let mut ids = HashMap::with_capacity(wanted.len());
+    for (entry_point, params) in wanted {
+        let data = Some(tracing_params_data(params)?);
+        let key = (entry_point_ids[entry_point], EntryPointTracingType::from(params));
+        let Some(id) = stored.get(&key).and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|(stored_data, _)| *stored_data == data)
+                .map(|(_, id)| *id)
+        }) else {
+            return Err(StorageError::NotFound(
+                "EntryPointTracingParams".to_string(),
+                format!("{entry_point}, {params:?}"),
+            ));
+        };
+        ids.insert((entry_point.clone(), params.clone()), id);
+    }
+    Ok(ids)
+}
+
+/// The JSON of tracing params, as the instance stores them in `data`.
+fn tracing_params_data(params: &TracingParams) -> Result<serde_json::Value, StorageError> {
+    match params {
+        TracingParams::RPCTracer(rpc_tracer) => serde_json::to_value(rpc_tracer).map_err(|err| {
+            StorageError::Unexpected(format!("Failed to serialize RPCTracerParams: {err}"))
+        }),
+    }
 }
 
 #[cfg(test)]
