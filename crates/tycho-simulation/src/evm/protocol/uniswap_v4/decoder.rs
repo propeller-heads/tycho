@@ -135,7 +135,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 .ok_or_else(|| InvalidSnapshotError::MissingAttribute("tick".to_string()))?,
         );
 
-        let ticks: Result<Vec<_>, _> = snapshot
+        let ticks: Vec<_> = snapshot
             .state
             .attributes
             .iter()
@@ -156,34 +156,52 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                     None
                 }
             })
-            .collect();
+            .try_collect()?;
 
+        // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
+        // about whether the pool has a hook: the zero address is what "no hook" looks like on the
+        // wire, and the length check rejects a malformed value. A pool whose hook cannot take part
+        // in a swap is a plain V4 pool too, on every chain: no handler, no chain needed. A hook
+        // with a native handler registered on this chain is always simulated by it, because some
+        // pool managers (PancakeSwap Infinity) do not encode permissions in the hook address. For
+        // the system that only emits such hooks the address bits are never consulted, so a missing
+        // chain or handler fails the decode instead of hinging on whatever bits the address has.
         let hook_attribute = snapshot
             .component
             .static_attributes
-            .get("hooks");
+            .get("hooks")
+            .ok_or_else(|| InvalidSnapshotError::MissingAttribute("hooks".to_string()))?;
+        let permissions_in_pool_key =
+            snapshot.component.protocol_system == POOL_KEY_PERMISSION_SYSTEM;
+        let hook_address = Some(bytes_to_address(hook_attribute).map_err(|err| {
+            InvalidSnapshotError::ValueError(format!(
+                "hooks attribute is not a 20-byte address: {err}"
+            ))
+        })?)
+        .filter(|address| {
+            hook_participates_in_swaps(*address) ||
+                (permissions_in_pool_key && !address.is_zero()) ||
+                decoder_context
+                    .chain
+                    .is_some_and(|chain| has_native_hook_handler(chain, address))
+        });
 
-        let mut ticks = match ticks {
-            Ok(ticks) if !ticks.is_empty() => ticks
+        let ticks = if ticks.is_empty() {
+            // An empty tick set is legitimate when the pool holds no active liquidity (a
+            // freshly-created or fully-drained pool) or when a hook manages swaps/liquidity.
+            // Active liquidity with no tick data, on the other hand, is a malformed snapshot.
+            if hook_address.is_some() || liquidity == 0 {
+                Vec::new()
+            } else {
+                return Err(InvalidSnapshotError::MissingAttribute("tick_liquidities".to_string()));
+            }
+        } else {
+            ticks
                 .into_iter()
                 .filter(|t| t.net_liquidity != 0)
-                .collect::<Vec<_>>(),
-            _ => {
-                // there might be pools where the liquidity is managed by the hook
-                //
-                // Keyed on the attribute being present rather than on the address being non-zero:
-                // a freshly initialised hookless pool has no ticks yet and must still decode.
-                if hook_attribute.is_some() {
-                    Vec::new()
-                } else {
-                    return Err(InvalidSnapshotError::MissingAttribute(
-                        "tick_liquidities".to_string(),
-                    ));
-                }
-            }
+                .sorted_unstable_by_key(|t| t.index)
+                .collect()
         };
-
-        ticks.sort_by_key(|tick| tick.index);
 
         let mut state = UniswapV4State::new(liquidity, sqrt_price, fees, tick, tick_spacing, ticks)
             .map_err(|err| {
@@ -195,32 +213,6 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
                 InvalidSnapshotError::ValueError(err.to_string())
             })?;
         state.set_gas_costs(gas_costs_for(&snapshot.component.protocol_system));
-
-        // Every Uniswap V4 component carries a `hooks` attribute, so its presence says nothing
-        // about whether the pool has a hook: the zero address is what "no hook" looks like on the
-        // wire, and the length check rejects a malformed value. A pool whose hook cannot take part
-        // in a swap is a plain V4 pool too, on every chain: no handler, no chain needed. A hook
-        // with a native handler registered on this chain is always simulated by it, because some
-        // pool managers (PancakeSwap Infinity) do not encode permissions in the hook address. For
-        // the system that only emits such hooks the address bits are never consulted, so a missing
-        // chain or handler fails the decode instead of hinging on whatever bits the address has.
-        let permissions_in_pool_key =
-            snapshot.component.protocol_system == POOL_KEY_PERMISSION_SYSTEM;
-        let hook_address = hook_attribute
-            .map(bytes_to_address)
-            .transpose()
-            .map_err(|err| {
-                InvalidSnapshotError::ValueError(format!(
-                    "hooks attribute is not a 20-byte address: {err}"
-                ))
-            })?
-            .filter(|address| {
-                hook_participates_in_swaps(*address) ||
-                    (permissions_in_pool_key && !address.is_zero()) ||
-                    decoder_context
-                        .chain
-                        .is_some_and(|chain| has_native_hook_handler(chain, address))
-            });
 
         if let Some(hook_address) = hook_address {
             // Merge state attributes into static_attributes for hook creation
@@ -251,7 +243,7 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
 
             let hook_handler = instantiate_hook_handler(chain, &hook_address, hook_params)?;
             state.set_hook_handler(hook_handler);
-        };
+        }
 
         // A pool whose hook refuses the pool's current terms (`spot_fees` fails with
         // `InvalidInput`) cannot price until a delta changes those terms, so it skips the probe
@@ -345,12 +337,19 @@ pub mod pons_fixture {
     pub fn hookless_snapshot() -> ComponentWithState {
         let mut snapshot = snapshot();
         snapshot.component.protocol_system = "uniswap_v4".to_string();
-        for attribute in ["hooks", "hook_identifier", "pons_hook_fee_bps", "pons_creator_tax_bps"] {
+        for attribute in ["hook_identifier", "pons_hook_fee_bps", "pons_creator_tax_bps"] {
             snapshot
                 .component
                 .static_attributes
                 .remove(attribute);
         }
+        snapshot
+            .component
+            .static_attributes
+            .insert(
+                "hooks".to_string(),
+                Bytes::from_str("0x0000000000000000000000000000000000000000").unwrap(),
+            );
         snapshot
     }
 
@@ -492,6 +491,7 @@ mod tests {
         let static_attributes: HashMap<String, Bytes> = HashMap::from([
             ("key_lp_fee".to_string(), Bytes::from(500_i32.to_be_bytes().to_vec())),
             ("tick_spacing".to_string(), Bytes::from(60_i32.to_be_bytes().to_vec())),
+            ("hooks".to_string(), Bytes::from(vec![0u8; 20])),
         ]);
 
         ProtocolComponent {
@@ -646,25 +646,6 @@ mod tests {
             state: ProtocolComponentState {
                 component_id: "State1".to_owned(),
                 attributes: hookless_pool_attributes(),
-                balances: HashMap::new(),
-            },
-            component,
-            component_tvl: None,
-            entrypoints: Vec::new(),
-        }
-    }
-
-    /// The snapshot the original hook tests used: minimal attributes, no tokens.
-    fn usv4_snapshot_with_hook(hook: &str) -> ComponentWithState {
-        let mut component = usv4_component();
-        component
-            .static_attributes
-            .insert("hooks".to_string(), Bytes::from_str(hook).unwrap());
-
-        ComponentWithState {
-            state: ProtocolComponentState {
-                component_id: "State1".to_owned(),
-                attributes: usv4_attributes(),
                 balances: HashMap::new(),
             },
             component,
@@ -1116,20 +1097,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_usv4_zero_hook_pool_with_no_ticks_still_decodes() {
-        // Tick leniency is keyed on the `hooks` attribute being present, not on the address being
-        // non-zero: a freshly initialised hookless pool has no ticks yet and must still decode.
-        let mut snapshot = usv4_snapshot_with_hook(ZERO_HOOK);
-        snapshot
-            .state
-            .attributes
-            .remove("ticks/60/net_liquidity");
+    async fn test_usv4_tick_decode_error_propagates() {
+        // A malformed tick attribute must surface as a decoding (ValueError) error, not be
+        // masked as missing/empty tick liquidity.
+        let mut attributes = usv4_attributes();
+        attributes.insert(
+            "ticks/not_an_int/net_liquidity".to_string(),
+            Bytes::from(400_i128.to_be_bytes().to_vec()),
+        );
 
-        let decoded = decode_with_chain(snapshot, None)
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(),
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot).await;
+        assert!(matches!(result, Err(InvalidSnapshotError::ValueError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_usv4_empty_hookless_pool_decodes() {
+        // A hookless pool with zero active liquidity and no tick data is valid (e.g. a freshly
+        // created or fully-drained pool) and must decode as an empty pool, not be rejected.
+        let mut attributes = usv4_attributes();
+        attributes.insert("liquidity".to_string(), Bytes::from(0_u64.to_be_bytes().to_vec()));
+        attributes.remove("ticks/60/net_liquidity");
+
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState {
+                component_id: "State1".to_owned(),
+                attributes,
+                balances: HashMap::new(),
+            },
+            component: usv4_component(), // hooks = zero address
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+
+        let result = try_decode_snapshot_with_defaults::<UniswapV4State>(snapshot)
             .await
-            .expect("a hookless pool with no ticks must decode");
+            .unwrap();
 
-        assert!(decoded.hook.is_none());
+        let expected = UniswapV4State::new(
+            0,
+            U256::from(79228162514264337593543950336_u128),
+            UniswapV4Fees::new(0, 0, 500),
+            300,
+            60,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result, expected);
     }
 
     #[tokio::test]
@@ -1141,6 +1165,7 @@ mod tests {
     #[case::missing_fee("key_lp_fee")]
     #[case::missing_fee("protocol_fees/one2zero")]
     #[case::missing_fee("protocol_fees/zero2one")]
+    #[case::missing_hooks("hooks")]
     async fn test_usv4_try_from_invalid(#[case] missing_attribute: String) {
         // remove missing attribute
         let mut component = usv4_component();
@@ -1159,6 +1184,12 @@ mod tests {
             component
                 .static_attributes
                 .remove("key_lp_fee");
+        }
+
+        if missing_attribute == "hooks" {
+            component
+                .static_attributes
+                .remove("hooks");
         }
 
         let snapshot = ComponentWithState {
