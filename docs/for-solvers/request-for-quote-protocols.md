@@ -4,11 +4,12 @@ Some venues price off the chain. Instead of pool state Tycho reads from the chai
 
 Two kinds share that shape, and the difference shows at execution:
 
-* **RFQ market makers** — Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
+* **RFQ market makers** — Aqua0, Bebop, Hashflow, Liquorice and Native. The streamed book prices **indicatively**, for simulation; at encoding time the maker signs a **binding** quote, firm for a few seconds, and may decline the trade.
 * **Off-chain-priced pAMMs** — Metric. The book prices a pool you execute against directly: there is no quote to request and nothing to sign.
 
 | Protocol    | Kind | Simulation Time | Credentials | Chains                                            | Protocol system  |
 |-------------|------|-----------------|-------------|---------------------------------------------------|------------------|
+| `aqua0`     | RFQ  | -               | None        | Base, Arbitrum, Polygon, Robinhood, Arc           | `rfq:aqua0`      |
 | `bebop`     | RFQ  | 0.5 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum, Robinhood | `rfq:bebop`      |
 | `hashflow`  | RFQ  | 0.4 µs          | Required    | Ethereum, BSC, Polygon, Base, Arbitrum            | `rfq:hashflow`   |
 | `liquorice` | RFQ  | 0.4 µs          | Required    | Ethereum, Arbitrum                                | `rfq:liquorice`  |
@@ -23,7 +24,7 @@ On Ethereum, Metric is also available as a pAMM venue on the [pAMM price level s
 
 The book-feed quickstart is similar to the other protocols [quickstart](../).
 
-See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, <a href="https://docs.native.org/" target="_blank" rel="noopener noreferrer">Native</a> and <a href="https://docs.metric.xyz/" target="_blank" rel="noopener noreferrer">Metric</a> are the only supported providers.
+See the code <a href="https://github.com/propeller-heads/tycho-indexer/tree/main/crates/tycho-simulation/examples/book_quickstart" target="_blank" rel="noopener noreferrer">here</a>. As of now, Aqua0, <a href="https://docs.bebop.xyz/bebop/bebop-api-pmm-rfq/pmm-rfq-api-intro" target="_blank" rel="noopener noreferrer">Bebop</a>, <a href="https://docs.hashflow.com/hashflow/taker/getting-started-api-v3" target="_blank" rel="noopener noreferrer">Hashflow</a>, <a href="https://liquorice.tech/" target="_blank" rel="noopener noreferrer">Liquorice</a>, <a href="https://docs.native.org/" target="_blank" rel="noopener noreferrer">Native</a> and <a href="https://docs.metric.xyz/" target="_blank" rel="noopener noreferrer">Metric</a> are the only supported providers.
 
 The feed builders take credentials as plain arguments; how you obtain them is up to your application. The example reads them from the environment, so set the ones for the providers you want, plus your private key if you wish to execute against the Tycho Router:
 
@@ -35,6 +36,7 @@ export HASHFLOW_KEY=<your-hashflow-api-key>
 export LIQUORICE_USER=<your-liquorice-api-username>
 export LIQUORICE_KEY=<your-liquorice-api-key>
 export NATIVE_API_KEY=<your-native-api-key>
+export AQUA0_ENABLED=true # Aqua0's API is public and needs no key
 export METRIC_API_KEY=<your-metric-trading-key>
 export PRIVATE_KEY=<your-wallet-private-key>
 ```
@@ -82,7 +84,7 @@ To get token information from Tycho Indexer RPC please use [load\_all\_tokens](s
 
 ### Book feeds
 
-Each venue has its own feed type (`BebopFeed`, `HashflowFeed`, `LiquoriceFeed`, `NativeFeed`, `MetricFeed`), built from a shared `BookFeedConfig` plus provider-specific credentials and options. Every feed implements the `SnapshotFeed` trait — a live price feed that publishes the provider's latest complete set of books, or withdraws when nothing is servable (before the first set arrives, and after one goes stale). You read it through `BookFeedStreams`, which owns the channels and the feed tasks: each feed runs in its own task and hands you the newest set through a watch channel, so falling behind costs you skipped snapshots rather than a stalled venue connection. Binding quotes are not part of the feed — for the RFQ venues, the states it emits request them at encoding time through their embedded client.
+Each venue has its own feed type (`Aqua0Feed`, `BebopFeed`, `HashflowFeed`, `LiquoriceFeed`, `NativeFeed`, `MetricFeed`), built from a shared `BookFeedConfig` plus provider-specific credentials and options. Every feed implements the `SnapshotFeed` trait — a live price feed that publishes the provider's latest complete set of books, or withdraws when nothing is servable (before the first set arrives, and after one goes stale). You read it through `BookFeedStreams`, which owns the channels and the feed tasks: each feed runs in its own task and hands you the newest set through a watch channel, so falling behind costs you skipped snapshots rather than a stalled venue connection. Binding quotes are not part of the feed — for the RFQ venues, the states it emits request them at encoding time through their embedded client.
 
 Example setup for Bebop:
 
@@ -99,9 +101,9 @@ let bebop_feed = BebopFeedBuilder::new(config.clone(), usd_quote_tokens.clone(),
 
 **Minimum TVL** (`min_tvl_usd`) counts in USD. This setting filters out token pairs whose book is thin on the venue's side, helping avoid illiquid quotes.
 
-**USD quote tokens:** The Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none, and Metric applies `min_tvl_usd` itself, leaving out pools whose TVL it cannot compute unless the floor is 0.
+**USD quote tokens:** The Aqua0, Bebop, Hashflow, Liquorice and Native builders take a set of USD-priced tokens that their feeds normalize book TVL into before applying `min_tvl_usd`. The feeds use the set only to filter by TVL, never for quote requests or trade execution. Metric's API reports USD TVL directly, so its builder takes none, and Metric applies `min_tvl_usd` itself, leaving out pools whose TVL it cannot compute unless the floor is 0.
 
-You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one.
+You should specify USD-priced stablecoins (e.g., USDC, USDT, DAI) as quote tokens, since the supported venues price most of their liquidity in USD stablecoins. This ensures the feed calculates TVL accurately when comparing pairs with different quote tokens. For instance, if you receive price levels for an ETH/WBTC pair where WBTC is the quote token, the feed will look up the WBTC price in one of your approved quote tokens (USD stablecoins) to properly calculate the TVL in dollar terms. `usd_stablecoins_for_chain` returns the curated set for a chain Tycho has one for, and `None` for the rest; an empty set filters out every pair, so always pass a non-empty one. Aqua0 differs here: a pair with neither token in the set clears only a zero `min_tvl_usd`.
 
 **Note:** Some venues may support tokens that Tycho does not. Because execution happens through the Tycho Router, it’s important to ensure that every token you trade out of these books is also supported by Tycho.
 
@@ -230,6 +232,22 @@ This mechanism also makes RFQs composable with other on-chain swaps. That enable
 
 {% hint style="warning" %}
 After encoding, a signed RFQ quote is valid for only 1–3 seconds. Execution must follow immediately, otherwise the transaction will revert.
+{% endhint %}
+
+{% hint style="info" %}
+**Aqua0 is different.** Its quote binds the exact input. The Aqua0 encoder checks only what it sees in its own swap: it is the first swap of its group, it is not split, and its `estimated_amount_in` is non-zero. The rest is up to the solver:
+
+* The Aqua0 swap is the first hop of the solution. A path like Uniswap → Aqua0 → Curve does not fill.
+* The route has one Aqua0 swap and no splits.
+* Its `estimated_amount_in` is exactly the solution's input, not a padded amount.
+
+A route that breaks one of these still encodes and reserves Aqua0 liquidity, then reverts on chain.
+
+An Aqua0 quote can be filled for 45 seconds. Its liquidity stays reserved for about 60 seconds, until 15 seconds after that deadline. Encode an Aqua0 route only to execute it.
+
+Several open quotes on one Aqua0 market are fine, from one `encode_solutions` call or several. Each new quote is priced as if the open quotes before it on that market fill, so a later quote in the same direction is priced past the earlier ones, and each can fill when they land in the order they were signed. Two cases still revert in the hook's `beforeSwap`: an earlier same-direction quote that lands after a later one, and a quote in the other direction that lands after a fill it was signed before. Quotes also compete for liquidity, also from the same caller, and Tycho encodes the solutions of one `encode_solutions` call in parallel. A quote that does not fit the liquidity the open quotes leave is refused, and then the whole call fails. A quote that reverts or goes unused keeps its liquidity held until its hold ends. The Aqua0 module's README lists the hook's errors, and `aqua0::revert::decode_revert` names the error in a failed fill's revert data.
+
+Set the gas limit at least 30% above Tycho's gas estimate, or use `eth_estimateGas` on the encoded transaction. The fill adds and removes its liquidity inside the swap, so it needs more gas while it runs than it is billed for after the refund. The recorded one-range fill on Arbitrum is estimated at about 758k gas and billed about 731k, but reverts with a gas limit below about 920k. For fills with more ranges, `eth_estimateGas` is safer.
 {% endhint %}
 
 #### Encode solution

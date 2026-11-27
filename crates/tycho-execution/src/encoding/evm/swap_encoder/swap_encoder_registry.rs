@@ -16,25 +16,25 @@ use crate::encoding::{
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
-            aerodrome_v1::AerodromeV1SwapEncoder, baibai::BaibaiSwapEncoder,
-            baibai_fallback::BaibaiFallbackSwapEncoder, balancer_v2::BalancerV2SwapEncoder,
-            balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
-            bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
-            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
-            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
-            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
-            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
-            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
-            native_fallback::NativeFallbackSwapEncoder, native_wrap::WrapSwapEncoder,
-            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
-            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            aerodrome_v1::AerodromeV1SwapEncoder, aqua0::Aqua0SwapEncoder,
+            baibai::BaibaiSwapEncoder, baibai_fallback::BaibaiFallbackSwapEncoder,
+            balancer_v2::BalancerV2SwapEncoder, balancer_v3::BalancerV3SwapEncoder,
+            bebop::BebopSwapEncoder, bebop_fallback::BebopFallbackSwapEncoder,
+            bopamm::BopAMMSwapEncoder, curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder,
+            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
+            etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder, fallback::FallbackSwapEncoder,
+            fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
+            hashflow::HashflowSwapEncoder, hashflow_fallback::HashflowFallbackSwapEncoder,
+            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            liquorice::LiquoriceSwapEncoder, liquorice_fallback::LiquoriceFallbackSwapEncoder,
+            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
+            metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
+            native::NativeSwapEncoder, native_fallback::NativeFallbackSwapEncoder,
+            native_wrap::WrapSwapEncoder, pancakeswap_infinity::PancakeswapInfinitySwapEncoder,
+            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -238,6 +238,9 @@ impl SwapEncoderRegistry {
                     self.chain,
                     config,
                 )?))
+            }
+            "rfq:aqua0" => {
+                Ok(Box::new(Aqua0SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ekubo_v2" => {
                 Ok(Box::new(EkuboSwapEncoder::new(executor_address, self.chain, config)?))
@@ -611,6 +614,23 @@ mod tests {
         assert!(registry
             .get_encoder("uniswap_v4")
             .is_none());
+    }
+
+    /// Aqua0 has no executor of its own: its `executor_addresses.json` entry is the chain's Uniswap
+    /// V4 executor.
+    #[test]
+    fn aqua0_reuses_the_existing_v4_executor() {
+        for chain in [Chain::Base, Chain::Arbitrum, Chain::Polygon, Chain::Robinhood, Chain::Arc] {
+            let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap();
+            let aqua0 = registry
+                .get_encoder("rfq:aqua0")
+                .unwrap();
+            let v4 = registry
+                .get_encoder("uniswap_v4")
+                .unwrap();
+            assert_eq!(aqua0.executor_address(), v4.executor_address());
+            assert!(aqua0.blocks_on_quote());
+        }
     }
 
     #[test]

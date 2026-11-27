@@ -1,3 +1,4 @@
+pub mod aqua0;
 pub mod bebop;
 pub mod euclid;
 pub mod hashflow;
