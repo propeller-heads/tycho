@@ -79,11 +79,15 @@ const GAS_PER_INITIALIZED_TICK_CROSS: u64 = 22_000;
 /// under and the warm ones slightly over.
 const SWAP_SETTLEMENT_GAS: u64 = 30_000;
 /// The swap callback paying the input token to the pool. The transfer alone is 8.9k in Base
-/// transaction `0x4cd89607…f82c` (block 61.6M), a USDC transfer to a pool that already holds
-/// USDC. Through TychoRouter the callback costs 7k (WETH) to 18k more than that per hop, as the
-/// Tycho team measured on Base. Set to the upper figure, so a WETH hop is over-estimated by
-/// about 11k.
-const SWAP_CALLBACK_GAS: u64 = 27_000;
+/// transaction `0x4cd896073e5de882cef0aca24962664f38b580835b73584903ddd6b215e4f82c` (block
+/// 61,621,836), a USDC transfer to a pool that already holds USDC. Through TychoRouter the
+/// callback costs more than the transfer: in the swaps the Tycho team executed for the Base range
+/// tests it came to about 16k per WETH hop and 20k per USDC hop, and to 27k at most (their
+/// review of PR #1714, 2026-11-26). Set to the USDC figure, so a WETH hop is over-estimated by
+/// about 4k.
+///
+/// Re-measure when the router's callback changes.
+const SWAP_CALLBACK_GAS: u64 = 20_000;
 /// Gas budget of a single swap: the Ethereum transaction gas cap, as in the Uniswap V3 model.
 const MAX_SWAP_GAS: u64 = 16_700_000;
 /// Plugin costs a swap can carry, `beforeSwap` and `afterSwap` together. Set aside before
@@ -1280,7 +1284,7 @@ mod tests {
         assert!(result.amount < fee_free);
         assert!(result.amount > &fee_free - &fee_free / 1000u32);
         // No plugin: the swap frame, one step and the settlement.
-        assert_eq!(result.gas, BigUint::from(54_000u64 + 5_400 + 30_000 + 27_000));
+        assert_eq!(result.gas, BigUint::from(54_000u64 + 5_400 + 30_000 + 20_000));
         let new_state = result
             .new_state
             .as_any()
@@ -1734,7 +1738,7 @@ mod tests {
         assert_eq!(pool.fee(), 0.001);
         assert_eq!(
             quote.gas,
-            BigUint::from(54_000u64 + 5_400 + 30_000 + 27_000 + 67_000 + 9_000 + 44_000 + 3_000)
+            BigUint::from(54_000u64 + 5_400 + 30_000 + 20_000 + 67_000 + 9_000 + 44_000 + 3_000)
         );
     }
 
