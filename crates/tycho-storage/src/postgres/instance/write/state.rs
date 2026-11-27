@@ -1,5 +1,5 @@
 //! Protocol state of an instance: one value per component and attribute name, versioned.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
@@ -58,16 +58,11 @@ impl PostgresGatewayNew {
         let mut changes = Vec::new();
         for (tx, delta) in deltas {
             let origin = origins.change(tx)?;
-            let component = component_ids[&delta.component_id];
-            // Sorted, so that the key a failure names does not depend on the hash order.
-            let updated: BTreeMap<_, _> = delta
-                .updated_attributes
-                .iter()
-                .collect();
-            for (name, value) in updated {
+            let component_id = component_ids[&delta.component_id];
+            for (name, value) in &delta.updated_attributes {
                 changes.push(VersionedChange::Update(NewProtocolState {
                     instance_id: instance,
-                    protocol_component_id: component,
+                    protocol_component_id: component_id,
                     attribute_name: name.clone(),
                     attribute_value: value.clone(),
                     // write_versions links every later version to the one it replaces.
@@ -76,12 +71,8 @@ impl PostgresGatewayNew {
                     tx_index: origin.tx_index,
                 }));
             }
-            let deleted: BTreeSet<_> = delta
-                .deleted_attributes
-                .iter()
-                .collect();
-            for name in deleted {
-                changes.push(VersionedChange::Delete { key: (component, name.clone()), origin });
+            for name in &delta.deleted_attributes {
+                changes.push(VersionedChange::Delete { key: (component_id, name.clone()), origin });
             }
         }
         self.write_versions(instance, changes, conn)

@@ -161,85 +161,81 @@ impl PostgresGatewayNew {
             })
             .collect();
 
-        self.insert_token_links(instance, &new, conn)
-            .await?;
-        self.insert_contract_links(instance, &new, &account_ids, conn)
-            .await
+        insert_token_links(instance, &new, conn).await?;
+        insert_contract_links(instance, &new, &account_ids, conn).await
     }
+}
 
-    /// Links each new component to its tokens, in the order of `tokens`.
-    async fn insert_token_links(
-        &self,
-        instance: InstanceId,
-        new: &[(&ProtocolComponent, i64)],
-        conn: &mut AsyncPgConnection,
-    ) -> Result<(), StorageError> {
-        let mut links = Vec::new();
-        for (component, id) in new {
-            for (index, token) in component.tokens.iter().enumerate() {
-                links.push(NewProtocolComponentHoldsToken {
+/// Links each new component to its tokens, in the order of `tokens`.
+async fn insert_token_links(
+    instance: InstanceId,
+    new: &[(&ProtocolComponent, i64)],
+    conn: &mut AsyncPgConnection,
+) -> Result<(), StorageError> {
+    let mut links = Vec::new();
+    for (component, id) in new {
+        for (index, token) in component.tokens.iter().enumerate() {
+            links.push(NewProtocolComponentHoldsToken {
+                instance_id: instance,
+                protocol_component_id: *id,
+                token: token.clone(),
+                token_index: convert_int(index, "token index")?,
+            });
+        }
+    }
+    for chunk in links.chunks(NewProtocolComponentHoldsToken::MAX_BATCH_SIZE) {
+        diesel::insert_into(protocol_component_holds_token::table)
+            .values(chunk)
+            .execute(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(
+                    err,
+                    "ProtocolComponentHoldsToken",
+                    &instance.to_string(),
+                    None,
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// Links each new component to the accounts of its contracts, by their `account_ids` in the
+/// same instance.
+async fn insert_contract_links(
+    instance: InstanceId,
+    new: &[(&ProtocolComponent, i64)],
+    account_ids: &HashMap<Bytes, i64>,
+    conn: &mut AsyncPgConnection,
+) -> Result<(), StorageError> {
+    let links: Vec<NewProtocolComponentHoldsContract> = new
+        .iter()
+        .flat_map(|(component, id)| {
+            component
+                .contract_addresses
+                .iter()
+                .map(|address| NewProtocolComponentHoldsContract {
                     instance_id: instance,
                     protocol_component_id: *id,
-                    token: token.clone(),
-                    token_index: convert_int(index, "token index")?,
-                });
-            }
-        }
-        for chunk in links.chunks(NewProtocolComponentHoldsToken::MAX_BATCH_SIZE) {
-            diesel::insert_into(protocol_component_holds_token::table)
-                .values(chunk)
-                .execute(conn)
-                .await
-                .map_err(|err| {
-                    storage_error_from_diesel(
-                        err,
-                        "ProtocolComponentHoldsToken",
-                        &instance.to_string(),
-                        None,
-                    )
-                })?;
-        }
-        Ok(())
+                    account_id: account_ids[address],
+                })
+        })
+        .collect();
+    for chunk in links.chunks(NewProtocolComponentHoldsContract::MAX_BATCH_SIZE) {
+        diesel::insert_into(protocol_component_holds_contract::table)
+            .values(chunk)
+            .execute(conn)
+            .await
+            .map_err(|err| {
+                storage_error_from_diesel(
+                    err,
+                    "ProtocolComponentHoldsContract",
+                    &instance.to_string(),
+                    None,
+                )
+            })?;
     }
-
-    /// Links each new component to the accounts of its contracts, by their `account_ids` in the
-    /// same instance.
-    async fn insert_contract_links(
-        &self,
-        instance: InstanceId,
-        new: &[(&ProtocolComponent, i64)],
-        account_ids: &HashMap<Bytes, i64>,
-        conn: &mut AsyncPgConnection,
-    ) -> Result<(), StorageError> {
-        let links: Vec<NewProtocolComponentHoldsContract> = new
-            .iter()
-            .flat_map(|(component, id)| {
-                component
-                    .contract_addresses
-                    .iter()
-                    .map(|address| NewProtocolComponentHoldsContract {
-                        instance_id: instance,
-                        protocol_component_id: *id,
-                        account_id: account_ids[address],
-                    })
-            })
-            .collect();
-        for chunk in links.chunks(NewProtocolComponentHoldsContract::MAX_BATCH_SIZE) {
-            diesel::insert_into(protocol_component_holds_contract::table)
-                .values(chunk)
-                .execute(conn)
-                .await
-                .map_err(|err| {
-                    storage_error_from_diesel(
-                        err,
-                        "ProtocolComponentHoldsContract",
-                        &instance.to_string(),
-                        None,
-                    )
-                })?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// The row of a new component. Static attributes are stored as a JSON object of hex strings, or
@@ -323,15 +319,15 @@ fn check_links_unique(component: &ProtocolComponent) -> Result<(), StorageError>
     Ok(())
 }
 
-/// Fails with `NotFound` for the first of `names` that is not a stored protocol type.
+/// Fails with `NotFound` for the first of `type_names` that is not a stored protocol type.
 ///
-/// Instance components name their type with no foreign key into `public.protocol_type`, so a
-/// writer checks the names first.
-pub(super) async fn check_protocol_types_stored(
-    names: &[&str],
+/// Instance components name their type with no foreign key into `public.protocol_type`, so
+/// `insert_protocol_components` checks the names first.
+async fn check_protocol_types_stored(
+    type_names: &[&str],
     conn: &mut AsyncPgConnection,
 ) -> Result<(), StorageError> {
-    let unique: HashSet<&str> = names.iter().copied().collect();
+    let unique: HashSet<&str> = type_names.iter().copied().collect();
     let stored: HashSet<String> = protocol_type::table
         .filter(protocol_type::name.eq_any(&unique))
         .select(protocol_type::name)
@@ -340,7 +336,7 @@ pub(super) async fn check_protocol_types_stored(
         .map_err(|err| storage_error_from_diesel(err, "ProtocolType", "batch", None))?
         .into_iter()
         .collect();
-    if let Some(missing) = names
+    if let Some(missing) = type_names
         .iter()
         .find(|name| !stored.contains(**name))
     {
