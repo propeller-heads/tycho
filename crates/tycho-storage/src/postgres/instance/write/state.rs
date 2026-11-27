@@ -220,17 +220,12 @@ impl VersionedRowNew for NewProtocolState {
 mod tests {
     use chrono::Duration;
     use tycho_common::{
-        models::{
-            blockchain::{Block, Transaction},
-            protocol::ProtocolComponentStateDelta,
-            Chain, TxHash,
-        },
+        models::{protocol::ProtocolComponentStateDelta, TxHash},
         Bytes,
     };
 
     use super::*;
     use crate::postgres::{
-        cache::WriteOp,
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
@@ -575,21 +570,7 @@ mod tests {
 
     /// A batch of block 2 at `at`, with the transaction `0xa1` at index 1 and `0xb2` at index 3.
     fn origins(at: NaiveDateTime) -> BatchOrigins {
-        let block = Block::new(2, Chain::Ethereum, Bytes::from(vec![2]), Bytes::default(), at);
-        let tx = |hash: u8, index: u64| {
-            Transaction::new(
-                Bytes::from(vec![hash]),
-                block.hash.clone(),
-                Bytes::default(),
-                None,
-                index,
-            )
-        };
-        let ops = vec![
-            WriteOp::UpsertBlock(vec![block.clone()]),
-            WriteOp::UpsertTx(vec![tx(0xa1, 1), tx(0xb2, 3)]),
-        ];
-        BatchOrigins::from_ops(&ops).expect("a valid batch")
+        db_fixtures::batch_origins(&[(2, at)], &[(0xa1, 2, 1), (0xb2, 2, 3)])
     }
 
     fn delta(

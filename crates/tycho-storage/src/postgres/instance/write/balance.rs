@@ -228,17 +228,10 @@ mod tests {
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use tycho_common::{
-        models::{
-            blockchain::{Block, Transaction},
-            protocol::ComponentBalance as DomainBalance,
-            Chain,
-        },
-        storage::StorageError,
-        Bytes,
+        models::protocol::ComponentBalance as DomainBalance, storage::StorageError, Bytes,
     };
 
     use crate::postgres::{
-        cache::WriteOp,
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
@@ -453,21 +446,7 @@ mod tests {
 
     /// A batch of block 10 at `ts`, with the transactions `0xa1` at index 1 and `0xa3` at index 3.
     fn origins(ts: NaiveDateTime) -> BatchOrigins {
-        let block = Block::new(10, Chain::Ethereum, Bytes::from("0x0a"), Bytes::default(), ts);
-        let tx = |hash: u8, index: u64| {
-            Transaction::new(
-                Bytes::from(vec![hash]),
-                block.hash.clone(),
-                Bytes::default(),
-                None,
-                index,
-            )
-        };
-        let ops = vec![
-            WriteOp::UpsertTx(vec![tx(0xa1, 1), tx(0xa3, 3)]),
-            WriteOp::UpsertBlock(vec![block.clone()]),
-        ];
-        BatchOrigins::from_ops(&ops).expect("a valid batch")
+        db_fixtures::batch_origins(&[(10, ts)], &[(0xa1, 10, 1), (0xa3, 10, 3)])
     }
 
     fn balance(token_id: u8, new: u64, tx: u8) -> DomainBalance {

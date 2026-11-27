@@ -349,25 +349,20 @@ async fn check_protocol_types_stored(
 mod tests {
     use std::collections::HashMap;
 
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::NaiveDate;
     use diesel::prelude::*;
     use diesel_async::{AsyncPgConnection, RunQueryDsl};
     use rstest::rstest;
     use serde_json::json;
     use tycho_common::{
-        models::{
-            blockchain::{Block, Transaction},
-            protocol::ProtocolComponent as DomainComponent,
-            Chain, ChangeType,
-        },
+        models::{protocol::ProtocolComponent as DomainComponent, Chain, ChangeType},
         storage::StorageError,
         Bytes,
     };
 
     use super::check_protocol_types_stored;
     use crate::postgres::{
-        cache::WriteOp,
-        db_fixtures,
+        db_fixtures::{self, ts},
         instance::{
             gateway::PostgresGatewayNew,
             origins::BatchOrigins,
@@ -466,39 +461,10 @@ mod tests {
         );
     }
 
-    fn ts(second: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, 26)
-            .and_then(|date| date.and_hms_opt(12, 0, second))
-            .expect("a valid timestamp")
-    }
-
     /// A batch of block 10 at second 10 with the transaction `0xa1` at index 1, and of block 11 at
     /// second 11 with the transaction `0xb2` at index 2.
     fn origins() -> BatchOrigins {
-        let block = |number: u8| {
-            Block::new(
-                number.into(),
-                Chain::Ethereum,
-                Bytes::from(vec![number]),
-                Bytes::default(),
-                ts(number.into()),
-            )
-        };
-        let tx = |hash: u8, block: &Block, index: u64| {
-            Transaction::new(
-                Bytes::from(vec![hash]),
-                block.hash.clone(),
-                Bytes::default(),
-                None,
-                index,
-            )
-        };
-        let (block_10, block_11) = (block(10), block(11));
-        let ops = vec![
-            WriteOp::UpsertBlock(vec![block_10.clone(), block_11.clone()]),
-            WriteOp::UpsertTx(vec![tx(0xa1, &block_10, 1), tx(0xb2, &block_11, 2)]),
-        ];
-        BatchOrigins::from_ops(&ops).expect("a valid batch")
+        db_fixtures::batch_origins(&[(10, ts(10)), (11, ts(11))], &[(0xa1, 10, 1), (0xb2, 11, 2)])
     }
 
     fn token(id: u8) -> Bytes {
