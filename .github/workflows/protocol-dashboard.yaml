@@ -69,14 +69,14 @@ jobs:
         env:
           TOKEN: ${{ secrets.ARTIFACT_TOKEN }}
           ARTIFACT_HOST: ${{ vars.ARTIFACT_HOST }}
-          ARTIFACT_SLUG: ${{ vars.ARTIFACT_SLUG }}
+          NAME: "integrations"
         run: |
           cd out
-          zip -r ../integrations.zip .
+          zip -r ../${NAME}.zip .
           cd ..
 
           curl --fail --show-error \
             -X PUT \
             -H "Authorization: Bearer $TOKEN" \
-            --data-binary @integrations.zip \
-            "https://${ARTIFACT_HOST}/artifacts/${ARTIFACT_SLUG}"
+            --data-binary @${NAME}.zip \
+            "https://${ARTIFACT_HOST}/artifacts/${NAME}"
