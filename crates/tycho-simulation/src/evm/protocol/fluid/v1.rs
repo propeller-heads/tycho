@@ -39,6 +39,7 @@ use crate::evm::{
         fluid::{v1::constant::RESERVES_RESOLVER, vm},
         safe_math::sqrt_u512,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        uniswap_v4::hooks::montra::{decode_paused, PAUSED_ATTRIBUTE},
         utils::add_fee_markup,
     },
     query_pool_swap::price_to_f64_with_decimals,
@@ -73,6 +74,10 @@ pub struct FluidV1 {
     sync_time: u64,
     pool_reserve0: U256,
     pool_reserve1: U256,
+    /// Tycho's pause flag, set by Fluid's swap-and-arbitrage pause or by the indexer. A paused
+    /// pool reverts every swap, so it quotes nothing.
+    #[serde(default)]
+    pub(super) paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,7 +187,12 @@ impl FluidV1 {
             sync_time,
             pool_reserve0,
             pool_reserve1,
+            paused: false,
         }
+    }
+
+    fn paused_error(&self) -> SimulationError {
+        SimulationError::InvalidInput(format!("Fluid pool {} is paused", self.pool_address), None)
     }
 
     fn normalize_native_address(address: &Bytes) -> &[u8] {
@@ -355,6 +365,9 @@ impl ProtocolSim for FluidV1 {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        if self.paused {
+            return Err(self.paused_error());
+        }
         if amount_in == BigUint::from(0u32) {
             return Ok(GetAmountOutResult {
                 amount: BigUint::from(0u32),
@@ -412,6 +425,7 @@ impl ProtocolSim for FluidV1 {
                 sync_time: self.sync_time,
                 pool_reserve0: self.pool_reserve0,
                 pool_reserve1: self.pool_reserve1,
+                paused: self.paused,
             }),
         );
         Ok(result)
@@ -422,6 +436,10 @@ impl ProtocolSim for FluidV1 {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        if self.paused {
+            trace!("Pool {} is paused", self.pool_address);
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
         let zero2one = sell_token == self.token0.address;
 
         let (upper_bound_out, out_decimals, in_decimals) = if zero2one {
@@ -487,13 +505,25 @@ impl ProtocolSim for FluidV1 {
     }
 
     /// Decodes `pool_reserves_adjusted` with its eight-byte `block_timestamp` when present.
-    /// A missing timestamp fails; only missing reserves fall back to confirmed state.
+    /// A missing timestamp fails; only missing reserves fall back to confirmed state. Sets the
+    /// pause flag from `paused` and clears it when the delta deletes `paused`.
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        if let Some(value) = delta
+            .updated_attributes
+            .get(PAUSED_ATTRIBUTE)
+        {
+            self.paused = decode_paused(value);
+        } else if delta
+            .deleted_attributes
+            .contains(PAUSED_ATTRIBUTE)
+        {
+            self.paused = false;
+        }
         let state = match delta
             .updated_attributes
             .get(vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE)
@@ -559,6 +589,9 @@ impl ProtocolSim for FluidV1 {
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        if self.paused {
+            return Err(self.paused_error());
+        }
         match params.swap_constraint() {
             SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
                 self.swap_to_target_price(params, target, *tolerance)

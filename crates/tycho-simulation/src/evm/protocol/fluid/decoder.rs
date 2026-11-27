@@ -6,7 +6,10 @@ use tycho_common::{models::token::Token, Bytes};
 use crate::{
     evm::{
         engine_db::{create_engine, SHARED_TYCHO_DB},
-        protocol::fluid::{v1::FluidV1, vm},
+        protocol::{
+            fluid::{v1::FluidV1, vm},
+            uniswap_v4::hooks::montra::{decode_paused, PAUSED_ATTRIBUTE},
+        },
     },
     protocol::{
         errors::InvalidSnapshotError,
@@ -73,7 +76,13 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for FluidV1 {
                 .unwrap_or_default(),
         )
         .expect("Infallible");
-        let state = vm::decode_from_vm(&pool_address, token0, token1, resolver_address, &engine)?;
+        let mut state =
+            vm::decode_from_vm(&pool_address, token0, token1, resolver_address, &engine)?;
+        state.paused = snapshot
+            .state
+            .attributes
+            .get(PAUSED_ATTRIBUTE)
+            .is_some_and(decode_paused);
 
         Ok(state)
     }
