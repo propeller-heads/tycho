@@ -17,7 +17,7 @@ use tycho_ethereum::BytesCodec;
 use crate::evm::protocol::{
     rocketpool::ETH_ADDRESS,
     safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
     utils::solidity_math::mul_div,
 };
 
@@ -259,7 +259,7 @@ impl ProtocolSim for RocketpoolState {
         token_in: &Token,
         _token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let is_depositing_eth = RocketpoolState::is_depositing_eth(&token_in.address);
 
         let amount_out = if is_depositing_eth {

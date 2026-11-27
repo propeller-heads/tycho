@@ -21,7 +21,7 @@ use crate::evm::{
         },
         cpmm::protocol::{cpmm_fee, cpmm_get_limits, cpmm_spot_price},
         safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
     query_pool_swap::query_pool_swap,
@@ -187,7 +187,7 @@ impl ProtocolSim for AeroBasicState {
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
         let fee_bps = self.fee_bps()?;
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let zero2one = token_in.address < token_out.address;
         let (reserve_in, reserve_out) =
             if zero2one { (self.reserve0, self.reserve1) } else { (self.reserve1, self.reserve0) };

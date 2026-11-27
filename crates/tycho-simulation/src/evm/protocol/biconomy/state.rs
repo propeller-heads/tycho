@@ -27,7 +27,7 @@ use super::{
     },
 };
 use crate::{
-    evm::protocol::u256_num::{biguint_to_u256, u256_to_biguint},
+    evm::protocol::u256_num::{biguint_to_uint, u256_to_biguint},
     utils::decimals_exponent,
 };
 
@@ -424,6 +424,59 @@ impl BiconomyState {
             *entry = flags | value;
         }
     }
+
+    /// `get_limits` in U256: the input the venue covers and the output it pays for it, after the
+    /// protocol fee.
+    fn limits(
+        &self,
+        sell_token: &Bytes,
+        buy_token: &Bytes,
+    ) -> Result<(U256, U256), SimulationError> {
+        let tin = address(sell_token)?;
+        let tout = address(buy_token)?;
+        let (boards, views) = self
+            .board_views(&tin, &tout)
+            .map_err(pricing_error)?;
+        let none = (U256::ZERO, U256::ZERO);
+        let room = views
+            .iter()
+            .fold(U256::ZERO, |sum, view| sum.saturating_add(view.remaining));
+        if room.is_zero() {
+            return Ok(none);
+        }
+        // `PropAMMVenue.quoteFillable`: when the merge covers less than asked, price exactly the
+        // covered amount, and report nothing if that second plan does not cover it.
+        let mut plan = merge(&views, room);
+        if plan.covered < room {
+            let capacity = plan.covered;
+            if capacity.is_zero() {
+                return Ok(none);
+            }
+            plan = merge(&views, capacity);
+            if plan.covered != capacity {
+                return Ok(none);
+            }
+        }
+        if plan.out.is_zero() {
+            return Ok(none);
+        }
+        // The venue still quotes a plan that routes to a provider that dropped the executor, but
+        // the swap reverts there: the limit stops where the merge would first reach one.
+        if self
+            .check_fillable(&boards, &plan)
+            .is_err()
+        {
+            let executable = self.executable_capacity(&boards, &views, plan.covered);
+            if executable.is_zero() {
+                return Ok(none);
+            }
+            plan = merge(&views, executable);
+            if plan.out.is_zero() {
+                return Ok(none);
+            }
+        }
+        Ok((plan.covered, after_protocol_fee(plan.out, self.fee_bps)))
+    }
 }
 
 /// The largest amount in `[0, high)` for which `passes` holds, given that it holds for every amount
@@ -458,14 +511,6 @@ fn marginal_after(views: &[BoardView], amount: U256) -> Option<U256> {
                 .map(|level| level.price)
         })
         .max()
-}
-
-/// A swap amount as the venue takes it; Tycho amounts can exceed uint256.
-fn amount_u256(amount: &BigUint) -> Result<U256, SimulationError> {
-    if amount.bits() > 256 {
-        return Err(SimulationError::InvalidInput("amount_in exceeds uint256".to_owned(), None));
-    }
-    Ok(biguint_to_u256(amount))
 }
 
 fn gas(views: &[BoardView], plan: &Plan) -> BigUint {
@@ -552,7 +597,8 @@ impl ProtocolSim for BiconomyState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let tin = address(&token_in.address)?;
         let tout = address(&token_out.address)?;
-        let (amount_out, plan, boards, gas) = self.quote(&tin, &tout, amount_u256(&amount_in)?)?;
+        let (amount_out, plan, boards, gas) =
+            self.quote(&tin, &tout, biguint_to_uint(&amount_in)?)?;
         let next = self.after_fill(&tin, &tout, &plan, &boards);
         Ok(GetAmountOutResult::new(u256_to_biguint(amount_out), gas, Box::new(next)))
     }
@@ -562,53 +608,8 @@ impl ProtocolSim for BiconomyState {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
-        let tin = address(&sell_token)?;
-        let tout = address(&buy_token)?;
-        let (boards, views) = self
-            .board_views(&tin, &tout)
-            .map_err(pricing_error)?;
-        let none = (BigUint::ZERO, BigUint::ZERO);
-        let room = views
-            .iter()
-            .fold(U256::ZERO, |sum, view| sum.saturating_add(view.remaining));
-        if room.is_zero() {
-            return Ok(none);
-        }
-        // `PropAMMVenue.quoteFillable`: when the merge covers less than asked, price exactly the
-        // covered amount, and report nothing if that second plan does not cover it.
-        let mut plan = merge(&views, room);
-        if plan.covered < room {
-            let capacity = plan.covered;
-            if capacity.is_zero() {
-                return Ok(none);
-            }
-            plan = merge(&views, capacity);
-            if plan.covered != capacity {
-                return Ok(none);
-            }
-        }
-        if plan.out.is_zero() {
-            return Ok(none);
-        }
-        // The venue still quotes a plan that routes to a provider that dropped the executor, but
-        // the swap reverts there: the limit stops where the merge would first reach one.
-        if self
-            .check_fillable(&boards, &plan)
-            .is_err()
-        {
-            let executable = self.executable_capacity(&boards, &views, plan.covered);
-            if executable.is_zero() {
-                return Ok(none);
-            }
-            plan = merge(&views, executable);
-            if plan.out.is_zero() {
-                return Ok(none);
-            }
-        }
-        Ok((
-            u256_to_biguint(plan.covered),
-            u256_to_biguint(after_protocol_fee(plan.out, self.fee_bps)),
-        ))
+        let (max_in, max_out) = self.limits(&sell_token, &buy_token)?;
+        Ok((u256_to_biguint(max_in), u256_to_biguint(max_out)))
     }
 
     fn delta_transition(
@@ -660,12 +661,13 @@ impl ProtocolSim for BiconomyState {
         let token_out = params.token_out();
         let zero = || PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None);
 
-        let (max_in, _) = self.get_limits(token_in.address.clone(), token_out.address.clone())?;
-        let mut capacity = biguint_to_u256(&max_in);
-        if let Some(max) = max_amount_in {
-            if max.bits() <= 256 {
-                capacity = capacity.min(biguint_to_u256(max));
-            }
+        let (mut capacity, _) = self.limits(&token_in.address, &token_out.address)?;
+        // A bound wider than uint256 bounds nothing.
+        if let Some(Ok(max)) = max_amount_in
+            .as_ref()
+            .map(biguint_to_uint)
+        {
+            capacity = capacity.min(max);
         }
         if capacity.is_zero() {
             return Ok(zero());

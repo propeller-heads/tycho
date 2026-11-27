@@ -913,7 +913,8 @@ mod tests {
                             .get_amount_out(BigUint::from(size), tin, tout)
                             .ok()
                             .map(|result| {
-                                crate::evm::protocol::u256_num::biguint_to_u256(&result.amount)
+                                crate::evm::protocol::u256_num::biguint_to_uint(&result.amount)
+                                    .unwrap()
                             });
                         assert_eq!(
                             sim, chain,

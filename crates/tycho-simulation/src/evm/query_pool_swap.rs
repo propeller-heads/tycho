@@ -407,7 +407,7 @@ pub(crate) mod test_helpers {
 mod tests {
     use std::str::FromStr;
 
-    use alloy::primitives::U256;
+    use alloy::primitives::{aliases::U112, U256};
     use rstest::rstest;
     use tycho_common::{hex_bytes::Bytes, models::Chain, simulation::protocol_sim::Price};
 
@@ -682,6 +682,7 @@ mod tests {
                 SHARED_TYCHO_DB,
             },
             protocol::{
+                aerodrome_v1::state::AerodromeV1State,
                 uniswap_v3::{enums::FeeAmount, state::UniswapV3State},
                 utils::{bytes_to_address, uniswap::tick_list::TickInfo},
                 vm::{
@@ -694,20 +695,32 @@ mod tests {
             tycho_models::AccountUpdate,
         };
 
-        pub async fn v2_same_decimals() -> (Box<dyn ProtocolSim>, Token, Token) {
-            let state = UniswapV2State::new(
+        /// A constant-product pool whose limit is soft: an Aerodrome V1 volatile pool keeps
+        /// uint256 reserves, so the search's range is the ~90% price-impact size.
+        pub async fn volatile_same_decimals() -> (Box<dyn ProtocolSim>, Token, Token) {
+            let state = AerodromeV1State::new(
                 U256::from(1000u64) * U256::from(10u64).pow(U256::from(18u64)),
                 U256::from(2_000_000u64) * U256::from(10u64).pow(U256::from(18u64)),
+                false,
+                30,
+                18,
+                18,
             );
             let token_in = create_token("0x0000000000000000000000000000000000000001", "DAI", 18);
             let token_out = create_token("0x0000000000000000000000000000000000000000", "WETH", 18);
             (Box::new(state), token_in, token_out)
         }
 
-        pub async fn v2_different_decimals() -> (Box<dyn ProtocolSim>, Token, Token) {
-            let state = UniswapV2State::new(
+        /// A constant-product pool whose limit is soft: an Aerodrome V1 volatile pool keeps
+        /// uint256 reserves, so the search's range is the ~90% price-impact size.
+        pub async fn volatile_different_decimals() -> (Box<dyn ProtocolSim>, Token, Token) {
+            let state = AerodromeV1State::new(
                 U256::from(1000u64) * U256::from(10u64).pow(U256::from(18u64)),
                 U256::from(2_000_000u64) * U256::from(10u64).pow(U256::from(6u64)),
+                false,
+                30,
+                18,
+                6,
             );
             let token_in = create_token("0x0000000000000000000000000000000000000001", "USDC", 6);
             let token_out = create_token("0x0000000000000000000000000000000000000000", "WETH", 18);
@@ -885,8 +898,8 @@ mod tests {
     // =========================================================================
 
     #[rstest]
-    #[case::v2_same_decimals(pool_setup::v2_same_decimals(), 0.99)]
-    #[case::v2_different_decimals(pool_setup::v2_different_decimals(), 0.95)]
+    #[case::volatile_same_decimals(pool_setup::volatile_same_decimals(), 0.99)]
+    #[case::volatile_different_decimals(pool_setup::volatile_different_decimals(), 0.95)]
     #[case::v3_different_decimals(pool_setup::v3_different_decimals(), 0.998)]
     #[case::balancer_same_decimals(pool_setup::balancer_same_decimals(), 0.98)]
     #[tokio::test]
@@ -934,8 +947,8 @@ mod tests {
     // =========================================================================
 
     #[rstest]
-    #[case::v2_same_decimals(pool_setup::v2_same_decimals(), 0.99)]
-    #[case::v2_different_decimals(pool_setup::v2_different_decimals(), 0.95)]
+    #[case::volatile_same_decimals(pool_setup::volatile_same_decimals(), 0.99)]
+    #[case::volatile_different_decimals(pool_setup::volatile_different_decimals(), 0.95)]
     #[case::v3_different_decimals(pool_setup::v3_different_decimals(), 0.998)]
     #[case::balancer_same_decimals(pool_setup::balancer_same_decimals(), 0.98)]
     #[tokio::test]
@@ -991,7 +1004,7 @@ mod tests {
 
     #[test]
     fn test_query_pool_swap_pool_target_price_unreachable() {
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
         let token_in = token_0();
         let token_out = token_1();
 
@@ -1006,8 +1019,8 @@ mod tests {
     #[test]
     fn test_query_pool_swap_trade_limit_price_maximizes_trade() {
         let state = UniswapV2State::new(
-            U256::from(1000u64) * U256::from(10u64).pow(U256::from(18u64)),
-            U256::from(2_000_000u64) * U256::from(10u64).pow(U256::from(18u64)),
+            U112::from(1000u64) * U112::from(10u64).pow(U112::from(18u64)),
+            U112::from(2_000_000u64) * U112::from(10u64).pow(U112::from(18u64)),
         );
         let token_in = create_token("0x0000000000000000000000000000000000000001", "DAI", 18);
         let token_out = create_token("0x0000000000000000000000000000000000000000", "WETH", 18);
@@ -1047,7 +1060,7 @@ mod tests {
 
     #[test]
     fn test_query_pool_swap_at_spot_price() {
-        let state = UniswapV2State::new(U256::from(2_000_000u32), U256::from(1_000_000u32));
+        let state = UniswapV2State::new(U112::from(2_000_000u32), U112::from(1_000_000u32));
         let token_in = token_0();
         let token_out = token_1();
 
@@ -1070,8 +1083,8 @@ mod tests {
     #[test]
     fn test_query_pool_swap_returns_price_points() {
         let state = UniswapV2State::new(
-            U256::from(1000u64) * U256::from(10u64).pow(U256::from(18u64)),
-            U256::from(2_000_000u64) * U256::from(10u64).pow(U256::from(18u64)),
+            U112::from(1000u64) * U112::from(10u64).pow(U112::from(18u64)),
+            U112::from(2_000_000u64) * U112::from(10u64).pow(U112::from(18u64)),
         );
         let token_in = create_token("0x0000000000000000000000000000000000000001", "DAI", 18);
         let token_out = create_token("0x0000000000000000000000000000000000000000", "WETH", 18);
@@ -1093,8 +1106,8 @@ mod tests {
     #[test]
     fn test_query_pool_swap_large_reserves() {
         let state = UniswapV2State::new(
-            U256::from_str("1000000000000000000000000").unwrap(),
-            U256::from_str("2000000000000000000000000000").unwrap(),
+            U112::from_str("1000000000000000000000000").unwrap(),
+            U112::from_str("2000000000000000000000000000").unwrap(),
         );
         let token_in = create_token("0x0000000000000000000000000000000000000001", "DAI", 18);
         let token_out = create_token("0x0000000000000000000000000000000000000000", "WETH", 18);

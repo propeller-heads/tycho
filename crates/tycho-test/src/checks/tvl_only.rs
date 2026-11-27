@@ -502,7 +502,7 @@ mod tests {
         );
         let states: HashMap<String, Box<dyn ProtocolSim>> = reserves
             .map(|reserve| {
-                let reserve = alloy::primitives::U256::from(reserve);
+                let reserve = alloy::primitives::aliases::U112::from(reserve);
                 let state: Box<dyn ProtocolSim> = Box::new(UniswapV2State::new(reserve, reserve));
                 (id.to_string(), state)
             })

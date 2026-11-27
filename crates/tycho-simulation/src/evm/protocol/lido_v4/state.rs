@@ -1,6 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
-use alloy::primitives::U256;
+use alloy::primitives::{U256, U512};
 use hex_literal::hex;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,8 @@ use tycho_common::{
 };
 
 use crate::evm::protocol::{
-    safe_math::{safe_add_u256, safe_mul_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    safe_math::{safe_add_u256, safe_div_u512, safe_mul_u256, safe_sub_u256},
+    u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
 };
 
 /// One component covers the whole venue: stETH mints, and wstETH wraps, unwraps and mints
@@ -221,12 +221,12 @@ impl LidoV4State {
             return Err(SimulationError::FatalError("invalid Lido share rate state".to_string()));
         }
         let share_headroom = safe_sub_u256(cap, self.total_shares)?;
-        // The product can exceed 256 bits. Floor division gives a conservative deposit
-        // whose minted shares fit the field; cap before converting back to U256.
-        let share_capacity = u256_to_biguint(share_headroom) *
-            u256_to_biguint(self.internal_ether()) /
-            u256_to_biguint(shares);
-        let share_capacity = biguint_to_u256(&share_capacity.min(u256_to_biguint(max_input)));
+        // The product can exceed 256 bits. Floor division gives a conservative deposit whose
+        // minted shares fit the field; a quotient beyond U256 saturates, and `max_input` caps it.
+        let share_capacity = U256::saturating_from(safe_div_u512(
+            share_headroom.widening_mul(self.internal_ether()),
+            U512::from(shares),
+        )?);
         Ok(self
             .staking_state
             .current_limit(self.execution_block_number)
@@ -452,7 +452,7 @@ impl ProtocolSim for LidoV4State {
                 None,
             ));
         }
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         validate_u128_bound("amount", amount_in)?;
         // Every direction reverts on a zero amount: `submit` with ZERO_DEPOSIT, and the wrapper
         // with its own zero-amount guards.
@@ -891,7 +891,10 @@ mod tests {
             .downcast_ref::<LidoV4State>()
             .unwrap();
         // `wrap` pulls the stETH in, so the wrapper holds the shares it just minted on top.
-        assert_eq!(wrapped.wsteth_shares, state.wsteth_shares + biguint_to_u256(&wrap.amount));
+        assert_eq!(
+            wrapped.wsteth_shares,
+            state.wsteth_shares + biguint_to_uint(&wrap.amount).unwrap()
+        );
 
         let unwrap = state
             .get_amount_out(amount_in.clone(), &wsteth_token(), &steth_token())
@@ -905,7 +908,7 @@ mod tests {
         // conversions round down, so the wrapper keeps one wei-share of what was burnt.
         assert_eq!(
             unwrapped.wsteth_shares,
-            state.wsteth_shares - biguint_to_u256(&amount_in) + U256::ONE
+            state.wsteth_shares - biguint_to_uint(&amount_in).unwrap() + U256::ONE
         );
     }
 
@@ -1378,7 +1381,7 @@ mod tests {
 
         // `receive()` mints exactly the shares `submit` returned.
         let expected = state
-            .shares_for_pooled_eth(biguint_to_u256(&amount_in))
+            .shares_for_pooled_eth(biguint_to_uint(&amount_in).unwrap())
             .unwrap();
         assert_eq!(result.amount, u256_to_biguint(expected));
 
@@ -1388,7 +1391,10 @@ mod tests {
             .downcast_ref::<LidoV4State>()
             .unwrap();
         // The submitted ETH is buffered, the shares are minted, and they land on the wrapper.
-        assert_eq!(new_state.buffered_ether, state.buffered_ether + biguint_to_u256(&amount_in));
+        assert_eq!(
+            new_state.buffered_ether,
+            state.buffered_ether + biguint_to_uint(&amount_in).unwrap()
+        );
         assert_eq!(new_state.total_shares, state.total_shares + expected);
         assert_eq!(new_state.wsteth_shares, state.wsteth_shares + expected);
     }

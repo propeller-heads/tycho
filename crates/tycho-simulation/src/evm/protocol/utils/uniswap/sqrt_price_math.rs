@@ -9,7 +9,7 @@ use crate::{
         safe_math::{
             div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
         },
-        u256_num::{biguint_to_u256, u256_to_f64},
+        u256_num::{biguint_to_uint, u256_to_f64},
         utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
     },
     utils::decimals_exponent,
@@ -242,8 +242,8 @@ pub fn get_sqrt_price_limit(
 
     // Convert target pool price (token_out/token_in) to swap price (token_in/token_out)
     // by flipping numerator and denominator
-    let swap_price_numerator = biguint_to_u256(&target_price.denominator);
-    let swap_price_denominator = biguint_to_u256(&target_price.numerator);
+    let swap_price_numerator = biguint_to_uint(&target_price.denominator)?;
+    let swap_price_denominator = biguint_to_uint(&target_price.numerator)?;
 
     // Apply fee to the sell price (numerator) using integer division to match APEX behavior
     // For Uniswap V3: adjusted_price = price * (1 - fee)

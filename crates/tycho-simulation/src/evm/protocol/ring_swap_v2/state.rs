@@ -23,7 +23,7 @@ use crate::evm::protocol::{
         ProtocolFee,
     },
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint},
+    u256_num::{biguint_to_uint, u256_to_biguint},
     utils::add_fee_markup,
 };
 
@@ -120,7 +120,7 @@ impl RingSwapV2State {
         } else {
             (self.reserve1, self.reserve0)
         };
-        let soft_input_u256 = biguint_to_u256(&soft_input);
+        let soft_input_u256: U256 = biguint_to_uint(&soft_input)?;
         let soft_output =
             cpmm_get_amount_out(soft_input_u256, reserve_in, reserve_out, Self::protocol_fee())?;
         let output_backing = self.output_backing(zero_to_one);
@@ -174,7 +174,7 @@ impl ProtocolSim for RingSwapV2State {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let zero_to_one = Self::zero_to_one(token_in, token_out);
         let (reserve_in, reserve_out) = if zero_to_one {
             (self.reserve0, self.reserve1)
@@ -474,7 +474,7 @@ mod tests {
             .get_limits(address(1), address(2))
             .unwrap();
         let expected_output = cpmm_get_amount_out(
-            biguint_to_u256(&max_input),
+            biguint_to_uint(&max_input).unwrap(),
             state.reserve0,
             state.reserve1,
             RingSwapV2State::protocol_fee(),

@@ -1,7 +1,7 @@
 //! Numeric methods for the U256 type
 use std::collections::HashMap;
 
-use alloy::primitives::{bytes::Bytes, U256};
+use alloy::primitives::{bytes::Bytes, Uint, U256};
 use num_bigint::BigUint;
 use tycho_common::simulation::errors::SimulationError;
 
@@ -112,19 +112,16 @@ pub fn u256_to_f64(x: U256) -> Result<f64, SimulationError> {
 
 #[inline]
 pub fn u256_to_biguint(value: U256) -> BigUint {
-    let digits = value
-        .as_limbs()
-        .map(|limb| [(limb & 0xFFFF_FFFF) as u32, (limb >> 32) as u32]);
-    BigUint::from_slice(digits.as_flattened())
+    BigUint::from(value)
 }
 
-pub fn biguint_to_u256(value: &BigUint) -> U256 {
-    assert!(value.bits() <= 256, "BigUint value overflows U256");
-    let mut limbs = [0u64; 4];
-    for (i, digit) in value.iter_u64_digits().enumerate() {
-        limbs[i] = digit;
-    }
-    U256::from_limbs(limbs)
+/// Converts a `BigUint` to an unsigned integer of `BITS` bits, refusing a value wider than that.
+pub fn biguint_to_uint<const BITS: usize, const LIMBS: usize>(
+    value: &BigUint,
+) -> Result<Uint<BITS, LIMBS>, SimulationError> {
+    Uint::try_from(value).map_err(|_too_wide| {
+        SimulationError::InvalidInput(format!("{value} does not fit uint{BITS}"), None)
+    })
 }
 
 #[expect(
@@ -192,7 +189,27 @@ mod test {
             let converted = u256_to_biguint(value);
 
             assert_eq!(converted, BigUint::from_bytes_le(&value.to_le_bytes::<32>()));
-            assert_eq!(biguint_to_u256(&converted), value);
+            assert_eq!(biguint_to_uint(&converted).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn test_biguint_to_uint_refuses_values_wider_than_256_bits() {
+        let max = BigUint::parse_bytes(
+            b"115792089237316195423570985008687907853269984665640564039457584007913129639935",
+            10,
+        )
+        .unwrap();
+        assert_eq!(biguint_to_uint(&max).unwrap(), U256::MAX);
+
+        let two_pow_256 = BigUint::parse_bytes(
+            b"115792089237316195423570985008687907853269984665640564039457584007913129639936",
+            10,
+        )
+        .unwrap();
+        assert!(matches!(
+            biguint_to_uint::<{ U256::BITS }, { U256::LIMBS }>(&two_pow_256),
+            Err(SimulationError::InvalidInput(..))
+        ));
     }
 }

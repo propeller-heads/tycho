@@ -20,7 +20,7 @@ use crate::evm::protocol::{
         error::CowAMMError,
     },
     safe_math::{safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
 };
 
 const COWAMM_FEE: f64 = 0.0; // 0% fee
@@ -461,7 +461,7 @@ impl ProtocolSim for CowAMMState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         if amount_in.is_zero() {
             return Err(SimulationError::InvalidInput("Amount in cannot be zero".to_string(), None));
         }
@@ -855,7 +855,7 @@ mod tests {
     use super::*;
     use crate::evm::protocol::{
         cowamm::state::{CowAMMState, ProtocolSim},
-        u256_num::biguint_to_u256,
+        u256_num::biguint_to_uint,
     };
     /// Converts a `BigUint` amount in wei to f64 ETH/WETH
     pub fn wei_to_eth(amount: &BigUint) -> f64 {
@@ -995,11 +995,11 @@ mod tests {
 
         assert_eq!(
             new_state.liquidity_a(),
-            safe_sub_u256(liq_a, biguint_to_u256(&amount_in)).unwrap()
+            safe_sub_u256(liq_a, biguint_to_uint(&amount_in).unwrap()).unwrap()
         );
         assert_eq!(
             new_state.liquidity_b(),
-            safe_add_u256(liq_b, biguint_to_u256(&expected_out)).unwrap()
+            safe_add_u256(liq_b, biguint_to_uint(&expected_out).unwrap()).unwrap()
         );
 
         // Original state unchanged

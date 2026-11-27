@@ -16,7 +16,7 @@ use tycho_common::{
 
 use crate::evm::protocol::{
     safe_math::{safe_add_u256, safe_sub_u256},
-    u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+    u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
     utils::solidity_math::{mul_div, mul_div_rounding_up},
 };
 
@@ -567,7 +567,7 @@ impl ProtocolSim for EtherfiState {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         // Every entry point reverts on a zero amount.
         if amount_in.is_zero() {
             return Err(SimulationError::RecoverableError("ZERO_AMOUNT".to_string()));
@@ -873,7 +873,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        evm::protocol::test_utils::try_decode_snapshot_with_defaults,
+        evm::protocol::{test_utils::try_decode_snapshot_with_defaults, u256_num::biguint_to_uint},
         protocol::{errors::InvalidSnapshotError, models::TryFromWithBlock},
     };
 
@@ -1045,7 +1045,7 @@ mod tests {
             .expect("amount out");
 
         let after = pool_of(&state_of(&result)).mint_limit;
-        let drawn = gwei_units(biguint_to_u256(&result.amount));
+        let drawn = gwei_units(biguint_to_uint(&result.amount).unwrap());
         assert_eq!(after.remaining, before.remaining - drawn);
         assert_eq!(after.last_refill, BLOCK_TIMESTAMP);
     }
@@ -1244,7 +1244,7 @@ mod tests {
         let quoted = pool_state_with_liquidity()
             .get_amount_out(u256_to_biguint(one_eth()), &eeth_token(), &eth_token())
             .expect("amount out");
-        assert!(biguint_to_u256(&quoted.amount) < one_eth());
+        assert!(biguint_to_uint(&quoted.amount).unwrap() < one_eth());
     }
 
     /// The redemption manager rejects an exit fee above the basis-point scale, so one that
@@ -1363,7 +1363,7 @@ mod tests {
         let wrapped = state
             .get_amount_out(u256_to_biguint(one_eth()), &eeth_token(), &weeth_token())
             .expect("wrap");
-        let weeth = biguint_to_u256(&wrapped.amount);
+        let weeth = biguint_to_uint(&wrapped.amount).unwrap();
         assert_eq!(
             weeth,
             state
@@ -1376,7 +1376,7 @@ mod tests {
         let unwrapped = after_wrap
             .get_amount_out(wrapped.amount, &weeth_token(), &eeth_token())
             .expect("unwrap");
-        let eeth = biguint_to_u256(&unwrapped.amount);
+        let eeth = biguint_to_uint(&unwrapped.amount).unwrap();
         assert_eq!(
             eeth,
             state

@@ -40,7 +40,7 @@ use crate::{
         engine_db::{engine_db_interface::EngineDatabaseInterface, tycho_db::PreCachedDB},
         override_stream::{FailurePolicy, OverrideSnapshot},
         protocol::{
-            u256_num::{u256_to_biguint, u256_to_f64},
+            u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
             utils::bytes_to_address,
         },
         simulation::BlockEnvOverrides,
@@ -947,7 +947,7 @@ where
     ) -> Result<GetAmountOutResult, SimulationError> {
         let sell_token_address = bytes_to_address(&token_in.address)?;
         let buy_token_address = bytes_to_address(&token_out.address)?;
-        let sell_amount = U256::from_be_slice(&amount_in.to_bytes_be());
+        let sell_amount = biguint_to_uint(amount_in)?;
         let block_overrides = self.block_env(live_snapshot);
         let overwrites = self.get_overwrites(
             &[sell_token_address, buy_token_address],

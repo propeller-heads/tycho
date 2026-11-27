@@ -1312,7 +1312,8 @@ mod tests {
             Bytes::default(),
             Default::default(),
         );
-        let reserve = alloy::primitives::U256::from(10u64).pow(alloy::primitives::U256::from(24));
+        let reserve = alloy::primitives::aliases::U112::from(10u64)
+            .pow(alloy::primitives::aliases::U112::from(24));
         let state: Box<dyn ProtocolSim> = Box::new(UniswapV2State::new(reserve, reserve));
         let components = HashMap::from([(id.to_string(), component)]);
         let update = Update::new(1, HashMap::from([(id.to_string(), state)]), components.clone());

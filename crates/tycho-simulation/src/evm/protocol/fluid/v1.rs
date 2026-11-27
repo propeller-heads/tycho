@@ -38,7 +38,7 @@ use crate::evm::{
     protocol::{
         fluid::{v1::constant::RESERVES_RESOLVER, vm},
         safe_math::sqrt_u512,
-        u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+        u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
     },
     query_pool_swap::price_to_f64_with_decimals,
@@ -366,7 +366,7 @@ impl ProtocolSim for FluidV1 {
 
         let (token_in_decimals, token_out_decimals) = (token_in.decimals, token_out.decimals);
 
-        let amount_in = biguint_to_u256(&amount_in);
+        let amount_in = biguint_to_uint(&amount_in)?;
         let fee = amount_in * self.fee / constant::SIX_DECIMALS;
 
         let amount_in_after_fee = amount_in - fee;

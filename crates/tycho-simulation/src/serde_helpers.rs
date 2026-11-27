@@ -233,14 +233,14 @@ mod tests {
     #[cfg(feature = "evm")]
     #[test]
     fn update_roundtrip_with_serializable_state() {
-        use alloy::primitives::U256;
+        use alloy::primitives::aliases::U112;
 
         use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
             "pool_a".to_string(),
-            Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
+            Box::new(UniswapV2State::new(U112::from(1000), U112::from(2000))),
         );
 
         let update = Update::new(12345, states, HashMap::new());
@@ -259,14 +259,14 @@ mod tests {
     #[cfg(feature = "evm")]
     #[test]
     fn protocol_states_skips_non_serializable_entries() {
-        use alloy::primitives::U256;
+        use alloy::primitives::aliases::U112;
 
         use crate::evm::{decoder::MockProtocolSim, protocol::uniswap_v2::state::UniswapV2State};
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
             "serializable".to_string(),
-            Box::new(UniswapV2State::new(U256::from(1000), U256::from(2000))),
+            Box::new(UniswapV2State::new(U112::from(1000), U112::from(2000))),
         );
         states.insert("non_serializable".to_string(), Box::new(MockProtocolSim::new()));
 
@@ -285,18 +285,18 @@ mod tests {
     #[cfg(feature = "evm")]
     #[test]
     fn protocol_states_serialize_produces_valid_json() {
-        use alloy::primitives::U256;
+        use alloy::primitives::aliases::U112;
 
         use crate::evm::protocol::uniswap_v2::state::UniswapV2State;
 
         let mut states: HashMap<String, Box<dyn ProtocolSim>> = HashMap::new();
         states.insert(
             "pool_x".to_string(),
-            Box::new(UniswapV2State::new(U256::from(100), U256::from(200))),
+            Box::new(UniswapV2State::new(U112::from(100), U112::from(200))),
         );
         states.insert(
             "pool_y".to_string(),
-            Box::new(UniswapV2State::new(U256::from(300), U256::from(400))),
+            Box::new(UniswapV2State::new(U112::from(300), U112::from(400))),
         );
 
         #[derive(Serialize)]

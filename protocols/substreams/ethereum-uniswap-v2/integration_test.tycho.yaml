@@ -6,12 +6,10 @@ protocol_type_names:
 module_name: "map_pool_events"
 # The pair contract holds its own reserves, so its balance is the pair's own `balanceOf`.
 balance_lens: ComponentIdBalances
-# The pair accepts any input: UniswapV2Pair.swap checks only the fee-adjusted invariant and
-# `amountOut < reserve_out`, and reverts on input only when a balance overflows uint112. The
-# simulated limit is therefore a recommended size (about 90% price impact), not a bound.
+# The pair's `_update` reverts with `UniswapV2: OVERFLOW` once a token balance exceeds uint112,
+# so the simulated limit is the room left below it, and one unit more is refused.
 limits:
-  kind: soft
-  reason: "UniswapV2Pair.swap has no input bound; it checks only the fee-adjusted invariant and amountOut < reserveOut. Checked on pool 0x6732...f2c18c2 at block 19701397 (reserves 1e30 WOLF / 1e18 WETH; the quoted limit is ~2.16e18 WETH): eth_call swap with the pair's WETH balance raised by state override accepted 1e20 WETH in (~46x the limit) and 1e24 WETH in (~460000x), each for the invariant-exact WOLF out, and reverted `UniswapV2: K` for 1e15 WOLF more than that out. We aim for the input with ~90% price impact (≈ 2.162 × reserve_in): a recommended size, not the pair's bound."
+  kind: hard
 tests:
   - name: test_wolf_weth_pool
     start_block: 19701395

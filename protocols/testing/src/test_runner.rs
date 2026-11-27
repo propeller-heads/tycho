@@ -2256,12 +2256,13 @@ mod tests {
         pools_update_over(ids, ["0x01", "0x02"])
     }
 
-    /// An update with a uniswap v2 pool for each id, all over `tokens`.
+    /// An update with a constant-product pool for each id, all over `tokens`: an Aerodrome V1
+    /// volatile pool, whose limit is soft.
     fn pools_update_over(
         ids: &[&str],
         tokens: [&str; 2],
     ) -> (Update, HashMap<String, ProtocolComponentModel>) {
-        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+        use tycho_simulation::evm::protocol::aerodrome_v1::state::AerodromeV1State;
         let token = |address: &str| {
             Token::new(&Bytes::from_str(address).unwrap(), "T", 18, 0, &[], Chain::Ethereum, 100)
         };
@@ -2269,7 +2270,10 @@ mod tests {
         let mut components = HashMap::new();
         for id in ids {
             let reserve = U256::from(1_000_000u64);
-            states.insert(id.to_string(), Box::new(UniswapV2State::new(reserve, reserve)));
+            states.insert(
+                id.to_string(),
+                Box::new(AerodromeV1State::new(reserve, reserve, false, 30, 18, 18)),
+            );
             components.insert(
                 id.to_string(),
                 ProtocolComponentModel::new(
@@ -2374,9 +2378,10 @@ tests:
             components.remove(id);
         }
         if let Some(id) = empty {
-            update
-                .states
-                .insert(id.to_string(), Box::new(UniswapV2State::new(U256::ZERO, U256::ZERO)));
+            update.states.insert(
+                id.to_string(),
+                Box::new(UniswapV2State::new(Default::default(), Default::default())),
+            );
         }
         let no_skips = HashMap::new();
         ladder::run_ladder(

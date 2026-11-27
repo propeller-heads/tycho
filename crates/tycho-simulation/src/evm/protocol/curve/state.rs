@@ -30,7 +30,7 @@ use crate::{
                 swap_to_price::{exchange, swap_to_price, SwapToPriceError},
                 vm,
             },
-            u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
+            u256_num::{biguint_to_uint, u256_to_biguint, u256_to_f64},
         },
     },
     utils::decimals_exponent,
@@ -237,8 +237,8 @@ impl CurveState {
         if target.numerator.bits() > 256 || target.denominator.bits() > 256 {
             return Ok(None);
         }
-        let target_num = biguint_to_u256(&target.numerator);
-        let target_den = biguint_to_u256(&target.denominator);
+        let target_num = biguint_to_uint(&target.numerator)?;
+        let target_den = biguint_to_uint(&target.denominator)?;
 
         match swap_to_price(
             &self.pool,
@@ -355,7 +355,7 @@ impl ProtocolSim for CurveState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let i = self.coin_index(&token_in.address)?;
         let j = self.coin_index(&token_out.address)?;
-        let dx = biguint_to_u256(&amount_in);
+        let dx = biguint_to_uint(&amount_in)?;
 
         let mut new_pool = self.pool.clone();
         let dy = if self.is_crypto() {
