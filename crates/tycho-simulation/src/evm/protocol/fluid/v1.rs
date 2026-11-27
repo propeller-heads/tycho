@@ -36,7 +36,10 @@ use tycho_common::{
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
-        fluid::{v1::constant::RESERVES_RESOLVER, vm},
+        fluid::{
+            v1::constant::RESERVES_RESOLVER,
+            vm::{self, decode_paused, PAUSED_ATTRIBUTE},
+        },
         safe_math::sqrt_u512,
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
         utils::add_fee_markup,
@@ -73,6 +76,10 @@ pub struct FluidV1 {
     sync_time: u64,
     pool_reserve0: U256,
     pool_reserve1: U256,
+    /// Tycho's pause flag, set by Fluid's swap-and-arbitrage pause or by the indexer. A paused
+    /// pool reverts every swap, so it quotes nothing.
+    #[serde(default)]
+    paused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,7 +189,18 @@ impl FluidV1 {
             sync_time,
             pool_reserve0,
             pool_reserve1,
+            paused: false,
         }
+    }
+
+    /// Sets Tycho's pause flag of the pool.
+    pub(super) fn with_paused(mut self, paused: bool) -> Self {
+        self.paused = paused;
+        self
+    }
+
+    fn paused_error(&self) -> SimulationError {
+        SimulationError::InvalidInput(format!("Fluid pool {} is paused", self.pool_address), None)
     }
 
     fn normalize_native_address(address: &Bytes) -> &[u8] {
@@ -355,6 +373,9 @@ impl ProtocolSim for FluidV1 {
         token_in: &Token,
         token_out: &Token,
     ) -> Result<GetAmountOutResult, SimulationError> {
+        if self.paused {
+            return Err(self.paused_error());
+        }
         if amount_in == BigUint::from(0u32) {
             return Ok(GetAmountOutResult {
                 amount: BigUint::from(0u32),
@@ -412,6 +433,7 @@ impl ProtocolSim for FluidV1 {
                 sync_time: self.sync_time,
                 pool_reserve0: self.pool_reserve0,
                 pool_reserve1: self.pool_reserve1,
+                paused: self.paused,
             }),
         );
         Ok(result)
@@ -422,6 +444,10 @@ impl ProtocolSim for FluidV1 {
         sell_token: Bytes,
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
+        if self.paused {
+            trace!("Pool {} is paused", self.pool_address);
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
         let zero2one = sell_token == self.token0.address;
 
         let (upper_bound_out, out_decimals, in_decimals) = if zero2one {
@@ -487,13 +513,25 @@ impl ProtocolSim for FluidV1 {
     }
 
     /// Decodes `pool_reserves_adjusted` with its eight-byte `block_timestamp` when present.
-    /// A missing timestamp fails; only missing reserves fall back to confirmed state.
+    /// A missing timestamp fails; only missing reserves fall back to confirmed state. Sets the
+    /// pause flag from `paused` and clears it when the delta deletes `paused`.
     fn delta_transition(
         &mut self,
         delta: ProtocolStateDelta,
         _tokens: &HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
+        if let Some(value) = delta
+            .updated_attributes
+            .get(PAUSED_ATTRIBUTE)
+        {
+            self.paused = decode_paused(value);
+        } else if delta
+            .deleted_attributes
+            .contains(PAUSED_ATTRIBUTE)
+        {
+            self.paused = false;
+        }
         let state = match delta
             .updated_attributes
             .get(vm::POOL_RESERVES_ADJUSTED_ATTRIBUTE)
@@ -559,6 +597,9 @@ impl ProtocolSim for FluidV1 {
     }
 
     fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        if self.paused {
+            return Err(self.paused_error());
+        }
         match params.swap_constraint() {
             SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
                 self.swap_to_target_price(params, target, *tolerance)
@@ -1756,6 +1797,90 @@ mod test {
         // withdrawable + borrowable expands_to caps the summed real reserves.
         assert_eq!(pool.pool_reserve0, U256::from(22u64 + 28u64));
         assert_eq!(pool.pool_reserve1, U256::from(25u64 + 31u64));
+    }
+
+    fn reserves_delta(paused: Option<&[u8]>, unpause: bool) -> ProtocolStateDelta {
+        let mut updated_attributes = HashMap::from(vm::pending_state_attributes(
+            alloy::sol_types::SolValue::abi_encode(&vm::sample_pool_with_reserves()),
+            1_700_000_000,
+        ));
+        if let Some(value) = paused {
+            updated_attributes.insert(PAUSED_ATTRIBUTE.to_string(), Bytes::from(value.to_vec()));
+        }
+        let deleted_attributes = if unpause {
+            std::collections::HashSet::from([PAUSED_ATTRIBUTE.to_string()])
+        } else {
+            std::collections::HashSet::new()
+        };
+        ProtocolStateDelta { updated_attributes, deleted_attributes, ..Default::default() }
+    }
+
+    #[rstest]
+    #[case::fluid_pause(&[1], true)]
+    #[case::indexer_tracing_error(&[2], true)]
+    #[case::zero(&[0], false)]
+    #[case::empty(&[], false)]
+    fn test_delta_transition_sets_paused(#[case] value: &[u8], #[case] expected: bool) {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+
+        pool.delta_transition(
+            reserves_delta(Some(value), false),
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
+
+        assert_eq!(pool.paused, expected);
+    }
+
+    #[test]
+    fn test_delta_transition_keeps_paused_without_pause_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        pool.paused = true;
+
+        pool.delta_transition(reserves_delta(None, false), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert!(pool.paused);
+    }
+
+    #[test]
+    fn test_delta_transition_unpauses_on_deleted_pause_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        pool.paused = true;
+
+        pool.delta_transition(reserves_delta(None, true), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert!(!pool.paused);
+    }
+
+    #[test]
+    fn test_paused_pool_quotes_nothing() {
+        let (wsteth, eth, mut pool) = wsteth_eth_pool_23526115();
+        pool.paused = true;
+        let amount_in = BigUint::from(10u64).pow(18);
+
+        let quote = pool.get_amount_out(amount_in, &wsteth, &eth);
+        let limits = pool
+            .get_limits(wsteth.address, eth.address)
+            .unwrap();
+
+        assert!(
+            matches!(quote, Err(SimulationError::InvalidInput(ref m, None)) if m.contains("paused"))
+        );
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    #[test]
+    fn test_unpaused_pool_quotes() {
+        let (wsteth, eth, pool) = wsteth_eth_pool_23526115();
+
+        let quote = pool
+            .get_amount_out(BigUint::from(10u64).pow(18), &wsteth, &eth)
+            .unwrap();
+
+        assert!(quote.amount > BigUint::ZERO);
     }
 
     #[test]
