@@ -119,7 +119,7 @@ INSERT INTO executors (chain, address, protocol_systems) VALUES
     ('ethereum', '0x4bc907e3e487f1c7b5c5414d1ac828bc0ecda522', ARRAY['rfq:native']),
     ('ethereum', '0x4dc7b66a563ceb85d3cd5998294c72ce7026894a', ARRAY['rfq:bebop']),
     ('ethereum', '0x63a1fff3a4b6e93d5687f7b340ff51ba3a88901c', ARRAY['bop_amm', 'vm:bopamm']),
-    ('ethereum', '0x667cb014f2b3c470b53089d984c3cca840d23052', ARRAY['pancakeswap_v3', 'uniswap_v3']),
+    ('ethereum', '0x667cb014f2b3c470b53089d984c3cca840d23052', ARRAY['aero_cl', 'community_v3', 'pancakeswap_v3', 'uniswap_v3']),
     ('ethereum', '0x67336209a32e14f52ea3466a2064c49885cd5a0b', ARRAY['rfq:hashflow']),
     ('ethereum', '0x67dd87c719d0ea8499346693978cbee1a743eec9', ARRAY['native_wrapper', 'weth']),
     ('ethereum', '0x69eae6eb2c924567912fbc435b915663c9d3d11e', ARRAY['rfq:bebop']),
