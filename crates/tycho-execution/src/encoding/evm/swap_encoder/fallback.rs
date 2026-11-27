@@ -44,6 +44,24 @@ pub enum FallbackProtocol {
     AerodromeV1,
 }
 
+/// Chains whose `TychoFallbackRouter` quotes Uniswap V3 through Eden Network's static quoter
+/// (`STATIC_QUOTERS` in `deploy-fallback-router.js`). Elsewhere it quotes by simulation.
+const STATIC_QUOTER_CHAINS: &[Chain] = &[Chain::Ethereum, Chain::Base, Chain::Polygon];
+
+/// Slipstream forks the static quoter cannot read: their `slot0()` returns six words, and the
+/// quoter decodes Uniswap V3's seven, so every quote reverts. The router then counts the fallback
+/// as quoting zero and runs the primary even when the pool would pay more, after the pool's dynamic
+/// `fee()` has cost 90k to 127k gas. Swaps through these pools work; only the quote fails.
+const STATIC_QUOTER_UNREADABLE_FORKS: &[&str] =
+    &["aerodrome_slipstreams", "velodrome_slipstreams", "aero_cl"];
+
+/// Whether `chain`'s router quotes a pool of `protocol_system` through a static quoter that cannot
+/// read it.
+fn static_quote_reverts(protocol_system: &str, chain: Chain) -> bool {
+    STATIC_QUOTER_CHAINS.contains(&chain) &&
+        STATIC_QUOTER_UNREADABLE_FORKS.contains(&protocol_system)
+}
+
 /// The fallback protocols each chain's `TychoFallbackRouter` runs. A chain lists a protocol when
 /// its router has what the protocol needs and Tycho has an executor for it there. A chain missing
 /// here has no router.
@@ -159,12 +177,28 @@ impl FallbackProtocol {
             .get(&chain)
             .is_some_and(|protocols| protocols.contains(&self))
     }
+
+    /// The protocol a pool of `protocol_system` on `chain` serves as a fallback through, `None`
+    /// when `chain`'s `TychoFallbackRouter` cannot run or quote it. A solver picks fallback pools
+    /// with this; [`from_protocol_system`](Self::from_protocol_system) only maps the name.
+    ///
+    /// Aerodrome Slipstreams, Velodrome Slipstreams and AERO CL pools are refused on chains whose
+    /// router quotes Uniswap V3 with a static quoter: the quote always reverts there.
+    pub fn for_pool(protocol_system: &str, chain: Chain) -> Option<Self> {
+        let protocol = Self::from_protocol_system(protocol_system)?;
+        if !protocol.supported_on(chain) || static_quote_reverts(protocol_system, chain) {
+            return None;
+        }
+        Some(protocol)
+    }
 }
 
 /// The fallback protocol and its pool, from the swap's `user_data` JSON, e.g.
 /// `{"fallback_protocol":"uniswap_v3","pool":"0x…"}`.
 pub(super) struct FallbackSwap {
     pub(super) protocol: FallbackProtocol,
+    /// The `fallback_protocol` tag as given: a fork's protocol system or the base name.
+    tag: String,
     data: FallbackSwapData,
 }
 
@@ -182,7 +216,7 @@ impl FallbackSwap {
         };
 
         let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(invalid_json)?;
-        let protocol = {
+        let (protocol, tag) = {
             let name = value
                 .get("fallback_protocol")
                 .and_then(serde_json::Value::as_str)
@@ -191,17 +225,36 @@ impl FallbackSwap {
                         "Fallback protocol user_data JSON names no fallback_protocol".to_string(),
                     )
                 })?;
-            FallbackProtocol::from_protocol_system(name).ok_or_else(|| {
+            let protocol = FallbackProtocol::from_protocol_system(name).ok_or_else(|| {
                 EncodingError::InvalidInput(format!(
                     "Fallback protocol {name} is not one TychoFallbackRouter can run"
                 ))
-            })?
+            })?;
+            (protocol, name.to_string())
         };
         // Replace a fork name with the tag serde expects.
         value["fallback_protocol"] = protocol.user_data_name().into();
         let data = serde_json::from_value(value).map_err(invalid_json)?;
 
-        Ok(Self { protocol, data })
+        Ok(Self { protocol, tag, data })
+    }
+
+    /// Rejects a fallback tagged with a Slipstream fork that `chain`'s static quoter cannot read,
+    /// for the routers that quote the fallback before picking a side. A Slipstream pool tagged
+    /// `uniswap_v3` passes: its address does not say what it is.
+    pub(super) fn reject_unquotable(
+        &self,
+        chain: Chain,
+        router: &str,
+    ) -> Result<(), EncodingError> {
+        if static_quote_reverts(&self.tag, chain) {
+            return Err(EncodingError::InvalidInput(format!(
+                "Fallback protocol {} cannot be quoted on {chain}: the {router} static quoter \
+                 cannot read its pools, so the fallback would never be picked",
+                self.tag
+            )));
+        }
+        Ok(())
     }
 
     /// The protocol byte followed by the protocol data.
@@ -366,6 +419,7 @@ impl SwapEncoder for FallbackSwapEncoder {
     ) -> Result<Vec<u8>, EncodingError> {
         let fallback = FallbackSwap::from_user_data(swap.user_data().as_ref())?;
         self.reject_unsupported(fallback.protocol)?;
+        fallback.reject_unquotable(self.chain, "TychoFallbackRouter")?;
         let pamm = bytes_to_address(&Self::pamm_address(swap)?)?;
         let token_in = bytes_to_address(&swap.token_in().address)?;
         let token_out = bytes_to_address(&swap.token_out().address)?;
@@ -544,15 +598,76 @@ mod tests {
         assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"));
     }
 
+    /// Arbitrum's router quotes Uniswap V3 by simulation, so every Slipstream fork encodes there.
     #[test]
     fn test_encode_slipstreams_alias() {
         for fork in SLIPSTREAMS_FORKS {
-            let hex_swap = encode_usdc_weth(Some(&format!(
-                r#"{{"fallback_protocol":"{fork}","pool":"0x{USDC_WETH_USV3}"}}"#
-            )))
+            let hex_swap = encode_usdc_weth_on(
+                Chain::Arbitrum,
+                Some(&format!(r#"{{"fallback_protocol":"{fork}","pool":"0x{USDC_WETH_USV3}"}}"#)),
+            )
             .unwrap();
 
             assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"), "{fork}");
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::aerodrome_slipstreams_on_base("aerodrome_slipstreams", Chain::Base)]
+    #[case::aero_cl_on_base("aero_cl", Chain::Base)]
+    #[case::aero_cl_on_ethereum("aero_cl", Chain::Ethereum)]
+    #[case::velodrome_slipstreams_on_polygon("velodrome_slipstreams", Chain::Polygon)]
+    fn test_rejects_slipstream_fork_the_static_quoter_cannot_read(
+        #[case] fork: &str,
+        #[case] chain: Chain,
+    ) {
+        let err = encode_usdc_weth_on(
+            chain,
+            Some(&format!(r#"{{"fallback_protocol":"{fork}","pool":"0x{USDC_WETH_USV3}"}}"#)),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, EncodingError::InvalidInput(msg) if msg.contains(fork) && msg.contains("static quoter")),
+            "{err:?}"
+        );
+    }
+
+    /// Ramses V3 pools return Uniswap V3's seven-word `slot0()`, so Polygon's static quoter reads
+    /// them.
+    #[test]
+    fn test_encode_ramses_v3_on_static_quoter_chain() {
+        let hex_swap = encode_usdc_weth_on(
+            Chain::Polygon,
+            Some(&format!(r#"{{"fallback_protocol":"ramses_v3","pool":"0x{USDC_WETH_USV3}"}}"#)),
+        )
+        .unwrap();
+
+        assert_eq!(hex_swap, format!("{USDC}{WETH}{PAMM}01{USDC_WETH_USV3}"));
+    }
+
+    #[test]
+    fn test_for_pool() {
+        let cases = [
+            ("uniswap_v3", Chain::Base, Some(FallbackProtocol::UniswapV3)),
+            ("pancakeswap_v3", Chain::Base, Some(FallbackProtocol::UniswapV3)),
+            ("aerodrome_slipstreams", Chain::Base, None),
+            ("aero_cl", Chain::Base, None),
+            ("aero_cl", Chain::Ethereum, None),
+            ("ramses_v3", Chain::Polygon, Some(FallbackProtocol::UniswapV3)),
+            ("aero_cl", Chain::Elysium, Some(FallbackProtocol::UniswapV3)),
+            ("up_v3", Chain::Robinhood, Some(FallbackProtocol::UniswapV3)),
+            ("aerodrome_v1", Chain::Base, Some(FallbackProtocol::AerodromeV1)),
+            ("aerodrome_v1", Chain::Ethereum, None),
+            ("uniswap_v3", Chain::Plasma, None),
+            ("vm:balancer_v2", Chain::Ethereum, None),
+        ];
+        for (protocol_system, chain, expected) in cases {
+            assert_eq!(
+                FallbackProtocol::for_pool(protocol_system, chain),
+                expected,
+                "{protocol_system} on {chain}"
+            );
         }
     }
 

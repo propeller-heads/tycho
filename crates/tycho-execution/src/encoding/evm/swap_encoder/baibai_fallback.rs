@@ -49,6 +49,7 @@ impl SwapEncoder for BaibaiFallbackSwapEncoder {
                 self.chain
             )));
         }
+        fallback.reject_unquotable(self.chain, "BaibaiFallbackRouter")?;
 
         let mut data = swap.token_in().address.to_vec();
         data.extend_from_slice(&swap.token_out().address);
@@ -167,6 +168,21 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, EncodingError::InvalidInput(message) if message.contains("base")));
+    }
+
+    #[test]
+    fn test_rejects_fallback_the_static_quoter_cannot_read() {
+        let err = encode_swap(
+            Chain::Base,
+            WETH,
+            USDC,
+            Some(&format!(r#"{{"fallback_protocol":"aero_cl","pool":"0x{USDC_WETH_USV3}"}}"#)),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EncodingError::InvalidInput(message) if message.contains("static quoter"))
+        );
     }
 
     #[test]
