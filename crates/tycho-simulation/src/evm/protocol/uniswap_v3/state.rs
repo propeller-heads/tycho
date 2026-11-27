@@ -20,7 +20,7 @@ use tycho_common::{
 
 use super::fee_tier::{fee_serde, FeeTier};
 use crate::evm::protocol::{
-    clmm::clmm_swap_to_price,
+    clmm::{clmm_swap_to_price, clmm_swap_to_price_u256},
     safe_math::{safe_add_u256, safe_sub_u256},
     u256_num::u256_to_biguint,
     utils::{
@@ -583,6 +583,31 @@ impl ProtocolSim for UniswapV3State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        if self.liquidity == 0 {
+            return Ok(None);
+        }
+        let res = clmm_swap_to_price_u256(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            self.fee,
+            Sign::Positive,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit))
+            },
+        )?;
+        Ok(res.map(|(ai, ao)| (*ai.as_limbs(), *ao.as_limbs())))
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
@@ -1898,5 +1923,54 @@ mod step_cache_tests {
             .step_cache
             .min_inputs(true)
             .is_empty());
+    }
+
+    #[test]
+    fn test_query_supply_to_price_matches_query_pool_swap() {
+        let (wbtc, weth) = wbtc_weth();
+        let pool = test_pool();
+
+        let cases: &[(&Token, &Token, u128, u128)] = &[
+            (&wbtc, &weth, 10_000_000 * 1_000_000, 1_000_000),
+            (&wbtc, &weth, 14_000_000 * 1_000_000, 1_000_000),
+            (&wbtc, &weth, 50_000_000 * 1_000_000, 1_000_000), // unreachable
+            (&weth, &wbtc, 1_000_000, 16_000_000 * 1_000_000),
+            (&weth, &wbtc, 3_000_000, 16_000_000 * 1_000_000),
+            (&weth, &wbtc, 100_000_000, 16_000_000 * 1_000_000), // unreachable
+        ];
+        for &(token_in, token_out, num, den) in cases {
+            let params = QueryPoolSwapParams::new(
+                token_in.clone(),
+                token_out.clone(),
+                SwapConstraint::PoolTargetPrice {
+                    target: tycho_common::simulation::protocol_sim::Price::new(
+                        BigUint::from(num),
+                        BigUint::from(den),
+                    ),
+                    tolerance: 0.0,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            );
+            let legacy = pool.query_pool_swap(&params);
+            let fast = pool.query_supply_to_price(
+                token_in,
+                token_out,
+                *U256::from(num).as_limbs(),
+                *U256::from(den).as_limbs(),
+            );
+            match (legacy, fast) {
+                (Ok(swap), Ok(Some((ai, ao)))) => {
+                    assert_eq!(u256_to_biguint(U256::from_limbs(ai)), *swap.amount_in());
+                    assert_eq!(u256_to_biguint(U256::from_limbs(ao)), *swap.amount_out());
+                }
+                (Ok(swap), Ok(None)) => assert!(swap.amount_in().is_zero()),
+                (Err(SimulationError::InvalidInput(msg, None)), Ok(None)) => {
+                    assert!(msg.contains("unreachable"), "unexpected error: {msg}");
+                }
+                (Err(_), Err(_)) => {}
+                (l, f) => panic!("mismatch for {num}/{den}: legacy={l:?} fast={f:?}"),
+            }
+        }
     }
 }

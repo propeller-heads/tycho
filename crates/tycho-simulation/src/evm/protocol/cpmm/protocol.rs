@@ -278,3 +278,53 @@ pub fn cpmm_swap_to_price(
 
     Ok((u256_to_biguint(amount_in), u256_to_biguint(implied_amount_out)))
 }
+
+/// Zero-allocation variant of [`cpmm_swap_to_price`] operating directly on `U256` target price
+/// limbs (`target_num / target_den` = `token_out / token_in`). Returns `Ok(None)` when the target
+/// price is unreachable or yields zero input.
+pub fn cpmm_swap_to_price_u256(
+    reserve_in: U256,
+    reserve_out: U256,
+    target_num: U256,
+    target_den: U256,
+    fee: ProtocolFee,
+) -> Result<Option<U256>, SimulationError> {
+    if reserve_in == U256::ZERO || reserve_out == U256::ZERO {
+        return Ok(None);
+    }
+
+    let swap_price_num = target_den;
+    let swap_price_den = target_num;
+
+    let target_price_cross_mult = U512::from(swap_price_num)
+        .checked_mul(U512::from(reserve_out))
+        .and_then(|x| x.checked_mul(U512::from(fee.numerator)))
+        .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+    let current_price_cross_mult = U512::from(swap_price_den)
+        .checked_mul(U512::from(reserve_in))
+        .and_then(|x| x.checked_mul(U512::from(fee.precision)))
+        .ok_or_else(|| SimulationError::FatalError("Overflow in price check".to_string()))?;
+
+    if target_price_cross_mult < current_price_cross_mult {
+        return Ok(None);
+    }
+
+    let k = U512::from(reserve_in) * U512::from(reserve_out);
+    let k_times_price = k * U512::from(swap_price_num) * U512::from(fee.numerator) /
+        (U512::from(swap_price_den) * U512::from(fee.precision));
+    let x_prime_u512 = sqrt_u512(k_times_price);
+
+    let limbs = x_prime_u512.as_limbs();
+    let x_prime = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
+
+    if x_prime <= reserve_in {
+        return Ok(None);
+    }
+
+    let amount_in = safe_sub_u256(x_prime, reserve_in)?;
+    if amount_in == U256::ZERO {
+        return Ok(None);
+    }
+
+    Ok(Some(amount_in))
+}

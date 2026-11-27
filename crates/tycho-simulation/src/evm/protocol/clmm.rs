@@ -6,8 +6,11 @@ use tycho_common::{
 };
 
 use crate::evm::protocol::{
-    u256_num::u256_to_biguint,
-    utils::uniswap::{sqrt_price_math::get_sqrt_price_limit, SwapResults},
+    u256_num::{biguint_to_u256, u256_to_biguint},
+    utils::uniswap::{
+        sqrt_price_math::get_reachable_sqrt_price_limit_u256,
+        SwapResults,
+    },
 };
 
 // U160_MAX = 2^160 - 1, used for "infinite" swap amounts in swap_to_price
@@ -43,22 +46,19 @@ where
 {
     let zero_for_one = token_in < token_out;
 
-    let sqrt_price_limit =
-        get_sqrt_price_limit(token_in, token_out, target_price, U256::from(fee_pips))?;
-
-    // Validate price limit is compatible with swap direction
-    if zero_for_one && sqrt_price_limit >= sqrt_price {
+    let Some(sqrt_price_limit) = get_reachable_sqrt_price_limit_u256(
+        zero_for_one,
+        sqrt_price,
+        biguint_to_u256(&target_price.numerator),
+        biguint_to_u256(&target_price.denominator),
+        U256::from(fee_pips),
+    )?
+    else {
         return Err(SimulationError::InvalidInput(
             "Target price is unreachable (already below current spot price)".to_string(),
             None,
         ));
-    }
-    if !zero_for_one && sqrt_price_limit <= sqrt_price {
-        return Err(SimulationError::InvalidInput(
-            "Target price is unreachable (already below current spot price)".to_string(),
-            None,
-        ));
-    }
+    };
 
     // Use U160_MAX as "infinite" amount to find maximum available liquidity
     let amount_specified =
@@ -87,4 +87,60 @@ where
         .into_raw();
 
     Ok((u256_to_biguint(amount_in), u256_to_biguint(amount_out), result))
+}
+
+/// Zero-allocation variant of [`clmm_swap_to_price`] operating directly on `U256` target price
+/// (`target_num / target_den` = `token_out / token_in`). Returns `Ok(None)` when the target price
+/// is unreachable or yields zero input.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches clmm_swap_to_price with split U256 target price limbs"
+)]
+pub fn clmm_swap_to_price_u256<F>(
+    sqrt_price: U256,
+    token_in: &Bytes,
+    token_out: &Bytes,
+    target_num: U256,
+    target_den: U256,
+    fee_pips: u32,
+    amount_sign: Sign,
+    swap_fn: F,
+) -> Result<Option<(U256, U256)>, SimulationError>
+where
+    F: FnOnce(bool, I256, U256) -> Result<SwapResults, SimulationError>,
+{
+    let zero_for_one = token_in < token_out;
+
+    let Some(sqrt_price_limit) = get_reachable_sqrt_price_limit_u256(
+        zero_for_one,
+        sqrt_price,
+        target_num,
+        target_den,
+        U256::from(fee_pips),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let amount_specified =
+        I256::checked_from_sign_and_abs(amount_sign, U160_MAX).ok_or_else(|| {
+            SimulationError::InvalidInput("I256 overflow: U160_MAX".to_string(), None)
+        })?;
+
+    let result = swap_fn(zero_for_one, amount_specified, sqrt_price_limit)?;
+
+    let amount_in = (result.amount_specified - result.amount_remaining)
+        .abs()
+        .into_raw();
+
+    if amount_in == U256::ZERO {
+        return Ok(None);
+    }
+
+    let amount_out = result
+        .amount_calculated
+        .abs()
+        .into_raw();
+
+    Ok(Some((amount_in, amount_out)))
 }

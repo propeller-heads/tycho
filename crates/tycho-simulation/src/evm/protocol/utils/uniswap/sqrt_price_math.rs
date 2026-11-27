@@ -1,15 +1,12 @@
-use alloy::primitives::U256;
-use tycho_common::{
-    simulation::{errors::SimulationError, protocol_sim::Price},
-    Bytes,
-};
+use alloy::primitives::{U256, U512};
+use tycho_common::simulation::errors::SimulationError;
 
 use crate::{
     evm::protocol::{
         safe_math::{
             div_mod_u256, safe_add_u256, safe_div_u256, safe_mul_u256, safe_sub_u256, sqrt_u256,
         },
-        u256_num::{biguint_to_u256, u256_to_f64},
+        u256_num::u256_to_f64,
         utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
     },
     utils::decimals_exponent,
@@ -223,27 +220,80 @@ pub fn get_sqrt_price_q96(price_0: U256, price_1: U256) -> Result<U256, Simulati
     sqrt_u256(ratio)
 }
 
-/// Converts a target price to sqrt_price_x96 format with fee adjustment
-///
-/// # Arguments
-/// * `token_in` - The token being sold
-/// * `token_out` - The token being bought
-/// * `target_price` - The target price as token_out/token_in (tycho convention)
-///
-/// # Returns
-/// The sqrt price limit in Q96 format
-pub fn get_sqrt_price_limit(
-    token_in: &Bytes,
-    token_out: &Bytes,
-    target_price: &Price,
+/// Converts a raw U256 target price (`target_num / target_den` = `token_out / token_in`) to
+/// `sqrt_price_x96` format with fee adjustment, returning `Ok(None)` if the target price is
+/// already on the unreachable side of `current_sqrt_price` without computing a 512-bit square root.
+pub fn get_reachable_sqrt_price_limit_u256(
+    zero_for_one: bool,
+    current_sqrt_price: U256,
+    target_num: U256,
+    target_den: U256,
+    fee_tier: U256,
+) -> Result<Option<U256>, SimulationError> {
+    let swap_price_numerator = target_den;
+    let swap_price_denominator = target_num;
+
+    let fee_precision = U256::from_limbs([1_000_000, 0, 0, 0]);
+    let sell_price_after_fee =
+        safe_div_u256(swap_price_numerator * (fee_precision - fee_tier), fee_precision)?;
+    let buy_price = swap_price_denominator;
+
+    let (price_0, price_1) = if zero_for_one {
+        (sell_price_after_fee, buy_price)
+    } else {
+        (buy_price, sell_price_after_fee)
+    };
+
+    if price_0.is_zero() {
+        return Err(SimulationError::FatalError("Division by zero".to_string()));
+    }
+
+    // Exact pre-sqrt reachability check using U512:
+    //   sqrt_price_limit = floor(sqrt(floor(price_1 * 2^192 / price_0)))
+    // - zero_for_one rejects when limit >= current_sqrt_price
+    //     <=> price_1 * 2^192 >= current_sqrt_price^2 * price_0
+    // - !zero_for_one rejects when limit <= current_sqrt_price
+    //     <=> price_1 * 2^192 < (current_sqrt_price + 1)^2 * price_0
+    let p1_limbs = price_1.as_limbs();
+    let lhs = U512::from_limbs([0, 0, 0, p1_limbs[0], p1_limbs[1], p1_limbs[2], p1_limbs[3], 0]);
+    let bound = if zero_for_one {
+        U512::from(current_sqrt_price)
+    } else {
+        U512::from(current_sqrt_price) + U512::from(1u64)
+    };
+    let bound_sq = bound * bound;
+    match bound_sq.checked_mul(U512::from(price_0)) {
+        Some(rhs) => {
+            if (zero_for_one && lhs >= rhs) || (!zero_for_one && lhs < rhs) {
+                return Ok(None);
+            }
+        }
+        None => {
+            // rhs >= 2^512 > 2^448 > lhs, so limit < bound is guaranteed.
+            // For !zero_for_one that means limit <= current_sqrt_price (unreachable).
+            if !zero_for_one {
+                return Ok(None);
+            }
+        }
+    }
+
+    let limit = get_sqrt_price_q96(price_1, price_0)?;
+    Ok(Some(limit))
+}
+
+/// Converts a raw U256 target price (`target_num / target_den` = `token_out / token_in`) to
+/// `sqrt_price_x96` format with fee adjustment, without `BigUint` conversions.
+#[cfg(test)]
+pub fn get_sqrt_price_limit_u256(
+    zero_for_one: bool,
+    target_num: U256,
+    target_den: U256,
     fee_tier: U256,
 ) -> Result<U256, SimulationError> {
-    let zero_for_one = token_in < token_out;
-
     // Convert target pool price (token_out/token_in) to swap price (token_in/token_out)
     // by flipping numerator and denominator
-    let swap_price_numerator = biguint_to_u256(&target_price.denominator);
-    let swap_price_denominator = biguint_to_u256(&target_price.numerator);
+    let swap_price_numerator = target_den;
+    let swap_price_denominator = target_num;
 
     // Apply fee to the sell price (numerator) using integer division to match APEX behavior
     // For Uniswap V3: adjusted_price = price * (1 - fee)
@@ -498,5 +548,40 @@ mod tests {
             true,
         );
         assert!(matches!(result, Err(SimulationError::FatalError(_))));
+    }
+
+    #[test]
+    fn test_reachable_sqrt_price_limit_at_boundaries() {
+        let fee = U256::from(3000u64);
+        let target_num = U256::from(2_500_000_000u64);
+        let target_den = U256::from(1_000_000_000_000_000_000u128);
+
+        for zero_for_one in [true, false] {
+            let exact =
+                get_sqrt_price_limit_u256(zero_for_one, target_num, target_den, fee).unwrap();
+            for offset in [-2i64, -1, 0, 1, 2] {
+                let current = if offset < 0 {
+                    exact - U256::from(offset.unsigned_abs())
+                } else {
+                    exact + U256::from(offset.unsigned_abs())
+                };
+                let expected = if (zero_for_one && exact >= current) ||
+                    (!zero_for_one && exact <= current)
+                {
+                    None
+                } else {
+                    Some(exact)
+                };
+                let got = get_reachable_sqrt_price_limit_u256(
+                    zero_for_one,
+                    current,
+                    target_num,
+                    target_den,
+                    fee,
+                )
+                .unwrap();
+                assert_eq!(got, expected, "zfo={zero_for_one} offset={offset}");
+            }
+        }
     }
 }

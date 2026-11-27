@@ -23,7 +23,7 @@ use super::hooks::utils::HookOptions;
 use crate::{
     evm::{
         protocol::{
-            clmm::clmm_swap_to_price,
+            clmm::{clmm_swap_to_price, clmm_swap_to_price_u256},
             safe_math::{safe_add_u256, safe_sub_u256},
             u256_num::{u256_to_biguint, u256_to_f64},
             uniswap_v4::hooks::{
@@ -1449,6 +1449,40 @@ impl ProtocolSim for UniswapV4State {
                 Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
             }
         }
+    }
+
+    fn query_supply_to_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target_num: [u64; 4],
+        target_den: [u64; 4],
+    ) -> Result<Option<([u64; 4], [u64; 4])>, SimulationError> {
+        let zero_for_one = token_in.address < token_out.address;
+        if let Some(hook) = &self.hook {
+            if !hook.swaps_enabled() || hook.spot_fees(zero_for_one)?.is_some() {
+                return Ok(None);
+            }
+        }
+        if self.liquidity == 0 {
+            return Ok(None);
+        }
+        let fee_pips = self
+            .fees
+            .calculate_swap_fees_pips(zero_for_one, None)?;
+        let res = clmm_swap_to_price_u256(
+            self.sqrt_price,
+            &token_in.address,
+            &token_out.address,
+            U256::from_limbs(target_num),
+            U256::from_limbs(target_den),
+            fee_pips,
+            Sign::Negative,
+            |zero_for_one, amount_specified, sqrt_price_limit| {
+                self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
+            },
+        )?;
+        Ok(res.map(|(ai, ao)| (*ai.as_limbs(), *ao.as_limbs())))
     }
 
     /// Forwards the execution block to the pool's hook, the only part of a V4 pool whose quoting
