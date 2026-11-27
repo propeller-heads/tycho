@@ -116,11 +116,9 @@ pub fn needs_approval(protocol_system: &str) -> bool {
 /// A swap that actually falls back pays for the fallback protocol on top.
 pub const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
 
-/// Gas for a `quoteFallback` call that simulates the fallback swap, also charged when the
-/// fallback protocol is unknown. Uniswap V4 quotes cost 80k to 100k in live Base swaps of 10 to
-/// 2,000 USDC and about 113k for 100 USDe on a Mainnet fork; a 10 USDC Uniswap V3 simulation costs
-/// about 108k on a Base fork.
-const FALLBACK_SIMULATED_QUOTE_GAS: u64 = 100_000;
+/// Gas for a `quoteFallback` call that simulates a Uniswap V3 swap, also charged when the fallback
+/// protocol is unknown. A 10 USDC simulation costs about 108k on a Base fork.
+const FALLBACK_SIMULATED_QUOTE_GAS: u64 = 110_000;
 
 /// Chains whose `TychoFallbackRouter` has a Uniswap V3 static quoter (`STATIC_QUOTERS` in
 /// `deploy-fallback-router.js`, which points back here). Elsewhere it quotes a Uniswap V3 fallback
@@ -139,20 +137,20 @@ fn fallback_quote_gas(swap: &Swap) -> u64 {
     let protocol = FallbackProtocol::from_user_data(swap.user_data().as_ref());
     let has_static_quoter = FALLBACK_STATIC_QUOTER_CHAINS.contains(&swap.token_in().chain);
     match protocol {
-        // About 7k for 10k USDC on a Mainnet fork, 7.4k in live Base swaps.
+        // 7.9k in executed quotes on Ethereum, 7.4k in live Base swaps.
         Some(FallbackProtocol::UniswapV2) => 8_000,
-        // Through the static quoter: about 27k on Mainnet and Base forks, and 26.5k to 41.6k in
-        // live Base swaps of 10 to 2,000 USDC, with a median of 26.8k.
+        // Through the static quoter: a median of 27k to 29k over 347 executed quotes on Uniswap V3
+        // and PancakeSwap V3 pools on Ethereum and Base.
         Some(FallbackProtocol::UniswapV3) if has_static_quoter => 30_000,
         // About 35k on 3pool and 71k on tricrypto on a Mainnet fork.
         Some(FallbackProtocol::Curve) => 50_000,
-        // About 39k for 10 sUSDe on a Mainnet fork.
-        Some(FallbackProtocol::FluidV1) => 40_000,
-        // About 26k for 0.01 tBTC on a Base fork.
-        Some(FallbackProtocol::AerodromeV1) => 25_000,
-        Some(FallbackProtocol::UniswapV3 | FallbackProtocol::UniswapV4) | None => {
-            FALLBACK_SIMULATED_QUOTE_GAS
-        }
+        // Simulated: a median of 87k over 121 executed quotes on Ethereum and 83k over 93 on Base.
+        Some(FallbackProtocol::UniswapV4) => 85_000,
+        // A median of 36.1k over 13 executed quotes on Ethereum.
+        Some(FallbackProtocol::FluidV1) => 36_000,
+        // 27.1k in executed quotes on Base, about 26k for 0.01 tBTC on a Base fork.
+        Some(FallbackProtocol::AerodromeV1) => 27_000,
+        Some(FallbackProtocol::UniswapV3) | None => FALLBACK_SIMULATED_QUOTE_GAS,
     }
 }
 
@@ -567,7 +565,7 @@ mod tests {
             hook: Bytes::default(),
             hook_data: Bytes::default(),
         },
-        100_000
+        85_000
     )]
     #[case::curve(
         FallbackSwapData::Curve { pool: Bytes::from(vec![0x0au8; 20]), pool_type: 1, i: 0, j: 1 },
@@ -575,11 +573,11 @@ mod tests {
     )]
     #[case::fluid_v1(
         FallbackSwapData::FluidV1 { dex: Bytes::from(vec![0x0au8; 20]), zero2one: true },
-        40_000
+        36_000
     )]
     #[case::aerodrome_v1(
         FallbackSwapData::AerodromeV1 { pool: Bytes::from(vec![0x0au8; 20]) },
-        25_000
+        27_000
     )]
     fn test_fallback_quote_gas_by_protocol(
         #[case] fallback: FallbackSwapData,
@@ -607,16 +605,16 @@ mod tests {
         )
         .with_user_data(Bytes::from(user_data));
 
-        assert_eq!(fallback_quote_gas(&swap), 100_000);
+        assert_eq!(fallback_quote_gas(&swap), 110_000);
     }
 
     #[test]
     fn test_fallback_quote_without_fallback_protocol_takes_highest_budget() {
-        assert_eq!(fallback_quote_gas(&make_swap("fallback:fermiswap")), 100_000);
+        assert_eq!(fallback_quote_gas(&make_swap("fallback:fermiswap")), 110_000);
 
         let unknown = make_swap("fallback:fermiswap")
             .with_user_data(Bytes::from(br#"{"fallback_protocol":"balancer_v2"}"#.to_vec()));
-        assert_eq!(fallback_quote_gas(&unknown), 100_000);
+        assert_eq!(fallback_quote_gas(&unknown), 110_000);
     }
 
     #[test]
