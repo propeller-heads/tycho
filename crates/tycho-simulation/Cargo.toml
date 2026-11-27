@@ -32,6 +32,7 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_with = { workspace = true, optional = true }
 toml = { workspace = true }
 typetag = { workspace = true }
+proptest = { version = "1.7.0", optional = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 # Error handling
@@ -131,6 +132,8 @@ criterion = "0.8.2"
 [features]
 default = ["evm", "book-feeds", "price-level-stream"]
 network_tests = []
+# Test cases of protocol states for property tests (`evm::protocol::checkable`).
+proptest = ["evm", "dep:proptest", "ruint/proptest"]
 price-level-stream = ["dep:async-stream", "dep:metrics", "dep:tokio-tungstenite"]
 evm = [
     "dep:foundry-block-explorers",

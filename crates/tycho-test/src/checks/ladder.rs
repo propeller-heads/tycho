@@ -288,7 +288,7 @@ impl LimitCheckRecord {
     fn past_limit_unfailed(&self, at_limit_executed: bool) -> Outcome {
         let not_run = || Outcome::NotRun { reason: format!("{} failed", CheckId::LimitsAtLimit) };
         let quoted = !matches!(self.at_limit, AtLimit::QuoteFailed);
-        match limits::past_limit_in_simulation(quoted, self.capped, &self.limits) {
+        match limits::past_limit_in_simulation(quoted, self.capped, self.limits.kind()) {
             PastLimitInSimulation::AtLimitFailed => not_run(),
             PastLimitInSimulation::Capped => Outcome::NotRun {
                 reason: "the limit is at the int128::MAX execution cap, which is not the venue's \
@@ -752,7 +752,7 @@ fn check_declared_limit(
         },
         &format!("{} -> {}", token_in.symbol, token_out.symbol),
         limit,
-        declared,
+        declared.kind(),
     );
     if let Some(rejection) = &checked.past_limit_rejection {
         info!(

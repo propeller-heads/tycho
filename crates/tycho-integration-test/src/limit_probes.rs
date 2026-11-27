@@ -426,7 +426,7 @@ pub fn probe_direction(
                 quote,
                 &turn.label,
                 &LimitSizes { max_input: &executable, max_output, capped },
-                limits,
+                limits.kind(),
             );
             for (check, detail) in &checked.failures {
                 turn.settle(*check, Outcome::Fail(Fail::LimitQuote, detail.clone()));
@@ -438,7 +438,7 @@ pub fn probe_direction(
                     .any(|(failed, _)| *failed == check)
             };
             let in_simulation =
-                past_limit_in_simulation(checked.at_limit_quote.is_some(), capped, limits);
+                past_limit_in_simulation(checked.at_limit_quote.is_some(), capped, limits.kind());
             let Some(at_quote) = &checked.at_limit_quote else {
                 // Nothing at or past the limit can be checked without its quote.
                 turn.not_run(NotRun::AtLimitFailed);
