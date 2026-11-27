@@ -61,9 +61,9 @@ use crate::{
 // Gas model of an Algebra Integral swap: what the pool's `swap` frame spends outside its plugin.
 // The figures come from cold swaps on Nami's Base WETH/USDC pool `0x0E8AF367…`, traced on a Base
 // fork at block 52562900 (no MEVX router) and block 52924436 (router set), in both directions, and
-// from Base swap traces for what those swaps did not exercise. The input transfer made in the
-// swap callback is part of the figure: the execution gas estimator leaves it to the quote for a
-// protocol that pays in a callback. The executor's own gas is the estimator's business.
+// from Base swap traces for what those swaps did not exercise. The swap callback is part of the
+// figure, router and executor code included: the execution gas estimator adds nothing per hop for
+// a protocol that pays in a callback.
 
 /// `swap` outside its external calls: state reads and writes, fee accounting and the swap loop.
 /// Measured at 54.0k to 54.3k.
@@ -81,10 +81,11 @@ const SWAP_SETTLEMENT_GAS: u64 = 30_000;
 /// The swap callback paying the input token to the pool. The transfer alone is 8.9k in Base
 /// transaction `0x4cd896073e5de882cef0aca24962664f38b580835b73584903ddd6b215e4f82c` (block
 /// 61,621,836), a USDC transfer to a pool that already holds USDC. Through TychoRouter the
-/// callback costs more than the transfer: in the swaps the Tycho team executed for the Base range
-/// tests it came to about 16k per WETH hop and 20k per USDC hop, and to 27k at most (their
-/// review of PR #1714, 2026-11-26). Set to the USDC figure, so a WETH hop is over-estimated by
-/// about 4k.
+/// callback costs more than the transfer: over 1,223 TychoRouter callbacks on Base between
+/// blocks 60.17M and 61.67M, measured by the Tycho team (review of PR #1714, 2026-11-26), the
+/// median was about 16k for WETH, 20k for USDC and 27k for the costliest token. Single callbacks
+/// reached 33.6k (a USDC `transferFrom`) and 41.3k (through Permit2). Set to the USDC median, so
+/// a WETH hop is over-estimated by about 4k.
 ///
 /// Re-measure when the router's callback changes.
 const SWAP_CALLBACK_GAS: u64 = 20_000;
@@ -146,7 +147,8 @@ pub struct PluginSetup {
 /// - **The sender.** A plugin can price by sender. Nami's charges its MEVX executor a fee of 1;
 ///   quotes are for any other sender.
 /// - **No backrun.** With a MEVX router set, Nami's `afterSwap` may swap the same pool again when
-///   it finds an arbitrage. The swap's own output is as quoted, but the pool ends at another price
+///   it finds an arbitrage, unless the plugin lists the pool's caller as one not to back-run
+///   (builds of 2026-11-25). The swap's own output is as quoted, but the pool ends at another price
 ///   than the state a quote returns, and the backrun's gas is not in the quote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "StateData", into = "StateData")]
