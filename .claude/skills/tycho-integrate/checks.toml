@@ -1,0 +1,191 @@
+# The checks each layer's round must pass, run by `scripts/layer_checks.py` in the run's worktree.
+#
+# Placeholders come from decisions.json `paths` and `agreements` and from spec.json:
+#   {package}          Substreams package directory, e.g. ethereum-foo
+#   {test_package}     the harness `--package` (a clone name such as robinhood-uniswap-v4-with-hooks
+#                      for a package with several manifests); defaults to {package}
+#   {chain}            the package's chain (the harness `--chain`)
+#   {protocol_system}  the agreed protocol_system string
+#   {sim_module}       nextest filter for the native ProtocolSim module, e.g. foo
+#   {adapter}          VM adapter contract name, e.g. FooAdapter
+#   {executor}         executor contract name, e.g. FooExecutor
+#   {encoder}          nextest filter for the swap encoder module, e.g. foo
+#   {router_test}      TychoRouter integration test contract, e.g. TychoRouterForFooTest
+#   {tree}             the worktree's absolute path
+#   {report}           a per-step path for a JSON report (set by layer_checks.py)
+#
+# Fields: layers (where it runs; "final" runs every step once more), cwd (relative to the tree),
+# cmd (run with bash -o pipefail -c), when (a list of kinds, "vm" | "native" | "hybrid", or
+# "file:<path>"), requires (a gap from harness_caps.py: the step is off until it lands), harness
+# (true: the protocol-testing run, with its own database and ports), timeout_min, needs
+# (placeholders that must be set), report_checks (for a step with a {report}: the report checks
+# each layer answers for, added to the earlier layers'; "*" is every check).
+
+[[step]]
+name = "substreams-fmt"
+layers = ["indexing"]
+cwd = "protocols/substreams"
+cmd = 'cargo +"$RUST_NIGHTLY" fmt -p {package} --check'
+needs = ["package"]
+
+[[step]]
+name = "substreams-clippy"
+layers = ["indexing"]
+cwd = "protocols/substreams"
+cmd = "cargo clippy -p {package} --all-targets -- -D warnings"
+needs = ["package"]
+
+[[step]]
+name = "substreams-test"
+layers = ["indexing"]
+cwd = "protocols/substreams"
+cmd = "cargo test -p {package}"
+needs = ["package"]
+
+[[step]]
+name = "substreams-wasm"
+layers = ["indexing", "simulation", "execution"]
+cwd = "protocols/substreams"
+cmd = "cargo build --target wasm32-unknown-unknown --release -p {package}"
+needs = ["package"]
+timeout_min = 30
+
+[[step]]
+name = "adapter-fmt"
+layers = ["simulation"]
+when = ["vm"]
+cwd = "protocols/adapter-integration/evm"
+cmd = "forge fmt --check"
+
+[[step]]
+name = "adapter-test"
+layers = ["simulation"]
+when = ["vm"]
+cwd = "protocols/adapter-integration/evm"
+cmd = "forge test --match-contract {adapter} -j 1"
+needs = ["adapter"]
+timeout_min = 40
+
+[[step]]
+name = "rust-fmt"
+layers = ["simulation", "execution"]
+cwd = "."
+cmd = 'cargo +"$RUST_NIGHTLY" fmt --all --check'
+
+[[step]]
+name = "simulation-clippy"
+layers = ["simulation"]
+when = ["native", "hybrid"]
+cwd = "."
+cmd = 'cargo +"$RUST_NIGHTLY" clippy -p tycho-simulation --all-features --all-targets -- -D warnings'
+timeout_min = 40
+
+[[step]]
+name = "simulation-test"
+layers = ["simulation"]
+when = ["native", "hybrid"]
+cwd = "."
+cmd = "cargo nextest run -p tycho-simulation --all-features -E 'test(/{sim_module}/)'"
+needs = ["sim_module"]
+timeout_min = 40
+
+[[step]]
+name = "execution-clippy"
+layers = ["execution"]
+cwd = "."
+# tycho-router-model is a workspace member tycho-execution does not depend on: built on its own, or
+# a change to the router's variants (a new protocol's) breaks it unseen.
+cmd = 'cargo +"$RUST_NIGHTLY" clippy -p tycho-execution -p tycho-router-model --all-features --all-targets -- -D warnings'
+timeout_min = 40
+
+[[step]]
+name = "encoder-test"
+layers = ["execution"]
+cwd = "."
+cmd = "cargo nextest run -p tycho-execution --all-features -E 'test(/{encoder}/)'"
+needs = ["encoder"]
+timeout_min = 30
+
+[[step]]
+name = "executor-fmt"
+layers = ["execution"]
+cwd = "crates/tycho-execution/contracts"
+cmd = "forge fmt --check"
+
+[[step]]
+name = "executor-test"
+layers = ["execution"]
+cwd = "crates/tycho-execution/contracts"
+cmd = "forge test --match-contract {executor} -j 1"
+needs = ["executor"]
+timeout_min = 40
+
+[[step]]
+name = "router-test"
+layers = ["execution"]
+cwd = "crates/tycho-execution/contracts"
+cmd = "forge test --match-contract {router_test} -j 1"
+needs = ["router_test"]
+timeout_min = 40
+
+[[step]]
+name = "runtime-bytecode-fixtures"
+layers = ["execution"]
+cwd = "crates/tycho-execution/contracts"
+cmd = "forge test --match-contract RuntimeBytecodeFixtures"
+timeout_min = 30
+
+[[step]]
+# The licensing check CI runs (ci-licensing.yaml): a new package's license fields.
+name = "licensing"
+layers = ["indexing", "simulation", "execution"]
+when = "file:scripts/check-licensing.sh"
+cwd = "."
+cmd = "./scripts/check-licensing.sh"
+
+[[step]]
+name = "ast-grep"
+layers = ["indexing", "simulation", "execution"]
+when = "file:sgconfig.yml"
+cwd = "."
+cmd = "ast-grep scan"
+
+[[step]]
+# G11 moves the wiring scripts into scripts/checks/; its PR defines the entry point. Update this
+# command when it lands.
+name = "wiring"
+layers = ["indexing", "simulation", "execution"]
+requires = "G11"
+cwd = "."
+cmd = "python3 scripts/checks/run.py --protocol-system {protocol_system}"
+needs = ["protocol_system"]
+
+[[step]]
+# The protocol-testing range run of the package, strict: indexing, balances against the lens,
+# the quote ladder, executions matched exactly, and each direction's declared limit
+# (`protocols/testing/README.md`, "Strict mode", "Test report"). The runner always runs every check,
+# but a layer answers only for its own and the earlier layers' (`report_checks`): before the decoder
+# and the executor exist, the simulation and execution checks fail by construction and are listed
+# as a later layer's. How a step's outcome follows from its checks: `layer_checks.judge_report`.
+name = "protocol-testing"
+layers = ["indexing", "simulation", "execution"]
+harness = true
+cwd = "protocols/testing"
+cmd = "cargo run --release -- range --package {test_package} --chain {chain} --report {report}"
+needs = ["package", "chain"]
+timeout_min = 120
+
+[step.report_checks]
+indexing = ["index", "state.components", "state.excluded", "balances"]
+simulation = ["decode", "sim.ladder", "balances.tvl_only", "limits.max_output"]
+execution = ["*"]
+
+[[step]]
+# G10's catalogue; its PR defines the entry point. Update this command when it lands.
+name = "mutation-score"
+layers = ["final"]
+requires = "G10"
+cwd = "."
+cmd = "python3 scripts/checks/mutants.py --package {package}"
+needs = ["package"]
+timeout_min = 240

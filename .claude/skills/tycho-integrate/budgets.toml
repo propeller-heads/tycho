@@ -1,0 +1,17 @@
+# Budgets for one tycho-integrate run. Placeholders: the first shadow runs record spend per stage
+# (`state.py status`), and these caps are set from that. Measured so far: a partial review costs
+# $5-10, a full one $15-22; the implementer's cost is not measured yet.
+
+[layer]
+# Per layer (indexing, simulation, execution). On overrun the layer escalates with its ledger and
+# later layers wait.
+rounds = 5
+usd = 100
+
+[integration]
+# The whole run, the final review included. On overrun the run escalates.
+usd = 300
+
+[final]
+# Rounds the final gates may add when the fresh full review raises new blocking findings.
+extra_rounds = 2

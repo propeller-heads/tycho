@@ -98,5 +98,6 @@ __pycache__/
 # tycho-review outputs and the worktrees of its runs
 .claude/reviews/
 
-# tycho-integrate run state (ledger, spec, decisions, prompts)
-.claude/integrations/
+# tycho-integrate run state (`.claude/worktrees/integrations/`: ledger, spec, decisions, prompts)
+# and each run's worktree
+.claude/worktrees/

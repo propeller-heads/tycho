@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""Runs a layer's checks (checks.toml) in the run's worktree and writes the results.
+
+    layer_checks.py --protocol P --layer indexing|simulation|execution|final --round N [--chains a,b] [--only s,...]
+    layer_checks.py --protocol P --layer L --scratch [--only s,...]      an implementer's own run, recorded nowhere
+
+Results go to `<run>/rounds/<layer>-<n>/checks.json` (one entry per step: pass, fail, infra, off
+with the gap that turns it on, or n/a) with a log per step beside it. Exit 0 when every step that
+ran passed, 1 when one failed, 3 when only the environment did (`infra`). The implementer runs the
+same commands while it works; this run is the one the ledger records.
+
+Chains: a round runs the protocol-testing harness on the run's primary chain (`schema.run_chains`),
+plus any chain `--chains` names (a chain the final gates found red); `--layer final` runs it on
+every chain. The other steps run once.
+
+Infrastructure: a failed step whose log shows the environment failing (RPC limits or TLS, an
+expired Substreams token, Docker, a full disk, a timeout that the log explains) is run once more,
+after the env files are read again (a renewed token) and a pause; a harness run checks its RPC
+and token again as it starts. Still failing that way, it is `infra`: never handed to the implementer as a code
+failure, and the stop rules ask the person about the named cause. It is not rerun at the base
+branch: the integration's package and tests do not exist there.
+"""
+
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import envcheck  # noqa: E402
+import harness_caps  # noqa: E402
+import schema  # noqa: E402
+
+# A failed step's log naming one of these is the environment failing, not the code (most specific
+# first). Each is (cause, pattern).
+INFRA_CAUSES = (
+    ("disk full", re.compile(r"No space left on device|ENOSPC", re.I)),
+    ("docker", re.compile(r"Cannot connect to the Docker daemon|docker: .*(daemon|not found)|error during connect", re.I)),
+    ("substreams token", re.compile(r"(substreams|firehose)[^\n]*(\b401\b|unauthenticated|unauthorized|invalid (api )?token|token (is )?expired)"
+                                    r"|(\b401\b|unauthenticated|unauthorized|invalid (api )?token|token (is )?expired)[^\n]*(substreams|firehose)|SUBSTREAMS_API_TOKEN", re.I)),
+    ("etherscan", re.compile(r"etherscan[^\n]*(rate limit|max rate|timed? ?out|429|503)", re.I)),
+    ("rpc rate limit", re.compile(r"(HTTP|status|code)\W{0,3}429\b|\b429 Too Many|Too Many Requests|\brate.?limit(ed|ing)?\b|exceeded (the )?(compute units|capacity|quota)", re.I)),
+    ("network", re.compile(r"tls handshake|certificate verify failed|InvalidCertificate|Connection reset by peer|connection refused|Could not resolve host|dns error|error sending request|network is unreachable|broken pipe|operation timed out", re.I)),
+)
+
+
+# Before the one retry of a step the environment failed: long enough for a rate limit's window.
+RETRY_PAUSE_S = 30
+
+
+def infra_cause(text: str):
+    """The infrastructure cause a log shows, or None."""
+    return next((cause for cause, rx in INFRA_CAUSES if rx.search(text)), None)
+
+
+def placeholders(run: Path, tree: Path, chain: str) -> dict:
+    """The checks' placeholders for one chain. A `paths` value may be one string, or a map from
+    chain to string (a package or test package per chain)."""
+    values = {"tree": str(tree), "chain": chain}
+    dec_path, spec_path = run / "decisions.json", run / "spec.json"
+    spec = schema.load_json(spec_path) if spec_path.exists() else {}
+    if dec_path.exists():
+        dec = schema.load_json(dec_path)
+        # Validated here, where its values go into commands, whatever the orchestrator did before.
+        errors = schema.validate_decisions(dec, spec)
+        if errors:
+            raise SystemExit("decisions.json: " + "; ".join(errors))
+        for k, v in (dec.get("paths") or {}).items():
+            v = v.get(chain) if isinstance(v, dict) else v
+            if isinstance(v, str):
+                values[k] = v
+        values.setdefault("protocol_system", (dec.get("agreements") or {}).get("protocol_system", ""))
+    values.setdefault("test_package", values.get("package", ""))
+    values["kind"] = spec.get("kind", "")
+    return values
+
+
+def layer_patterns(step: dict, layer: str):
+    """The report checks `layer` answers for: its own `report_checks` and the earlier layers'. None
+    when the step lists none, or for the final run: every check."""
+    table = step.get("report_checks")
+    if not table or layer == "final":
+        return None
+    out = []
+    for l in schema.LAYERS:
+        out += table.get(l, [])
+        if l == layer:
+            break
+    return None if "*" in out else out
+
+
+def judge_report(path: Path, patterns, exit_code: int) -> tuple:
+    """(status, detail, failing checks, checks skipped with a reason, later-layer checks) of a
+    protocol-testing `--report` file
+    (`protocols/testing/README.md`, "Test report").
+
+    The layer's checks (`patterns`; None is all) decide the step: one that failed, did not run, or
+    was skipped without a reason fails it. A skip with a reason is structural (a direction capped
+    at the int128 limit, a zero-limit dust band): it is listed, not failed. A missing or empty
+    report fails, since the runner exits 0 having tested nothing when a package has no test yaml or
+    manifest; so does a report with none of the layer's checks. A failed exit with none of the
+    layer's checks failing passes only when a later layer's check explains it."""
+    if not path.exists():
+        return "fail", f"exit {exit_code}, and the runner wrote no report: nothing was tested", [], [], []
+    try:
+        results = schema.load_json(path).get("results") or []
+    except (OSError, ValueError, AttributeError):
+        return "fail", f"exit {exit_code}, and the report {path} is unreadable", [], [], []
+    keep = ("test", "check", "component", "direction", "outcome", "detail", "reason", "block", "limit")
+    pick = lambda r: {k: r[k] for k in keep if k in r}
+    mine = lambda c: patterns is None or c in patterns
+    own = [r for r in results if mine(r.get("check", ""))]
+    later = [pick(r) for r in results if not mine(r.get("check", "")) and r.get("outcome") != "pass"]
+    bad = [pick(r) for r in own if r.get("outcome") in ("fail", "not_run") or (r.get("outcome") == "skipped" and not r.get("reason"))]
+    skipped = [pick(r) for r in own if r.get("outcome") == "skipped" and r.get("reason")]
+    if not own:
+        return "fail", f"exit {exit_code}, and the report has none of this layer's checks ({len(results)} results)", [], skipped, later
+    if len(skipped) == len(own):
+        return "fail", f"exit {exit_code}, and every one of this layer's {len(own)} checks was skipped: nothing was tested", [], skipped, later
+    if bad:
+        return "fail", f"exit {exit_code}; {len(bad)} of this layer's checks failed", bad, skipped, later
+    if exit_code != 0 and not later:
+        return "fail", f"exit {exit_code} with every check passing: see the log", [], skipped, later
+    note = f"; {len(later)} later-layer checks not counted" if later else ""
+    return "pass", f"{len(own)} checks of this layer passed{note}", [], skipped, later
+
+
+# Above the harness's defaults (Postgres 5431, the indexer 4242), so a run never takes the ports a
+# person's own harness uses.
+DB_PORT_FROM, SERVER_PORT_FROM = 5440, 4250
+
+
+def free_port(start: int) -> int:
+    port = next((p for p in range(start, start + 200) if envcheck.port_free(p)), None)
+    if port is None:
+        raise SystemExit(f"no free port from {start}")
+    return port
+
+
+class Harness:
+    """A protocol-testing environment of the run's own: a Postgres on a free port, an indexer port,
+    and `tycho-indexer` on PATH (the harness runs it by name)."""
+
+    def __init__(self, tree: Path, project: str, logdir: Path, chain: str, timeout_min: int):
+        self.tree, self.project, self.logdir, self.chain, self.timeout_min = tree, project, logdir, chain, timeout_min
+        self.db_port = free_port(DB_PORT_FROM)
+        self.server_port = free_port(SERVER_PORT_FROM)
+        self.env = None
+
+    def up(self) -> tuple:
+        """(started, detail, infrastructure cause or None). Everything here but the indexer's build
+        is the environment: a build failure is the environment only when its log says so."""
+        rpc = schema.rpc_url(self.chain)
+        if not rpc:
+            return False, schema.no_rpc(self.chain), "rpc missing"
+        try:
+            envcheck.rpc(rpc, "eth_blockNumber", [])
+        except Exception as e:  # noqa: BLE001 - any failure here is the node's
+            return False, f"the {self.chain} RPC does not answer: {e}", "rpc"
+        # Valid for the longest harness step (checks.toml `timeout_min`), and the retry after it.
+        name, ok, detail = envcheck.check_substreams_token(hours=2 * self.timeout_min / 60)
+        if not ok:
+            return False, f"{name}: {detail}", "substreams token"
+        log = self.logdir / "harness-setup.log"
+        with open(log, "w") as out:
+            build = subprocess.run(["cargo", "build", "--release", "-p", "tycho-indexer"], cwd=self.tree, stdout=out, stderr=subprocess.STDOUT)
+            if build.returncode != 0:
+                return False, f"building tycho-indexer failed (see {log})", infra_cause(log.read_text(errors="replace"))
+            env = {**os.environ, "DB_HOST_PORT": str(self.db_port)}
+            db = subprocess.run(["docker", "compose", "-p", self.project, "up", "db", "-d", "--wait"], cwd=self.tree / "protocols/testing", env=env, stdout=out, stderr=subprocess.STDOUT)
+            if db.returncode != 0:
+                return False, f"starting the harness database failed (see {log})", infra_cause(log.read_text(errors="replace")) or "docker"
+        self.env = {
+            **os.environ,
+            "RPC_URL": rpc,  # the runner reads the chain's RPC from RPC_URL
+            "DATABASE_URL": f"postgres://postgres:mypassword@localhost:{self.db_port}/tycho_indexer_0",
+            "TYCHO_SERVER_PORT": str(self.server_port),
+            "PATH": f"{self.tree / 'target/release'}:{os.environ.get('PATH', '')}",
+        }
+        return True, f"db on {self.db_port}, indexer on {self.server_port}", None
+
+    def down(self) -> None:
+        subprocess.run(["docker", "compose", "-p", self.project, "down"], cwd=self.tree / "protocols/testing", capture_output=True)
+
+
+def applies(step: dict, layer: str, values: dict, caps: dict, tree: Path, route: list) -> tuple:
+    """(status, detail): status `run`, or why the step does not run (`n/a`, `off`, `fail`), or None
+    for a step of another layer, which is not listed. The final run runs the steps of the layers the
+    route builds."""
+    layers = step.get("layers", [])
+    if layer != "final" and layer not in layers:
+        return None, None
+    # At the final run: the steps of the layers the route builds, and the final-only steps.
+    if layer == "final" and not (set(layers) & set(route) or layers == ["final"]):
+        return None, None
+    when = step.get("when")
+    if isinstance(when, list):
+        if values.get("kind") not in schema.SIM_KINDS:
+            return "fail", f"spec.json's kind {values.get('kind')!r} is not one of {schema.SIM_KINDS}"
+        if values["kind"] not in when:
+            return "n/a", f"{values['kind']} integration"
+    if isinstance(when, str) and when.startswith("file:") and not (tree / when[5:]).exists():
+        return "n/a", f"no {when[5:]} in the tree"
+    gap = step.get("requires")
+    if gap and not caps.get(gap, {}).get("on"):
+        return "off", caps.get(gap, {}).get("reason", gap + " unknown")
+    missing = sorted({k for k in step.get("needs", []) + PLACEHOLDER.findall(step["cmd"]) if k != "report" and not values.get(k)})
+    if missing:
+        return "fail", f"decisions.json paths lack {missing}"
+    return "run", None
+
+
+PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def run_step(step: dict, values: dict, tree: Path, outdir: Path, name: str, env, layer: str) -> dict:
+    """Runs one step once: its result, with the infrastructure cause when the log shows one."""
+    report_path = outdir / f"{name}.report.json"
+    report_path.unlink(missing_ok=True)
+    cmd = step["cmd"].format(**values, report=report_path)
+    log = outdir / f"{name}.log"
+    started = time.time()
+    timeout = step.get("timeout_min", 20)
+    proc = None
+    try:
+        with open(log, "w") as out:
+            # A session of its own, so a timeout ends the whole pipeline (cargo, the indexer it starts),
+            # not only bash.
+            proc = subprocess.Popen(["bash", "-o", "pipefail", "-c", cmd], cwd=tree / step.get("cwd", "."), env=env, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.wait(timeout=timeout * 60)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                raise
+        status, detail = ("pass" if proc.returncode == 0 else "fail"), f"exit {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        proc = None
+        status, detail = "fail", f"timed out after {timeout} min"
+    result = {"name": name, "cmd": cmd, "log": str(log), "seconds": round(time.time() - started)}
+    checks = []
+    if "{report}" in step["cmd"] and proc is not None:
+        status, detail, checks, skipped, later = judge_report(report_path, layer_patterns(step, layer), proc.returncode)
+        result.update(report=str(report_path), checks=checks, skipped=skipped, later=later)
+    text = log.read_text(errors="replace")
+    tail = text.splitlines()[-30:] if status == "fail" else []
+    result.update(status=status, detail=detail, tail=tail)
+    # The environment, not the code, only when nothing of the code's own failed: a report that
+    # names failing checks is the code's whatever its log also says (RPC retries are common noise).
+    # A timeout is the environment only when the log shows why.
+    if status == "fail" and not checks:
+        cause = infra_cause("\n".join(text.splitlines()[-400:]))
+        if cause:
+            result["infra"] = cause
+    return result
+
+
+def run_once(step: dict, values: dict, tree: Path, outdir: Path, name: str, chain: str, args) -> dict:
+    harness = None
+    try:
+        env = None
+        if step.get("harness"):
+            harness = Harness(tree, f"tycho-integrate-{schema.slug(args.protocol)}-{chain}", outdir, chain, step.get("timeout_min", 20))
+            ok, detail, cause = harness.up()
+            if not ok:
+                return {"name": name, "status": "fail", "detail": detail, **({"infra": cause} if cause else {})}
+            env = harness.env
+        return run_step(step, values, tree, outdir, name, env, args.layer)
+    finally:
+        if harness is not None:
+            harness.down()
+
+
+def run_with_retry(step: dict, values: dict, tree: Path, outdir: Path, name: str, chain: str, args) -> dict:
+    """A step, run once more when the environment failed it: after reloading the env files (a
+    renewed token, a restored RPC) and a pause. Failing so twice, it is `infra`."""
+    result = run_once(step, values, tree, outdir, name, chain, args)
+    if result["status"] != "fail" or not result.get("infra"):
+        return result
+    schema.load_env_files(refresh=True)
+    time.sleep(RETRY_PAUSE_S)
+    result = run_once(step, values, tree, outdir, name, chain, args)
+    if result["status"] == "fail" and result.get("infra"):
+        result.update(status="infra", detail=f"{result['infra']}: {result['detail']} (twice)")
+    return result
+
+
+def load_steps() -> list:
+    """checks.toml's steps; a `when` kind that is not a simulation kind is an error, never a step
+    that silently never runs."""
+    with open(schema.skill_dir() / "checks.toml", "rb") as f:
+        steps = tomllib.load(f)["step"]
+    for step in steps:
+        bad = [k for k in step.get("when", []) if k not in schema.SIM_KINDS] if isinstance(step.get("when"), list) else []
+        if bad:
+            raise SystemExit(f"checks.toml step {step['name']}: unknown kinds {bad} (one of {schema.SIM_KINDS})")
+    return steps
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--protocol", required=True)
+    p.add_argument("--layer", required=True, choices=(*schema.LAYERS, "final"))
+    p.add_argument("--round", type=int, help="the round the results are for (not with --scratch)")
+    p.add_argument("--scratch", action="store_true", help="the implementer's own run: results under the temp dir, nothing recorded")
+    p.add_argument("--only", help="comma-separated step names")
+    p.add_argument("--chains", help="comma-separated chains to run the harness on besides the primary; `all` for every chain")
+    args = p.parse_args()
+    if (args.round is None) == (not args.scratch):
+        raise SystemExit("give --round (a recorded run) or --scratch (an implementer's own run), not both")
+
+    run = schema.run_dir(args.protocol)
+    tree = schema.worktree_dir(args.protocol)
+    if args.scratch:
+        outdir = Path(tempfile.gettempdir()) / f"tycho-integrate-{schema.slug(args.protocol)}" / args.layer
+    else:
+        outdir = run / "rounds" / f"{args.layer}-{args.round}"
+    outdir.mkdir(parents=True, exist_ok=True)
+    steps = load_steps()
+    schema.load_env_files()
+    primary, every = schema.run_chains(run)
+    extra = every if args.layer == "final" or args.chains == "all" else [c for c in (args.chains or "").split(",") if c]
+    unknown = [c for c in extra if c not in every]
+    if unknown:
+        raise SystemExit(f"chains {unknown} are not the run's ({every})")
+    harness_chains = [primary] + [c for c in every if c in extra and c != primary]
+    values_of = {chain: placeholders(run, tree, chain) for chain in harness_chains}
+    route = schema.route_layers(run)
+    caps = harness_caps.detect(tree)
+    only = set(args.only.split(",")) if args.only else None
+
+    results = []
+    for step in steps:
+        if only and step["name"] not in only:
+            continue
+        ran = set()
+        for chain in harness_chains:
+            values = values_of[chain]
+            name = step["name"] if chain == primary else f"{step['name']}@{chain}"
+            status, detail = applies(step, args.layer, values, caps, tree, route)
+            if status is None:
+                continue
+            # A step runs once per distinct command: the harness on each chain, another step once
+            # per chain whose package differs. A chain's run is named `<step>@<chain>`, except the
+            # primary's, so a failure keeps its name from round to round.
+            key = (status, step["cmd"].format_map({**values, "report": ""}) if status == "run" else detail)
+            if key in ran:
+                continue
+            ran.add(key)
+            if status != "run":
+                results.append({"name": name, "status": status, "detail": f"{status}: {detail}"})
+                continue
+            results.append(run_with_retry(step, values, tree, outdir, name, chain, args))
+
+    green = all(r["status"] in ("pass", "n/a", "off") for r in results)
+    only_infra = not green and all(r["status"] in ("pass", "n/a", "off", "infra") for r in results)
+    head = schema.git("-C", str(tree), "rev-parse", "HEAD", check=False).stdout.strip()
+    report = {"layer": args.layer, "round": args.round, "head": head, "chains": harness_chains, "green": green, "steps": results, "caps": caps}
+    schema.write_json(outdir / "checks.json", report)
+    for r in results:
+        print(f"{r['status']:5} {r['name']}: {r['detail']}")
+    print(json.dumps({"green": green, "infra": [r["name"] for r in results if r["status"] == "infra"], "file": str(outdir / "checks.json")}))
+    sys.exit(0 if green else 3 if only_infra else 1)
+
+
+if __name__ == "__main__":
+    main()

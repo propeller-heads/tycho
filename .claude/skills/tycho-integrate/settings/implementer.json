@@ -1,0 +1,70 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(jq:*)",
+      "Bash(mkdir:*)",
+      "Bash(python3:*)",
+      "Bash(cast:*)",
+      "Bash(curl:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git grep:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(mise exec:*)",
+      "Bash(cargo:*)",
+      "Bash(forge:*)",
+      "Bash(anvil:*)",
+      "Bash(substreams:*)",
+      "Bash(docker:*)",
+      "Bash(ast-grep:*)",
+      "Bash(bash .claude/scripts/run-nextest.sh:*)",
+      "Bash(git submodule:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git mv:*)",
+      "Bash(git rm:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Bash(gh:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git worktree:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I {GUARD}"
+          }
+        ]
+      }
+    ]
+  }
+}
