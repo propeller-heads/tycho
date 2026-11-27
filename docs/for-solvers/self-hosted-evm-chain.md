@@ -145,6 +145,7 @@ chains:
 <tr><td><code>name</code></td><td>Chain identifier; reference it from an extractor's <code>chain:</code> field and from <code>CHAINS</code>.</td></tr>
 <tr><td><code>chain_id</code></td><td>EVM chain id.</td></tr>
 <tr><td><code>block_time_secs</code></td><td>Average block time in seconds.</td></tr>
+<tr><td><code>block_time_ms</code></td><td>Optional. Block interval in milliseconds, for chains that make more than one block per second. Simulation uses it to project the next block's timestamp. Defaults to <code>block_time_secs</code> × 1000.</td></tr>
 <tr><td><code>native</code></td><td>Native gas token: <code>address</code>, <code>symbol</code>, <code>decimals</code>.</td></tr>
 <tr><td><code>wrapped_native</code></td><td>Wrapped native token (e.g. WETH): <code>address</code>, <code>symbol</code>, <code>decimals</code>. Use the wrapper deployed on your chain. If <code>wrapped_native.address</code> equals <code>native.address</code>, Tycho treats the chain as having no wrapper and injects no <code>native_wrapper</code> component.</td></tr>
 <tr><td><code>default_tvl_thresholds</code></td><td>Liquidity gates in <strong>native-token units</strong> (e.g. ETH), read by downstream consumers (solvers, tycho-simulation) to decide which components to track — not by the indexer. Size <code>low</code>/<code>medium</code> to the USD floor you want at the native token's price; the Ethereum defaults target roughly $20k / $200k.</td></tr>
