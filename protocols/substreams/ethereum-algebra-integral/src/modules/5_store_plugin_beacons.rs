@@ -143,6 +143,14 @@ pub fn beacon_bindings(
     bindings
 }
 
+/// The trace of the block's transaction at `index`, if the block has one.
+pub fn trace_at(block: &eth::Block, index: u64) -> Option<&eth::TransactionTrace> {
+    block
+        .transaction_traces
+        .iter()
+        .find(|trace| u64::from(trace.index) == index)
+}
+
 /// What the block writes to `store_plugin_beacons`, in ordinal order:
 ///
 /// - the beacon (hex) each plugin is bound to, under [`plugin_beacon_key`], and a marker for every
@@ -159,12 +167,6 @@ pub fn plugin_beacon_writes(
     events: &Events,
     pool_plugins_store: &impl StringStore,
 ) -> Vec<StoreWrite> {
-    let trace_of = |index: u32| {
-        block
-            .transaction_traces
-            .iter()
-            .find(|trace| trace.index == index)
-    };
     let known = |known: bool| if known { KNOWN.to_string() } else { String::new() };
     let mut writes = Vec::new();
 
@@ -180,8 +182,8 @@ pub fn plugin_beacon_writes(
             key: tracked_beacon_key(&binding.beacon),
             value: KNOWN.to_string(),
         });
-        let implementation =
-            trace_of(binding.tx_index).and_then(|trace| plugin_beacon(trace, &binding.plugin));
+        let implementation = trace_at(block, binding.tx_index.into())
+            .and_then(|trace| plugin_beacon(trace, &binding.plugin));
         writes.push(StoreWrite {
             ordinal,
             key: known_implementation_key(&binding.plugin),
@@ -201,14 +203,7 @@ pub fn plugin_beacon_writes(
         };
         let plugin = switch.new;
         let attributes = plugin.as_ref().and_then(|plugin| {
-            let trace = trace_of(
-                event
-                    .transaction
-                    .as_ref()?
-                    .index
-                    .try_into()
-                    .ok()?,
-            )?;
+            let trace = trace_at(block, event.transaction.as_ref()?.index)?;
             named_plugin_attributes(trace, plugin, &[])
         });
         let followed = match (&plugin, attributes) {
