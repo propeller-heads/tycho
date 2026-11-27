@@ -53,6 +53,8 @@ static EXECUTOR_MAPPING: LazyLock<HashMap<&'static str, &'static str>> = LazyLoc
     map.insert("pancakeswap_v2", UNISWAP_V2_BYTECODE_JSON);
     map.insert("uniswap_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("pancakeswap_v3", UNISWAP_V3_BYTECODE_JSON);
+    // Algebra pools share Uniswap V3's swap selector; the router answers their callback.
+    map.insert("nami_v4", UNISWAP_V3_BYTECODE_JSON);
     map.insert("gigadex_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("swaphood_v3", UNISWAP_V3_BYTECODE_JSON);
     map.insert("kleos_v3", UNISWAP_V3_BYTECODE_JSON);

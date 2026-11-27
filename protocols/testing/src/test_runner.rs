@@ -20,6 +20,7 @@ use tycho_execution::encoding::evm::utils::bytes_to_address;
 use tycho_simulation::{
     evm::{
         protocol::{
+            algebra_integral::plugin::deployments::initialize_plugin_handlers,
             u256_num::bytes_to_u256,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
         },
@@ -101,6 +102,9 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
+        ("ethereum-nami-v4", "ethereum-algebra-integral"),
+        ("base-nami-v4", "ethereum-algebra-integral"),
+        ("robinhood-nami-v4", "ethereum-algebra-integral"),
     ])
 });
 
@@ -1645,6 +1649,7 @@ impl TestRunner {
 
         let decoder = protocol_stream_builder.get_decoder();
         initialize_hook_handlers().into_diagnostic()?;
+        initialize_plugin_handlers().into_diagnostic()?;
 
         let state_msgs: HashMap<String, StateSyncMessage<BlockHeader>> = HashMap::from([(
             String::from(protocol_system),
@@ -2954,6 +2959,39 @@ tests:
                 .and_then(|name| name.to_str()),
             Some("integration_test_bsc_ring_swap_v2.tycho.yaml")
         );
+    }
+
+    /// The runner returns `Ok` when a config file is missing, so a manifest whose file has
+    /// another name passes without running.
+    #[test]
+    fn nami_v4_manifests_resolve_to_config_files_that_exist() {
+        for (chain, protocol) in [
+            (Chain::Ethereum, "ethereum-nami-v4"),
+            (Chain::Base, "base-nami-v4"),
+            (Chain::Robinhood, "robinhood-nami-v4"),
+        ] {
+            let runner =
+                get_mocked_runner_for(chain, protocol, "http://localhost:8545".to_string());
+
+            assert!(
+                runner
+                    .substreams_path
+                    .ends_with("substreams/ethereum-algebra-integral"),
+                "unexpected substreams_path: {}",
+                runner.substreams_path.display()
+            );
+            let file_name = runner
+                .config_file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("the config path has a file name");
+            assert_eq!(
+                file_name,
+                format!("integration_test_{}.tycho.yaml", protocol.replace('-', "_"))
+            );
+            let config = protocols_path("substreams/ethereum-algebra-integral").join(file_name);
+            assert!(config.exists(), "{} is missing", config.display());
+        }
     }
 
     #[test]

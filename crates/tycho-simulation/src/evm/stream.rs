@@ -146,6 +146,7 @@ use crate::{
         override_stream::{self, StateOverrideProvider},
         pending::PendingBlockProcessor,
         protocol::{
+            algebra_integral::plugin::deployments::initialize_plugin_handlers,
             filters::uniswap_v4_non_angstrom_hook_pool_filter,
             native_wrapper::state::NativeWrapperState,
             uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
@@ -915,6 +916,9 @@ impl ProtocolStreamBuilder {
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
         })?;
+        initialize_plugin_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing plugin handlers: {e:?}"))
+        })?;
         self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
         let decoder = Arc::new(self.decoder);
@@ -971,6 +975,9 @@ impl ProtocolStreamBuilder {
         self.install_fallback_router_labels()?;
         initialize_hook_handlers().map_err(|e| {
             StreamError::SetUpError(format!("Error initializing hook handlers: {e:?}"))
+        })?;
+        initialize_plugin_handlers().map_err(|e| {
+            StreamError::SetUpError(format!("Error initializing plugin handlers: {e:?}"))
         })?;
         self.install_override_providers();
         let (_, rx) = self.stream_builder.build().await?;
@@ -1341,6 +1348,55 @@ mod tests {
     ///
     /// This test only checks that the builder method is callable and that the returned controller
     /// compiles — it does not start any network connection.
+    /// `build` is what registers the Algebra Integral plugin handlers: without that call every
+    /// `nami_v4` pool with a plugin decodes as not quoted. The handler registry is process-wide,
+    /// so this proves it only where each test has its own process, as under nextest.
+    #[tokio::test]
+    async fn test_build_registers_the_algebra_plugin_handlers() {
+        use tycho_common::simulation::protocol_sim::BlockContext;
+
+        use crate::evm::protocol::algebra_integral::{
+            plugin::{
+                registry::{instantiate_plugin_handler, PluginCreationParams},
+                PLUGIN_CONFIG_ATTRIBUTE,
+            },
+            state::{
+                test_support::{
+                    robinhood_module_attributes, NAMI_PLUGIN_CONFIG, PLUGIN, PLUGIN_IMPL_ROBINHOOD,
+                    SESSION,
+                },
+                AlgebraIntegralState,
+            },
+        };
+
+        let builder = ProtocolStreamBuilder::new("localhost:1", Chain::Robinhood)
+            .exchange::<AlgebraIntegralState>(
+            "nami_v4",
+            ComponentFilter::with_tvl_range(0.0, 0.0),
+            None,
+        );
+        // No server listens there. The handlers are registered before the builder connects, so
+        // the outcome of the connection does not matter.
+        drop(tokio::time::timeout(std::time::Duration::from_millis(200), builder.build()).await);
+
+        let mut attributes = robinhood_module_attributes();
+        attributes.insert(
+            PLUGIN_CONFIG_ATTRIBUTE.to_string(),
+            tycho_common::Bytes::from(vec![NAMI_PLUGIN_CONFIG]),
+        );
+        let handler = instantiate_plugin_handler(
+            Chain::Robinhood,
+            Some(PLUGIN_IMPL_ROBINHOOD),
+            PluginCreationParams {
+                pool: PLUGIN,
+                plugin: PLUGIN,
+                attributes: &attributes,
+                block: BlockContext::new(100, SESSION),
+            },
+        );
+        assert!(handler.is_ok(), "{:?}", handler.err());
+    }
+
     #[tokio::test]
     async fn test_with_step_controller_returns_controller() {
         let builder = ProtocolStreamBuilder::new("tycho-beta.propellerheads.xyz", Chain::Ethereum);

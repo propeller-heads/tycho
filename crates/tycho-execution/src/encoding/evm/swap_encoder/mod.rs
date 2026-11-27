@@ -14,6 +14,7 @@ mod etherfi;
 mod euclid;
 mod fallback;
 pub use fallback::{FallbackProtocol, FallbackSwapData};
+mod algebra_integral;
 mod fermiswap;
 mod fluid_v1;
 mod hashflow;

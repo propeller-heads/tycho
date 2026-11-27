@@ -89,6 +89,7 @@ fn register_exchanges(
                 .exchange::<SkyState>("sky", tvl_filter.clone(), None)
                 .exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None)
                 .exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None)
+                .exchange::<AlgebraIntegralState>("nami_v4", tvl_filter.clone(), None)
                 .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
         }
@@ -101,6 +102,7 @@ fn register_exchanges(
                 .exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
                 .exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aerodrome_slipstreams", tvl_filter.clone(), None)
+                .exchange::<AlgebraIntegralState>("nami_v4", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
                 .exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None)
                 .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
@@ -155,6 +157,7 @@ fn register_exchanges(
                 .exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
                 .exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(ekubo_v3_extension_filter))
+                .exchange::<AlgebraIntegralState>("nami_v4", tvl_filter.clone(), None)
                 .exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None)
                 .exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
                 .exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)

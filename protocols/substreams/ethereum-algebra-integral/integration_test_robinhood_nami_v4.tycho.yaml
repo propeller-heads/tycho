@@ -1,0 +1,37 @@
+substreams_yaml_path: ./robinhood-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # The pool is created with an adaptive fee (alpha1 1500, alpha2 4000) under implementation
+  # 0x8788deCB…ba97. Both still hold at the stop block: simulation does not quote an adaptive
+  # fee, so the component is indexed and checked but not simulated. The pool gets its first
+  # liquidity 1.5M blocks after it is created, so the range covers its creation only.
+  - name: test_weth_usdg_pool_with_adaptive_fee
+    start_block: 86166359
+    stop_block: 86176359
+    expected_components:
+      - id: "0xa730c5d09dd9926f798530d52e572d7594b952f3"
+        tokens:
+          - "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73" # WETH
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+        static_attributes: {}
+        creation_tx: "0x624ca7d5a1f20e9be93425489b09139d9359bf68e8e3be8476e725a75595f2ea"
+        skip_simulation: true
+        skip_execution: true
+  # The pool is created, named its plugin and given its first liquidity in block 119164470, under
+  # an implementation the registry knows, so it is quoted from its first block.
+  - name: test_usdg_ant_pool
+    start_block: 119164470
+    stop_block: 119164570
+    expected_components:
+      - id: "0xf688bc00518722cf5baab35dd201b0d053c35d78"
+        tokens:
+          - "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168" # USDG
+          - "0xbbB6c29bCc3a1028A2B54310DF73F4F7A3bcB373" # ANT
+        static_attributes: {}
+        creation_tx: "0x5f8e35390689894df496fa50561a86b1d9e6dfcc745825712556e438dee727d3"
+        skip_simulation: false

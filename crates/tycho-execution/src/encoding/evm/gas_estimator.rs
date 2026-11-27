@@ -2,9 +2,9 @@ use num_bigint::BigUint;
 
 use super::{
     constants::{
-        BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX, METRIC_FALLBACK_PROTOCOL_SYSTEM,
-        PRICE_LEVEL_STREAM_PREFIX, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-        UNISWAP_V3_FORKS,
+        ALGEBRA_INTEGRAL_FORKS, BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
+        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
     subsidy::encoded_subsidy,
@@ -24,7 +24,7 @@ pub const USER_PERMIT2_TRANSFER: u64 = 80_000;
 /// Exact-name callback-based protocols: the input `transferFrom` happens inside the callback,
 /// which is inside `swap()`. The gas is thus already included in `get_amount_out`.
 ///
-/// Incomplete on its own: every Uniswap V3 and Slipstream fork qualifies too. Use
+/// Incomplete on its own: every Uniswap V3, Slipstream and Algebra Integral fork qualifies too. Use
 /// [`is_callback_protocol`] for the full classification. The forks listed here before that
 /// function existed stay listed, so code that reads this public list directly keeps its answer
 /// for them.
@@ -46,12 +46,14 @@ pub const PROTOCOLS_CALLBACK: &[&str] = &[
 ];
 
 /// Whether `protocol_system` pulls its input inside a swap callback (see
-/// [`PROTOCOLS_CALLBACK`]). Uniswap V3 and Slipstream forks all swap through the Uniswap V3 pool
-/// ABI and pay in its callback, so a fork added to either list is covered without a second edit.
+/// [`PROTOCOLS_CALLBACK`]). Uniswap V3, Slipstream and Algebra Integral forks all pay in the swap
+/// callback of a pool with Uniswap V3's `swap` selector, so a fork added to one of the lists is
+/// covered without a second edit.
 pub fn is_callback_protocol(protocol_system: &str) -> bool {
     PROTOCOLS_CALLBACK.contains(&protocol_system) ||
         UNISWAP_V3_FORKS.contains(&protocol_system) ||
-        SLIPSTREAMS_FORKS.contains(&protocol_system)
+        SLIPSTREAMS_FORKS.contains(&protocol_system) ||
+        ALGEBRA_INTEGRAL_FORKS.contains(&protocol_system)
 }
 
 /// Exact-name protocols where the router-to-pool input transfer is skipped (funds are sent
@@ -588,12 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn test_single_callback_protocol_covers_every_v3_and_slipstream_fork() {
-        // Every fork in either list pays inside the Uniswap V3 swap callback, so each costs the
-        // same as `test_single_callback_protocol`, including a fork added to a list later.
+    fn test_single_callback_protocol_covers_every_v3_slipstream_and_algebra_fork() {
+        // Every fork in the three lists pays inside the swap callback, so each costs the same as
+        // `test_single_callback_protocol`, including a fork added to a list later.
         for protocol_system in UNISWAP_V3_FORKS
             .iter()
             .chain(SLIPSTREAMS_FORKS)
+            .chain(ALGEBRA_INTEGRAL_FORKS)
         {
             let solution = make_solution(vec![make_swap(protocol_system)]);
             let gas = estimate_gas_usage(&solution, Strategy::Single);

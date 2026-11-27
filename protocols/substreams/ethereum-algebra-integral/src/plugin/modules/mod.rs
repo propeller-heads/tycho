@@ -15,6 +15,7 @@ use std::fmt;
 use crate::plugin::storage::StorageField;
 
 pub mod algebra;
+pub mod nami;
 
 /// One plugin module's indexed storage.
 #[derive(Debug)]
@@ -26,7 +27,13 @@ pub struct PluginModule {
 }
 
 /// Every module the package indexes.
-pub const MODULES: &[&PluginModule] = &[&algebra::dynamic_fee::MODULE];
+pub const MODULES: &[&PluginModule] = &[
+    &algebra::dynamic_fee::MODULE,
+    &algebra::farming::MODULE,
+    &nami::anti_sniper::MODULE,
+    &nami::fee_override::MODULE,
+    &nami::mevx::MODULE,
+];
 
 /// A manifest's `modules` param that cannot be resolved.
 #[derive(Debug, PartialEq, Eq)]
@@ -97,6 +104,14 @@ pub fn modules_named(names: &str) -> Result<Vec<&'static PluginModule>, ModuleLi
         modules.push(module);
     }
     Ok(modules)
+}
+
+/// Whether one of `modules` indexes a field stored at `slot`.
+pub fn lists_slot(modules: &[&PluginModule], slot: &[u8]) -> bool {
+    modules
+        .iter()
+        .flat_map(|module| module.fields.iter())
+        .any(|field| field.slot().as_slice() == slot)
 }
 
 #[cfg(test)]

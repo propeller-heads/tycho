@@ -1,0 +1,59 @@
+substreams_yaml_path: ./base-nami-v4.yaml
+protocol_system: "nami_v4"
+protocol_type_names:
+  - "nami_v4_pool"
+module_name: "map_protocol_changes"
+skip_balance_check: false
+initialized_accounts:
+tests:
+  # A pool created under the current implementation 0xd1dfA0…a642 with no fee override. Its
+  # full-range liquidity at creation is replaced by a concentrated position at block 59613656
+  # and its first regular swap is at block 59618306. A range that stops earlier quotes every
+  # trade as draining the pool.
+  - name: test_usdc_antc_pool
+    start_block: 59604941
+    stop_block: 59618400
+    expected_components:
+      - id: "0x46a365ffdbd4247d12f77b0b6b8f354131f91055"
+        tokens:
+          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+          - "0xb20000000000000000000016e38FD364d271Ba28" # ANTc
+        static_attributes: {}
+        creation_tx: "0xfec248615afc815f28ee273c38744bb0b616f9aca3dfb700d336d47646d00df0"
+        skip_simulation: false
+  # The same pool, followed until its plugin has a fee source. At block 60044639 the plugin is
+  # given the NYSE fee source 0x146669E5…E5d2, a fee per market segment, a floor and a
+  # cap, so the fee quoted at the stop block comes from the fee source.
+  - name: test_usdc_antc_pool_after_fee_source_is_set
+    start_block: 59604941
+    stop_block: 60044700
+    expected_components:
+      - id: "0x46a365ffdbd4247d12f77b0b6b8f354131f91055"
+        tokens:
+          - "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # USDC
+          - "0xb20000000000000000000016e38FD364d271Ba28" # ANTc
+        static_attributes: {}
+        creation_tx: "0xfec248615afc815f28ee273c38744bb0b616f9aca3dfb700d336d47646d00df0"
+        skip_simulation: false
+  # The creation transaction names two plugins to the pool, one after the other: the one the
+  # factory creates with every pool, then an AntiSniper plugin bound to another beacon
+  # (0xabb28b3e…359e), both created in that transaction. The pool has no liquidity and its
+  # plugin refuses swaps until trading opens 802k blocks later, so it is indexed and checked but
+  # not simulated.
+  - name: test_weth_nami_pool_switched_to_an_anti_sniper_plugin
+    start_block: 54878072
+    stop_block: 54878172
+    expected_components:
+      - id: "0x22c96e2873ac34462addf0160e1b69d3373c64ae"
+        tokens:
+          - "0x4200000000000000000000000000000000000006" # WETH
+          - "0x8888CDad9Ef66382f89E68f95Ec384d89ec28888" # NAMI
+        static_attributes: {}
+        # The second plugin the transaction names, and the implementation its beacon pointed at,
+        # both read from the chain at the stop block.
+        state_attributes:
+          plugin: "0x64fc0e1b9872bcb1786064c18aeef94a97f90b88"
+          plugin_impl: "0x9c5d328a1bddb841e889d1976670f3c0c153d037"
+        creation_tx: "0x5874af1646b7ead553ffe7206649d1f1e92fd726149bc2312ce53388590ea23b"
+        skip_simulation: true
+        skip_execution: true

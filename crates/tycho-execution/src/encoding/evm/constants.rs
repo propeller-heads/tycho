@@ -141,6 +141,10 @@ pub const UNISWAP_V3_FORKS: &[&str] = &[
     "stockiumswap_v3",
 ];
 
+/// DEXs built on Algebra Integral. They share `AlgebraIntegralSwapEncoder`: the pool's `swap` has
+/// Uniswap V3's selector and pays in a callback, so `UniswapV3Executor` runs them.
+pub const ALGEBRA_INTEGRAL_FORKS: &[&str] = &["nami_v4"];
+
 /// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
 /// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
 pub const SLIPSTREAMS_FORKS: &[&str] =

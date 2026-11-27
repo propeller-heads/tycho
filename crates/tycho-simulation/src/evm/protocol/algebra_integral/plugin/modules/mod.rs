@@ -12,6 +12,7 @@ use tycho_common::Bytes;
 use crate::protocol::errors::InvalidSnapshotError;
 
 pub mod algebra;
+pub mod nami;
 
 /// The `N` bytes of attribute `name`.
 ///
