@@ -1,3 +1,18 @@
+## [0.544.0](https://github.com/propeller-heads/tycho/compare/0.543.0...0.544.0) (2026-11-27)
+
+
+### Features
+
+* **execution:** budget the fallback quote gas by protocol ([3c9e267](https://github.com/propeller-heads/tycho/commit/3c9e26735dc824bee05f2320140b4d3cf98cf52f))
+* **execution:** charge BaiBai's fallback quote by protocol ([16b1c7b](https://github.com/propeller-heads/tycho/commit/16b1c7bea7ce9e4c888f046b276d6df7db1d56c8))
+
+
+### Bug Fixes
+
+* **execution:** budget fallback quotes at their typical cost ([1a583e5](https://github.com/propeller-heads/tycho/commit/1a583e5ecbe67dba9903e1832bdf8f90ef667f9e))
+* **execution:** budget fallback quotes from executed transactions ([9047471](https://github.com/propeller-heads/tycho/commit/9047471f4e0ee592cf13d7306c33074ec7dd8a27))
+* **execution:** cover the live Uniswap V3 fallback quote cost ([8f24f99](https://github.com/propeller-heads/tycho/commit/8f24f9972c9a86b6c883e7f136141ae489aca201))
+
 ## [0.543.0](https://github.com/propeller-heads/tycho/compare/0.542.1...0.543.0) (2026-11-26)
 
 
