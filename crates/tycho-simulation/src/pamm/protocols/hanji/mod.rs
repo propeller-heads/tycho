@@ -99,10 +99,12 @@
 //! two swap methods), the feed calls three unnamed getters of the proxies, identified by what they
 //! return (`reader.rs`), and `whitelisted(address)`. The fill rules and the choice of quoter were
 //! measured rather than read from source, so an upgrade can break the quotes without failing any
-//! read. The feed therefore checks each served market's fills against its state once a minute,
-//! with an `eth_call` of a swap from the taker, and withholds a market whose proxy fills otherwise
-//! (`FillChecks` in `feed.rs`). Re-recording the fixture with `testdata/record_fixture.py` and
-//! running the state tests checks the rules across sizes.
+//! read. The feed therefore pins the implementation each proxy and CLOB ran when the fills were
+//! recorded ([`Deployment::implementations`]) and reads every served market's from its EIP-1967
+//! slot on every poll, at the read's block: a market whose proxy or CLOB runs another
+//! implementation, or one not pinned, is withheld until the pin is updated. Before updating a pin,
+//! re-record the fixture with `testdata/record_fixture.py` and run the state tests, which check
+//! the fill rules across sizes against the new implementation.
 
 use alloy::primitives::{address, Address};
 use tycho_common::models::Chain;
@@ -131,9 +133,20 @@ pub(crate) struct Deployment {
     pub chain: Chain,
     /// The aggregator API's market list.
     pub markets_url: &'static str,
+    /// The implementation each served proxy and CLOB must run, as (proxy, implementation): those
+    /// the fill rules were recorded against (see the module docs).
+    pub implementations: &'static [(Address, Address)],
 }
 
 impl Deployment {
+    /// The implementation `proxy` must run, or `None` for a contract not pinned.
+    pub(crate) fn pinned_implementation(&self, proxy: Address) -> Option<Address> {
+        self.implementations
+            .iter()
+            .find(|(pinned, _)| *pinned == proxy)
+            .map(|(_, implementation)| *implementation)
+    }
+
     /// The token the API and `getConfig()` name for the native side of a native market: the
     /// chain's wrapped native token, if Tycho knows one.
     pub(crate) fn wrapped_native(&self) -> Option<Address> {
@@ -143,9 +156,40 @@ impl Deployment {
     }
 }
 
-/// The Base deployment.
-pub(crate) const BASE_DEPLOYMENT: Deployment =
-    Deployment { chain: Chain::Base, markets_url: "https://api-base.hanji.io/aggregators/markets" };
+/// The Base deployment. Its implementations were read at Base blocks 61,693,481, where the fixture
+/// was recorded, and 62,862,282 (2026-11-27), and were the same at both.
+pub(crate) const BASE_DEPLOYMENT: Deployment = Deployment {
+    chain: Chain::Base,
+    markets_url: "https://api-base.hanji.io/aggregators/markets",
+    implementations: &[
+        // ETH/USDC, cbBTC/USDC and cbBTC/ETH proxies, each on its own implementation.
+        (
+            address!("6a6951db3bb99f76a8ccb9f8a8399b613666298b"),
+            address!("d6e13dfc6730d6eafbb0d1c605e78d97767fc3a3"),
+        ),
+        (
+            address!("15c8cb4e336b1e478d155d813830129fb225eee3"),
+            address!("8a5417c47d3c56dadb232cb8b40ecb135752737c"),
+        ),
+        (
+            address!("f455b3c0756908c6a2f44a7f7390053cfe354eea"),
+            address!("db613bf573977aa8948b43e5ab794c980e812d02"),
+        ),
+        // Their CLOBs, in the same order, on one shared implementation.
+        (
+            address!("7c976801c8589d924ce93bbcce6966d34edf91bf"),
+            address!("f1466addf635bf0ba0a0c4bb9fecaa03b0945510"),
+        ),
+        (
+            address!("84792a7e7d80e20404d8ebb77574cfdf91093bfd"),
+            address!("f1466addf635bf0ba0a0c4bb9fecaa03b0945510"),
+        ),
+        (
+            address!("b6e72302898ec065038cefacf014b45f0b7e8498"),
+            address!("f1466addf635bf0ba0a0c4bb9fecaa03b0945510"),
+        ),
+    ],
+};
 
 /// Tycho's default router on Base, the taker the books are read for unless
 /// [`HanjiFeedBuilder::taker`] sets another.

@@ -18,20 +18,23 @@
 //! the market, and checked on every read after; a market whose wiring changed is left out of that
 //! read and resolved again before the next. A market whose wiring does not resolve, or that names
 //! no contract quoter, is not read, and its wiring is asked for again [`UNSERVED_RETRY`] later.
+//!
+//! After the multicall, the reader reads the EIP-1967 implementation slot of each market's proxy
+//! and CLOB at the read's block, with one `eth_getStorageAt` each, since no call can read another
+//! contract's storage. A market whose proxy or CLOB runs another implementation than
+//! [`Deployment::implementations`] pins, or is not pinned, is left out of the read, logged once
+//! when that starts and once when it ends. The quoters are not proxies: a proxy that names
+//! another quoter changes its wiring, which every read checks.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use alloy::{
     eips::BlockId,
-    primitives::{
-        address,
-        aliases::{U24, U72},
-        hex, keccak256, Address, Bytes as AlloyBytes, B256, U256,
-    },
+    primitives::{aliases::U24, b256, Address, Bytes as AlloyBytes, B256, U256},
     providers::{
         bindings::IMulticall3::{
             aggregate3Call, getBlockNumberCall, getChainIdCall, getCurrentBlockTimestampCall,
@@ -39,21 +42,18 @@ use alloy::{
         },
         Provider, RootProvider, MULTICALL3_ADDRESS,
     },
-    rpc::types::{
-        state::{AccountOverride, StateOverride},
-        TransactionInput, TransactionRequest,
-    },
+    rpc::types::{TransactionInput, TransactionRequest},
     sol,
     sol_types::{SolCall, SolValue},
-    transports::RpcError,
 };
+use futures::future::try_join_all;
 use reqwest::Url;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     pamm::protocols::hanji::{
         market::{Market, NativeSide},
-        state::{FillReport, Level, Probe},
+        state::Level,
         Deployment,
     },
     snapshot_feed::errors::FeedError,
@@ -90,32 +90,6 @@ sol! {
     function assembleOrderbookFromOrders(address lobAddress, bool isAsk, uint24 maxPriceLevels)
         external view returns (uint72[] memory arrayPrices, uint128[] memory arrayShares);
 
-    #[derive(Debug)]
-    function placeOrder(
-        bool isAsk,
-        uint128 quantity,
-        uint72 price,
-        uint128 maxCommission,
-        bool marketOnly,
-        bool postOnly,
-        bool transferExecutedTokens,
-        uint256 expires
-    ) external payable returns (
-        uint64 orderId,
-        uint128 executedShares,
-        uint128 executedValue,
-        uint128 aggressiveFee
-    );
-
-    #[derive(Debug)]
-    function placeMarketOrderWithTargetValue(
-        bool isAsk,
-        uint128 targetTokenYValue,
-        uint72 price,
-        uint128 maxCommission,
-        bool transferExecutedTokens,
-        uint256 expires
-    ) external payable returns (uint128 executedShares, uint128 executedValue, uint128 aggressiveFee);
 }
 
 /// Unnamed getters of the proxy orderbooks' unverified implementations, each identified by what
@@ -145,46 +119,9 @@ const WIRING_CALLS: usize = 3;
 /// contract quoter, waits before its wiring is asked for again.
 const UNSERVED_RETRY: Duration = Duration::from_secs(30);
 
-/// Runtime code planted at the taker for a fill check: it calls the address in the first 20 bytes
-/// of its calldata with the rest and its value, and returns or reverts with the answer. A call
-/// without calldata stops, so it takes the native ETH a proxy pays out, as the router does.
-pub(super) const FORWARDER: [u8; 51] = hex!(
-    "3615603157" // if calldatasize == 0 jump to stop
-    "6014360380601460003760006000826000" // calldatacopy(0, 20, size - 20); call's sizes, offsets
-    "3460003560601c5af1" // value, target = calldata[0..20], gas, call
-    "3d600060003e" // returndatacopy(0, 0, returndatasize)
-    "602c573d6000fd" // if the call failed revert(0, returndatasize)
-    "5b3d6000f3" // return(0, returndatasize)
-    "5b00" // stop
-);
-
-/// The sender of a fill check's call. It is not the taker, so the proxy sees the taker as a
-/// contract that is not the transaction's sender, as it sees Tycho's router inside a route.
-pub(super) const PROBE_SENDER: Address = address!("00000000000000000000000000000000000c4ec4");
-
-/// The prices a fill check accepts, as tycho-execution's `HanjiExecutor` sends them: any bid for a
-/// sell, and the highest price the orderbooks accept for a buy.
-const MIN_PRICE: U72 = U72::from_limbs([1, 0]);
-/// 999,999e15, as limbs.
-const MAX_PRICE: U72 = U72::from_limbs([0x35c6_2047_39d9_8000, 0x36]);
-
-/// Balance and allowance mapping slots of the ERC20s a fill check funds, found by overriding
-/// candidate slots and reading `balanceOf` back. A token not listed here is not funded, and a
-/// check that would need it is skipped.
-const TOKEN_SLOTS: [(Address, u64, u64); 2] = [
-    (address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"), 9, 10), // USDC
-    (address!("cbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"), 9, 10), // cbBTC
-];
-
-/// What one fill check found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ProbeOutcome {
-    Filled(FillReport),
-    /// The proxy reverted, with the node's message.
-    Reverted(String),
-    /// The input is an ERC20 the check cannot fund (see [`TOKEN_SLOTS`]).
-    Unfunded,
-}
+/// EIP-1967's implementation slot, `keccak256("eip1967.proxy.implementation") - 1`.
+const IMPLEMENTATION_SLOT: B256 =
+    b256!("360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc");
 
 /// Where a market's virtual orders come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +183,10 @@ pub(super) struct HanjiReader {
     /// Each proxy's wiring, as last resolved.
     #[debug(skip)]
     wiring: Arc<Mutex<HashMap<Address, Resolution>>>,
+    /// The proxies whose market the last read left out for its implementations, so that the
+    /// change is logged once each way.
+    #[debug(skip)]
+    withheld: Arc<Mutex<HashSet<Address>>>,
 }
 
 impl HanjiReader {
@@ -256,6 +197,7 @@ impl HanjiReader {
             deployment,
             taker,
             wiring: Arc::new(Mutex::new(HashMap::new())),
+            withheld: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -263,8 +205,9 @@ impl HanjiReader {
     /// A market whose calls revert, whose config names other tokens or another native side than
     /// the list, or whose wiring changed is left out, and the read logs how many with the first
     /// reason; it fails when every market was left out that way or none is served (see the module
-    /// docs), and fails fatally when the node serves another chain. A paused market is left out
-    /// without failing anything.
+    /// docs), and fails fatally when the node serves another chain. A paused market, and one whose
+    /// proxy or CLOB runs an implementation not pinned, is left out without failing anything; a
+    /// node that cannot report the implementations fails the read.
     pub(super) async fn read(&self, markets: &[Market]) -> Result<BookRead, FeedError> {
         let wired = self.wired(markets);
         if wired.is_empty() {
@@ -286,19 +229,24 @@ impl HanjiReader {
         let (head, market_answers) = answers.split_at(HEAD_CALLS);
         let mut read = self.decode_head(head)?;
         let mut failures: Vec<(Address, String)> = Vec::new();
+        let mut decoded: Vec<(MarketRead, Address)> = Vec::new();
         // `aggregate` checked the answer count, so the chunks are whole and one per market.
         let (market_answers, _) = market_answers.as_chunks::<MARKET_CALLS>();
         for ((market, wiring), answers) in wired.iter().zip(market_answers) {
             match self.decode_market(*market, wiring, answers) {
-                Ok(Some(market_read)) => read.markets.push(market_read),
+                Ok(Some(market_read)) => decoded.push((market_read, wiring.lob)),
                 Ok(None) => {}
                 Err(reason) => failures.push((market.orderbook, reason)),
             }
         }
+        let decoded_any = !decoded.is_empty();
+        read.markets = self
+            .pinned(read.block_number, decoded)
+            .await?;
         let Some((orderbook, reason)) = failures.first() else {
             return Ok(read);
         };
-        if read.markets.is_empty() {
+        if !decoded_any {
             return Err(FeedError::Parsing(format!(
                 "Hanji: none of the {} markets read cleanly; {orderbook} failed with: {reason}",
                 wired.len()
@@ -306,6 +254,79 @@ impl HanjiReader {
         }
         warn!(skipped = failures.len(), %orderbook, %reason, "skipping Hanji markets");
         Ok(read)
+    }
+
+    /// The markets of `decoded` (each with its CLOB) whose proxy and CLOB run the implementations
+    /// the deployment pins, read at `block`.
+    async fn pinned(
+        &self,
+        block: u64,
+        decoded: Vec<(MarketRead, Address)>,
+    ) -> Result<Vec<MarketRead>, FeedError> {
+        let contracts: Vec<Address> = decoded
+            .iter()
+            .flat_map(|(market_read, lob)| [market_read.market.orderbook, *lob])
+            .collect();
+        let implementations: HashMap<Address, Address> = try_join_all(
+            contracts
+                .iter()
+                .map(|contract| self.implementation(*contract, block)),
+        )
+        .await?
+        .into_iter()
+        .collect();
+        let mut withheld = self
+            .withheld
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut pinned = Vec::new();
+        for (market_read, lob) in decoded {
+            let orderbook = market_read.market.orderbook;
+            let refusal = [orderbook, lob]
+                .into_iter()
+                .find_map(|contract| {
+                    let found = implementations
+                        .get(&contract)
+                        .copied()?;
+                    let reason = unpinned(
+                        self.deployment
+                            .pinned_implementation(contract),
+                        found,
+                    )?;
+                    Some(format!("{contract} {reason}"))
+                });
+            match refusal {
+                Some(reason) => {
+                    if withheld.insert(orderbook) {
+                        error!(%orderbook, block, %reason, "withholding Hanji market: its \
+                            implementation is not the one its fills were recorded against");
+                    }
+                }
+                None => {
+                    if withheld.remove(&orderbook) {
+                        info!(%orderbook, block, "Hanji market runs its pinned implementations \
+                            again");
+                    }
+                    pinned.push(market_read);
+                }
+            }
+        }
+        Ok(pinned)
+    }
+
+    /// The implementation in `proxy`'s EIP-1967 slot at `block`.
+    async fn implementation(
+        &self,
+        proxy: Address,
+        block: u64,
+    ) -> Result<(Address, Address), FeedError> {
+        let word = self
+            .provider
+            .get_storage_at(proxy, IMPLEMENTATION_SLOT.into())
+            .block_id(BlockId::number(block))
+            .await
+            .map_err(|e| self.connection_error("implementation slot", e))?;
+        Ok((proxy, Address::from_word(B256::from(word))))
     }
 
     /// The markets whose wiring is resolved and served, with it.
@@ -467,115 +488,6 @@ impl HanjiReader {
         }))
     }
 
-    /// Sends `probe` to the market's proxy at `block`, as the taker, and reports what the proxy
-    /// filled. The taker's code is replaced by [`FORWARDER`] and it is given the input, so the
-    /// proxy fills it as it fills the taker inside a route. A connection failure is an error; a
-    /// revert is an outcome.
-    pub(super) async fn probe(
-        &self,
-        block: u64,
-        timestamp: u64,
-        read: &MarketRead,
-        probe: &Probe,
-    ) -> Result<ProbeOutcome, FeedError> {
-        let market = &read.market;
-        let (token, native, scaling) = if probe.sell_base {
-            (market.token_x, market.native == NativeSide::X, read.config.scaling_x)
-        } else {
-            (market.token_y, market.native == NativeSide::Y, read.config.scaling_y)
-        };
-        let amount = probe
-            .units
-            .checked_mul(scaling)
-            .ok_or_else(|| FeedError::Parsing("Hanji fill check input overflows".into()))?;
-        let mut overrides = StateOverride::default();
-        overrides.insert(
-            self.taker,
-            AccountOverride::default()
-                .with_code(FORWARDER)
-                .with_balance(amount),
-        );
-        let value = if native {
-            overrides.insert(PROBE_SENDER, AccountOverride::default().with_balance(amount));
-            amount
-        } else {
-            let Some(funding) = erc20_funding(token, self.taker, market.orderbook, amount) else {
-                return Ok(ProbeOutcome::Unfunded);
-            };
-            overrides.insert(token, funding);
-            U256::ZERO
-        };
-        let units = u128::try_from(probe.units)
-            .map_err(|e| FeedError::Parsing(format!("Hanji fill check input: {e}")))?;
-        let expires = U256::from(timestamp) + U256::from(60);
-        let call = if probe.sell_base {
-            placeOrderCall {
-                isAsk: true,
-                quantity: units,
-                price: MIN_PRICE,
-                maxCommission: u128::MAX,
-                marketOnly: true,
-                postOnly: false,
-                transferExecutedTokens: true,
-                expires,
-            }
-            .abi_encode()
-        } else {
-            placeMarketOrderWithTargetValueCall {
-                isAsk: false,
-                targetTokenYValue: units,
-                price: MAX_PRICE,
-                maxCommission: u128::MAX,
-                transferExecutedTokens: true,
-                expires,
-            }
-            .abi_encode()
-        };
-        let mut input = market.orderbook.to_vec();
-        input.extend(call);
-        let request = TransactionRequest::default()
-            .from(PROBE_SENDER)
-            .to(self.taker)
-            .value(value)
-            .input(TransactionInput::new(input.into()));
-        let answer = self
-            .provider
-            .call(request)
-            .block(BlockId::number(block))
-            .overrides(overrides)
-            .await;
-        let raw = match answer {
-            Ok(raw) => raw,
-            Err(RpcError::ErrorResp(error)) => {
-                return Ok(ProbeOutcome::Reverted(format!(
-                    "{} {}",
-                    error.message,
-                    error
-                        .data
-                        .as_ref()
-                        .map_or("", |data| data.get())
-                )));
-            }
-            Err(e) => return Err(self.connection_error(e)),
-        };
-        let report = if probe.sell_base {
-            placeOrderCall::abi_decode_returns(&raw).map(|fill| FillReport {
-                shares: U256::from(fill.executedShares),
-                value: U256::from(fill.executedValue),
-                fee: U256::from(fill.aggressiveFee),
-            })
-        } else {
-            placeMarketOrderWithTargetValueCall::abi_decode_returns(&raw).map(|fill| FillReport {
-                shares: U256::from(fill.executedShares),
-                value: U256::from(fill.executedValue),
-                fee: U256::from(fill.aggressiveFee),
-            })
-        };
-        report
-            .map(ProbeOutcome::Filled)
-            .map_err(|e| FeedError::Parsing(format!("Hanji fill check answer: {e}")))
-    }
-
     async fn aggregate(&self, calls: Vec<Call3>) -> Result<Vec<Call3Result>, FeedError> {
         let expected = calls.len();
         let request = TransactionRequest::default()
@@ -590,7 +502,7 @@ impl HanjiReader {
             .call(request)
             .block(BlockId::latest())
             .await
-            .map_err(|e| self.connection_error(e))?;
+            .map_err(|e| self.connection_error("multicall", e))?;
         let answers = aggregate3Call::abi_decode_returns(&raw)
             .map_err(|e| FeedError::Parsing(format!("Hanji multicall: {e}")))?;
         if answers.len() != expected {
@@ -604,11 +516,23 @@ impl HanjiReader {
 
     /// A transport failure, with the RPC URL removed: it commonly carries a key, and the HTTP
     /// client's errors quote the URL they failed on.
-    fn connection_error(&self, error: impl std::fmt::Display) -> FeedError {
+    fn connection_error(&self, what: &str, error: impl std::fmt::Display) -> FeedError {
         let error = error
             .to_string()
             .replace(&self.rpc_url, "<rpc url>");
-        FeedError::Connection(format!("Hanji multicall: {error}"))
+        FeedError::Connection(format!("Hanji {what}: {error}"))
+    }
+}
+
+/// Why a contract running `found` is not served, given the implementation pinned for it: `None`
+/// when it runs the pinned one.
+fn unpinned(pinned: Option<Address>, found: Address) -> Option<String> {
+    match pinned {
+        None => Some(format!("runs implementation {found}, and none is pinned for it")),
+        Some(pinned) if pinned != found => {
+            Some(format!("runs implementation {found}, not the pinned {pinned}"))
+        }
+        Some(_) => None,
     }
 }
 
@@ -642,27 +566,6 @@ fn decode_config(market: Market, answer: &Call3Result) -> Result<MarketConfig, S
         scaling_y: config.scalingFactorTokenY,
         fee_rate,
     })
-}
-
-/// The storage writes that give `owner` `amount` of `token` and let `spender` take it all, or
-/// `None` for a token whose slots [`TOKEN_SLOTS`] does not list.
-fn erc20_funding(
-    token: Address,
-    owner: Address,
-    spender: Address,
-    amount: U256,
-) -> Option<AccountOverride> {
-    let (_, balance_slot, allowance_slot) = TOKEN_SLOTS
-        .iter()
-        .find(|(listed, _, _)| *listed == token)?;
-    let slot = |key: B256, slot: u64| keccak256((key, U256::from(slot)).abi_encode());
-    let balance = slot(owner.into_word(), *balance_slot);
-    let allowance =
-        keccak256((spender.into_word(), slot(owner.into_word(), *allowance_slot)).abi_encode());
-    Some(
-        AccountOverride::default()
-            .with_state_diff([(balance, B256::from(amount)), (allowance, B256::from(U256::MAX))]),
-    )
 }
 
 /// The proxy's CLOB, quoter and contract quoter getters, in the order [`decode_wiring`] reads
@@ -751,6 +654,7 @@ fn to_u64(value: U256, what: &str) -> Result<u64, FeedError> {
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::{aliases::U72, hex, keccak256};
     use rstest::rstest;
 
     use super::*;
@@ -802,6 +706,25 @@ mod tests {
     }
 
     #[test]
+    fn only_the_pinned_implementation_is_served() {
+        let (pinned, other) = (Address::repeat_byte(1), Address::repeat_byte(2));
+
+        let changed = unpinned(Some(pinned), other).unwrap();
+        let not_pinned = unpinned(None, other).unwrap();
+
+        assert_eq!(unpinned(Some(pinned), pinned), None);
+        assert!(changed.contains("not the pinned"), "{changed}");
+        assert!(not_pinned.contains("none is pinned"), "{not_pinned}");
+    }
+
+    #[test]
+    fn the_implementation_slot_is_eip_1967s() {
+        let slot = U256::from_be_bytes(keccak256("eip1967.proxy.implementation").0) - U256::from(1);
+
+        assert_eq!(B256::from(slot), IMPLEMENTATION_SLOT);
+    }
+
+    #[test]
     fn a_side_with_more_prices_than_share_counts_is_refused() {
         let side = assembleOrderbookFromOrdersCall::abi_encode_returns(
             &assembleOrderbookFromOrdersReturn {
@@ -831,31 +754,5 @@ mod tests {
         for line in expected {
             assert!(script.contains(&line), "record_fixture.py lacks `{line}`");
         }
-    }
-
-    #[test]
-    fn the_highest_price_is_the_executors() {
-        assert_eq!(MAX_PRICE, U72::from(999_999u128 * 10u128.pow(15)));
-    }
-
-    /// The funding writes land in the slots an ERC20 with balances at slot 9 and allowances at
-    /// slot 10 reads (`balanceOf(owner)`, `allowance(owner, spender)`), and an unlisted token is
-    /// not funded.
-    #[test]
-    fn an_erc20_input_is_funded_in_its_balance_and_allowance_slots() {
-        let usdc = TOKEN_SLOTS[0].0;
-        let (owner, spender) = (Address::repeat_byte(0xaa), Address::repeat_byte(0xbb));
-
-        let funding = erc20_funding(usdc, owner, spender, U256::from(7)).unwrap();
-
-        let balance = keccak256((owner.into_word(), U256::from(9)).abi_encode());
-        let allowance = keccak256(
-            (spender.into_word(), keccak256((owner.into_word(), U256::from(10)).abi_encode()))
-                .abi_encode(),
-        );
-        let writes = funding.state_diff.unwrap();
-        assert_eq!(writes[&balance], B256::from(U256::from(7)));
-        assert_eq!(writes[&allowance], B256::from(U256::MAX));
-        assert!(erc20_funding(Address::repeat_byte(1), owner, spender, U256::from(7)).is_none());
     }
 }

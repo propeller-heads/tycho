@@ -31,14 +31,12 @@ use tycho_common::{
 use crate::{
     book::BookFeedConfig,
     pamm::protocols::hanji::{
-        feed::{FillChecks, HanjiBookAssembler, HanjiBookSource, MarketList},
+        feed::{HanjiBookAssembler, HanjiBookSource, MarketList},
         market::{ApiMarket, Market},
         reader::{
             assembleOrderbookFromOrdersCall, assembleOrderbookFromOrdersReturn, getConfigCall,
-            getConfigReturn, pausedCall, placeMarketOrderWithTargetValueCall,
-            placeMarketOrderWithTargetValueReturn, placeOrderCall, placeOrderReturn,
-            whitelistedCall, BookRead, HanjiReader, MarketConfig, MarketRead,
-            CONTRACT_QUOTER_SELECTOR, FORWARDER, LOB_SELECTOR, PROBE_SENDER, QUOTER_SELECTOR,
+            getConfigReturn, pausedCall, whitelistedCall, BookRead, HanjiReader, MarketConfig,
+            MarketRead, CONTRACT_QUOTER_SELECTOR, LOB_SELECTOR, QUOTER_SELECTOR,
         },
         state::{HanjiState, Level},
         BASE_DEPLOYMENT, BASE_ROUTER,
@@ -296,14 +294,11 @@ pub(super) struct FakeNode {
     pub node_delay: Mutex<Duration>,
     /// How many requests reached the API.
     pub api_requests: AtomicUsize,
-    /// Proxies whose fills report one more unit of value than their book predicts.
-    pub misfilling: Mutex<HashSet<Address>>,
-    /// Proxies whose fills revert.
-    pub fill_reverting: HashSet<Address>,
-    /// Whether fill checks fail at the transport, as from an overloaded node.
-    pub fills_unreachable: AtomicBool,
-    /// The fill checks the node answered, as (proxy, sells base).
-    pub fills: Mutex<Vec<(Address, bool)>>,
+    /// The implementation in each proxy's EIP-1967 slot: the deployment's pins unless a test
+    /// upgrades one.
+    pub implementations: Mutex<HashMap<Address, Address>>,
+    /// Whether implementation slot reads fail at the transport.
+    pub storage_failing: AtomicBool,
 }
 
 impl FakeNode {
@@ -331,10 +326,14 @@ impl FakeNode {
             api_delay: Mutex::new(Duration::ZERO),
             node_delay: Mutex::new(Duration::ZERO),
             api_requests: AtomicUsize::new(0),
-            misfilling: Mutex::new(HashSet::new()),
-            fill_reverting: HashSet::new(),
-            fills_unreachable: AtomicBool::new(false),
-            fills: Mutex::new(Vec::new()),
+            implementations: Mutex::new(
+                BASE_DEPLOYMENT
+                    .implementations
+                    .iter()
+                    .copied()
+                    .collect(),
+            ),
+            storage_failing: AtomicBool::new(false),
         }
     }
 
@@ -362,10 +361,11 @@ impl FakeNode {
             return self.answer_api();
         }
         let request: serde_json::Value = serde_json::from_str(&request.body).unwrap();
-        assert_eq!(request["method"], "eth_call", "the reader only sends eth_call");
-        if request["params"][0]["to"] != serde_json::json!(MULTICALL3_ADDRESS) {
-            return self.answer_fill(&request);
+        if request["method"] == "eth_getStorageAt" {
+            return self.answer_storage(&request);
         }
+        assert_eq!(request["method"], "eth_call", "the reader sends eth_call and eth_getStorageAt");
+        assert_eq!(request["params"][0]["to"], serde_json::json!(MULTICALL3_ADDRESS));
         let delay = *self
             .node_delay
             .lock()
@@ -417,146 +417,40 @@ impl FakeNode {
         serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result })
     }
 
-    /// Answers a fill check: the fill the recorded book of the taker predicts for the probe the
-    /// state sends, unless a test makes the proxy misfill, revert or the node unreachable. Checks
-    /// that the call is sent as the feed must send it.
-    fn answer_fill(&self, request: &serde_json::Value) -> MockResponse {
+    /// Answers an implementation slot read, which must be at the read's block.
+    fn answer_storage(&self, request: &serde_json::Value) -> MockResponse {
         if self
-            .fills_unreachable
+            .storage_failing
             .load(Ordering::SeqCst)
         {
             return MockResponse::from(("502 Bad Gateway", "overloaded".to_string()));
         }
-        let call = &request["params"][0];
-        let overrides = &request["params"][2];
-        assert_eq!(call["from"], serde_json::json!(PROBE_SENDER));
-        assert_eq!(call["to"], serde_json::json!(BASE_ROUTER), "a fill check is sent as the taker");
+        let params = &request["params"];
+        let slot: U256 = serde_json::from_value(params[1].clone()).unwrap();
         assert_eq!(
-            request["params"][1],
+            slot,
+            U256::from_be_bytes(
+                alloy::primitives::b256!(
+                    "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+                )
+                .0
+            ),
+            "the reader reads only the EIP-1967 implementation slot"
+        );
+        assert_eq!(
+            params[2],
             serde_json::json!(format!("{:#x}", self.block.load(Ordering::SeqCst))),
-            "a fill check runs at the read's block"
+            "an implementation is read at the read's block"
         );
-        let taker_override = overrides
-            .as_object()
-            .unwrap()
-            .iter()
-            .find(|(account, _)| account.parse::<Address>().unwrap() == BASE_ROUTER)
-            .map(|(_, account)| account)
-            .expect("the taker's code is overridden");
-        assert_eq!(
-            taker_override["code"],
-            serde_json::json!(alloy::primitives::hex::encode_prefixed(FORWARDER))
-        );
-        let input = call["input"]
-            .as_str()
-            .or_else(|| call["data"].as_str())
-            .unwrap();
-        let input = alloy::primitives::hex::decode(input).unwrap();
-        let orderbook = Address::from_slice(&input[..20]);
-        let data = &input[20..];
-        let sell_base = data[..4] == placeOrderCall::SELECTOR;
-        let config = &self
-            .market(orderbook)
-            .expect("a fill check of a listed proxy")
-            .config;
-        let native_in = config.supports_native_eth && (config.is_token_x_weth == sell_base);
-        let token_in = if sell_base { config.token_x } else { config.token_y };
-        let funded = overrides
-            .as_object()
-            .unwrap()
-            .iter()
-            .find(|(account, _)| account.parse::<Address>().unwrap() == token_in)
-            .map(|(_, account)| {
-                account["stateDiff"]
-                    .as_object()
-                    .unwrap()
-                    .len()
-            });
-        let value = U256::from_str_radix(
-            call["value"]
-                .as_str()
-                .unwrap_or("0x0")
-                .trim_start_matches("0x"),
-            16,
-        )
-        .unwrap();
-        if native_in {
-            assert!(value > U256::ZERO, "a native input is sent as value");
-            assert_eq!(funded, None);
-        } else {
-            assert_eq!(value, U256::ZERO);
-            assert_eq!(funded, Some(2), "an ERC20 input is funded with a balance and an allowance");
-        }
-        self.fills
+        let proxy: Address = serde_json::from_value(params[0].clone()).unwrap();
+        let implementation = self
+            .implementations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((orderbook, sell_base));
-        if self.fill_reverting.contains(&orderbook) {
-            let error = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "error": { "code": 3, "message": "execution reverted", "data": "0x90b8ec18" }
-            });
-            return MockResponse::from(("200 OK", error.to_string()));
-        }
-        let caller = if self
-            .whitelisting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&orderbook)
-        {
-            Caller::Direct
-        } else {
-            Caller::Contract
-        };
-        let mut state = state(orderbook, caller);
-        if let Some(rates) = self.rates {
-            state.fee_rate = rates.taker();
-        }
-        let probe = state
-            .probe(sell_base)
-            .unwrap()
-            .expect("a fill check of a side with levels");
-        let units = if sell_base {
-            U256::from(
-                placeOrderCall::abi_decode(data)
-                    .unwrap()
-                    .quantity,
-            )
-        } else {
-            U256::from(
-                placeMarketOrderWithTargetValueCall::abi_decode(data)
-                    .unwrap()
-                    .targetTokenYValue,
-            )
-        };
-        assert_eq!(units, probe.units, "the check sends the state's probe");
-        let mut fill = probe.expected;
-        if self
-            .misfilling
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&orderbook)
-        {
-            fill.value += U256::from(1);
-        }
-        let answer = if sell_base {
-            placeOrderCall::abi_encode_returns(&placeOrderReturn {
-                orderId: 0,
-                executedShares: fill.shares.to(),
-                executedValue: fill.value.to(),
-                aggressiveFee: fill.fee.to(),
-            })
-        } else {
-            placeMarketOrderWithTargetValueCall::abi_encode_returns(
-                &placeMarketOrderWithTargetValueReturn {
-                    executedShares: fill.shares.to(),
-                    executedValue: fill.value.to(),
-                    aggressiveFee: fill.fee.to(),
-                },
-            )
-        };
-        let result = alloy::primitives::hex::encode_prefixed(answer);
+            .get(&proxy)
+            .copied()
+            .unwrap_or_default();
+        let result = implementation.into_word();
         let body = serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result });
         MockResponse::from(("200 OK", body.to_string()))
     }
@@ -749,7 +643,6 @@ pub(super) fn source(
         ),
         reader: HanjiReader::new(Url::parse(&server.url()).unwrap(), BASE_DEPLOYMENT, BASE_ROUTER),
         assembler: HanjiBookAssembler { book_config: book_config() },
-        fill_checks: FillChecks::new(Duration::from_secs(60)),
         clock: Arc::new(move || now_ms),
         last_block: Arc::new(AtomicU64::new(0)),
     }
