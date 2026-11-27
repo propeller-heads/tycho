@@ -156,25 +156,52 @@ mod tests {
     };
 
     /// Every build a beacon has pointed at gets Nami's handler, with the AntiSniper gate only
-    /// for the builds that contain the module. On Ethereum a build with no entry would be served
-    /// by the generic VM handler instead, so the handler's type is checked too.
+    /// for the builds that contain the module and the fee sources of its own chain. On Ethereum a
+    /// build with no entry would be served by the generic VM handler instead, so the handler's
+    /// type is checked too. The sources are the contracts pools name on chain, written out
+    /// rather than read from the lists above.
     #[rstest]
-    #[case::ethereum(Chain::Ethereum, &PLUGINS_ETHEREUM, false)]
-    #[case::base(Chain::Base, &PLUGINS_BASE, false)]
-    #[case::base_anti_sniper(Chain::Base, &ANTI_SNIPER_PLUGINS_BASE, true)]
-    #[case::robinhood(Chain::Robinhood, &PLUGINS_ROBINHOOD, false)]
+    #[case::ethereum(
+        Chain::Ethereum,
+        &PLUGINS_ETHEREUM,
+        false,
+        address!("A7f5e79C7c88A917993dd4785dA700214C4429a6")
+    )]
+    #[case::base(
+        Chain::Base,
+        &PLUGINS_BASE,
+        false,
+        address!("146669E5670c08730599ED8182AC979c5d04E5d2")
+    )]
+    #[case::base_anti_sniper(
+        Chain::Base,
+        &ANTI_SNIPER_PLUGINS_BASE,
+        true,
+        address!("146669E5670c08730599ED8182AC979c5d04E5d2")
+    )]
+    #[case::robinhood_nyse(
+        Chain::Robinhood,
+        &PLUGINS_ROBINHOOD,
+        false,
+        address!("622B1971F9792A2d410B14b8108d5481c1D2C362")
+    )]
+    #[case::robinhood_gold(
+        Chain::Robinhood,
+        &PLUGINS_ROBINHOOD,
+        false,
+        address!("55B8ca9B7B6679458C84Ee32e7F0741130a28040")
+    )]
     fn every_build_a_beacon_has_pointed_at_has_its_handler(
         #[case] chain: Chain,
         #[case] implementations: &[Address],
         #[case] anti_sniper: bool,
+        #[case] source: Address,
     ) {
         initialize_plugin_handlers().expect("the handlers should register");
         let mut attributes = robinhood_module_attributes();
         attributes
             .insert(PLUGIN_CONFIG_ATTRIBUTE.to_string(), Bytes::from(vec![NAMI_PLUGIN_CONFIG]));
-        // The fee source of the recorded attributes is Robinhood's.
-        attributes.insert("fee_override/source_enabled".to_string(), Bytes::from(vec![0]));
-        attributes.insert("fee_override/source".to_string(), Bytes::from(vec![0; 20]));
+        attributes.insert("fee_override/source".to_string(), Bytes::from(source.to_vec()));
         // An AntiSniper period that has not started: the gate refuses swaps.
         attributes.insert("anti_sniper/start_timestamp".to_string(), Bytes::from(vec![0; 8]));
 
