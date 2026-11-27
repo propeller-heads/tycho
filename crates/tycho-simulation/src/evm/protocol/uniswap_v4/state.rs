@@ -113,6 +113,12 @@ const MAX_SWAP_GAS: u64 = 16_700_000;
 // 1e30 makes the rounding smaller than an f64 can hold and still leaves room under U256::MAX for
 // the hook's own intermediate products.
 const HOOK_FEE_PROBE_EXP: u64 = 30;
+/// The largest output a swap can pay, the largest `int128`: v4 casts the output, positive in the
+/// swapper's delta, with `toInt128`.
+const MAX_SWAP_OUTPUT: U256 = U256::from_limbs([u64::MAX, u64::MAX >> 1, 0, 0]);
+/// The largest input a swap can take, 2^127: negative in the swapper's delta, it is cast with
+/// `toInt128` too, down to the smallest `int128`.
+const MAX_SWAP_INPUT: U256 = U256::from_limbs([0, 1 << 63, 0, 0]);
 /// The exact input `amount_in_to_price` offers its walk: 2^200. Net of the swap fee, either
 /// token's amount over the whole tick range is at most a uint128 liquidity times 2^96 divided by
 /// the smallest sqrt price (about 2^32), below 2^192. The gross input is that net times
@@ -646,6 +652,38 @@ impl UniswapV4State {
     ) -> Result<u32, SimulationError> {
         self.fees
             .calculate_swap_fees_pips(zero_for_one, lp_fee_override)
+    }
+
+    /// The largest exact input up to `upper`, [`MAX_SWAP_INPUT`] at most, whose swap takes at most
+    /// [`MAX_SWAP_INPUT`] and pays at most [`MAX_SWAP_OUTPUT`], with that swap's output: past
+    /// either v4's `Pool.swap` reverts. Bisects over [`Self::swap`], whose input taken and output
+    /// both grow with the input. No closed form serves here: at extreme prices the rounding of a
+    /// square-root price moves an output by far more than a unit.
+    fn largest_swap_within_int128(
+        &self,
+        zero_for_one: bool,
+        upper: U256,
+    ) -> Result<(U256, U256), SimulationError> {
+        // The output of a swap of `amount`, when it stays within `int128`.
+        let output_within = |amount: U256| -> Result<Option<U256>, SimulationError> {
+            let specified = -I256::from_raw(amount);
+            let result = self.swap(zero_for_one, specified, None, None)?;
+            let taken = (specified - result.amount_remaining).unsigned_abs();
+            let output = result.amount_calculated.unsigned_abs();
+            Ok((taken <= MAX_SWAP_INPUT && output <= MAX_SWAP_OUTPUT).then_some(output))
+        };
+        if let Some(output) = output_within(upper)? {
+            return Ok((upper, output));
+        }
+        let (mut low, mut low_output, mut high) = (U256::ZERO, U256::ZERO, upper);
+        while high - low > U256::ONE {
+            let mid = low + (high - low) / U256::from(2u8);
+            match output_within(mid)? {
+                Some(output) => (low, low_output) = (mid, output),
+                None => high = mid,
+            }
+        }
+        Ok((low, low_output))
     }
 
     /// The exact input that moves the pool's price from where it is to `sqrt_price_target` in
@@ -1298,6 +1336,13 @@ impl ProtocolSim for UniswapV4State {
             }
         }
 
+        // v4 refuses a swap that takes or pays more than an int128 of either token, which the
+        // walk above does not see.
+        if total_amount_in > MAX_SWAP_INPUT || total_amount_out > MAX_SWAP_OUTPUT {
+            (total_amount_in, total_amount_out) =
+                self.largest_swap_within_int128(zero_for_one, total_amount_in.min(MAX_SWAP_INPUT))?;
+        }
+
         // A hook that charges the output reduces what a swapper can actually receive, so the
         // limit has to be reported net of its cut.
         if let Some(hook) = &self.hook {
@@ -1462,6 +1507,13 @@ impl ProtocolSim for UniswapV4State {
                         self.swap(zero_for_one, amount_specified, Some(sqrt_price_limit), None)
                     },
                 )?;
+
+                // `Pool.swap` casts both amounts with `toInt128`, reverting past it.
+                to_int128(
+                    swap_result.amount_specified - swap_result.amount_remaining,
+                    "The swap's input",
+                )?;
+                to_int128(-swap_result.amount_calculated, "The swap's output")?;
 
                 let new_state = self.clone_post_swap(
                     swap_result.sqrt_price,
@@ -4807,6 +4859,49 @@ mod tests {
         let pool = pool_moving_past_int128();
 
         let result = pool.get_amount_out(BigUint::from(1u8) << 200, &token_y(), &token_x());
+
+        assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
+    }
+
+    /// The limit is the largest input whose swap stays within `int128`: it quotes, and one unit
+    /// more is refused. Selling token0 the output binds, selling token1 the input does.
+    #[rstest]
+    #[case::output_binds(true)]
+    #[case::input_binds(false)]
+    fn test_get_limits_stop_where_a_swap_leaves_int128(#[case] zero_for_one: bool) {
+        let pool = pool_moving_past_int128();
+        let (token_in, token_out) =
+            if zero_for_one { (token_x(), token_y()) } else { (token_y(), token_x()) };
+        let (max_in, max_out) = pool
+            .get_limits(token_in.address.clone(), token_out.address.clone())
+            .unwrap();
+
+        assert!(max_in <= u256_to_biguint(MAX_SWAP_INPUT), "{max_in}");
+        assert!(max_out <= u256_to_biguint(MAX_SWAP_OUTPUT), "{max_out}");
+        let at_limit = pool
+            .get_amount_out(max_in.clone(), &token_in, &token_out)
+            .unwrap();
+        assert_eq!(at_limit.amount, max_out);
+        let past = pool.get_amount_out(max_in + 1u8, &token_in, &token_out);
+        assert!(matches!(past, Err(SimulationError::InvalidInput(..))), "{past:?}");
+    }
+
+    /// `query_pool_swap` casts the amounts as `get_amount_out` does: walking the price to near
+    /// the bottom of the range takes and pays more than an `int128`.
+    #[test]
+    fn test_query_pool_swap_refuses_a_swap_past_int128() {
+        let pool = pool_moving_past_int128();
+
+        let result = pool.query_pool_swap(&QueryPoolSwapParams::new(
+            token_x(),
+            token_y(),
+            SwapConstraint::PoolTargetPrice {
+                target: Price::new(BigUint::from(1u8), BigUint::from(1_000_000_000_000u64)),
+                tolerance: 0f64,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        ));
 
         assert!(matches!(result, Err(SimulationError::InvalidInput(..))), "{result:?}");
     }
