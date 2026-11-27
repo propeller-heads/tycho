@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.6
+
+- Add the Ethereum CommunityV3 manifest, `ethereum-community-v3.yaml` (`community_v3`, factory
+  `0x00a38533c68327aBE0Cc265436e036066E2D6B38`, deployed at block `25895766`). The deployment is
+  canonical Uniswap V3: same contracts, pool init code hash, factory and pool event layouts,
+  immutable per-pool fee, and the `uniswapV3SwapCallback` family. Its factory owner is burned, so
+  `feeProtocol` stays 0. The wasm is unchanged.
+
 ## v0.1.5
 
 - Add Elysium manifests for three Uniswap V3 copies: `elysium-kleos-v3.yaml` (`kleos_v3`),

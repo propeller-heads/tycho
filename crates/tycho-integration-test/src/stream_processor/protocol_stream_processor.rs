@@ -273,6 +273,7 @@ impl ProtocolStreamProcessor {
                 "pancakeswap_v2".to_string(),
                 "uniswap_v3".to_string(),
                 "pancakeswap_v3".to_string(),
+                "community_v3".to_string(),
                 "vm:balancer_v2".to_string(),
                 "uniswap_v4".to_string(),
                 "ekubo_v2".to_string(),
@@ -397,7 +398,7 @@ impl ProtocolStreamProcessor {
                 );
             }
             "uniswap_v3" | "sushiswap_v3" | "robinswap_v3" | "gigadex_v3" | "pancakeswap_v3" |
-            "swaphood_v3" | "kleos_v3" | "elyspump_v3" | "stockiumswap_v3" => {
+            "swaphood_v3" | "kleos_v3" | "elyspump_v3" | "stockiumswap_v3" | "community_v3" => {
                 stream = stream.exchange::<UniswapV3State>(protocol, tvl_filter.clone(), None);
             }
             "vm:balancer_v2" => {
