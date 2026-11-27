@@ -337,7 +337,7 @@ fn tracing_params_data(params: &TracingParams) -> Result<serde_json::Value, Stor
 #[cfg(test)]
 mod tests {
     use diesel_async::AsyncPgConnection;
-    use tycho_common::Bytes;
+    use tycho_common::{models::blockchain::RPCTracerParams, Bytes};
 
     use super::*;
     use crate::postgres::{db_fixtures, testing::instance_test_connection};
@@ -558,6 +558,215 @@ mod tests {
         assert_eq!(
             result,
             Err(StorageError::NotFound("EntryPoint".to_string(), "missing".to_string()))
+        );
+    }
+
+    fn params(calldata: u8) -> TracingParams {
+        TracingParams::RPCTracer(RPCTracerParams::new(None, Bytes::from(vec![calldata])))
+    }
+
+    /// The setup instance with the entry point `ep` on `pool_a`.
+    async fn setup_with_entry_point() -> (AsyncPgConnection, PostgresGatewayNew, InstanceId) {
+        let (mut conn, gateway, instance) = setup().await;
+        let new_data = HashMap::from([("pool_a".to_string(), HashSet::from([ep("ep", 1)]))]);
+        gateway
+            .insert_entry_points(instance, &new_data, &mut conn)
+            .await
+            .expect("inserting the entry points failed");
+        (conn, gateway, instance)
+    }
+
+    /// Tracing params data of the instance, sorted by id.
+    async fn stored_params(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+    ) -> Vec<Option<serde_json::Value>> {
+        entry_point_tracing_params::table
+            .filter(entry_point_tracing_params::instance_id.eq(instance))
+            .order_by(entry_point_tracing_params::id)
+            .select(entry_point_tracing_params::data)
+            .load(conn)
+            .await
+            .expect("loading the tracing params failed")
+    }
+
+    /// Params links of the instance as (component id, params id), sorted.
+    async fn stored_params_links(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+    ) -> Vec<(i64, i64)> {
+        protocol_component_has_entry_point_tracing_params::table
+            .filter(protocol_component_has_entry_point_tracing_params::instance_id.eq(instance))
+            .order_by((
+                protocol_component_has_entry_point_tracing_params::protocol_component_id,
+                protocol_component_has_entry_point_tracing_params::entry_point_tracing_params_id,
+            ))
+            .select((
+                protocol_component_has_entry_point_tracing_params::protocol_component_id,
+                protocol_component_has_entry_point_tracing_params::entry_point_tracing_params_id,
+            ))
+            .load(conn)
+            .await
+            .expect("loading the params links failed")
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_stores_params_and_links() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+        let new_data = HashMap::from([(
+            "ep".to_string(),
+            HashSet::from([(params(1), "pool_a".to_string()), (params(2), "pool_a".to_string())]),
+        )]);
+
+        gateway
+            .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+            .await
+            .expect("inserting the tracing params failed");
+
+        let mut data = stored_params(&mut conn, instance).await;
+        data.sort_by_key(|value| value.as_ref().map(ToString::to_string));
+        let mut expected = vec![
+            Some(tracing_params_data(&params(1)).unwrap()),
+            Some(tracing_params_data(&params(2)).unwrap()),
+        ];
+        expected.sort_by_key(|value| value.as_ref().map(ToString::to_string));
+        assert_eq!(data, expected);
+        let ids = tracing_params_ids(
+            instance,
+            &[("ep".to_string(), params(1)), ("ep".to_string(), params(2))],
+            &mut conn,
+        )
+        .await
+        .expect("looking the params up failed");
+        let pool_a = gateway
+            .component_ids(instance, &["pool_a"], &mut conn)
+            .await
+            .unwrap()["pool_a"];
+        let mut expected_links = vec![
+            (pool_a, ids[&("ep".to_string(), params(1))]),
+            (pool_a, ids[&("ep".to_string(), params(2))]),
+        ];
+        expected_links.sort();
+        assert_eq!(stored_params_links(&mut conn, instance).await, expected_links);
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_shared_by_two_components() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+        let new_data = HashMap::from([(
+            "ep".to_string(),
+            HashSet::from([(params(1), "pool_a".to_string()), (params(1), "pool_b".to_string())]),
+        )]);
+
+        gateway
+            .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+            .await
+            .expect("inserting the tracing params failed");
+
+        assert_eq!(
+            stored_params(&mut conn, instance)
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            stored_params_links(&mut conn, instance)
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_resent_adds_no_row() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+        let new_data =
+            HashMap::from([("ep".to_string(), HashSet::from([(params(1), "pool_a".to_string())]))]);
+
+        for _ in 0..2 {
+            gateway
+                .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+                .await
+                .expect("inserting the tracing params failed");
+        }
+
+        assert_eq!(
+            stored_params(&mut conn, instance)
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            stored_params_links(&mut conn, instance)
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_fails_for_an_unknown_entry_point() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+        let new_data = HashMap::from([(
+            "missing".to_string(),
+            HashSet::from([(params(1), "pool_a".to_string())]),
+        )]);
+
+        let result = gateway
+            .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("EntryPoint".to_string(), "missing".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_fails_for_an_unknown_component() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+        let new_data = HashMap::from([(
+            "ep".to_string(),
+            HashSet::from([(params(1), "missing".to_string())]),
+        )]);
+
+        let result = gateway
+            .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("ProtocolComponent".to_string(), "missing".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_tracing_params_empty_is_ok() {
+        let (mut conn, gateway, instance) = setup_with_entry_point().await;
+
+        let result = gateway
+            .insert_entry_point_tracing_params(instance, &HashMap::new(), &mut conn)
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(stored_params(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tracing_params_ids_fails_for_unknown_params() {
+        let (mut conn, _gateway, instance) = setup_with_entry_point().await;
+
+        let result =
+            tracing_params_ids(instance, &[("ep".to_string(), params(9))], &mut conn).await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound(
+                "EntryPointTracingParams".to_string(),
+                format!("ep, {:?}", params(9))
+            ))
         );
     }
 }
