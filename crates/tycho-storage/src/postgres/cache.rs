@@ -610,10 +610,22 @@ impl DBCacheWriteExecutor {
                     .upsert_protocol_states(instance, origins, deltas, conn)
                     .await?
             }
-            WriteOp::UpdateTokens(_) |
-            WriteOp::InsertEntryPoints(_) |
-            WriteOp::InsertEntryPointTracingParams(_) |
-            WriteOp::UpsertTracedEntryPoints(_) => {
+            WriteOp::InsertEntryPoints(entry_points) => {
+                self.instance_gateway
+                    .insert_entry_points(instance, entry_points, conn)
+                    .await?
+            }
+            WriteOp::InsertEntryPointTracingParams(params) => {
+                self.instance_gateway
+                    .insert_entry_point_tracing_params(instance, params, conn)
+                    .await?
+            }
+            WriteOp::UpsertTracedEntryPoints(traced) => {
+                self.instance_gateway
+                    .upsert_traced_entry_points(instance, origins, traced, conn)
+                    .await?
+            }
+            WriteOp::UpdateTokens(_) => {
                 return Err(StorageError::Unsupported(format!(
                     "{} for instance {instance}",
                     operation.variant_name()
