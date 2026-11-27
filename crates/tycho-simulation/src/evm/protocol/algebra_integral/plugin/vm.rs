@@ -11,7 +11,9 @@
 //! The engine holds only the accounts the indexer traced `beforeSwap` into. The indexer does not
 //! retrace an entrypoint whose trace succeeded, so a plugin that starts calling another contract
 //! later (a fee source enabled after the first trace, say) fails every quote with a missing
-//! account until its entrypoint is traced again.
+//! account until its entrypoint is traced again. Nothing causes that short of a change of the
+//! plugin's beacon: the first trace did not read the slot that names the new contract, so a
+//! write to it is no retrigger, and the same trace parameters are not traced twice.
 
 use alloy::{
     core::sol,
