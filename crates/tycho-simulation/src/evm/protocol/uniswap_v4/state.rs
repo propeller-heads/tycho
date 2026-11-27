@@ -408,11 +408,9 @@ impl UniswapV4State {
         let mut gas_used = U256::from(self.gas_costs.base);
 
         // A hook's fee override holds for one swap only, so those swaps neither use nor add to the
-        // step cache.
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() && lp_fee_override.is_none() {
+        // step cache. Only exact-input swaps use the step cache, which finds a step by its input
+        // and optional price limit.
+        let cache_key = if exact_input && lp_fee_override.is_none() {
             let fee_pips = self
                 .fees
                 .calculate_swap_fees_pips(zero_for_one, None)?;
@@ -431,6 +429,7 @@ impl UniswapV4State {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;

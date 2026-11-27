@@ -209,10 +209,9 @@ impl VelodromeSlipstreamsState {
         let mut gas_used = U256::from(130_000);
 
         let fee = self.get_fee();
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() {
+        // Only exact-input swaps use the step cache. The cache finds a step by its input and
+        // optional price limit, which an exact-output swap does not know.
+        let cache_key = if exact_input {
             StepCacheKey::new(self.sqrt_price, state.tick.value(), self.liquidity, fee, gas_used)
         } else {
             None
@@ -222,6 +221,7 @@ impl VelodromeSlipstreamsState {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;

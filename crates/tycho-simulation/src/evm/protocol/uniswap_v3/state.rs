@@ -155,10 +155,9 @@ impl UniswapV3State {
         };
         let mut gas_used = U256::from(SWAP_BASE_GAS);
 
-        // Only exact-input swaps with no price limit use the step cache. The cache finds a step by
-        // its input, which an exact-output swap does not know. A cached step can also lie past a
-        // price limit.
-        let cache_key = if exact_input && sqrt_price_limit.is_none() {
+        // Only exact-input swaps use the step cache. The cache finds a step by its input and
+        // optional price limit, which an exact-output swap does not know.
+        let cache_key = if exact_input {
             StepCacheKey::new(
                 self.sqrt_price,
                 state.tick.value(),
@@ -174,6 +173,7 @@ impl UniswapV3State {
             zero_for_one,
             cache_key,
             amount_specified.unsigned_abs(),
+            sqrt_price_limit,
         );
         if let Some(progress) = cache_run.apply_cached_progress(&mut state) {
             gas_used = progress.gas;
@@ -1849,5 +1849,54 @@ mod step_cache_tests {
             format_quote_result(&cached, &large, &wbtc, &weth),
             format_quote_result(&fresh, &large, &wbtc, &weth)
         );
+    }
+
+    #[test]
+    fn test_step_cache_swap_to_price_matches_fresh_state() {
+        let (wbtc, weth) = wbtc_weth();
+        let cached = test_pool();
+
+        // Quote a mix of far and near price limits in both directions; the first far limit warms
+        // the cache across multiple ticks, and subsequent nearer limits must stop before crossing.
+        let targets: &[(&Token, &Token, &[u64])] = &[
+            (&wbtc, &weth, &[10_000_000, 12_000_000, 14_000_000, 11_000_000]),
+            (&weth, &wbtc, &[1, 2, 4, 3]),
+        ];
+
+        for (sell, buy, nums) in targets {
+            for &num in *nums {
+                let target = tycho_common::simulation::protocol_sim::Price::new(
+                    BigUint::from(num),
+                    BigUint::from(1_000_000u64),
+                );
+                let params = QueryPoolSwapParams::new(
+                    (*sell).clone(),
+                    (*buy).clone(),
+                    SwapConstraint::PoolTargetPrice {
+                        target,
+                        tolerance: 0.0,
+                        min_amount_in: None,
+                        max_amount_in: None,
+                    },
+                );
+                let fresh = test_pool();
+                let res_cached = cached.query_pool_swap(&params);
+                let res_fresh = fresh.query_pool_swap(&params);
+                match (res_cached, res_fresh) {
+                    (Ok(c), Ok(f)) => {
+                        assert_eq!(c.amount_in(), f.amount_in());
+                        assert_eq!(c.amount_out(), f.amount_out());
+                        assert!(c.new_state().eq(f.new_state()));
+                    }
+                    (Err(_), Err(_)) => {}
+                    (c, f) => panic!("cached vs fresh mismatch: {c:?} vs {f:?}"),
+                }
+            }
+        }
+        // Confirm the cache actually populated from price-limited swaps.
+        assert!(!cached
+            .step_cache
+            .min_inputs(true)
+            .is_empty());
     }
 }
