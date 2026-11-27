@@ -757,7 +757,8 @@ impl WsDeltasClient {
     /// Forcefully ends a (client) stream by unsubscribing.
     ///
     /// Is used only if the message can't be processed due to an error that might resolve
-    /// itself by resubscribing.
+    /// itself by resubscribing. Returns once the unsubscribe command is sent: the subscription
+    /// ends when the server confirms it, which the read loop handles after this returns.
     async fn force_unsubscribe(subscription_id: Uuid, inner: &mut Inner) {
         // avoid unsubscribing multiple times
         if let Some(SubscriptionInfo::RequestedUnsubscription(_)) = inner
@@ -767,19 +768,11 @@ impl WsDeltasClient {
             return;
         }
 
-        let (tx, rx) = oneshot::channel();
+        // Nothing waits for the confirmation. This runs inside the read loop, the only place
+        // that can deliver it, so waiting here would only stall the connection.
+        let (tx, _rx) = oneshot::channel();
         if let Err(e) = WsDeltasClient::unsubscribe_inner(inner, subscription_id, tx).await {
             warn!(?e, ?subscription_id, "Failed to send unsubscribe command");
-        } else {
-            // Wait for unsubscribe completion with timeout
-            match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                Ok(_) => {
-                    debug!(?subscription_id, "Unsubscribe completed successfully");
-                }
-                Err(_) => {
-                    warn!(?subscription_id, "Unsubscribe completion timed out");
-                }
-            }
         }
     }
 
@@ -1764,6 +1757,51 @@ mod tests {
 
         // Should not take too long (max ~300ms for 3 attempts with some tolerance)
         assert!(elapsed < Duration::from_millis(500), "Took too long: {:?}", elapsed);
+    }
+
+    /// A subscription whose buffer overflows ends as soon as the server confirms the
+    /// unsubscribe. The confirmation arrives through the read loop, so the loop must not wait
+    /// for it.
+    #[test_log::test(tokio::test)]
+    async fn test_overflowing_subscription_ends_promptly() {
+        let exp_comm = [
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(subscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_confirmation())),
+            // The first block fills the one-message buffer, the second overflows it.
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(block_deltas())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(block_deltas())),
+            ExpectedComm::Receive(100, tungstenite::protocol::Message::Text(unsubscribe())),
+            ExpectedComm::Send(tungstenite::protocol::Message::Text(subscription_ended())),
+        ];
+        let (addr, server_thread) = mock_tycho_ws(&exp_comm, 0).await;
+        let client = TychoStreamBuilder::new("unused", Chain::Ethereum)
+            .subscription_buffer_size(1)
+            .build_ws_deltas_client(&format!("ws://{addr}"), None, None)
+            .expect("stream builder should construct a websocket client");
+        let jh = client
+            .connect()
+            .await
+            .expect("connect failed");
+
+        let (_sub_id, mut rx) = timeout(
+            Duration::from_millis(100),
+            client.subscribe(
+                ExtractorIdentity::new(Chain::Ethereum, "vm:ambient"),
+                SubscriptionOptions::new().with_compression(false),
+            ),
+        )
+        .await
+        .expect("subscription timed out")
+        .expect("subscription failed");
+
+        timeout(Duration::from_secs(1), async { while rx.recv().await.is_some() {} })
+            .await
+            .expect("subscription did not end within 1 s of overflowing");
+
+        jh.abort();
+        server_thread
+            .await
+            .expect("mock server failed");
     }
 
     #[test_log::test(tokio::test)]
