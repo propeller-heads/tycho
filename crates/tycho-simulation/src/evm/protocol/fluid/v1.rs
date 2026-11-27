@@ -1791,6 +1791,90 @@ mod test {
         assert_eq!(pool.pool_reserve1, U256::from(25u64 + 31u64));
     }
 
+    fn reserves_delta(paused: Option<&[u8]>, unpause: bool) -> ProtocolStateDelta {
+        let mut updated_attributes = HashMap::from(vm::pending_state_attributes(
+            alloy::sol_types::SolValue::abi_encode(&vm::sample_pool_with_reserves()),
+            1_700_000_000,
+        ));
+        if let Some(value) = paused {
+            updated_attributes.insert(PAUSED_ATTRIBUTE.to_string(), Bytes::from(value.to_vec()));
+        }
+        let deleted_attributes = if unpause {
+            std::collections::HashSet::from([PAUSED_ATTRIBUTE.to_string()])
+        } else {
+            std::collections::HashSet::new()
+        };
+        ProtocolStateDelta { updated_attributes, deleted_attributes, ..Default::default() }
+    }
+
+    #[rstest]
+    #[case::fluid_pause(&[1], true)]
+    #[case::indexer_tracing_error(&[2], true)]
+    #[case::zero(&[0], false)]
+    #[case::empty(&[], false)]
+    fn test_delta_transition_sets_paused(#[case] value: &[u8], #[case] expected: bool) {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+
+        pool.delta_transition(
+            reserves_delta(Some(value), false),
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
+
+        assert_eq!(pool.paused, expected);
+    }
+
+    #[test]
+    fn test_delta_transition_keeps_paused_without_pause_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        pool.paused = true;
+
+        pool.delta_transition(reserves_delta(None, false), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert!(pool.paused);
+    }
+
+    #[test]
+    fn test_delta_transition_unpauses_on_deleted_pause_attribute() {
+        let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
+        pool.paused = true;
+
+        pool.delta_transition(reserves_delta(None, true), &HashMap::new(), &Balances::default())
+            .unwrap();
+
+        assert!(!pool.paused);
+    }
+
+    #[test]
+    fn test_paused_pool_quotes_nothing() {
+        let (wsteth, eth, mut pool) = wsteth_eth_pool_23526115();
+        pool.paused = true;
+        let amount_in = BigUint::from(10u64).pow(18);
+
+        let quote = pool.get_amount_out(amount_in, &wsteth, &eth);
+        let limits = pool
+            .get_limits(wsteth.address, eth.address)
+            .unwrap();
+
+        assert!(
+            matches!(quote, Err(SimulationError::InvalidInput(ref m, None)) if m.contains("paused"))
+        );
+        assert_eq!(limits, (BigUint::ZERO, BigUint::ZERO));
+    }
+
+    #[test]
+    fn test_unpaused_pool_quotes() {
+        let (wsteth, eth, pool) = wsteth_eth_pool_23526115();
+
+        let quote = pool
+            .get_amount_out(BigUint::from(10u64).pow(18), &wsteth, &eth)
+            .unwrap();
+
+        assert!(quote.amount > BigUint::ZERO);
+    }
+
     #[test]
     fn test_delta_transition_attribute_without_timestamp() {
         let (_, _, mut pool) = setup_fluid_pool(U256::ONE);
