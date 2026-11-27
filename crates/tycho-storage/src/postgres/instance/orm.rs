@@ -744,6 +744,15 @@ pub struct EntryPointTracingParamsCallsAccount {
     pub account_id: i64,
 }
 
+impl EntryPointTracingParamsCallsAccount {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::entry_point_tracing_result)]
 #[diesel(primary_key(instance_id, id))]
@@ -769,6 +778,15 @@ pub struct NewEntryPointTracingResult {
     pub detection_block_number: i64,
     pub detection_block_hash: Bytes,
     pub detection_data: serde_json::Value,
+}
+
+impl NewEntryPointTracingResult {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 5;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable, Insertable)]

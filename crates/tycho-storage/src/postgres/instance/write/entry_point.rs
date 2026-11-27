@@ -2,28 +2,33 @@
 //!
 //! Every lookup and write stays inside one instance. Two instances that use the same entry point
 //! each store their own copy.
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
-use diesel::prelude::*;
+use diesel::{prelude::*, upsert::excluded};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     models::{
-        blockchain::{EntryPoint, TracingParams},
-        ComponentId, EntryPointId,
+        blockchain::{EntryPoint, TracedEntryPoint, TracingParams, TracingResult},
+        BlockHash, ComponentId, EntryPointId,
     },
     storage::StorageError,
+    Bytes,
 };
 
+use super::block::block_origin;
 use crate::postgres::{
     instance::{
         gateway::PostgresGatewayNew,
+        origins::{BatchOrigins, BlockOrigin},
         orm::{
-            EntryPointTracingType, NewEntryPoint, NewEntryPointTracingParams,
+            EntryPointTracingParamsCallsAccount, EntryPointTracingType, NewEntryPoint,
+            NewEntryPointTracingParams, NewEntryPointTracingResult,
             ProtocolComponentHasEntryPointTracingParams, ProtocolComponentUsesEntryPoint,
         },
         schema::tycho::{
-            entry_point, entry_point_tracing_params,
-            protocol_component_has_entry_point_tracing_params, protocol_component_uses_entry_point,
+            entry_point, entry_point_tracing_params, entry_point_tracing_params_calls_account,
+            entry_point_tracing_result, protocol_component_has_entry_point_tracing_params,
+            protocol_component_uses_entry_point,
         },
         InstanceId,
     },
@@ -211,6 +216,147 @@ impl PostgresGatewayNew {
         }
         Ok(())
     }
+
+    /// Stores the traced result of each entry point and params in the instance, and links the
+    /// params to every account that the trace accessed.
+    ///
+    /// Results of the same params are merged, in input order, then merged with the stored result
+    /// of the instance. The detection block of a row is the block of the last result of its
+    /// params. It comes from `origins`, or from the shared block table.
+    ///
+    /// Fails with `NotFound` for params or an account that the instance does not have, and with
+    /// `NoRelatedEntity` for a detection block that neither `origins` nor the block table has.
+    pub(crate) async fn upsert_traced_entry_points(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        traced: &[TracedEntryPoint],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        if traced.is_empty() {
+            return Ok(());
+        }
+        let wanted: Vec<(EntryPointId, TracingParams)> = traced
+            .iter()
+            .map(params_key)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let params_ids = tracing_params_ids(instance, &wanted, conn).await?;
+        let mut blocks: HashMap<BlockHash, BlockOrigin> = HashMap::new();
+        for hash in traced
+            .iter()
+            .map(|tep| &tep.detection_block_hash)
+        {
+            if !blocks.contains_key(hash) {
+                let block = block_origin(origins, hash, "TracedEntryPoint", conn).await?;
+                blocks.insert(hash.clone(), block);
+            }
+        }
+
+        let mut grouped: HashMap<i64, (BlockHash, TracingResult)> = HashMap::new();
+        for tep in traced {
+            let params_id = params_ids[&params_key(tep)];
+            match grouped.entry(params_id) {
+                Entry::Occupied(mut entry) => {
+                    let (block, result) = entry.get_mut();
+                    *block = tep.detection_block_hash.clone();
+                    result.merge(tep.tracing_result.clone());
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((tep.detection_block_hash.clone(), tep.tracing_result.clone()));
+                }
+            }
+        }
+
+        let mut stored = stored_results(instance, grouped.keys().copied(), conn).await?;
+        let mut rows = Vec::with_capacity(grouped.len());
+        for (params_id, (block_hash, mut result)) in grouped {
+            if let Some(stored_result) = stored.remove(&params_id) {
+                result.merge(stored_result);
+            }
+            let detection_data = serde_json::to_value(&result).map_err(|err| {
+                StorageError::Unexpected(format!("Failed to serialize TracingResult: {err}"))
+            })?;
+            rows.push(NewEntryPointTracingResult {
+                instance_id: instance,
+                entry_point_tracing_params_id: params_id,
+                detection_block_number: blocks[&block_hash].number,
+                detection_block_hash: block_hash,
+                detection_data,
+            });
+        }
+        for chunk in rows.chunks(NewEntryPointTracingResult::MAX_BATCH_SIZE) {
+            diesel::insert_into(entry_point_tracing_result::table)
+                .values(chunk)
+                .on_conflict((
+                    entry_point_tracing_result::instance_id,
+                    entry_point_tracing_result::entry_point_tracing_params_id,
+                ))
+                .do_update()
+                .set((
+                    entry_point_tracing_result::detection_block_number
+                        .eq(excluded(entry_point_tracing_result::detection_block_number)),
+                    entry_point_tracing_result::detection_block_hash
+                        .eq(excluded(entry_point_tracing_result::detection_block_hash)),
+                    entry_point_tracing_result::detection_data
+                        .eq(excluded(entry_point_tracing_result::detection_data)),
+                    entry_point_tracing_result::modified_ts
+                        .eq(excluded(entry_point_tracing_result::modified_ts)),
+                ))
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(
+                        err,
+                        "EntryPointTracingResult",
+                        &instance.to_string(),
+                        None,
+                    )
+                })?;
+        }
+
+        let addresses: Vec<&Bytes> = traced
+            .iter()
+            .flat_map(|tep| tep.tracing_result.accessed_slots.keys())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let account_ids = self
+            .account_ids(instance, &addresses, conn)
+            .await?;
+        let links: Vec<EntryPointTracingParamsCallsAccount> = traced
+            .iter()
+            .flat_map(|tep| {
+                let params_id = params_ids[&params_key(tep)];
+                tep.tracing_result
+                    .accessed_slots
+                    .keys()
+                    .map(move |address| (params_id, address))
+            })
+            .map(|(params_id, address)| EntryPointTracingParamsCallsAccount {
+                instance_id: instance,
+                entry_point_tracing_params_id: params_id,
+                account_id: account_ids[address],
+            })
+            .collect();
+        for chunk in links.chunks(EntryPointTracingParamsCallsAccount::MAX_BATCH_SIZE) {
+            diesel::insert_into(entry_point_tracing_params_calls_account::table)
+                .values(chunk)
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await
+                .map_err(|err| {
+                    storage_error_from_diesel(
+                        err,
+                        "EntryPointTracingParamsCallsAccount",
+                        &instance.to_string(),
+                        None,
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 /// Returns the id of each entry point of the instance, by external id.
@@ -323,6 +469,47 @@ async fn tracing_params_ids(
         ids.insert((entry_point.clone(), params.clone()), id);
     }
     Ok(ids)
+}
+
+/// The (entry point external id, params) pair of a traced entry point.
+fn params_key(tep: &TracedEntryPoint) -> (EntryPointId, TracingParams) {
+    (
+        tep.entry_point_with_params
+            .entry_point
+            .external_id
+            .clone(),
+        tep.entry_point_with_params
+            .params
+            .clone(),
+    )
+}
+
+/// Returns the stored traced result of each params id in the instance, by params id.
+async fn stored_results(
+    instance: InstanceId,
+    params_ids: impl Iterator<Item = i64>,
+    conn: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, TracingResult>, StorageError> {
+    let rows: Vec<(i64, serde_json::Value)> = entry_point_tracing_result::table
+        .filter(entry_point_tracing_result::instance_id.eq(instance))
+        .filter(entry_point_tracing_result::entry_point_tracing_params_id.eq_any(params_ids))
+        .select((
+            entry_point_tracing_result::entry_point_tracing_params_id,
+            entry_point_tracing_result::detection_data,
+        ))
+        .load(conn)
+        .await
+        .map_err(|err| {
+            storage_error_from_diesel(err, "EntryPointTracingResult", &instance.to_string(), None)
+        })?;
+    rows.into_iter()
+        .map(|(params_id, data)| {
+            let result = serde_json::from_value(data).map_err(|err| {
+                StorageError::DecodeError(format!("Failed to deserialize TracingResult: {err}"))
+            })?;
+            Ok((params_id, result))
+        })
+        .collect()
 }
 
 /// The JSON of tracing params, as the instance stores them in `data`.
