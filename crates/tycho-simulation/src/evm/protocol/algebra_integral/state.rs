@@ -1037,12 +1037,15 @@ pub(crate) mod test_support {
     };
 
     use super::PluginSetup;
-    use crate::evm::protocol::algebra_integral::plugin::deployments::initialize_plugin_handlers;
+    use crate::evm::protocol::algebra_integral::plugin::deployments::{
+        initialize_plugin_handlers,
+        nami::{ANTI_SNIPER_PLUGINS_BASE, PLUGINS_ROBINHOOD},
+    };
 
     /// `NamiPluginV1Diamond` on Robinhood.
-    pub const PLUGIN_IMPL_ROBINHOOD: Address = address!("1a2898f77957B9C5B7bAfD29a2dAFBA4404b6874");
+    pub const PLUGIN_IMPL_ROBINHOOD: Address = PLUGINS_ROBINHOOD[0];
     /// `NamiPluginV1WithAntiSniperDiamond` on Base.
-    pub const ANTI_SNIPER_IMPL_BASE: Address = address!("9c5D328a1bDdb841E889d1976670F3C0C153D037");
+    pub const ANTI_SNIPER_IMPL_BASE: Address = ANTI_SNIPER_PLUGINS_BASE[0];
     pub const PLUGIN: Address = address!("b0918bddea10fcc127bbe816725b2be536cebb8a");
     /// BEFORE_SWAP, AFTER_SWAP, AFTER_INIT and DYNAMIC_FEE: the config of Nami's pools.
     pub const NAMI_PLUGIN_CONFIG: u8 = 195;
