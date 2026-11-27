@@ -8,7 +8,9 @@ use crate::{
     evm::protocol::{
         safe_math::{div_mod_u256, safe_add_u256, safe_div_u256, safe_sub_u256, sqrt_u256},
         u256_num::{biguint_to_u256, u256_to_f64},
-        utils::solidity_math::{mul_div, mul_div_q96_rounding_up, mul_div_rounding_up},
+        utils::solidity_math::{
+            mul_div, mul_div_q96, mul_div_q96_rounding_up, mul_div_rounding_up,
+        },
     },
     utils::decimals_exponent,
 };
@@ -71,7 +73,7 @@ pub fn get_amount1_delta(
     if round_up {
         mul_div_q96_rounding_up(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     } else {
-        mul_div(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a, Q96)
+        mul_div_q96(U256::from(liquidity), sqrt_ratio_b - sqrt_ratio_a)
     }
 }
 
