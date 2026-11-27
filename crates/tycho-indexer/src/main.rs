@@ -738,6 +738,22 @@ async fn create_indexing_tasks(
 
     let (close_connections, connections_closed) = watch::channel(false);
 
+    let max_protocol_lag = chrono::Duration::minutes(
+        i64::try_from(global_args.max_protocol_lag_minutes).map_err(|err| {
+            ExtractionError::Setup(format!(
+                "max protocol lag of {} minutes is too large: {err}",
+                global_args.max_protocol_lag_minutes
+            ))
+        })?,
+    );
+    let committed_block_ts = cached_gw
+        .get_committed_blocks(&chain)
+        .await
+        .map_err(|e| ExtractionError::Setup(format!("Failed to load the committed blocks: {e}")))?
+        .into_iter()
+        .map(|(system, block)| (system, block.ts))
+        .collect();
+
     let (server_handle, server_task) =
         ServicesBuilder::new(rpc_gw, rpc_client.clone(), api_key, pause_changes)
             .prefix(&global_args.server_version_prefix)
@@ -746,6 +762,7 @@ async fn create_indexing_tasks(
             .plans_config(plans_config)
             .dci_protocols(dci_protocols)
             .protocol_systems(protocol_systems)
+            .max_protocol_lag(max_protocol_lag, committed_block_ts)
             .register_extractors(extractor_handles.clone())
             .pending_deltas(pending_deltas_rxs)
             .window_config(WindowConfig {

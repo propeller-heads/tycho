@@ -67,6 +67,8 @@ pub struct ServicesBuilder<G> {
     dci_protocols: Vec<String>,
     /// Active protocol systems derived from extractor config.
     protocol_systems: Vec<String>,
+    /// Leaves lagging systems out of `/protocol_systems`. `None` lists every system.
+    protocol_lag: Option<rpc::ProtocolLag>,
     /// Pre-built receivers for PendingDeltas (one per extractor).
     pending_deltas_rxs: Vec<tokio::sync::mpsc::Receiver<crate::extractor::DeltaCommand>>,
     window_config: WindowConfig,
@@ -126,6 +128,7 @@ where
             plans_config: PlansConfig::default(),
             dci_protocols: Vec::new(),
             protocol_systems: Vec::new(),
+            protocol_lag: None,
             pending_deltas_rxs: Vec::new(),
             window_config: WindowConfig::default(),
             entity_cache: EntityCacheSetup::Off,
@@ -199,6 +202,19 @@ where
     /// Sets the active protocol systems derived from extractor config.
     pub fn protocol_systems(mut self, protocol_systems: Vec<String>) -> Self {
         self.protocol_systems = protocol_systems;
+        self
+    }
+
+    /// Leaves out of `/protocol_systems` each system whose newest block is more than `max_lag`
+    /// old. The newest block is the tip of the system's delta window, else its entry in
+    /// `committed_block_ts`: the time of its last committed block at startup. A system with
+    /// neither is left out.
+    pub fn max_protocol_lag(
+        mut self,
+        max_lag: chrono::Duration,
+        committed_block_ts: HashMap<String, chrono::NaiveDateTime>,
+    ) -> Self {
+        self.protocol_lag = Some(rpc::ProtocolLag::new(max_lag, committed_block_ts));
         self
     }
 
@@ -365,6 +381,7 @@ where
             )
             .with_disabled_caches(&self.disabled_rpc_caches)
             .with_ready_head_tolerance(self.ready_head_tolerance)
+            .with_protocol_lag(self.protocol_lag)
             .with_shutdown_signal(self.shutdown.clone())
             .with_state_service(state_service),
         );

@@ -450,7 +450,7 @@ All POST under `/{version_prefix}/` (default `/v1/`), except where noted.
 | `/protocol_components` | Components by system / TVL / IDs |
 | `/traced_entry_points` | Traced entry point results |
 | `/add_entry_points` | Register entry points for tracing |
-| `/protocol_systems` | List available protocol systems |
+| `/protocol_systems` | List available protocol systems; leaves out systems whose newest block is more than `--max-protocol-lag-minutes` (default 60) old, e.g. a new extractor that backfills. The newest block is the tip of the system's `DeltaWindow`, else its last committed block read at startup; a system with neither is left out |
 | `/component_tvl` | Component TVL estimates |
 | `/health` | GET — liveness check; 503 when the leader stopped confirming its lock |
 | `/ready` | GET — readiness check; 503 when unhealthy or while a follower is behind the chain head |
