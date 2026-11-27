@@ -1,4 +1,6 @@
 //! Protocol state of an instance: one value per component and attribute name, versioned.
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use diesel::{
@@ -9,17 +11,74 @@ use diesel::{
     upsert::excluded,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tycho_common::storage::StorageError;
+use tycho_common::{
+    models::{protocol::ProtocolComponentStateDelta, TxHash},
+    storage::StorageError,
+};
 
 use crate::postgres::{
     instance::{
+        gateway::PostgresGatewayNew,
+        origins::BatchOrigins,
         orm::{NewProtocolState, NewProtocolStateHistory},
         schema::tycho::{protocol_state, protocol_state_history},
-        write::versioning::VersionedRowNew,
+        write::versioning::{VersionedChange, VersionedRowNew},
         InstanceId,
     },
     storage_error_from_diesel,
 };
+
+impl PostgresGatewayNew {
+    /// Writes the state deltas of a batch as new versions: an updated attribute starts a version,
+    /// a deleted attribute ends one. Each change takes the block timestamp and index of its
+    /// transaction from `origins`.
+    ///
+    /// `NotFound` for a component that is not in the instance or a transaction that is not in the
+    /// batch. `Unexpected` for a change that does not start after the stored version of its key,
+    /// and for a deleted attribute with no stored version.
+    pub(crate) async fn upsert_protocol_states(
+        &self,
+        instance: InstanceId,
+        origins: &BatchOrigins,
+        deltas: &[(TxHash, ProtocolComponentStateDelta)],
+        conn: &mut AsyncPgConnection,
+    ) -> Result<(), StorageError> {
+        // A batch spans many blocks, so the same components come back many times. Look up each
+        // one once.
+        let external_ids: Vec<&str> = deltas
+            .iter()
+            .map(|(_, delta)| delta.component_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let component_ids = self
+            .component_ids(instance, &external_ids, conn)
+            .await?;
+
+        let mut changes = Vec::new();
+        for (tx, delta) in deltas {
+            let origin = origins.change(tx)?;
+            let component_id = component_ids[&delta.component_id];
+            for (name, value) in &delta.updated_attributes {
+                changes.push(VersionedChange::Update(NewProtocolState {
+                    instance_id: instance,
+                    protocol_component_id: component_id,
+                    attribute_name: name.clone(),
+                    attribute_value: value.clone(),
+                    // write_versions links every later version to the one it replaces.
+                    previous_value: None,
+                    valid_from: origin.valid_from,
+                    tx_index: origin.tx_index,
+                }));
+            }
+            for name in &delta.deleted_attributes {
+                changes.push(VersionedChange::Delete { key: (component_id, name.clone()), origin });
+            }
+        }
+        self.write_versions(instance, changes, conn)
+            .await
+    }
+}
 
 #[async_trait]
 impl VersionedRowNew for NewProtocolState {
@@ -160,15 +219,19 @@ impl VersionedRowNew for NewProtocolState {
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use tycho_common::Bytes;
+    use tycho_common::{
+        models::{protocol::ProtocolComponentStateDelta, TxHash},
+        Bytes,
+    };
 
     use super::*;
     use crate::postgres::{
         db_fixtures,
         instance::{
             gateway::PostgresGatewayNew,
-            origins::ChangeOrigin,
+            origins::{BatchOrigins, ChangeOrigin},
             orm::{ProtocolState, ProtocolStateHistory},
+            schema::tycho::protocol_component,
             write::versioning::VersionedChange,
         },
         testing::instance_test_connection,
@@ -503,5 +566,180 @@ mod tests {
             ),
             "{result:?}"
         );
+    }
+
+    /// A batch of block 2 at `at`, with the transaction `0xa1` at index 1 and `0xb2` at index 3.
+    fn origins(at: NaiveDateTime) -> BatchOrigins {
+        db_fixtures::batch_origins(&[(2, at)], &[(0xa1, 2, 1), (0xb2, 2, 3)])
+    }
+
+    fn delta(
+        tx: u8,
+        component: &str,
+        updated: &[(&str, u64)],
+        deleted: &[&str],
+    ) -> (TxHash, ProtocolComponentStateDelta) {
+        let updated = updated
+            .iter()
+            .map(|(name, new)| (name.to_string(), value(*new)))
+            .collect();
+        let deleted = deleted
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        (Bytes::from(vec![tx]), ProtocolComponentStateDelta::new(component, updated, deleted))
+    }
+
+    async fn upsert(
+        setup: &mut Setup,
+        at: NaiveDateTime,
+        deltas: &[(TxHash, ProtocolComponentStateDelta)],
+    ) -> Result<(), StorageError> {
+        setup
+            .gateway
+            .upsert_protocol_states(setup.instance, &origins(at), deltas, &mut setup.conn)
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_update_and_delete_attributes() {
+        let mut setup = setup().await;
+        db_fixtures::insert_instance_state(
+            &mut setup.conn,
+            setup.instance,
+            setup.component,
+            "fee",
+            value(5),
+        )
+        .await;
+        let at = db_fixtures::minutes_ago(1);
+
+        upsert(&mut setup, at, &[delta(0xa1, "pool", &[("reserve", 2)], &["fee"])])
+            .await
+            .unwrap();
+
+        let current = current(&mut setup).await;
+        assert_eq!(current.len(), 1);
+        assert_eq!(
+            (&current[0].attribute_name, &current[0].attribute_value, &current[0].previous_value),
+            (&"reserve".to_string(), &value(2), &Some(value(1)))
+        );
+        assert_eq!((current[0].valid_from, current[0].tx_index), (at, 1));
+        let mut archived: Vec<(String, Bytes)> = history(&mut setup)
+            .await
+            .into_iter()
+            .map(|row| (row.attribute_name, row.attribute_value))
+            .collect();
+        archived.sort();
+        assert_eq!(
+            archived,
+            vec![("fee".to_string(), value(5)), ("reserve".to_string(), value(1))]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_order_two_txs_of_one_block_by_tx_index() {
+        let mut setup = setup().await;
+        let at = db_fixtures::minutes_ago(1);
+
+        upsert(
+            &mut setup,
+            at,
+            &[
+                delta(0xb2, "pool", &[("reserve", 3)], &[]),
+                delta(0xa1, "pool", &[("reserve", 2)], &[]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let current = current(&mut setup).await;
+        assert_eq!(
+            (&current[0].attribute_value, &current[0].previous_value, current[0].tx_index),
+            (&value(3), &Some(value(2)), 3)
+        );
+        let history = history(&mut setup).await;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            (&history[1].attribute_value, history[1].valid_to, history[1].tx_index),
+            (&value(2), at, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_write_a_deleted_component() {
+        let mut setup = setup().await;
+        diesel::update(protocol_component::table)
+            .filter(protocol_component::id.eq(setup.component))
+            .set(protocol_component::deleted_at.eq(db_fixtures::minutes_ago(10)))
+            .execute(&mut setup.conn)
+            .await
+            .expect("deleting the component failed");
+
+        upsert(
+            &mut setup,
+            db_fixtures::minutes_ago(1),
+            &[delta(0xa1, "pool", &[("reserve", 2)], &[])],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(current(&mut setup).await[0].attribute_value, value(2));
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_fail_for_an_unknown_component() {
+        let mut setup = setup().await;
+        let system =
+            db_fixtures::insert_protocol_system(&mut setup.conn, "vm:other".to_string()).await;
+        let other = db_fixtures::insert_instance(&mut setup.conn, system, "0.0.1").await;
+        db_fixtures::insert_instance_component(&mut setup.conn, other, "other", &[]).await;
+
+        let result = upsert(
+            &mut setup,
+            db_fixtures::minutes_ago(1),
+            &[delta(0xa1, "other", &[("reserve", 2)], &[])],
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("ProtocolComponent".to_string(), "other".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_fail_for_a_tx_outside_the_batch() {
+        let mut setup = setup().await;
+
+        let result = upsert(
+            &mut setup,
+            db_fixtures::minutes_ago(1),
+            &[delta(0xff, "pool", &[("reserve", 2)], &[])],
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound(
+                "Transaction".to_string(),
+                Bytes::from(vec![0xff]).to_string()
+            ))
+        );
+        assert_eq!(current(&mut setup).await[0].attribute_value, value(1));
+    }
+
+    #[tokio::test]
+    async fn test_state_deltas_fail_for_a_deleted_attribute_that_is_not_stored() {
+        let mut setup = setup().await;
+
+        let result = upsert(
+            &mut setup,
+            db_fixtures::minutes_ago(1),
+            &[delta(0xa1, "pool", &[], &["missing"])],
+        )
+        .await;
+
+        assert!(matches!(result, Err(StorageError::Unexpected(_))), "{result:?}");
     }
 }

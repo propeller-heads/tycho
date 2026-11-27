@@ -1691,6 +1691,49 @@ pub mod db_fixtures {
             .expect("zero nanoseconds is valid")
     }
 
+    /// A fixed time on 2026-11-26, `second` seconds after 12:00.
+    pub fn ts(second: u32) -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 11, 26)
+            .and_then(|date| date.and_hms_opt(12, 0, second))
+            .expect("a valid timestamp")
+    }
+
+    /// The origins of a batch with the `blocks` as (number, timestamp) and the `txs` as (hash
+    /// byte, block number, index). The hash of a block is its number.
+    #[cfg(test)]
+    pub(crate) fn batch_origins(
+        blocks: &[(u64, NaiveDateTime)],
+        txs: &[(u8, u64, u64)],
+    ) -> instance::origins::BatchOrigins {
+        use tycho_common::models::{
+            blockchain::{Block, Transaction},
+            Chain,
+        };
+
+        use crate::postgres::cache::WriteOp;
+
+        let blocks = blocks
+            .iter()
+            .map(|(number, ts)| {
+                Block::new(*number, Chain::Ethereum, Bytes::from(*number), Bytes::default(), *ts)
+            })
+            .collect();
+        let txs = txs
+            .iter()
+            .map(|(hash, block, index)| {
+                Transaction::new(
+                    Bytes::from(vec![*hash]),
+                    Bytes::from(*block),
+                    Bytes::default(),
+                    None,
+                    *index,
+                )
+            })
+            .collect();
+        let ops = [WriteOp::UpsertBlock(blocks), WriteOp::UpsertTx(txs)];
+        instance::origins::BatchOrigins::from_ops(&ops).expect("a valid batch")
+    }
+
     /// The `valid_from` of the versioned rows that the instance fixtures insert: 2020-01-01 00:00.
     pub const INSTANCE_VALID_FROM: NaiveDateTime = NaiveDate::from_ymd_opt(2020, 1, 1)
         .expect("a valid date")

@@ -96,7 +96,6 @@ pub enum VersionedChange<R: VersionedRowNew> {
     /// A new version of the row's key. It starts at the row's `valid_from` and `tx_index`.
     Update(R),
     /// The end of the latest version of `key`, at `origin`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no instance write op deletes rows yet"))]
     Delete { key: R::Key, origin: ChangeOrigin },
 }
 
