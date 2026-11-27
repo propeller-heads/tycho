@@ -71,8 +71,14 @@ DEFINITION = [
 ]
 
 
-def git(*args, check=True):
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=check).stdout
+# A user's git config (an external diff driver, textconv, color) must not change what the script
+# parses. Kept here, in `git()`, so a new call site cannot miss them.
+CMD_OPTS = {"diff": ("--no-ext-diff", "--no-textconv", "--no-color"), "grep": ("--no-color",)}
+
+
+def git(cmd, *args, check=True):
+    argv = ["git", "-c", "color.ui=never", cmd, *CMD_OPTS.get(cmd, ()), *args]
+    return subprocess.run(argv, capture_output=True, text=True, check=check).stdout
 
 
 def kinds(path: str, text: str) -> set:
@@ -400,11 +406,18 @@ def main():
             files = git("diff", "--name-only", f"{base}...{head}").split()
             rng = [f"{base}...{head}"]
         diff_of = {}
+        tracked_changes = set(git("diff", "--name-only", *rng).split())
         for f in files:
             d = git("diff", *rng, "--", f, check=False)
-            if not d and Path(f).is_file():  # untracked: the whole file is new
+            if not d and Path(f).is_file() and f not in tracked_changes:  # untracked: the whole file is new
                 d = "".join("+" + l for l in Path(f).read_text(errors="replace").splitlines(True))
             diff_of[f] = d
+        # A changed file whose diff came back empty is a failed git call, not an empty change: say so
+        # instead of planning the review with 0 diff lines.
+        empty = [f for f in files if f in tracked_changes and not diff_of[f]]
+        if empty:
+            print(f"warning: git returned no diff for {len(empty)} changed files, e.g. {empty[0]}; "
+                  "the planned diff lines are too low", file=sys.stderr)
     files = sorted(set(files))
     if not files:
         sys.exit("empty file list: nothing to review")
