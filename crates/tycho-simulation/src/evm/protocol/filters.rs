@@ -87,7 +87,7 @@ pub fn balancer_v3_pool_filter(component: &ComponentWithState) -> bool {
 }
 
 pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
-    const PAUSED_POOLS: [&str; 6] = [
+    const PAUSED_POOLS: [&str; 7] = [
         // The components below are properly paused by substreams but the way indexer
         // handles tracing atm wrongly paused all components due to tracing failure. The
         // failure is unrelated to any issues with the protocol itself.
@@ -101,6 +101,9 @@ pub fn fluid_v1_paused_pools_filter(component: &ComponentWithState) -> bool {
         // Fluid governance unpaused swaps on this pool, but the pool storage is empty on chain.
         // Keep it blocked until a swap through it is confirmed.
         "0xba9ed8ae94c70ef9aa2cd1045ed473aaa405c6c7",
+        // Swaps paused by Fluid governance on the ETH/USDC pool. The simulation does not read the
+        // `paused` attribute, so a swap through it reverts with DexT1__SwapAndArbitragePaused.
+        "0x836951eb21f3df98273517b7249dceff270d34bf",
     ];
 
     !PAUSED_POOLS.contains(
