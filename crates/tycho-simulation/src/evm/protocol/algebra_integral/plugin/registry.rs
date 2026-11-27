@@ -40,8 +40,8 @@ pub trait PluginHandlerCreator: Send + Sync {
 /// Chains on which a plugin with no registered native handler is simulated with the generic VM
 /// handler.
 ///
-/// Anywhere else such a plugin is rejected at decode time, so a pool whose plugin sets the fee is
-/// never quoted at a fee the plugin did not choose.
+/// Anywhere else a pool calling such a plugin still decodes but is not quoted, so a pool whose
+/// plugin sets the fee is never quoted at a fee the plugin did not choose.
 pub const GENERIC_VM_PLUGIN_CHAINS: [Chain; 1] = [Chain::Ethereum];
 
 /// Handler creators by chain and plugin implementation, plus the generic VM creator.

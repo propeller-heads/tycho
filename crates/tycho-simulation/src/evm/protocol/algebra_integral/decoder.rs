@@ -28,9 +28,9 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for AlgebraIntegralState 
     /// tick, including ones with zero net liquidity, and every other `<module>/<field>`
     /// attribute belongs to the plugin.
     ///
-    /// Fails when the component id is not the pool address, a required attribute is missing or
-    /// malformed, or the pool calls a plugin the simulation cannot reproduce. A pool that calls
-    /// its plugin needs `decoder_context.chain`.
+    /// Fails when the component id is not the pool address or a required attribute is missing
+    /// or malformed. A pool that calls a plugin the simulation cannot reproduce, or that calls
+    /// its plugin without `decoder_context.chain`, decodes but is not quoted.
     async fn try_from_with_header(
         snapshot: ComponentWithState,
         block: BlockHeader,
