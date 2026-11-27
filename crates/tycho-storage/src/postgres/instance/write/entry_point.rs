@@ -524,10 +524,16 @@ fn tracing_params_data(params: &TracingParams) -> Result<serde_json::Value, Stor
 #[cfg(test)]
 mod tests {
     use diesel_async::AsyncPgConnection;
-    use tycho_common::{models::blockchain::RPCTracerParams, Bytes};
+    use tycho_common::models::{
+        blockchain::{Block, EntryPointWithTracingParams, RPCTracerParams},
+        Chain,
+    };
 
     use super::*;
-    use crate::postgres::{db_fixtures, testing::instance_test_connection};
+    use crate::postgres::{
+        db_fixtures::{self, ts},
+        testing::instance_test_connection,
+    };
 
     fn target(id: u8) -> Bytes {
         Bytes::from(vec![0xe0, id])
@@ -955,5 +961,294 @@ mod tests {
                 format!("ep, {:?}", params(9))
             ))
         );
+    }
+
+    fn account(id: u8) -> Bytes {
+        Bytes::from(vec![0xac, id])
+    }
+
+    /// A traced result of `ep` with params 1 at block `block`, accessing `slot` of each account.
+    fn traced(block: u64, accounts: &[u8], slot: u8) -> TracedEntryPoint {
+        let accessed_slots = accounts
+            .iter()
+            .map(|id| (account(*id), HashSet::from([Bytes::from(vec![slot])])))
+            .collect();
+        TracedEntryPoint::new(
+            EntryPointWithTracingParams::new(ep("ep", 1), params(1)),
+            Bytes::from(block),
+            TracingResult::new(HashSet::new(), accessed_slots),
+        )
+    }
+
+    /// The setup instance with the params 1 of `ep` on `pool_a`, and the accounts 1 and 2. The
+    /// chain `ethereum` is stored, with no block.
+    async fn setup_with_params() -> (AsyncPgConnection, PostgresGatewayNew, InstanceId) {
+        let (mut conn, _, instance) = setup_with_entry_point().await;
+        db_fixtures::insert_chain(&mut conn, "ethereum").await;
+        for id in [1, 2] {
+            db_fixtures::insert_instance_account(&mut conn, instance, account(id)).await;
+        }
+        let gateway = PostgresGatewayNew::from_connection(&mut conn).await;
+        let new_data =
+            HashMap::from([("ep".to_string(), HashSet::from([(params(1), "pool_a".to_string())]))]);
+        gateway
+            .insert_entry_point_tracing_params(instance, &new_data, &mut conn)
+            .await
+            .expect("inserting the tracing params failed");
+        (conn, gateway, instance)
+    }
+
+    /// A batch with the blocks 10 and 11.
+    fn blocks_10_and_11() -> BatchOrigins {
+        db_fixtures::batch_origins(&[(10, ts(10)), (11, ts(11))], &[])
+    }
+
+    /// Traced results of the instance as (block number, block hash, result).
+    async fn stored_traced(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+    ) -> Vec<(i64, Bytes, TracingResult)> {
+        entry_point_tracing_result::table
+            .filter(entry_point_tracing_result::instance_id.eq(instance))
+            .select((
+                entry_point_tracing_result::detection_block_number,
+                entry_point_tracing_result::detection_block_hash,
+                entry_point_tracing_result::detection_data,
+            ))
+            .load::<(i64, Bytes, serde_json::Value)>(conn)
+            .await
+            .expect("loading the traced results failed")
+            .into_iter()
+            .map(|(number, hash, data)| {
+                (number, hash, serde_json::from_value(data).expect("a tracing result"))
+            })
+            .collect()
+    }
+
+    /// Accounts linked to tracing params in the instance, sorted.
+    async fn stored_called_accounts(
+        conn: &mut AsyncPgConnection,
+        instance: InstanceId,
+    ) -> Vec<Bytes> {
+        use crate::postgres::instance::schema::tycho::account as account_table;
+
+        entry_point_tracing_params_calls_account::table
+            .inner_join(
+                account_table::table.on(account_table::id
+                    .eq(entry_point_tracing_params_calls_account::account_id)
+                    .and(
+                        account_table::instance_id
+                            .eq(entry_point_tracing_params_calls_account::instance_id),
+                    )),
+            )
+            .filter(entry_point_tracing_params_calls_account::instance_id.eq(instance))
+            .order_by(account_table::address)
+            .select(account_table::address)
+            .load(conn)
+            .await
+            .expect("loading the called accounts failed")
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_stores_result_with_batch_block() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+        let tep = traced(10, &[1], 0x01);
+
+        gateway
+            .upsert_traced_entry_points(
+                instance,
+                &blocks_10_and_11(),
+                std::slice::from_ref(&tep),
+                &mut conn,
+            )
+            .await
+            .expect("upserting the traced entry points failed");
+
+        assert_eq!(
+            stored_traced(&mut conn, instance).await,
+            vec![(10, Bytes::from(10u64), tep.tracing_result)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_takes_block_from_public_block() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+        let block = Block::new(12, Chain::Ethereum, Bytes::from(12u64), Bytes::default(), ts(12));
+        gateway
+            .upsert_block(&[block], &mut conn)
+            .await
+            .expect("storing the block failed");
+
+        gateway
+            .upsert_traced_entry_points(
+                instance,
+                &BatchOrigins::default(),
+                &[traced(12, &[1], 0x01)],
+                &mut conn,
+            )
+            .await
+            .expect("upserting the traced entry points failed");
+
+        let rows = stored_traced(&mut conn, instance).await;
+        assert_eq!((rows[0].0, &rows[0].1), (12, &Bytes::from(12u64)));
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_fails_for_an_unknown_block() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        let result = gateway
+            .upsert_traced_entry_points(
+                instance,
+                &blocks_10_and_11(),
+                &[traced(99, &[1], 0x01)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NoRelatedEntity(
+                "Block".to_string(),
+                "TracedEntryPoint".to_string(),
+                Bytes::from(99u64).to_string()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_merges_results_of_one_batch() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        gateway
+            .upsert_traced_entry_points(
+                instance,
+                &blocks_10_and_11(),
+                &[traced(10, &[1], 0x01), traced(11, &[2], 0x02)],
+                &mut conn,
+            )
+            .await
+            .expect("upserting the traced entry points failed");
+
+        let mut expected = traced(10, &[1], 0x01).tracing_result;
+        expected.merge(traced(11, &[2], 0x02).tracing_result);
+        assert_eq!(
+            stored_traced(&mut conn, instance).await,
+            vec![(11, Bytes::from(11u64), expected)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_merges_with_stored_result() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        for tep in [traced(10, &[1], 0x01), traced(11, &[1], 0x02)] {
+            gateway
+                .upsert_traced_entry_points(instance, &blocks_10_and_11(), &[tep], &mut conn)
+                .await
+                .expect("upserting the traced entry points failed");
+        }
+
+        let mut expected = traced(10, &[1], 0x01).tracing_result;
+        expected.merge(traced(11, &[1], 0x02).tracing_result);
+        assert_eq!(
+            stored_traced(&mut conn, instance).await,
+            vec![(11, Bytes::from(11u64), expected)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_links_accessed_accounts() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        gateway
+            .upsert_traced_entry_points(
+                instance,
+                &blocks_10_and_11(),
+                &[traced(10, &[1, 2], 0x01)],
+                &mut conn,
+            )
+            .await
+            .expect("upserting the traced entry points failed");
+
+        assert_eq!(stored_called_accounts(&mut conn, instance).await, vec![account(1), account(2)]);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_without_accessed_slots_adds_no_link() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        gateway
+            .upsert_traced_entry_points(
+                instance,
+                &blocks_10_and_11(),
+                &[traced(10, &[], 0x01)],
+                &mut conn,
+            )
+            .await
+            .expect("upserting the traced entry points failed");
+
+        assert_eq!(
+            stored_traced(&mut conn, instance)
+                .await
+                .len(),
+            1
+        );
+        assert!(stored_called_accounts(&mut conn, instance)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_fails_for_an_account_of_another_instance() {
+        let (mut conn, gateway, a) = setup_with_params().await;
+        let system =
+            db_fixtures::insert_protocol_system(&mut conn, "vm:balancer".to_string()).await;
+        let b = db_fixtures::insert_instance(&mut conn, system, "0.0.1").await;
+        db_fixtures::insert_instance_account(&mut conn, b, account(3)).await;
+
+        let result = gateway
+            .upsert_traced_entry_points(
+                a,
+                &blocks_10_and_11(),
+                &[traced(10, &[3], 0x01)],
+                &mut conn,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(StorageError::NotFound("Account".to_string(), account(3).to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_fails_for_unknown_params() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+        let mut tep = traced(10, &[1], 0x01);
+        tep.entry_point_with_params.params = params(9);
+
+        let result = gateway
+            .upsert_traced_entry_points(instance, &blocks_10_and_11(), &[tep], &mut conn)
+            .await;
+
+        assert!(
+            matches!(result, Err(StorageError::NotFound(ref entity, _)) if entity == "EntryPointTracingParams"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_traced_empty_is_ok() {
+        let (mut conn, gateway, instance) = setup_with_params().await;
+
+        let result = gateway
+            .upsert_traced_entry_points(instance, &blocks_10_and_11(), &[], &mut conn)
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert!(stored_traced(&mut conn, instance)
+            .await
+            .is_empty());
     }
 }
