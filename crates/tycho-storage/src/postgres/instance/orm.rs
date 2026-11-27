@@ -682,6 +682,15 @@ pub struct NewEntryPoint {
     pub signature: String,
 }
 
+impl NewEntryPoint {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 4;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::entry_point_tracing_params)]
 #[diesel(primary_key(instance_id, id))]
@@ -753,6 +762,15 @@ pub struct ProtocolComponentUsesEntryPoint {
     pub instance_id: InstanceId,
     pub protocol_component_id: i64,
     pub entry_point_id: i64,
+}
+
+impl ProtocolComponentUsesEntryPoint {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable, Insertable)]

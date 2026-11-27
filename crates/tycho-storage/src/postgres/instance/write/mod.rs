@@ -11,6 +11,7 @@ mod component;
 mod contract;
 mod contract_code;
 mod contract_storage;
+mod entry_point;
 mod extraction_state;
 mod state;
 mod token;
