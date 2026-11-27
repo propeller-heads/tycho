@@ -1,11 +1,19 @@
 //! Blocks, which stay in the shared `public.block` table.
+use diesel::OptionalExtension;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tracing::{debug_span, warn, Instrument};
-use tycho_common::{models::blockchain::Block, storage::StorageError};
+use tycho_common::{
+    models::{blockchain::Block, BlockHash},
+    storage::StorageError,
+};
 
 use crate::postgres::{
-    convert_int, instance::gateway::PostgresGatewayNew, orm, storage_error_from_diesel,
-    ChainEnumCache,
+    convert_int,
+    instance::{
+        gateway::PostgresGatewayNew,
+        origins::{BatchOrigins, BlockOrigin},
+    },
+    orm, storage_error_from_diesel, ChainEnumCache,
 };
 
 impl PostgresGatewayNew {
@@ -17,6 +25,29 @@ impl PostgresGatewayNew {
     ) -> Result<(), StorageError> {
         upsert_blocks(&self.chain_id_cache, blocks, conn).await
     }
+}
+
+/// Returns the number and timestamp of the block with `hash`: from `origins`, or from the shared
+/// block table when the batch doesn't carry the block.
+///
+/// Fails with [`StorageError::NoRelatedEntity`] naming `related` when neither has it.
+pub(super) async fn block_origin(
+    origins: &BatchOrigins,
+    hash: &BlockHash,
+    related: &str,
+    conn: &mut AsyncPgConnection,
+) -> Result<BlockOrigin, StorageError> {
+    if let Some(block) = origins.block(hash) {
+        return Ok(block);
+    }
+    let stored = orm::Block::by_hash(hash, conn)
+        .await
+        .optional()
+        .map_err(|err| storage_error_from_diesel(err, "Block", &hash.to_string(), None))?
+        .ok_or_else(|| {
+            StorageError::NoRelatedEntity("Block".to_owned(), related.to_owned(), hash.to_string())
+        })?;
+    Ok(BlockOrigin { number: stored.number, ts: stored.ts })
 }
 
 /// Inserts `blocks` into the shared block table, all on the chain of the first block. A block whose
