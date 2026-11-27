@@ -49,6 +49,11 @@ tests:
           - "0x4200000000000000000000000000000000000006" # WETH
           - "0x8888CDad9Ef66382f89E68f95Ec384d89ec28888" # NAMI
         static_attributes: {}
+        # The second plugin the transaction names, and the implementation its beacon pointed at,
+        # both read from the chain at the stop block.
+        state_attributes:
+          plugin: "0x64fc0e1b9872bcb1786064c18aeef94a97f90b88"
+          plugin_impl: "0x9c5d328a1bddb841e889d1976670f3c0c153d037"
         creation_tx: "0x5874af1646b7ead553ffe7206649d1f1e92fd726149bc2312ce53388590ea23b"
         skip_simulation: true
         skip_execution: true
