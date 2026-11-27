@@ -1363,6 +1363,19 @@ mod tests {
     }
 
     #[test]
+    fn rebind_without_the_read_in_the_block_that_named_the_plugin_leaves_no_implementation() {
+        let mut indexed = Indexed::default();
+
+        // The store keeps the rebind's missing implementation over the naming's, which it wrote
+        // earlier in the block, so the upgrade has no row to update.
+        indexed
+            .block(vec![creates_and_names(PLUGIN_X, true, BASE_FEE_500), rebinds(PLUGIN_X, None)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
+        indexed.block(vec![upgrades(OTHER_BEACON, NEW_IMPLEMENTATION)]);
+        assert_eq!(indexed.row_names(), FOLLOWED_PLAIN);
+    }
+
+    #[test]
     fn rebind_that_shows_the_implementation_again_creates_it() {
         let mut indexed = Indexed::default();
 
