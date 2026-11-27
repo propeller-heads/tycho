@@ -3,15 +3,13 @@ use diesel::{prelude::*, upsert::excluded};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use tycho_common::{models::ExtractionState, storage::StorageError, Bytes};
 
+use super::block::block_origin;
 use crate::postgres::{
     instance::{
-        gateway::PostgresGatewayNew,
-        origins::{BatchOrigins, BlockOrigin},
-        orm::NewExtractionState,
-        schema::tycho::extraction_state,
-        InstanceId,
+        gateway::PostgresGatewayNew, origins::BatchOrigins, orm::NewExtractionState,
+        schema::tycho::extraction_state, InstanceId,
     },
-    orm, storage_error_from_diesel,
+    storage_error_from_diesel,
 };
 
 impl PostgresGatewayNew {
@@ -29,25 +27,7 @@ impl PostgresGatewayNew {
         state: &ExtractionState,
         conn: &mut AsyncPgConnection,
     ) -> Result<(), StorageError> {
-        let block = match origins.block(&state.block_hash) {
-            Some(block) => block,
-            None => {
-                let stored = orm::Block::by_hash(&state.block_hash, conn)
-                    .await
-                    .optional()
-                    .map_err(|err| {
-                        storage_error_from_diesel(err, "Block", &state.block_hash.to_string(), None)
-                    })?
-                    .ok_or_else(|| {
-                        StorageError::NoRelatedEntity(
-                            "Block".to_owned(),
-                            "ExtractionState".to_owned(),
-                            state.block_hash.to_string(),
-                        )
-                    })?;
-                BlockOrigin { number: stored.number, ts: stored.ts }
-            }
-        };
+        let block = block_origin(origins, &state.block_hash, "ExtractionState", conn).await?;
         let row = NewExtractionState {
             instance_id: instance,
             cursor: Some(Bytes::from(state.cursor.clone())),

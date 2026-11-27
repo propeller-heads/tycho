@@ -12,7 +12,7 @@
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_derive_enum::DbEnum;
-use tycho_common::Bytes;
+use tycho_common::{models::blockchain::TracingParams, Bytes};
 
 use super::{schema::tycho, InstanceId};
 
@@ -33,6 +33,14 @@ pub enum InstanceStatus {
 #[ExistingTypePath = "crate::postgres::instance::schema::tycho::sql_types::EntryPointTracingType"]
 pub enum EntryPointTracingType {
     RpcTracer,
+}
+
+impl From<&TracingParams> for EntryPointTracingType {
+    fn from(params: &TracingParams) -> Self {
+        match params {
+            TracingParams::RPCTracer(_) => Self::RpcTracer,
+        }
+    }
 }
 
 // Catalog
@@ -682,6 +690,15 @@ pub struct NewEntryPoint {
     pub signature: String,
 }
 
+impl NewEntryPoint {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 4;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable)]
 #[diesel(table_name = tycho::entry_point_tracing_params)]
 #[diesel(primary_key(instance_id, id))]
@@ -708,6 +725,15 @@ pub struct NewEntryPointTracingParams {
     pub data: Option<serde_json::Value>,
 }
 
+impl NewEntryPointTracingParams {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 4;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::entry_point_tracing_params_calls_account)]
 #[diesel(primary_key(instance_id, entry_point_tracing_params_id, account_id))]
@@ -716,6 +742,15 @@ pub struct EntryPointTracingParamsCallsAccount {
     pub instance_id: InstanceId,
     pub entry_point_tracing_params_id: i64,
     pub account_id: i64,
+}
+
+impl EntryPointTracingParamsCallsAccount {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }
 
 #[derive(Debug, Identifiable, Queryable, Selectable)]
@@ -745,6 +780,15 @@ pub struct NewEntryPointTracingResult {
     pub detection_data: serde_json::Value,
 }
 
+impl NewEntryPointTracingResult {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 5;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::protocol_component_uses_entry_point)]
 #[diesel(primary_key(instance_id, protocol_component_id, entry_point_id))]
@@ -755,6 +799,15 @@ pub struct ProtocolComponentUsesEntryPoint {
     pub entry_point_id: i64,
 }
 
+impl ProtocolComponentUsesEntryPoint {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
+}
+
 #[derive(Debug, Identifiable, Queryable, Selectable, Insertable)]
 #[diesel(table_name = tycho::protocol_component_has_entry_point_tracing_params)]
 #[diesel(primary_key(instance_id, protocol_component_id, entry_point_tracing_params_id))]
@@ -763,4 +816,13 @@ pub struct ProtocolComponentHasEntryPointTracingParams {
     pub instance_id: InstanceId,
     pub protocol_component_id: i64,
     pub entry_point_tracing_params_id: i64,
+}
+
+impl ProtocolComponentHasEntryPointTracingParams {
+    /// Number of fields, which is the number of bind parameters per row. Update it when a field
+    /// changes.
+    pub const FIELD_COUNT: usize = 3;
+    /// Maximum number of rows in one insert. Postgres accepts at most 32767 bind parameters per
+    /// statement.
+    pub const MAX_BATCH_SIZE: usize = 32767 / Self::FIELD_COUNT;
 }

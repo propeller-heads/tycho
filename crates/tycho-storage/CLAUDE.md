@@ -58,6 +58,7 @@ postgres/
     │   ├── contract.rs — accounts of a batch (the first creation wins), account deltas and token balances; the account id of each address, in one instance
     │   ├── contract_code.rs — contract code rows: their key, history row and table writes for versioning; the same hash adds no version
     │   ├── contract_storage.rs — contract storage rows: their key, history row and table writes for versioning
+    │   ├── entry_point.rs — entry points, tracing params and traced results of a batch, with their component and account links; traced results merge with the stored one and keep their detection block inline; one external id with two entry points fails
     │   ├── extraction_state.rs — cursor and last block of each instance
     │   ├── state.rs    — state deltas of a batch, and protocol state rows: their key, history row and table writes for versioning
     │   ├── token.rs    — tokens in the shared `public.token` table, by address; the first writer of a token wins; the stored-token check of balance writes
@@ -90,8 +91,9 @@ instances. No table has a DEFAULT partition.
   `execute_instance_write_op` on `PostgresGatewayNew`. No transactions are stored: versioned rows
   take their block timestamp and tx index from the batch (`instance::origins`), and `UpsertTx`
   writes nothing. It writes blocks, tokens, components, protocol state, component balances,
-  accounts, contract code, storage, account balances and `tycho.extraction_state` so far; any
-  other op fails the whole batch with `StorageError::Unsupported`. At cut-over, the old gateway
+  accounts, contract code, storage, account balances, entry points, tracing params, traced
+  results and `tycho.extraction_state`. `UpdateTokens` fails the whole batch with
+  `StorageError::Unsupported`. At cut-over, the old gateway
   is deleted and `PostgresGatewayNew` is renamed.
 - `PostgresGatewayNew::write_versions` versions the rows of an entity that implements
   `instance::write::versioning::VersionedRowNew` (protocol state, component balances, contract

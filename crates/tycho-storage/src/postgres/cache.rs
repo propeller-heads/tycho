@@ -67,9 +67,12 @@ pub(crate) enum WriteOp {
     // Simply merge
     InsertTokens(Vec<models::token::Token>),
     // Currently unused but supported, please see `CacheGateway.update_tokens` docs.
-    #[expect(
-        dead_code,
-        reason = "handled by the cache writer but never constructed by the gateway"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "handled by the cache writer but never constructed by the gateway"
+        )
     )]
     UpdateTokens(Vec<models::token::Token>),
     // Simply merge
@@ -610,10 +613,22 @@ impl DBCacheWriteExecutor {
                     .upsert_protocol_states(instance, origins, deltas, conn)
                     .await?
             }
-            WriteOp::UpdateTokens(_) |
-            WriteOp::InsertEntryPoints(_) |
-            WriteOp::InsertEntryPointTracingParams(_) |
-            WriteOp::UpsertTracedEntryPoints(_) => {
+            WriteOp::InsertEntryPoints(entry_points) => {
+                self.instance_gateway
+                    .insert_entry_points(instance, entry_points, conn)
+                    .await?
+            }
+            WriteOp::InsertEntryPointTracingParams(params) => {
+                self.instance_gateway
+                    .insert_entry_point_tracing_params(instance, params, conn)
+                    .await?
+            }
+            WriteOp::UpsertTracedEntryPoints(traced) => {
+                self.instance_gateway
+                    .upsert_traced_entry_points(instance, origins, traced, conn)
+                    .await?
+            }
+            WriteOp::UpdateTokens(_) => {
                 return Err(StorageError::Unsupported(format!(
                     "{} for instance {instance}",
                     operation.variant_name()
@@ -2222,6 +2237,146 @@ mod test_serial_db {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_instance_batch_writes_entry_points() {
+        run_against_db(|connection_pool| async move {
+            let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
+            let mut connection = connection_pool
+                .get()
+                .await
+                .expect("Failed to get a connection from the pool");
+            db_fixtures::insert_protocol_type(&mut connection, "pool", None, None, None).await;
+            let block_1 = get_sample_block(1);
+            let tx_1 = get_sample_transaction(1);
+            let address = Bytes::from("0x6b175474e89094c44da98b954eedeac495271d0f");
+            let creation = AccountDelta::new(
+                Chain::Ethereum,
+                address.clone(),
+                HashMap::new(),
+                None,
+                Some(Bytes::from("0x6080")),
+                models::ChangeType::Creation,
+            );
+            let component = models::protocol::ProtocolComponent::new(
+                "pool",
+                "vm:test",
+                "pool",
+                Chain::Ethereum,
+                vec![],
+                vec![address.clone()],
+                HashMap::new(),
+                models::ChangeType::Creation,
+                tx_1.hash.clone(),
+                block_1.ts,
+            );
+            let entry_point =
+                EntryPoint::new("ep".to_string(), address.clone(), "getRate()".to_string());
+            let params = TracingParams::RPCTracer(models::blockchain::RPCTracerParams::new(
+                None,
+                Bytes::from("0x679aefce"),
+            ));
+            let traced = TracedEntryPoint::new(
+                EntryPointWithTracingParams::new(entry_point.clone(), params.clone()),
+                block_1.hash.clone(),
+                TracingResult::new(
+                    HashSet::new(),
+                    HashMap::from([(address.clone(), HashSet::from([Bytes::from(1_u64)]))]),
+                ),
+            );
+
+            cached_gw
+                .start_transaction(&block_1, None)
+                .await;
+            cached_gw
+                .upsert_block(slice::from_ref(&block_1))
+                .await
+                .expect("Upsert block 1 ok");
+            cached_gw
+                .upsert_tx(slice::from_ref(&tx_1))
+                .await
+                .expect("Upsert tx 1 ok");
+            // Staged before the component and the contract: the executor writes contracts, then
+            // components, then entry points, params and traced results.
+            cached_gw
+                .upsert_traced_entry_points(slice::from_ref(&traced))
+                .await
+                .expect("Staging traced entry points ok");
+            cached_gw
+                .insert_entry_point_tracing_params(&HashMap::from([(
+                    "ep".to_string(),
+                    HashSet::from([(params, "pool".to_string())]),
+                )]))
+                .await
+                .expect("Staging tracing params ok");
+            cached_gw
+                .insert_entry_points(&HashMap::from([(
+                    "pool".to_string(),
+                    HashSet::from([entry_point]),
+                )]))
+                .await
+                .expect("Staging entry points ok");
+            cached_gw
+                .add_protocol_components(slice::from_ref(&component))
+                .await
+                .expect("Staging components ok");
+            cached_gw
+                .insert_contract(&creation.ref_into_account(&tx_1))
+                .await
+                .expect("Staging account ok");
+            cached_gw
+                .commit_transaction(0)
+                .await
+                .expect("committing tx failed");
+            handle.abort();
+
+            let entry_points: i64 = instance_schema::entry_point::table
+                .filter(instance_schema::entry_point::instance_id.eq(instance))
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the entry points failed");
+            let component_links: i64 = instance_schema::protocol_component_uses_entry_point::table
+                .filter(
+                    instance_schema::protocol_component_uses_entry_point::instance_id.eq(instance),
+                )
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the entry point links failed");
+            let params_links: i64 =
+                instance_schema::protocol_component_has_entry_point_tracing_params::table
+                    .filter(
+                        instance_schema::protocol_component_has_entry_point_tracing_params::instance_id
+                            .eq(instance),
+                    )
+                    .count()
+                    .get_result(&mut connection)
+                    .await
+                    .expect("counting the params links failed");
+            let account_links: i64 = instance_schema::entry_point_tracing_params_calls_account::table
+                .filter(
+                    instance_schema::entry_point_tracing_params_calls_account::instance_id
+                        .eq(instance),
+                )
+                .count()
+                .get_result(&mut connection)
+                .await
+                .expect("counting the account links failed");
+            assert_eq!((entry_points, component_links, params_links, account_links), (1, 1, 1, 1));
+            let results: Vec<(i64, Bytes)> = instance_schema::entry_point_tracing_result::table
+                .filter(instance_schema::entry_point_tracing_result::instance_id.eq(instance))
+                .select((
+                    instance_schema::entry_point_tracing_result::detection_block_number,
+                    instance_schema::entry_point_tracing_result::detection_block_hash,
+                ))
+                .load(&mut connection)
+                .await
+                .expect("loading the traced results failed");
+            assert_eq!(results, vec![(1, block_1.hash.clone())]);
+        })
+        .await;
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_fresh_gateway_keeps_instance() {
         run_against_db(|connection_pool| async move {
             let (cached_gw, instance, handle) = setup_instance_gateway(&connection_pool).await;
@@ -2245,10 +2400,11 @@ mod test_serial_db {
                 .upsert_block(slice::from_ref(&block_1))
                 .await
                 .expect("Upsert block 1 ok");
+            // No public method stages it: `update_tokens` is a direct write.
             cached_gw
-                .insert_entry_points(&HashMap::new())
+                .add_op(WriteOp::UpdateTokens(Vec::new()))
                 .await
-                .expect("Staging entry points ok");
+                .expect("Staging token updates ok");
             let res = cached_gw.commit_transaction(0).await;
             handle.abort();
 
