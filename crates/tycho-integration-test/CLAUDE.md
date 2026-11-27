@@ -54,12 +54,14 @@ shows up as a failure.
 - **`stream_processor/`**:
   - `protocol_stream_processor.rs`: Handles on-chain protocol updates — applies deltas to
     `ProtocolSim` instances, runs `get_amount_out` simulations, validates via RPC execution.
-    Swaps are executed on the update block's state, in that block's context. The protocols in
-    `NEXT_BLOCK_PROTOCOLS` (`main.rs`) are the exception: the decoder prices them for the next
-    block through `ProtocolSim::apply_block` (number + 1, timestamp + `block_time_secs`), and
-    their quotes move with time, so a full block's swaps execute in that next block's context
-    (`simulate_swap_transaction_next_block`). Add a protocol there when its state implements
-    `apply_block`
+    Swaps are executed on the update block's state, in that block's context. Two lists are the
+    exception: `NEXT_BLOCK_PROTOCOLS` (`main.rs`) and, for the protocols of one chain,
+    `NEXT_BLOCK_CHAIN_PROTOCOLS`. The decoder prices their pools for the next block through
+    `ProtocolSim::apply_block` (number + 1, timestamp + `block_time_secs`). Their quotes move
+    with time, so a full block's swaps execute in that next block's context
+    (`simulate_swap_transaction_next_block`). Add a protocol to the first list when its state
+    implements `apply_block` on every chain. Add a chain and protocol pair to the second when
+    only that chain's components do
   - `book_stream_processor.rs`: Handles the off-chain book feeds in one processor. RFQ and pAMM
     are selected and checked separately: `RfqSelection` (each RFQ venue whose credentials are
     set, off with `--disable-rfq`) and `PammSelection` (`--pamm`, `PammVenue`, off with

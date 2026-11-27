@@ -11,12 +11,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::uniswap_v4::hooks::{
-    hook_handler::HookHandler,
-    models::{
-        AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
-        BeforeSwapParameters, SwapParams, WithGasEstimate,
+use crate::evm::protocol::{
+    uniswap_v4::hooks::{
+        hook_handler::HookHandler,
+        models::{
+            AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
+            BeforeSwapParameters, SwapParams, WithGasEstimate,
+        },
     },
+    utils::uniswap::lp_fee::OVERRIDE_FEE_FLAG,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -81,12 +84,8 @@ impl HookHandler for AngstromHookHandler {
         // Gas for internal asset/pool lookup
         gas_estimate += 1000;
 
-        // Apply the unlock fee as an override.
-        // In Uniswap V4, bit 22 is the OVERRIDE_FEE_FLAG (0x400000) - see LPFeeLibrary.sol
-        //
-        // Replicate the behaviour of the Angstrom hook:
+        // Apply the unlock fee as an override, replicating the behaviour of the Angstrom hook:
         // swapFee = _unlockedFees[storeKey].unlockedFee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
-        const OVERRIDE_FEE_FLAG: u32 = 1 << 22;
         let swap_fee_override = U24::from(self.fees.unlock.to::<u32>() | OVERRIDE_FEE_FLAG);
 
         Ok(WithGasEstimate {
@@ -239,6 +238,8 @@ mod tests {
                 // Fees are irrelevant to the beforeSwap method.
                 fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 3000 },
                 tick_spacing: 10,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Swap params and hook data taken from tenderly simulation: input to innermost
@@ -298,6 +299,8 @@ mod tests {
                 // Irrelevant: Fee is not used in afterSwap calculations.
                 fees: UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: 0 },
                 tick_spacing: 10,
+                sqrt_price_x96: U256::ZERO,
+                tick: 0,
             },
             sender: Address::from_str("0xb535aeb27335b91e1b5bccbd64888ba7574efbf8").unwrap(),
             // Taken from tenderly simulation: input to innermost afterSwap call (directly to hook,

@@ -32,6 +32,8 @@ const EKUBO_V3_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/EkuboV3Robinhood.runtime.json");
 const UNISWAP_V4_ROBINHOOD_BYTECODE_JSON: &str =
     include_str!("../fixtures/UniswapV4Robinhood.runtime.json");
+const UNISWAP_V4_ELYSIUM_BYTECODE_JSON: &str =
+    include_str!("../fixtures/UniswapV4Elysium.runtime.json");
 const FLUIDV1_BYTECODE_JSON: &str = include_str!("../fixtures/FluidV1.runtime.json");
 const LIQUIDITYPARTY_BYTECODE_JSON: &str = include_str!("../fixtures/LiquidityParty.runtime.json");
 const BICONOMY_BYTECODE_JSON: &str = include_str!("../fixtures/Biconomy.runtime.json");
@@ -94,6 +96,8 @@ static CHAIN_SPECIFIC_EXECUTORS: LazyLock<HashMap<(Chain, &'static str), &'stati
             ((Chain::Robinhood, "ekubo_v3"), EKUBO_V3_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
             ((Chain::Robinhood, "uniswap_v4_hooks"), UNISWAP_V4_ROBINHOOD_BYTECODE_JSON),
+            ((Chain::Elysium, "uniswap_v4"), UNISWAP_V4_ELYSIUM_BYTECODE_JSON),
+            ((Chain::Elysium, "uniswap_v4_hooks"), UNISWAP_V4_ELYSIUM_BYTECODE_JSON),
             (
                 (Chain::Robinhood, "pancakeswap_infinity_cl"),
                 PANCAKESWAP_INFINITY_CL_ROBINHOOD_BYTECODE_JSON,
@@ -200,6 +204,23 @@ mod tests {
         assert_ne!(
             robinhood_v4, ethereum_v4,
             "Robinhood must not silently fall back to the Ethereum executor"
+        );
+    }
+
+    #[test]
+    fn elysium_uniswap_v4_and_hooks_use_the_elysium_specific_executor() {
+        let ethereum_v4 = load_executor_bytecode(Chain::Ethereum, "uniswap_v4").unwrap();
+        let elysium_v4 = load_executor_bytecode(Chain::Elysium, "uniswap_v4").unwrap();
+        let elysium_v4_hooks = load_executor_bytecode(Chain::Elysium, "uniswap_v4_hooks").unwrap();
+
+        assert!(!elysium_v4.is_empty());
+        assert_eq!(
+            elysium_v4, elysium_v4_hooks,
+            "both Elysium protocol systems must use the same chain-specific executor"
+        );
+        assert_ne!(
+            elysium_v4, ethereum_v4,
+            "Elysium must not silently fall back to the Ethereum executor"
         );
     }
 

@@ -70,19 +70,13 @@ contract BaibaiTest is TychoRouterTestSetup {
 
     function setUp() public override {
         super.setUp();
-        deployCodeTo(
+        // Registered before the pinned timestamp, so activation does not expire the curve.
+        deployExecutorAt(
             "BaibaiExecutor.sol:BaibaiExecutor",
             abi.encode(BAIBAI_ENTRYPOINT),
             BAIBAI_EXECUTOR
         );
         baibaiExecutor = BaibaiExecutor(BAIBAI_EXECUTOR);
-        address[] memory executors = new address[](1);
-        executors[0] = address(baibaiExecutor);
-        // Register before the pinned timestamp so activation does not expire the curve.
-        vm.warp(forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR);
-        vm.prank(EXECUTOR_SETTER);
-        tychoRouter.setExecutors(executors);
-        vm.warp(forkTimestamp);
     }
 
     function getChain() public pure override returns (string memory) {

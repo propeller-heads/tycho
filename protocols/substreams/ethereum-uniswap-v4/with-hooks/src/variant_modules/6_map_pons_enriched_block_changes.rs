@@ -4,8 +4,6 @@
 //!
 //! Robinhood runs no dynamic contract indexing, so the block changes carry no storage payload.
 
-use std::collections::HashSet;
-
 use anyhow::{anyhow, Result};
 use ethereum_uniswap_v4_shared::{
     pb::uniswap::v4::{Events, LiquidityChanges, TickDeltas},
@@ -17,13 +15,13 @@ use substreams_ethereum::pb::eth::v2::{self as eth};
 use tycho_substreams::prelude::*;
 
 use crate::{
+    address_list::{parse_address_list, Address},
     pons::{pons_static_attributes, PONS_HOOK_IDENTIFIER},
     storage::{pad32, tx_storage_writes, Word},
 };
 
 /// Query-string parameters of [`map_pons_enriched_block_changes`]. `pons_hooks` is the only
-/// parameter: a non-empty, comma-separated list of 20-byte hexadecimal addresses, with the `0x`
-/// prefix optional and the digits read case-insensitively, e.g.
+/// parameter: an address list in the form the crate's `address_list` module reads, e.g.
 /// `pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,0x...`. A single hook is a one-element
 /// list.
 #[derive(Debug, Deserialize)]
@@ -39,8 +37,9 @@ impl Params {
             .map_err(|e| anyhow!("failed to parse query params `{input}`: {e}"))
     }
 
-    /// Returns the configured Pons hooks as raw addresses. Each comma-separated entry must be
-    /// exactly 20 hexadecimal bytes, and duplicate addresses are rejected case-insensitively.
+    /// Returns the configured Pons hooks as raw addresses, in the order `pons_hooks` lists them.
+    /// Fails when `pons_hooks` is unset, and when it is not an address list: empty, an empty or
+    /// non-hex entry, an entry other than 20 bytes, the zero address, or an address twice.
     pub fn pons_hook_addresses(&self) -> Result<Vec<[u8; 20]>> {
         let Some(value) = &self.pons_hooks else {
             return Err(anyhow!(
@@ -48,37 +47,7 @@ impl Params {
                  comma-separated addresses"
             ))
         };
-
-        if value.is_empty() {
-            return Err(anyhow!("`pons_hooks` must contain at least one address"))
-        }
-
-        let mut addresses = Vec::new();
-        let mut seen = HashSet::new();
-        for (index, value) in value.split(',').enumerate() {
-            if value.is_empty() {
-                return Err(anyhow!("`pons_hooks` entry {} is empty", index + 1))
-            }
-
-            let digits = value
-                .strip_prefix("0x")
-                .unwrap_or(value);
-            let bytes = hex::decode(digits).map_err(|e| {
-                anyhow!("`pons_hooks` entry {} `{value}` is not hex: {e}", index + 1)
-            })?;
-            let address = <[u8; 20]>::try_from(bytes.as_slice()).map_err(|_| {
-                anyhow!("`pons_hooks` entry {} `{value}` is not exactly 20 bytes", index + 1)
-            })?;
-            if !seen.insert(address) {
-                return Err(anyhow!(
-                    "`pons_hooks` entry {} `{value}` duplicates an earlier address",
-                    index + 1
-                ))
-            }
-            addresses.push(address);
-        }
-
-        Ok(addresses)
+        parse_address_list("pons_hooks", value)
     }
 }
 
@@ -121,7 +90,7 @@ pub fn map_pons_enriched_block_changes(
 /// rejects the pool instead of pricing it with a substituted value. Components of other hooks, and
 /// every other change, are left untouched.
 pub fn enrich_pons_creations(
-    pons_hooks: &[[u8; 20]],
+    pons_hooks: &[Address],
     block: &eth::Block,
     changes: &mut [TransactionChanges],
 ) {
@@ -131,7 +100,7 @@ pub fn enrich_pons_creations(
 }
 
 fn enrich_transaction(
-    pons_hooks: &[[u8; 20]],
+    pons_hooks: &[Address],
     block: &eth::Block,
     tx_changes: &mut TransactionChanges,
 ) {
@@ -187,8 +156,8 @@ fn enrich_transaction(
 /// Returns the configured hook that created `component`.
 fn configured_pons_hook<'a>(
     component: &ProtocolComponent,
-    pons_hooks: &'a [[u8; 20]],
-) -> Option<&'a [u8; 20]> {
+    pons_hooks: &'a [Address],
+) -> Option<&'a Address> {
     if component.change != i32::from(ChangeType::Creation) {
         return None
     }
@@ -582,20 +551,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn params_accept_multiple_hooks_in_any_case_and_without_the_prefix() {
-        let params = Params::parse_from_query(
-            "pons_hooks=E5E702641EA86F4AE6CC3CDAED2B886F976BE044,0x0000000000000000000000000000000000000002",
-        )
-        .expect("the multiple-hook query parses");
-        assert_eq!(
-            params
-                .pons_hook_addresses()
-                .expect("multiple hooks decode"),
-            vec![PONS_HOOK, SECOND_PONS_HOOK]
-        );
-    }
-
     /// `pons_hooks` is the only form the module reads: the singular `pons_hook` is not a
     /// parameter, so a query that sets it alone configures no hook at all.
     #[test]
@@ -608,21 +563,20 @@ mod tests {
         assert!(error.to_string().contains("pons_hooks"), "{error}");
     }
 
+    /// The list's own rules are `address_list`'s, tested there; a malformed list fails naming the
+    /// `pons_hooks` key.
     #[test]
-    fn params_reject_malformed_empty_and_duplicate_lists() {
-        for input in [
-            "pons_hooks=",
-            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,",
-            "pons_hooks=0xzzz",
-            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be0",
-            "pons_hooks=0xe5e702641ea86f4ae6cc3cdaed2b886f976be044,E5E702641EA86F4AE6CC3CDAED2B886F976BE044",
-        ] {
-            let error = Params::parse_from_query(input)
-                .expect("the query syntax is valid")
-                .pons_hook_addresses()
-                .expect_err("the hook list must be rejected");
-            assert!(!error.to_string().is_empty(), "{input}");
-        }
+    fn params_reject_a_malformed_list_naming_the_key() {
+        let error = Params::parse_from_query("pons_hooks=0xzzz")
+            .expect("the query syntax is valid")
+            .pons_hook_addresses()
+            .expect_err("the hook list must be rejected");
+        assert!(
+            error
+                .to_string()
+                .starts_with("`pons_hooks` value `0xzzz` is not hex"),
+            "{error}"
+        );
     }
 
     #[test]

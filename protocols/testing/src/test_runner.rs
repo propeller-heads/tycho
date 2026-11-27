@@ -96,6 +96,7 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("robinhood-pancakeswap-infinity-cl", "base-pancakeswap-infinity-cl"),
         ("bsc-pancakeswap-infinity-bin", "base-pancakeswap-infinity-bin"),
         ("robinhood-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
+        ("elysium-uniswap-v4-with-hooks", "ethereum-uniswap-v4/with-hooks"),
         ("bsc-ring-swap-v2", "ethereum-ring-swap-v2"),
     ])
 });
@@ -2911,13 +2912,30 @@ tests:
 
     #[test]
     fn robinhood_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
-        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
-        // in the no-external-deps CI job, which does not set RPC_URL.
-        let runner = get_mocked_runner_for(
+        uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config(
             Chain::Robinhood,
             "robinhood-uniswap-v4-with-hooks",
-            "http://localhost:8545".to_string(),
+            "integration_test_robinhood_uniswap_v4_with_hooks.tycho.yaml",
         );
+    }
+
+    #[test]
+    fn elysium_uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config() {
+        uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config(
+            Chain::Elysium,
+            "elysium-uniswap-v4-with-hooks",
+            "integration_test_elysium_uniswap_v4_with_hooks.tycho.yaml",
+        );
+    }
+
+    fn uniswap_v4_with_hooks_resolves_to_the_nested_with_hooks_config(
+        chain: Chain,
+        protocol: &str,
+        config_file: &str,
+    ) {
+        // Path resolution never contacts the RPC, so a placeholder URL keeps this test runnable
+        // in the no-external-deps CI job, which does not set RPC_URL.
+        let runner = get_mocked_runner_for(chain, protocol, "http://localhost:8545".to_string());
 
         assert!(
             runner
@@ -2931,7 +2949,7 @@ tests:
                 .config_file_path
                 .file_name()
                 .and_then(|name| name.to_str()),
-            Some("integration_test_robinhood_uniswap_v4_with_hooks.tycho.yaml")
+            Some(config_file)
         );
     }
 

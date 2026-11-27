@@ -4,7 +4,10 @@ use alloy::primitives::U256;
 use serde::{Deserialize, Serialize};
 use tycho_common::simulation::errors::SimulationError;
 
-use super::tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK};
+use super::{
+    liquidity_math::add_liquidity_delta,
+    tick_math::{get_sqrt_ratio_at_tick, MAX_TICK, MIN_TICK},
+};
 
 /// An initialized tick and the sqrt price at its index.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +39,20 @@ impl TickInfo {
         //  compared to the Python implementation, likely more correct
         let sqrt_price = get_sqrt_ratio_at_tick(index)?;
         Ok(TickInfo { index, net_liquidity, sqrt_price })
+    }
+
+    /// The active liquidity once a swap in the direction given by `zero_for_one` crosses this
+    /// tick from `liquidity`: v4-core's `Pool.swap` adds the tick's `liquidityNet` on the way up
+    /// and subtracts it on the way down.
+    ///
+    /// Fails if the result leaves the `u128` range.
+    pub(crate) fn liquidity_after_crossing(
+        &self,
+        liquidity: u128,
+        zero_for_one: bool,
+    ) -> Result<u128, SimulationError> {
+        let liquidity_net = if zero_for_one { -self.net_liquidity } else { self.net_liquidity };
+        add_liquidity_delta(liquidity, liquidity_net)
     }
 }
 
@@ -325,6 +342,26 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    /// Crossing a tick upwards adds its net liquidity and crossing it downwards subtracts it; a
+    /// result outside the `u128` range fails.
+    #[rstest]
+    #[case::up_adds(false, 1_000, 5, Some(1_005))]
+    #[case::down_subtracts(true, 1_000, 5, Some(995))]
+    #[case::down_adds_a_negative_net(true, 1_000, -5, Some(1_005))]
+    #[case::down_below_zero_fails(true, 3, 5, None)]
+    fn test_liquidity_after_crossing(
+        #[case] zero_for_one: bool,
+        #[case] liquidity: u128,
+        #[case] net_liquidity: i128,
+        #[case] expected: Option<u128>,
+    ) {
+        let tick = TickInfo::new(60, net_liquidity).unwrap();
+
+        let result = tick.liquidity_after_crossing(liquidity, zero_for_one);
+
+        assert_eq!(result.ok(), expected);
+    }
 
     /// The next tick within one word, and whether it is initialized.
     fn next_tick(tick_list: &TickList, tick: i32, lte: bool) -> Result<(i32, bool), TickListError> {
