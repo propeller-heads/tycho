@@ -224,8 +224,8 @@ mod tests {
     use crate::pamm::protocols::elfomofi::{
         feed::ElfomofiFeedBuilder,
         test_support::{
-            base_book_config, bytes, helper_answer, now_secs, weth_usdc_wire, wire_book, FakeNode,
-            ASKS, BIDS, CBBTC, USDC, WETH,
+            base_book_config, big, bytes, helper_answer, now_secs, usdc, weth, weth_usdc_wire,
+            wire_book, FakeNode, ASKS, BIDS, CBBTC, USDC, WETH,
         },
     };
 
@@ -267,6 +267,41 @@ mod tests {
         let book = &snapshot.books[&id.to_string()];
         assert_eq!(book.component.protocol_system, PROTOCOL_SYSTEM);
         assert_eq!(book.component.tokens.len(), 2);
+    }
+
+    /// The published state sells WETH down the bids and USDC down the asks, each capped by the
+    /// vault's balance of the token it pays out: 5,985 USDC stops the bids inside their second
+    /// segment (see the state's limit test), and 1.5 WETH stops the asks inside theirs, where
+    /// 6,000 USDC buy 1.96 WETH.
+    #[tokio::test]
+    async fn a_published_book_quotes_its_own_sides_and_balances() {
+        let book = wire_book(WETH, USDC, &ASKS, &BIDS, (1_500_000_000_000_000_000, 5_985_000_000));
+        let (source, _node) = node(vec![fresh(vec![book], 10)]).await;
+
+        let snapshot = source.fetch().await.unwrap();
+
+        let state =
+            &snapshot.books[&canonical_pair_id(&bytes(WETH), &bytes(USDC)).to_string()].state;
+        let one_weth = big(1_000_000_000_000_000_000);
+        let sold_weth = state
+            .get_amount_out(one_weth, &weth(), &usdc())
+            .unwrap();
+        let bought_weth = state
+            .get_amount_out(big(3_000_000_000), &usdc(), &weth())
+            .unwrap();
+        assert_eq!(sold_weth.amount, big(3_000_000_000));
+        assert_eq!(bought_weth.amount, big(990_000_000_000_000_000));
+        assert_eq!(
+            state
+                .get_limits(weth().address, usdc().address)
+                .unwrap(),
+            (big(2_000_000_000_000_000_000 + 335_008_375), big(5_985_000_000))
+        );
+        let (_, weth_out) = state
+            .get_limits(usdc().address, weth().address)
+            .unwrap();
+        assert!(weth_out <= big(1_500_000_000_000_000_000), "{weth_out}");
+        assert!(weth_out > big(990_000_000_000_000_000), "{weth_out}");
     }
 
     #[tokio::test]

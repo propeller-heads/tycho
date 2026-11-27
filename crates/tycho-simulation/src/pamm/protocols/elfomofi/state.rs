@@ -3,7 +3,7 @@
 use std::{any::Any, collections::HashMap};
 
 use num_bigint::BigUint;
-use num_traits::{CheckedSub, ToPrimitive, Zero};
+use num_traits::{ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use tycho_common::{
     dto::ProtocolStateDelta,
@@ -284,6 +284,19 @@ impl ElfomofiState {
             )),
         }
     }
+
+    /// The input and output the book can still take in `direction` after the route's fill; zero
+    /// for both once either is used up. A fill can pay out all of the vault's balance while its
+    /// input stops short of the bound by less than one unit of output's worth, and no more input
+    /// then buys anything.
+    fn remaining(&self, direction: SwapDirection) -> Result<(BigUint, BigUint), SimulationError> {
+        let (filled_in, filled_out) = self.filled(direction)?;
+        let (max_in, max_out) = self.book_limit(direction);
+        if max_in <= filled_in || max_out <= filled_out {
+            return Ok((BigUint::ZERO, BigUint::ZERO));
+        }
+        Ok((max_in - filled_in, max_out - filled_out))
+    }
 }
 
 impl PairState for ElfomofiState {
@@ -296,8 +309,8 @@ impl PairState for ElfomofiState {
     }
 
     fn directions(&self) -> Vec<(Bytes, Bytes)> {
-        let tradable = |direction| match self.filled(direction) {
-            Ok((input, _)) => self.book_limit(direction).0 > input,
+        let tradable = |direction| match self.remaining(direction) {
+            Ok((input, _)) => !input.is_zero(),
             Err(_) => false,
         };
         sim::directions(
@@ -327,7 +340,7 @@ impl ProtocolSim for ElfomofiState {
                 quote.symbol, base.symbol
             ))
         };
-        if self.book_limit(direction).0 <= filled {
+        if self.remaining(direction)?.0.is_zero() {
             return Err(no_liquidity());
         }
         let (span_in, span_out) = self
@@ -349,27 +362,24 @@ impl ProtocolSim for ElfomofiState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         sim::require_positive_amount(&amount_in)?;
         let direction = self.direction(&token_in.address, &token_out.address)?;
-        let (filled_in, filled_out) = self.filled(direction)?;
-        let (max_in, _) = self.book_limit(direction);
-        let total_in = &filled_in + &amount_in;
-        if total_in > max_in {
+        let (remaining_in, _) = self.remaining(direction)?;
+        if amount_in > remaining_in {
             return Err(SimulationError::InvalidInput(
                 format!(
-                    "ElFomoFi book cannot fill {amount_in} {}: it takes at most {} more",
+                    "ElFomoFi book cannot fill {amount_in} {}: it takes at most {remaining_in} more",
                     token_in.symbol,
-                    max_in
-                        .checked_sub(&filled_in)
-                        .unwrap_or_default()
                 ),
                 None,
             ));
         }
+        let (filled_in, filled_out) = self.filled(direction)?;
+        let total_in = &filled_in + &amount_in;
         let total_out = self
             .ladder(direction)
             .output_for(&total_in)
             .ok_or_else(|| {
                 SimulationError::FatalError(format!(
-                    "ElFomoFi book limit {max_in} lies past its own ladder"
+                    "ElFomoFi book limit {total_in} lies past its own ladder"
                 ))
             })?;
         let amount = &total_out - &filled_out;
@@ -394,16 +404,7 @@ impl ProtocolSim for ElfomofiState {
         buy_token: Bytes,
     ) -> Result<(BigUint, BigUint), SimulationError> {
         let direction = self.direction(&sell_token, &buy_token)?;
-        let (filled_in, filled_out) = self.filled(direction)?;
-        let (max_in, max_out) = self.book_limit(direction);
-        Ok((
-            max_in
-                .checked_sub(&filled_in)
-                .unwrap_or_default(),
-            max_out
-                .checked_sub(&filled_out)
-                .unwrap_or_default(),
-        ))
+        self.remaining(direction)
     }
 
     fn delta_transition(
@@ -648,6 +649,29 @@ mod tests {
         assert!(state
             .get_amount_out(limit + 1u8, &weth(), &usdc())
             .is_err());
+    }
+
+    /// Selling 2 WETH + 1 wei into the 5,985 USDC vault pays all of it, while 335,008,374 wei of
+    /// the limit's input are left: too little to buy another unit, so the direction is used up.
+    #[test]
+    fn a_fill_that_pays_out_the_vault_uses_the_direction_up() {
+        let state = state_with_balances(big(100 * ONE_WETH), big(5_985_000_000));
+        let result = sell_weth(&state, 2 * ONE_WETH + 1).unwrap();
+        let state = filled(&result);
+
+        assert_eq!(result.amount, big(5_985_000_000));
+        assert_eq!(
+            state
+                .get_limits(weth().address, usdc().address)
+                .unwrap(),
+            (BigUint::ZERO, BigUint::ZERO)
+        );
+        assert_eq!(state.directions(), Vec::<(Bytes, Bytes)>::new());
+        assert!(state
+            .spot_price(&usdc(), &weth())
+            .is_err());
+        let error = sell_weth(state, 1).unwrap_err();
+        assert!(matches!(error, SimulationError::InvalidInput(_, None)), "{error}");
     }
 
     #[test]
