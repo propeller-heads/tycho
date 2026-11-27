@@ -6,4 +6,5 @@ mod hook_permissions_detector;
 pub mod hooks_dci_builder;
 pub(super) mod integrations;
 mod metadata_orchestrator;
+pub mod router_code_tracer;
 mod rpc_metadata_provider;

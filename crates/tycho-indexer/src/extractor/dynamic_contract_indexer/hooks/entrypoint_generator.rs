@@ -35,11 +35,12 @@ use tycho_common::{
 use super::component_metadata::ComponentTracingMetadata;
 type SlotId = U256;
 
-// V4MiniRouter compiled bytecode
+// V4MiniRouter compiled bytecode, built from assets/V4MiniRouter.sol (see assets/README.md)
 // The V4MiniRouter is a simple wrapper around V4Router that:
 // - Overrides msgSender() to return address(this)
 // - Implements _pay() to burn tokens from the payer
 // - Exposes execute(bytes calldata params) to call _executeActions
+// - Has a payable receive(), so the PoolManager can pay native ETH out to it
 pub(super) const V4_MINI_ROUTER_BYTECODE: &[u8] = include_bytes!("assets/V4MiniRouter.evm.runtime");
 pub(super) const UNICHAIN_V4_MINI_ROUTER_BYTECODE: &[u8] =
     include_bytes!("assets/UnichainV4MiniRouter.evm.runtime");
@@ -1045,6 +1046,25 @@ mod tests {
         balances: HashMap<Address, Bytes>,
     ) -> ComponentTracingMetadata {
         ComponentTracingMetadata::new(TxHash::from([0u8; 32])).with_balances(Ok(balances))
+    }
+
+    #[test]
+    fn test_mini_routers_differ_only_in_pool_manager() {
+        // Each chain's router is the same build with its PoolManager immutable substituted, so
+        // updating one runtime without the other fails here.
+        let ethereum_pool_manager = hex!("000000000004444c5dc75cB358380D2e3dE08A90");
+        let unichain_pool_manager = hex!("1F98400000000000000000000000000000000004");
+        let mut expected = UNICHAIN_V4_MINI_ROUTER_BYTECODE.to_vec();
+        let mut replaced = 0;
+        for start in 0..=expected.len() - 20 {
+            if expected[start..start + 20] == unichain_pool_manager {
+                expected[start..start + 20].copy_from_slice(&ethereum_pool_manager);
+                replaced += 1;
+            }
+        }
+
+        assert!(replaced > 0, "Unichain router does not embed the Unichain PoolManager");
+        assert_eq!(expected, V4_MINI_ROUTER_BYTECODE);
     }
 
     #[tokio::test]
