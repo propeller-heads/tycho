@@ -1,3 +1,10 @@
+## [0.540.1](https://github.com/propeller-heads/tycho/compare/0.540.0...0.540.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **tycho-simulation:** skip feed rounds that carry no block ([f6d7432](https://github.com/propeller-heads/tycho/commit/f6d743258757522717ad95e544232e1b595bd289))
+
 ## [0.540.0](https://github.com/propeller-heads/tycho/compare/0.539.0...0.540.0) (2026-11-24)
 
 
