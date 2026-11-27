@@ -17,7 +17,7 @@ use tycho_common::{
             ComponentBalance, ProtocolComponent, ProtocolComponentState,
             ProtocolComponentStateDelta, QualityRange,
         },
-        token::Token,
+        token::{Token, TokenAnalysis},
         Address, Chain, ComponentId, ContractId, EntryPointId, ExtractionState, PaginationParams,
         ProtocolType, TxHash,
     },
@@ -566,7 +566,22 @@ mod gateway_mock {
                 'life1: 'async_trait,
                 Self: 'async_trait;
 
-            fn get_protocol_states_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+            fn upsert_token_analyses<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            analyses: &'life1 [(Address, TokenAnalysis)],
+        ) -> ::core::pin::Pin<
+            Box<
+                dyn ::core::future::Future<
+                    Output = Result<(), StorageError>,
+                > + ::core::marker::Send + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait;
+
+        fn get_protocol_states_delta<'life0, 'life1, 'life2, 'life3, 'async_trait>(
                 &'life0 self,
                 chain: &'life1 Chain,
                 start_version: Option<&'life2 BlockOrTimestamp>,

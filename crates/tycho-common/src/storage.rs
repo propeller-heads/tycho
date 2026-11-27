@@ -20,7 +20,7 @@ use crate::{
             ComponentBalance, ComponentPause, PauseRecord, ProtocolComponent,
             ProtocolComponentState, ProtocolComponentStateDelta, QualityRange, UnpauseRecord,
         },
-        token::Token,
+        token::{Token, TokenAnalysis},
         Address, Balance, BlockHash, Chain, Code, CodeHash, ComponentId, ContractId, EntryPointId,
         ExtractionState, PaginationParams, ProtocolSystem, ProtocolType, StoreKey, StoreVal,
         TxHash,
@@ -426,6 +426,19 @@ pub trait ProtocolGateway {
     /// Ok if all tokens could be inserted, Err if at least one token failed to
     /// insert.
     async fn update_tokens(&self, tokens: &[Token]) -> Result<(), StorageError>;
+
+    /// Stores the latest analysis of each token, replacing earlier ones.
+    ///
+    /// Writes the verdict, per-leg fees and analysed block onto the token and the remaining
+    /// details to a side table that token reads do not load. Tokens that do not exist are
+    /// skipped with a warning.
+    ///
+    /// # Parameters
+    /// - `analyses` Token address and its analysis.
+    async fn upsert_token_analyses(
+        &self,
+        analyses: &[(Address, TokenAnalysis)],
+    ) -> Result<(), StorageError>;
 
     /// Retrieve protocol state changes
     ///

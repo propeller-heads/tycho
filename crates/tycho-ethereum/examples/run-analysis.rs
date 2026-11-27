@@ -1,25 +1,20 @@
 /// To run: cargo run --example run-analysis
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::U256;
 use tycho_common::{
-    models::{blockchain::BlockTag, token::TokenOwnerStore},
+    models::{blockchain::BlockTag, token::TokenOwnerStore, Chain},
     traits::TokenAnalyzer,
     Bytes,
 };
 use tycho_ethereum::{
-    rpc::EthereumRpcClient, services::token_analyzer::EthCallDetector, BytesCodec,
+    rpc::EthereumRpcClient, services::token_analyzer::SimulationDetector, BytesCodec,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), ()> {
     let rpc_url = std::env::var("RPC_URL").expect("RPC URL must be set for testing");
     let rpc = EthereumRpcClient::new(&rpc_url).expect("RPC connection to Ethereum provider failed");
-
-    let settlement_contract = std::env::var("SETTLEMENT_CONTRACT")
-        .unwrap_or_else(|_| "0xc9f2e6ea1637E499406986ac50ddC92401ce1f58".to_string())
-        .parse::<Address>()
-        .expect("SETTLEMENT_CONTRACT must be a valid EVM address");
 
     let tf = TokenOwnerStore::new(HashMap::from([(
         Bytes::from_str("3A9FfF453d50D4Ac52A6890647b823379ba36B9E").unwrap(),
@@ -31,7 +26,7 @@ async fn main() -> Result<(), ()> {
         ),
     )]));
 
-    let detector = EthCallDetector::new(&rpc, Arc::new(tf), settlement_contract);
+    let detector = SimulationDetector::new(&rpc, Arc::new(tf), Chain::Ethereum);
 
     let quality = detector
         .analyze(
