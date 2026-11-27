@@ -1,0 +1,83 @@
+# The benchmark runner. launch.sh fills in the placeholders (target name, config, extra arguments, the two keys)
+# and applies it to prod-tycho.
+# The source comes from the ConfigMap "tycho-bench" (launch.sh creates it from this directory);
+# the pod serves its results directory on port 8000 from the start (bench.py pull copies files
+# out while the run goes), builds startup-loadgen, runs bench.py with the chosen config and then
+# stays up until it is deleted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tycho-bench-${BENCH_NAME}      # one pod per target, so two targets can run side by side
+  labels:
+    app: tycho-bench
+    target: "${BENCH_NAME}"
+  annotations:
+    karpenter.sh/do-not-disrupt: "true"
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: bench
+      image: rust:1.91-bookworm
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          apt-get update -qq && apt-get install -y -qq python3 python3-zstandard >/dev/null
+          mkdir -p /bench/harness /bench/loadgen/src /bench/bench /results
+          cp /src/*.py /bench/harness/
+          cp /src/Cargo.toml /src/Cargo.lock /bench/loadgen/
+          cp /src/main.rs /bench/loadgen/src/
+          cp /src/*.toml /bench/bench/ && rm /bench/bench/Cargo.toml
+          (cd /results && python3 -m http.server 8000 --bind 0.0.0.0 >/dev/null 2>&1) &
+          cd /bench/harness
+          python3 bench.py run "/bench/bench/${BENCH_CONFIG}" --out /results --yes ${BENCH_ARGS} || echo "bench.py exited with $?"
+          echo "run finished; results stay served on port 8000 until the pod is deleted"
+          wait
+      env:
+        - name: BENCH_CONFIG
+          value: "${BENCH_CONFIG}"
+        - name: BENCH_ARGS            # extra bench.py arguments, e.g. --only old_version_n16
+          value: "${BENCH_ARGS}"
+        - name: TYCHO_API_KEY
+          value: "${TYCHO_API_KEY}"
+        - name: GRAFANA_API_KEY
+          value: "${GRAFANA_API_KEY}"
+      # Small requests so the pod fits a slot on an existing node (the load generator discards
+      # response bodies and uses little CPU); the limits leave room for the 64-client waves.
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      volumeMounts:
+        - name: src
+          mountPath: /src
+  volumes:
+    - name: src
+      configMap:
+        name: tycho-bench
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: karpenter.sh/capacity-type
+                operator: In
+                values: ["on-demand"]
+    # Never share a node with an indexer.
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - ethereum-tycho-indexer-1
+                  - ethereum-tycho-indexer-2
+                  - robinhood-tycho-indexer-1
+                  - robinhood-tycho-indexer-2

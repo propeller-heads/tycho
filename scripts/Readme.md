@@ -134,3 +134,7 @@ python scripts/compare-uniswap-v3-the-graph.py \
     0x1385fc1fe0418ea0b4fcf7adc61fc7535ab7f80d \
     0x6b6c7beadce465f8f2ada88903bdbbb170fa1f10
 ```
+## Startup load benchmark
+
+`startup-load-bench/` replays realistic client startups against one RPC host (idle prod pod or
+dev) and records pod, database and client-side numbers per wave. See its README.
