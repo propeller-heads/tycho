@@ -171,7 +171,8 @@ Dispatcher/TransferManager.
 
 Supported: UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Curve, Ekubo, EkuboV3,
 Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky,
-Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Euclid (RFQ), Metric (RFQ), FluidV1, Rocketpool, ERC4626, Etherfi,
+Bebop (RFQ), Hashflow (RFQ), Liquorice (RFQ), Euclid (RFQ), Metric (RFQ), Kipseli (`pamm:kipseli`, a pAMM signing a quote per
+swap), FluidV1, Rocketpool, ERC4626, Etherfi,
 NativeWrap (ETH↔WETH and other native wrappers), PropAMM (a single generic executor shared by all pAMMs implementing
 the standard `IPropAMM` interface; the pAMM address travels in the swap data), Fallback (runs one leg through
 `TychoFallbackRouter` -- see "Protocol fallback"), and TychoSubsidizing (runs one hop through an inner executor and
@@ -426,7 +427,7 @@ is the exception: `TychoFallbackRouter` transfers to the protocol itself, outsid
 | Category                   | Executors                                                                                                                                       | `outputToRouter` | Behavior                                                                                         |
 |----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|------------------|--------------------------------------------------------------------------------------------------|
 | **Direct-to-receiver**     | UniswapV2, UniswapV3, UniswapV4, PancakeswapInfinity, BalancerV2, BalancerV3, Ekubo, EkuboV3, Slipstreams, MaverickV2, AerodromeV1, LiquidityParty, ERC4626, FluidV1, BopAMM, FermiSwap, LunarBase, BaiBai, RingSwapV2, Sky, Metric, Fallback | `false`          | Dispatcher measures balance at receiver                                                          |
-| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice, Euclid                                                                      | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
+| **Output-lands-at-router** | Curve, NativeWrap, Rocketpool, Etherfi, Bebop, Hashflow, Liquorice, Euclid, Kipseli                                                             | `true`           | Dispatcher measures at `address(this)`, then forwards via `_transferOut()` if receiver != router |
 
 **Two input categories**:
 
@@ -537,6 +538,13 @@ with the protocol name or, for auto-detected pAMMs, the protocol address). Price
 resolve generically: a single `pricelevelstream` config entry serves the whole family via a
 `get_encoder` fallback (shared generic `PropAMMSwapEncoder`/`PropAMMExecutor`), with exact
 `pricelevelstream:{protocol}` entries overriding per protocol.
+
+`pamm:kipseli` has `KipseliExecutor` and gas estimator entries here but no encoder. It is the one entry of
+`EXTERNALLY_ENCODED_PROTOCOLS`: the default registry records its executor address
+(`externally_encoded_executor`) instead of building an encoder, and hosted Fynd registers its own with
+`register_encoder`. `KipseliExecutor`'s doc says why only hosted Fynd encodes it. Kipseli liquidity also reaches
+Tycho through Titan's price level stream, as `pricelevelstream:kipseli` and `fallback:kipseli` on Ethereum, which
+the generic pAMM encoders serve.
 
 `fallback:{protocol}` is the same liquidity executed through `PropAMMFallbackRouter` (see "protocol
 fallback" above): any pAMM qualifies, and the solver picks the fallback protocol per swap. It

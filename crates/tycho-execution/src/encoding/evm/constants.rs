@@ -182,6 +182,15 @@ pub const BAIBAI_QUOTE_ATTRIBUTE: &str = "quote";
 /// BaiBai components executed through `BaibaiFallbackRouter`.
 pub const BAIBAI_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:pamm:baibai";
 
+/// Protocol system of Kipseli PropAMM swaps, which `KipseliExecutor` runs. Their encoder lives in
+/// hosted Fynd, which fetches Kipseli's per-swap signature; this crate only estimates their gas.
+pub const KIPSELI_PROTOCOL_SYSTEM: &str = "pamm:kipseli";
+
+/// Protocol systems with an executor but no encoder in this crate: the encoder is registered from
+/// outside with `SwapEncoderRegistry::register_encoder`. The default registry records their
+/// executor addresses and builds no encoder for them.
+pub const EXTERNALLY_ENCODED_PROTOCOLS: &[&str] = &[KIPSELI_PROTOCOL_SYSTEM];
+
 /// Metric components executed through `MetricFallbackRouter`.
 pub const METRIC_FALLBACK_PROTOCOL_SYSTEM: &str = "fallback:rfq:metric";
 

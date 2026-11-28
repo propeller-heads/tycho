@@ -4,7 +4,7 @@ use tycho_common::models::Chain;
 use super::{
     constants::{
         BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM, FALLBACK_PREFIX,
-        METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
+        KIPSELI_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_PREFIX,
         SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, UNISWAP_V3_FORKS,
     },
     group_swaps::group_swaps,
@@ -99,6 +99,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "ring_swap_v2",
     "sky",
     BAIBAI_PROTOCOL_SYSTEM,
+    KIPSELI_PROTOCOL_SYSTEM,
 ];
 
 /// Whether the router must approve the protocol before swapping (see
@@ -171,8 +172,15 @@ pub const SUBSIDY_GAS: u64 = 65_000;
 
 /// `outputToRouter = true`: the pool sends output to the router, which then does an extra
 /// `_transferOut` to the receiver.
-pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] =
-    &["vm:curve", "rocketpool", "fluid_v1", "native_wrapper", "lido_v4", "rfq:euclid"];
+pub const PROTOCOLS_OUTPUT_TO_ROUTER: &[&str] = &[
+    "vm:curve",
+    "rocketpool",
+    "fluid_v1",
+    "native_wrapper",
+    "lido_v4",
+    "rfq:euclid",
+    KIPSELI_PROTOCOL_SYSTEM,
+];
 
 /// Mainnet stETH, the only Lido input token whose leg the router has to approve. Lido is
 /// configured on mainnet only, so a plain constant is enough.
