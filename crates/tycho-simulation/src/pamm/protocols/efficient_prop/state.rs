@@ -449,12 +449,21 @@ impl std::str::FromStr for CreditGas {
 }
 
 /// The moment a side stops quoting: on this process's monotonic clock, and the wall clock's Unix
-/// milliseconds it was set from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// milliseconds it was set from. Two deadlines are equal where they name the same millisecond:
+/// the `Instant` is this process's own reading of it, which a state read back makes afresh.
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Deadline {
     pub(super) at: Instant,
     pub(super) unix_ms: u64,
 }
+
+impl PartialEq for Deadline {
+    fn eq(&self, other: &Self) -> bool {
+        self.unix_ms == other.unix_ms
+    }
+}
+
+impl Eq for Deadline {}
 
 impl Deadline {
     /// `unix_ms`, on the wall clock that reads `now_ms` now.
@@ -549,7 +558,8 @@ pub struct EfficientPropState {
     /// and still land while the price print it read lives, where that is sooner than the book's
     /// life. `None` where the side quotes for as long as the book is served. Serialized as its
     /// Unix milliseconds and read back against the wall clock, so a state read back refuses from
-    /// the same moment; a payload without the field reads as already lapsed, never as no deadline.
+    /// the same moment, give or take how far the reader's wall clock is off the writer's; a
+    /// payload without the field reads as already lapsed, never as no deadline.
     #[serde(default = "lapsed", with = "until_ms")]
     pub(super) bid_until: Option<Deadline>,
     /// The same for the ask.
@@ -1476,6 +1486,9 @@ mod tests {
             Some(bid_ms)
         );
         assert_eq!(back.ask_until, None);
+        // Equal to the state written, though its `Instant` is rebuilt at the read.
+        assert_eq!(back, state);
+        assert!(ProtocolSim::eq(&back, &state));
         let sell = amount(500_000_000_000_000_000);
         let before = back.bid_until.unwrap().at - std::time::Duration::from_secs(1);
         assert!(back
