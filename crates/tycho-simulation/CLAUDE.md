@@ -224,9 +224,9 @@ for any protocol indexed by Tycho.
     which `EfficientPropFeedBuilder::ethereum`, `base` and `bnb` build on with the deployment's
     price sources (none on BNB Chain, whose one registered source is the caller's to approve).
     No other code reads them as constants; `with_door_code_hash` pins the doors'
-  - Base and BNB Chain serve no book yet: neither lists anything, and BNB Chain has no state URL
-    and no `PropAMMExecutor`. Their paths run in the offline tests, and against the deployed
-    fronts in ignored tests
+  - BNB Chain has no `PropAMMExecutor`, so its books are simulated and cannot be encoded. The
+    Base and BNB Chain paths run in the offline tests, and against the deployed fronts in ignored
+    tests
   Its tests run on `test_support.rs` (a fake node, and a node replaying `testdata/`'s polls
   recorded from local forks of Ethereum holding the deployed contracts, checked wei for wei).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing

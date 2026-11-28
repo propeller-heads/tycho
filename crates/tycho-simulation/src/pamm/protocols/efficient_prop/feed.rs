@@ -319,8 +319,8 @@ impl EfficientPropFeedBuilder {
     /// another chain, over 64 KiB or 1,024 desks, names the zero address, or is stamped zero,
     /// before the one held or ahead of the clock.
     ///
-    /// No such list is served at any URL yet. Until one is, give the desks to
-    /// [`Self::with_approved_desks`]: they are the whole set, and they rule.
+    /// Without a list URL, the desks given to [`Self::with_approved_desks`] are the whole set, and
+    /// they rule.
     pub fn with_approved_desks_url(mut self, url: impl Into<String>) -> Self {
         self.approved_desks_url = Some(url.into());
         self
@@ -417,10 +417,10 @@ impl EfficientPropFeedBuilder {
 
     /// The state endpoints to read the next block's state map from, on Ethereum and BNB Chain
     /// (required there, refused on Base): URLs answering the JSON-RPC method
-    /// `titan_getPammStateOverrides`, such as the protocol api's `https://<api host>/v1/1/state`
-    /// and a builder's data hosts. On BNB Chain a map names its block (`blockNumber`) and no
-    /// slot; no URL serving chain 56 is known yet, and until one answers the feed serves nothing
-    /// there. Every poll asks each and keeps only the maps for the block after the latest one. Each
+    /// `titan_getPammStateOverrides` for the chain: a builder's data hosts, or the protocol api's
+    /// `/v1/<chain id>/state` where it serves the chain. On BNB Chain a map names its block
+    /// (`blockNumber`) and no slot, and until a URL answers one the feed serves nothing there.
+    /// Every poll asks each and keeps only the maps for the block after the latest one. Each
     /// listing is quoted from one answer, the first URL's in this order that writes its quote's
     /// stamp slot with a stamp that block fills, and only when that answer also writes the price
     /// contract it reads. A URL may carry a key, in its query or its userinfo; it is never logged,

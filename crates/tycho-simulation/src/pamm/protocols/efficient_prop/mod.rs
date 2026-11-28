@@ -7,10 +7,9 @@
 //! On Base, as on Ethereum, a listing is served only where its maker's desk contract is approved
 //! ([`EfficientPropFeedBuilder::with_approved_desks`]), and on Base only where its gas is named
 //! too ([`EfficientPropFeedBuilder::credit_listing`]): no fill of the deployed build has been
-//! measured on Base, so this crate charges no figure of its own there. The front is deployed on
-//! Base ([`EfficientPropDeployment::base`]) but no listing exists there yet: the path below runs in
-//! this module's offline tests, and against the deployed front in ignored tests, which find it as
-//! the preset holds it and serve no book.
+//! measured on Base, so this crate charges no figure of its own there. The front deployed on Base
+//! is [`EfficientPropDeployment::base`]: the path below runs in this module's offline tests, and
+//! against the deployed front in ignored tests, which find it as the preset holds it.
 //!
 //! The front prices every listing on chain from what its operator last posted, so the
 //! feed does not model the front: it reads each door's own `quote` over JSON-RPC every poll, at
@@ -416,8 +415,9 @@
 //! Each poll reads, at once, the listings at the node's latest block (the first request, as on
 //! Base, less BaseTime: that predeploy is Base's and has no code on Ethereum) and the next block's
 //! state map from every URL given to [`EfficientPropFeedBuilder::state_urls`] (required on
-//! Ethereum, refused on Base), such as the protocol api's `https://<api host>/v1/1/state`: one
-//! JSON-RPC POST of `titan_getPammStateOverrides` a URL. A map names a block, its beacon slot and,
+//! Ethereum, refused on Base), each a host answering `titan_getPammStateOverrides` for the chain
+//! (a builder's data host, or the protocol api's `/v1/<chain id>/state` where it serves the
+//! chain): one JSON-RPC POST of that method a URL. A map names a block, its beacon slot and,
 //! for each account the block's updates write, the storage they write. The poll waits up to 300 ms
 //! for the other URLs once a map carrying an update has answered, and fails where every URL fails,
 //! without logging a URL. Each URL is given half the request timeout, so one that hangs does not
@@ -587,9 +587,8 @@
 //! maker's desk contract is approved: one of [`EfficientPropFeedBuilder::with_approved_desks`]'s,
 //! or of the list read from [`EfficientPropFeedBuilder::with_approved_desks_url`] while that
 //! read is fresh (ten minutes; past it the builder's desks rule less those the list left out, so
-//! a URL that fails brings no desk in). With neither, nothing is served. No such list is served
-//! at any URL yet: until one is, the desks given to the builder are the whole set, and they rule.
-//! Listing ids are the
+//! a URL that fails brings no desk in). With neither, nothing is served. Without a list URL, the
+//! desks given to the builder are the whole set, and they rule. Listing ids are the
 //! front's own, handed out in order to every pool and desk, and each poll scans `doorView` past
 //! the highest id holding a pool, served or not, so an approved maker's new listing is found at
 //! the next poll, whatever listings were reserved before it. Its door is the factory's CREATE2
@@ -698,14 +697,13 @@
 //! polls count under the outcomes `off_cadence` and `clock_behind` of
 //! `efficient_prop_polls_total`.
 //!
-//! Nothing is served on BNB Chain yet. The front runs there ([`EfficientPropDeployment::bnb`],
-//! at the addresses it has on Ethereum, with its listing-door factory, its implementation, whose
-//! code differs from Ethereum's, and its first desk contract; an ignored test reads them from a
-//! node), and its price source 1, the QQQB/USD1 price contract, is registered, though
-//! [`EfficientPropFeedBuilder::bnb`] approves no source. No listing exists there, no state URL
-//! serving chain 56 is known, and tycho-execution runs
-//! no `PropAMMExecutor` there: its pAMM encoder refuses the chain, so no book there could be
-//! encoded. The path runs in this module's offline tests.
+//! The front runs on BNB Chain ([`EfficientPropDeployment::bnb`], at the addresses it has on
+//! Ethereum, with its listing-door factory, its implementation, whose code differs from Ethereum's,
+//! and its first desk contract; an ignored test reads them from a node), and its price source 1,
+//! the QQQB/USD1 price contract, is registered, though [`EfficientPropFeedBuilder::bnb`] approves
+//! no source. tycho-execution runs no `PropAMMExecutor` there: its pAMM encoder refuses the chain,
+//! so a book there is simulated and cannot be encoded. The path runs in this module's offline
+//! tests.
 //!
 //! # What this integration depends on
 //!
