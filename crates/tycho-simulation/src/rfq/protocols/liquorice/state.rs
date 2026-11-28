@@ -23,8 +23,13 @@ use crate::{
     rfq::protocols::liquorice::{client::LiquoriceClient, models::LiquoriceTokenPairPrice},
 };
 
-/// Rough gas estimate for one Liquorice settlement.
-const LIQUORICE_SWAP_GAS: u64 = 134_000;
+/// Gas of one Liquorice settlement, excluding what the router's estimate adds around it.
+///
+/// Median of 377 integration-test executions through the TychoRouter (2026-11-24 to 2026-11-28,
+/// 708k) and of cold settlement calls on Ethereum over 60 days (688k); two TychoRouter fills on
+/// 2026-04-13 cost 702k. Most of it is the maker's calls into its lending position during the
+/// settlement, so measure again when the makers change how they fund fills.
+const LIQUORICE_SWAP_GAS: u64 = 700_000;
 
 #[derive(Clone, derive_more::Debug, Serialize, Deserialize)]
 pub struct LiquoriceState {
@@ -394,7 +399,7 @@ mod tests {
                 .unwrap();
 
             assert_eq!(amount_out_result.amount, BigUint::from_str("4500000000").unwrap());
-            assert_eq!(amount_out_result.gas, BigUint::from(134_000u64));
+            assert_eq!(amount_out_result.gas, BigUint::from(LIQUORICE_SWAP_GAS));
         }
 
         #[test]
