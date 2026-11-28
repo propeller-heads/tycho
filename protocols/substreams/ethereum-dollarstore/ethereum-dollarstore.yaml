@@ -1,0 +1,78 @@
+specVersion: v0.1.0
+package:
+  name: "ethereum_dollarstore"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/ethereum-dollarstore"
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/ethereum_dollarstore.wasm
+
+network: mainnet
+
+# The DollarStore proxy, hex without 0x.
+params:
+  store_assets: &config "store=825e1e13d804816b8ccda405f1a7b7915461ddc4"
+  map_components: *config
+  map_balance_deltas: *config
+  map_protocol_changes: *config
+
+modules:
+  - name: store_assets
+    kind: store
+    # The block the DollarStore proxy was created in.
+    initialBlock: &start_block 26294489
+    updatePolicy: append
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_components
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_assets
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: map_balance_deltas
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: *start_block
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *start_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - map: map_components
+      - map: map_balance_deltas
+      - store: store_assets
+      - store: store_balances
+    output:
+      type: proto:tycho.evm.v1.BlockChanges

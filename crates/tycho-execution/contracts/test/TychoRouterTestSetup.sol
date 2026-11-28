@@ -10,6 +10,7 @@ import {EkuboV3Executor} from "../src/executors/ekubo_v3/EkuboV3Executor.sol";
 import {EtherfiExecutor} from "../src/executors/EtherfiExecutor.sol";
 import {FermiSwapExecutor} from "../src/executors/FermiSwapExecutor.sol";
 import {BopAMMExecutor} from "../src/executors/BopAMMExecutor.sol";
+import {DollarStoreExecutor} from "../src/executors/DollarStoreExecutor.sol";
 import {
     LiquidityPartyExecutor
 } from "../src/executors/LiquidityPartyExecutor.sol";
@@ -170,6 +171,7 @@ contract TychoRouterTestSetup is
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
     SkyExecutor public skyExecutor;
+    DollarStoreExecutor public dollarStoreExecutor;
     PropAMMFallbackRouter public propAMMFallbackRouter;
     PropAMMFallbackExecutor public propAMMFallbackExecutor;
 
@@ -384,11 +386,14 @@ contract TychoRouterTestSetup is
             0xC697d2898e0D09264376196696c51D7aBbbAA4a9
         );
         aeroBasicExecutor = new AeroBasicExecutor();
-        // Appended last: every earlier executor keeps its CREATE address.
         euclidExecutor = new EuclidExecutor(ONEINCH_ROUTER_V5);
+        // Appended last: every earlier executor keeps its CREATE address. The
+        // constructor only stores the store address, so it deploys on every
+        // fork.
+        dollarStoreExecutor = new DollarStoreExecutor(DOLLARSTORE);
 
         address[] memory executors = new address[](
-            31 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
+            32 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
         );
         executors[0] = address(usv2Executor);
         executors[1] = address(usv3Executor);
@@ -421,7 +426,8 @@ contract TychoRouterTestSetup is
         executors[28] = address(pancakeswapInfinityExecutor);
         executors[29] = address(aeroBasicExecutor);
         executors[30] = address(euclidExecutor);
-        uint256 nextExecutorIndex = 31;
+        executors[31] = address(dollarStoreExecutor);
+        uint256 nextExecutorIndex = 32;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
             nextExecutorIndex++;

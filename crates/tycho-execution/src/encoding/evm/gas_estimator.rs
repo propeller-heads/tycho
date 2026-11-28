@@ -98,6 +98,7 @@ pub const PROTOCOLS_NEEDING_APPROVAL: &[&str] = &[
     "erc4626",
     "ring_swap_v2",
     "sky",
+    "vm:dollarstore",
     BAIBAI_PROTOCOL_SYSTEM,
 ];
 

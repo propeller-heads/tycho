@@ -12,7 +12,7 @@ an adapter.
 Organised by protocol under `evm/src/` and `evm/test/`:
 
 - `src/{protocol}/` — adapter contract source (angle, balancer-v2, balancer-v3, bopamm, curve,
-  etherfi, fermiswap, integral, liquidityparty, maverick-v2, sfrax, sfraxeth, uniswap-v2,
+  dollarstore, etherfi, fermiswap, integral, liquidityparty, maverick-v2, sfrax, sfraxeth, uniswap-v2,
   template); plus shared `src/interfaces/` and `src/libraries/`
 - `src/balance-lenses/` — the balance lenses protocol-testing's strict mode calls
   (`protocols/testing/README.md`, "Balances"), each with its test in `test/`

@@ -8,6 +8,7 @@ mod bebop;
 mod bebop_fallback;
 mod bopamm;
 mod curve;
+mod dollarstore;
 mod ekubo;
 mod ekubo_v3;
 mod erc_4626;

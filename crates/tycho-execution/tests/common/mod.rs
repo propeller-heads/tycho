@@ -48,6 +48,14 @@ pub fn weth() -> Bytes {
     Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap()
 }
 
+pub fn usds() -> Bytes {
+    Bytes::from_str("0xdC035D45d973E3EC169d2276DDab16f1e407384F").unwrap()
+}
+
+pub fn usdg() -> Bytes {
+    Bytes::from_str("0xe343167631d89B6Ffc58B88d6b7fB0228795491D").unwrap()
+}
+
 pub fn usdc() -> Bytes {
     Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap()
 }

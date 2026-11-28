@@ -17,7 +17,8 @@ use tycho_execution::encoding::{
 
 use crate::common::{
     alice_address, bob_address, client_fee_receiver, dai, encoding::encode_tycho_router_call, eth,
-    eth_chain, get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdt, wbtc, weth,
+    eth_chain, get_signer, get_tycho_router_encoder, ondo, pepe, usdc, usdg, usds, usdt, wbtc,
+    weth,
 };
 
 #[test]
@@ -1729,6 +1730,176 @@ fn test_single_encoding_strategy_bopamm_weth_usdc() {
     .data;
     let hex_calldata = encode(&calldata);
     write_calldata_to_file("test_single_encoding_strategy_bopamm_weth_usdc", hex_calldata.as_str());
+}
+
+fn dollarstore_component(id: &str) -> ProtocolComponent {
+    ProtocolComponent {
+        id: String::from(id),
+        protocol_system: String::from("vm:dollarstore"),
+        ..Default::default()
+    }
+}
+
+/// keccak256(store, USDC, USDG): the USDC/USDG pair on the DollarStore spoke.
+const DOLLARSTORE_USDC_USDG: &str =
+    "0x097cc630397efe83d759e75de6f9f996bb350abdd015a099f837a2a69c42d5e4";
+/// keccak256(store, USDC, USDS): the USDC/USDS pair on the DollarStore hub.
+const DOLLARSTORE_USDC_USDS: &str =
+    "0x48883064a1a16978e8857f235d726998fd83be81c77ef5303f7b5d151b7e0b1a";
+
+#[test]
+fn test_single_encoding_strategy_dollarstore_usdc_usdg() {
+    // USDC -> (DollarStore) -> USDG, 1:1, so the minimum is the whole amount.
+    let token_in = usdc();
+    let token_out = usdg();
+
+    let swap = Swap::new(
+        dollarstore_component(DOLLARSTORE_USDC_USDG),
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from(10_000_000_000_u64),
+        BigUint::from(10_000_000_000_u64),
+        BigUint::from(10_000_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_dollarstore_usdc_usdg",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_single_encoding_strategy_dollarstore_usds_usdc_sub_unit() {
+    // USDS -> (DollarStore hub) -> USDC with 123 wei past whole units; the store takes the whole
+    // units and the remainder stays at the router.
+    let token_in = usds();
+    let token_out = usdc();
+
+    let swap = Swap::new(
+        dollarstore_component(DOLLARSTORE_USDC_USDS),
+        default_token(token_in.clone()),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("10000000000000000000123").unwrap(),
+        BigUint::from(10_000_000_000_u64),
+        BigUint::from(10_000_000_000_u64),
+        vec![swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_single_encoding_strategy_dollarstore_usds_usdc_sub_unit",
+        hex_calldata.as_str(),
+    );
+}
+
+#[test]
+fn test_sequential_encoding_strategy_dollarstore_usds_usdc_usdg() {
+    // USDS -> (DollarStore hub) -> USDC -> (DollarStore spoke) -> USDG
+    let token_in = usds();
+    let intermediate = usdc();
+    let token_out = usdg();
+
+    let hub_swap = Swap::new(
+        dollarstore_component(DOLLARSTORE_USDC_USDS),
+        default_token(token_in.clone()),
+        default_token(intermediate.clone()),
+        BigUint::ZERO,
+    );
+    let spoke_swap = Swap::new(
+        dollarstore_component(DOLLARSTORE_USDC_USDG),
+        default_token(intermediate),
+        default_token(token_out.clone()),
+        BigUint::ZERO,
+    );
+
+    let encoder = get_tycho_router_encoder(Chain::Ethereum);
+    let solution = Solution::new(
+        alice_address(),
+        alice_address(),
+        token_in,
+        token_out,
+        BigUint::from_str("10000000000000000000000").unwrap(),
+        BigUint::from(10_000_000_000_u64),
+        BigUint::from(10_000_000_000_u64),
+        vec![hub_swap, spoke_swap],
+    );
+
+    let encoded_solution = encoder
+        .encode_solutions(vec![solution.clone()])
+        .unwrap()[0]
+        .clone();
+
+    let calldata = encode_tycho_router_call(
+        eth_chain().id(),
+        &encoded_solution,
+        &solution,
+        &eth(),
+        None,
+        0,
+        &Bytes::zero(20),
+        &BigUint::ZERO,
+    )
+    .unwrap()
+    .data;
+    let hex_calldata = encode(&calldata);
+    write_calldata_to_file(
+        "test_sequential_encoding_strategy_dollarstore_usds_usdc_usdg",
+        hex_calldata.as_str(),
+    );
 }
 
 fn ring_swap_v2_component() -> ProtocolComponent {

@@ -33,6 +33,7 @@ const deploy_protocols = {
         "vm:fermiswap",
         "vm:liquidityparty",
         "vm:bopamm",
+        "vm:dollarstore",
         "rfq:metric",
         "pricelevelstream",
         "rfq:native",

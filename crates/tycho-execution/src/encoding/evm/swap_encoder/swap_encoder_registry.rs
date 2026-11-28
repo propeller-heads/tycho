@@ -20,21 +20,21 @@ use crate::encoding::{
             baibai_fallback::BaibaiFallbackSwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder,
             bebop_fallback::BebopFallbackSwapEncoder, bopamm::BopAMMSwapEncoder,
-            curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
-            erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder,
-            fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
-            fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            hashflow_fallback::HashflowFallbackSwapEncoder, lido_v4::LidoV4SwapEncoder,
-            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            liquorice_fallback::LiquoriceFallbackSwapEncoder, lunarbase::LunarBaseSwapEncoder,
-            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
-            metric_fallback::MetricFallbackSwapEncoder, native::NativeSwapEncoder,
-            native_fallback::NativeFallbackSwapEncoder, native_wrap::WrapSwapEncoder,
-            pancakeswap_infinity::PancakeswapInfinitySwapEncoder, propamm::PropAMMSwapEncoder,
-            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
-            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
-            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
-            uniswap_v4::UniswapV4SwapEncoder,
+            curve::CurveSwapEncoder, dollarstore::DollarStoreSwapEncoder, ekubo::EkuboSwapEncoder,
+            ekubo_v3::EkuboV3SwapEncoder, erc_4626::ERC4626SwapEncoder,
+            etherfi::EtherfiSwapEncoder, euclid::EuclidSwapEncoder, fallback::FallbackSwapEncoder,
+            fermiswap::FermiSwapEncoder, fluid_v1::FluidV1SwapEncoder,
+            hashflow::HashflowSwapEncoder, hashflow_fallback::HashflowFallbackSwapEncoder,
+            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            liquorice::LiquoriceSwapEncoder, liquorice_fallback::LiquoriceFallbackSwapEncoder,
+            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
+            metric::MetricSwapEncoder, metric_fallback::MetricFallbackSwapEncoder,
+            native::NativeSwapEncoder, native_fallback::NativeFallbackSwapEncoder,
+            native_wrap::WrapSwapEncoder, pancakeswap_infinity::PancakeswapInfinitySwapEncoder,
+            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
+            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
+            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
+            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
@@ -247,6 +247,9 @@ impl SwapEncoderRegistry {
             }
             "vm:bopamm" => {
                 Ok(Box::new(BopAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "vm:dollarstore" => {
+                Ok(Box::new(DollarStoreSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "vm:curve" => {
                 Ok(Box::new(CurveSwapEncoder::new(executor_address, self.chain, config)?))

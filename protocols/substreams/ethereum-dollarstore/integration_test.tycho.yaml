@@ -1,0 +1,47 @@
+substreams_yaml_path: ./ethereum-dollarstore.yaml
+protocol_system: "vm:dollarstore"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "dollarstore_pair"
+adapter_contract: "DollarStoreAdapter"
+adapter_build_signature: "constructor(address)"
+adapter_build_args: "0x825e1e13D804816b8ccdA405F1a7B7915461dDc4"
+skip_balance_check: "component ids are pair hashes, not addresses, and every pair's balances are the store's whole token balances, so there is no per-component address to compare against"
+
+# The store proxy is created at 26294489, before the range; the package tracks it from creation.
+initialized_accounts:
+  - "0x825e1e13D804816b8ccdA405F1a7B7915461dDc4" # DollarStore proxy
+
+tests:
+  - name: test_pair_creation_and_first_swaps
+    # USDC listed in the hub at 26298823, USDS at 26298830 (creates USDC/USDS), the USDG spoke at
+    # 26298837 (creates USDG/USDC and USDG/USDS). First deposits, spoke liquidity and swaps follow
+    # by 26299700, where the hub holds 51 USDC and the spoke 49 USDG. The hub holds no USDS here,
+    # so the directions that pay out USDS have zero limits.
+    start_block: 26298820
+    stop_block: 26299700
+    expected_components:
+      - id: "0x48883064a1a16978e8857f235d726998fd83be81c77ef5303f7b5d151b7e0b1a"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xdc035d45d973e3ec169d2276ddab16f1e407384f" # USDS
+        static_attributes: {}
+        creation_tx: "0xad9a76996483ee44b937796f9823d42d3c657412fb3787100dd9703fc59bcda6"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0x097cc630397efe83d759e75de6f9f996bb350abdd015a099f837a2a69c42d5e4"
+        tokens:
+          - "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" # USDC
+          - "0xe343167631d89b6ffc58b88d6b7fb0228795491d" # USDG
+        static_attributes: {}
+        creation_tx: "0x78d3f8feca8c63400543e766e1007fca50b1a97447d3c54cebe19a4c053f29e7"
+        skip_simulation: false
+        skip_execution: false
+      - id: "0xc75d44634bc602c1fc11c34a06c53d64b96a06828594d761017663d63cc3f434"
+        tokens:
+          - "0xdc035d45d973e3ec169d2276ddab16f1e407384f" # USDS
+          - "0xe343167631d89b6ffc58b88d6b7fb0228795491d" # USDG
+        static_attributes: {}
+        creation_tx: "0x78d3f8feca8c63400543e766e1007fca50b1a97447d3c54cebe19a4c053f29e7"
+        skip_simulation: false
+        skip_execution: false

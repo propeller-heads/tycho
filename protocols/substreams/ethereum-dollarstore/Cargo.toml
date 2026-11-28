@@ -1,0 +1,19 @@
+[package]
+name = "ethereum-dollarstore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ethereum_dollarstore"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.95"
+hex = "0.4"
+itertools = "0.10.5"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_qs = "0.13.0"
+substreams = "0.5.22"
+substreams-ethereum = "0.9.9"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+tycho-substreams = "0.8.2"
