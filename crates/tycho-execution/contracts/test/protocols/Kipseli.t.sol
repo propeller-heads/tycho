@@ -30,14 +30,14 @@ contract KipseliExecutorTest is TestUtils {
         executor = new KipseliExecutor(KIPSELI_ROUTER);
     }
 
-    /// @dev Placeholder verification data: fee 25, originRate 1e18, the test router, and a
-    ///      65-byte signature of 0xab bytes.
+    /// @dev Placeholder verification data shaped like the API's: fee 0 and originRate 0, as every
+    ///      recorded answer has them, the test router, and a 65-byte signature of 0xab bytes.
     function _verificationData() internal pure returns (bytes memory) {
         bytes memory signature = new bytes(65);
         for (uint256 i; i < 65; ++i) {
             signature[i] = 0xab;
         }
-        return abi.encode(uint256(25), uint256(1e18), TEST_ROUTER, signature);
+        return abi.encode(uint256(0), uint256(0), TEST_ROUTER, signature);
     }
 
     function testConstructorRejectsZeroRouter() public {
@@ -144,9 +144,16 @@ contract KipseliExecutorTest is TestUtils {
 ///      block: at any later block the venue pays nothing and the swap reverts.
 ///
 ///      Kipseli whitelisted Tycho's Base router `PROD_ROUTER`, not the router these tests deploy.
-///      `setUp` copies the two records that whitelisting wrote onto the test router: its signer
-///      in the Verifier and its swap handler in `KIPSELI_HANDLERS`. Without the first the
-///      venue pays nothing; without the second the swap reverts inside the venue.
+///      `setUp` copies the three records that whitelisting wrote onto the test router:
+///      - the Verifier's entry for the router, its signer (`0xbeee…f001`); without it the venue
+///        pays nothing;
+///      - the Verifier's entry for the router's address plus one, which holds 3. It is a separate
+///        key of the same mapping, which the venue reads on every swap, not a second slot of the
+///        first entry;
+///      - the handler entry for the router in `KIPSELI_HANDLERS`, the contract that settles its
+///        swaps; without it the swap reverts inside the venue.
+///      Kipseli's contracts are not source-verified: the mapping slots were found from the
+///      storage the venue reads in call traces of a whitelisted swap at the fork block.
 contract TychoRouterForKipseliTest is TychoRouterTestSetup {
     address constant KIPSELI_ROUTER =
         0x71C2Ed90CC288229Be59F26b8B3EEF3C07d7ab99;
@@ -159,7 +166,7 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         0xc2Be7B94d5498b1acEb914F3a1dec4Ce502d235F;
     /// @dev Tycho's Base router, which Kipseli whitelisted.
     address constant PROD_ROUTER = 0xd374c00614f95492D816b5957E3797ce3f0c445C;
-    /// @dev Uniswap V3 WETH/USDC 0.05% on Base, the other leg of the split.
+    /// @dev Uniswap V3 BASE_WETH/BASE_USDC 0.05% on Base, the other leg of the split.
     address constant WETH_USDC_USV3 =
         0xd0b53D9277642d899DF5C87A3966A349A798F224;
     /// @dev The quotes, as the API returned them.
@@ -172,9 +179,6 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
     uint256 constant USDC_CBBTC_QUOTE_TIMESTAMP = 1795781083;
     bytes constant USDC_CBBTC_VERIFICATION_DATA =
         hex"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006bc529dc7b81a031828ddce2bc419d01ff268c66000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000411a5b212f382d41529375e81c2d3d8c58df76a6a72cea32bb4f2f0b0c4c5044755604d33f319bc9351544bec179ebea839a85474937075d863795e3b15d26e2691c00000000000000000000000000000000000000000000000000000000000000";
-    address constant WETH = 0x4200000000000000000000000000000000000006;
-    address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     /// @dev Derived from the name, so deployments the shared setup adds do not move it.
     address constant KIPSELI_EXECUTOR =
         address(uint160(uint256(keccak256("tycho.test.KipseliExecutor"))));
@@ -182,23 +186,19 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
     uint24 constant SIXTY_PERCENT = uint24(uint256(0xffffff) * 60 / 100);
     uint256 constant WETH_IN = 1e16;
     uint256 constant USDC_IN = 35e6;
-
-    KipseliExecutor kipseliExecutor;
+    /// @dev What the split pays at the fork block: Kipseli's 60% and Uniswap V3's 40%.
+    uint256 constant SPLIT_OUT = 17_217_508;
+    /// @dev The 1% client fee on the WETH -> USDC swap at the fork block: 1% of 17_220_171,
+    ///      rounded down.
+    uint256 constant CLIENT_FEE = 172_201;
 
     function setUp() public override {
         super.setUp();
-        deployCodeTo(
+        deployExecutorAt(
             "KipseliExecutor.sol:KipseliExecutor",
             abi.encode(KIPSELI_ROUTER),
             KIPSELI_EXECUTOR
         );
-        kipseliExecutor = KipseliExecutor(KIPSELI_EXECUTOR);
-        address[] memory executors = new address[](1);
-        executors[0] = KIPSELI_EXECUTOR;
-        vm.warp(forkTimestamp - _SETUP_TIME_OFFSET_NEW_EXECUTOR);
-        vm.prank(EXECUTOR_SETTER);
-        tychoRouter.setExecutors(executors);
-        vm.warp(forkTimestamp);
 
         _copyKipseliWhitelist(KIPSELI_VERIFIER, 3, PROD_ROUTER, tychoRouterAddr);
         _copyKipseliWhitelist(
@@ -224,23 +224,29 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         vm.store(kipseli, keccak256(abi.encode(to, slot)), record);
     }
 
-    /// @dev The executor's swap data for the WETH -> USDC quote.
+    /// @dev The executor's swap data for the BASE_WETH -> BASE_USDC quote.
     function _wethUsdcSwapData() internal pure returns (bytes memory) {
         return abi.encodePacked(
-            WETH, USDC, WETH_USDC_QUOTE_TIMESTAMP, WETH_USDC_VERIFICATION_DATA
+            BASE_WETH,
+            BASE_USDC,
+            WETH_USDC_QUOTE_TIMESTAMP,
+            WETH_USDC_VERIFICATION_DATA
         );
     }
 
     function _usdcWethSwapData() internal pure returns (bytes memory) {
         return abi.encodePacked(
-            USDC, WETH, USDC_WETH_QUOTE_TIMESTAMP, USDC_WETH_VERIFICATION_DATA
+            BASE_USDC,
+            BASE_WETH,
+            USDC_WETH_QUOTE_TIMESTAMP,
+            USDC_WETH_VERIFICATION_DATA
         );
     }
 
     function _usdcCbbtcSwapData() internal pure returns (bytes memory) {
         return abi.encodePacked(
-            USDC,
-            CBBTC,
+            BASE_USDC,
+            BASE_cbBTC,
             USDC_CBBTC_QUOTE_TIMESTAMP,
             USDC_CBBTC_VERIFICATION_DATA
         );
@@ -255,15 +261,17 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         return 62_953_546;
     }
 
-    /// @dev Checks BOB received `amountOut` of `tokenOut` for all of his `tokenIn`, and that the
-    ///      router holds neither token and no approval of the Kipseli Router.
+    /// @dev Checks BOB received `expectedOut` of `tokenOut` for all of his `tokenIn`, and that the
+    ///      router holds neither token and no approval of the Kipseli Router. The amounts are what
+    ///      Kipseli pays at the fork block.
     function _assertSettled(
         address tokenIn,
         address tokenOut,
         uint256 amountOut,
+        uint256 expectedOut,
         uint256 beforeBalance
     ) internal view {
-        assertGt(amountOut, 0);
+        assertEq(amountOut, expectedOut);
         assertEq(IERC20(tokenOut).balanceOf(BOB) - beforeBalance, amountOut);
         assertEq(IERC20(tokenIn).balanceOf(BOB), 0);
         assertEq(IERC20(tokenIn).balanceOf(tychoRouterAddr), 0);
@@ -276,7 +284,8 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        bytes memory swapData
+        bytes memory swapData,
+        uint256 expectedOut
     ) internal {
         deal(tokenIn, BOB, amountIn);
         uint256 beforeBalance = IERC20(tokenOut).balanceOf(BOB);
@@ -293,15 +302,23 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
             encodeSingleSwap(KIPSELI_EXECUTOR, swapData)
         );
         vm.stopPrank();
-        _assertSettled(tokenIn, tokenOut, amountOut, beforeBalance);
+        _assertSettled(tokenIn, tokenOut, amountOut, expectedOut, beforeBalance);
     }
 
     function testSingleSwapWethToUsdc() public {
-        _singleSwap(WETH, USDC, WETH_IN, _wethUsdcSwapData());
+        _singleSwap(
+            BASE_WETH, BASE_USDC, WETH_IN, _wethUsdcSwapData(), 17_220_171
+        );
     }
 
     function testSingleSwapUsdcToWeth() public {
-        _singleSwap(USDC, WETH, USDC_IN, _usdcWethSwapData());
+        _singleSwap(
+            BASE_USDC,
+            BASE_WETH,
+            USDC_IN,
+            _usdcWethSwapData(),
+            20_323_021_337_539_322
+        );
     }
 
     /// @dev Kipseli as the second hop is funded only by the first hop's output, which the
@@ -310,20 +327,29 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSequentialSwap(KIPSELI_EXECUTOR, _wethUsdcSwapData());
         swaps[1] = encodeSequentialSwap(KIPSELI_EXECUTOR, _usdcCbbtcSwapData());
-        deal(WETH, BOB, WETH_IN);
-        uint256 beforeBalance = IERC20(CBBTC).balanceOf(BOB);
+        deal(BASE_WETH, BOB, WETH_IN);
+        uint256 beforeBalance = IERC20(BASE_cbBTC).balanceOf(BOB);
         vm.startPrank(BOB);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         uint256 amountOut = tychoRouter.sequentialSwap(
-            WETH_IN, WETH, CBBTC, 1, 1, BOB, noClientFee(), pleEncode(swaps)
+            WETH_IN,
+            BASE_WETH,
+            BASE_cbBTC,
+            1,
+            1,
+            BOB,
+            noClientFee(),
+            pleEncode(swaps)
         );
         vm.stopPrank();
-        _assertSettled(WETH, CBBTC, amountOut, beforeBalance);
-        assertEq(IERC20(USDC).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC).allowance(tychoRouterAddr, KIPSELI_ROUTER), 0);
+        _assertSettled(BASE_WETH, BASE_cbBTC, amountOut, 27_945, beforeBalance);
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
+        assertEq(
+            IERC20(BASE_USDC).allowance(tychoRouterAddr, KIPSELI_ROUTER), 0
+        );
     }
 
-    /// @dev Kipseli trades 60% of a split and the Uniswap V3 WETH/USDC pool the rest: the Kipseli
+    /// @dev Kipseli trades 60% of a split and the Uniswap V3 BASE_WETH/BASE_USDC pool the rest: the Kipseli
     ///      leg is funded with a fraction of the input.
     function testSplitSwap() public {
         bytes[] memory swaps = new bytes[](2);
@@ -335,20 +361,30 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
             1,
             0,
             address(usv3Executor),
-            encodeUniswapV3Swap(WETH, USDC, WETH_USDC_USV3, true)
+            encodeUniswapV3Swap(BASE_WETH, BASE_USDC, WETH_USDC_USV3, true)
         );
-        deal(WETH, ALICE, WETH_IN);
+        deal(BASE_WETH, ALICE, WETH_IN);
         vm.startPrank(ALICE);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         uint256 amountOut = tychoRouter.splitSwap(
-            WETH_IN, WETH, USDC, 1, 1, 2, BOB, noClientFee(), pleEncode(swaps)
+            WETH_IN,
+            BASE_WETH,
+            BASE_USDC,
+            1,
+            1,
+            2,
+            BOB,
+            noClientFee(),
+            pleEncode(swaps)
         );
         vm.stopPrank();
-        assertGt(amountOut, 0);
-        assertEq(IERC20(USDC).balanceOf(BOB), amountOut);
-        assertEq(IERC20(WETH).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(USDC).balanceOf(tychoRouterAddr), 0);
-        assertEq(IERC20(WETH).allowance(tychoRouterAddr, KIPSELI_ROUTER), 0);
+        assertEq(amountOut, SPLIT_OUT);
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), amountOut);
+        assertEq(IERC20(BASE_WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), 0);
+        assertEq(
+            IERC20(BASE_WETH).allowance(tychoRouterAddr, KIPSELI_ROUTER), 0
+        );
     }
 
     /// @dev Kipseli settles a signature once: the same quote on a second leg is paid nothing
@@ -359,15 +395,22 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         bytes[] memory swaps = new bytes[](2);
         swaps[0] = encodeSplitSwap(0, 1, SIXTY_PERCENT, KIPSELI_EXECUTOR, data);
         swaps[1] = encodeSplitSwap(0, 1, 0, KIPSELI_EXECUTOR, data);
-        deal(WETH, ALICE, WETH_IN);
+        deal(BASE_WETH, ALICE, WETH_IN);
         vm.startPrank(ALICE);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         vm.expectRevert(bytes("return too low"));
         tychoRouter.splitSwap(
-            WETH_IN, WETH, USDC, 1, 1, 2, BOB, noClientFee(), pleEncode(swaps)
+            WETH_IN,
+            BASE_WETH,
+            BASE_USDC,
+            1,
+            1,
+            2,
+            BOB,
+            noClientFee(),
+            pleEncode(swaps)
         );
         vm.stopPrank();
-        assertEq(IERC20(WETH).balanceOf(ALICE), WETH_IN);
     }
 
     /// @dev A client fee redirects the output through the router, where the fee stays as the
@@ -381,8 +424,8 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
             clientFeeBps,
             0,
             WETH_IN,
-            WETH,
-            USDC,
+            BASE_WETH,
+            BASE_USDC,
             expected,
             1,
             BOB,
@@ -390,19 +433,21 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
             tychoRouterAddr,
             CLIENT_FEE_RECEIVER_PK
         );
-        deal(WETH, ALICE, WETH_IN);
+        deal(BASE_WETH, ALICE, WETH_IN);
         vm.startPrank(ALICE);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         uint256 amountOut = tychoRouter.singleSwap(
-            WETH_IN, WETH, USDC, expected, 1, BOB, clientFee, swapData
+            WETH_IN, BASE_WETH, BASE_USDC, expected, 1, BOB, clientFee, swapData
         );
         vm.stopPrank();
-        assertEq(IERC20(USDC).balanceOf(BOB), amountOut);
-        uint256 fee =
-            tychoRouter.balanceOf(clientFeeReceiver, uint256(uint160(USDC)));
-        assertGt(fee, 0);
-        assertEq(IERC20(USDC).balanceOf(tychoRouterAddr), fee);
-        assertEq(IERC20(WETH).balanceOf(tychoRouterAddr), 0);
+        assertEq(amountOut, 17_220_171 - CLIENT_FEE);
+        assertEq(IERC20(BASE_USDC).balanceOf(BOB), amountOut);
+        uint256 fee = tychoRouter.balanceOf(
+            clientFeeReceiver, uint256(uint160(BASE_USDC))
+        );
+        assertEq(fee, CLIENT_FEE);
+        assertEq(IERC20(BASE_USDC).balanceOf(tychoRouterAddr), fee);
+        assertEq(IERC20(BASE_WETH).balanceOf(tychoRouterAddr), 0);
     }
 
     /// @dev The route's minAmountOut binds: a minimum above what Kipseli pays reverts.
@@ -410,23 +455,23 @@ contract TychoRouterForKipseliTest is TychoRouterTestSetup {
         bytes memory swapData =
             encodeSingleSwap(KIPSELI_EXECUTOR, _wethUsdcSwapData());
         uint256 snapshot = vm.snapshotState();
-        deal(WETH, ALICE, WETH_IN);
+        deal(BASE_WETH, ALICE, WETH_IN);
         vm.startPrank(ALICE);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         uint256 amountOut = tychoRouter.singleSwap(
-            WETH_IN, WETH, USDC, 1, 1, BOB, noClientFee(), swapData
+            WETH_IN, BASE_WETH, BASE_USDC, 1, 1, BOB, noClientFee(), swapData
         );
         vm.stopPrank();
         vm.revertToState(snapshot);
 
-        deal(WETH, ALICE, WETH_IN);
+        deal(BASE_WETH, ALICE, WETH_IN);
         vm.startPrank(ALICE);
-        IERC20(WETH).approve(tychoRouterAddr, WETH_IN);
+        IERC20(BASE_WETH).approve(tychoRouterAddr, WETH_IN);
         vm.expectPartialRevert(TychoRouter__NegativeSlippage.selector);
         tychoRouter.singleSwap(
             WETH_IN,
-            WETH,
-            USDC,
+            BASE_WETH,
+            BASE_USDC,
             amountOut + 1,
             amountOut + 1,
             BOB,

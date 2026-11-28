@@ -35,6 +35,14 @@ interface IKipseliRouter {
 ///        nothing. The router reverts "return too low" when the output is below `minOutAmount`,
 ///        so the swap passes a floor of one wei, which turns that silent loss into a revert.
 ///        Pricing stays with the route's `minAmountOut`.
+///
+///      A signature settles one swap and binds only `(tokenIn, tokenOut, quoteTimestamp, fee,
+///      originRate, userAddress)`, with the timestamp in whole seconds and no nonce. Every
+///      request for one pair and direction in the same second gets the same signature, so of two
+///      such swaps through the TychoRouter only the first is paid, and the second reverts. For that
+///      reason only hosted Fynd encodes Kipseli swaps. The TychoRouter is permissionless, so anyone
+///      can also spend a signature first, from the API or a pending transaction: the victim's
+///      swap reverts and loses its gas, but not its input.
 contract KipseliExecutor is IExecutor {
     error KipseliExecutor__InvalidRouter();
     error KipseliExecutor__InvalidDataLength();

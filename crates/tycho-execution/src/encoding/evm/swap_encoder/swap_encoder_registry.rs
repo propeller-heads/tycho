@@ -7,12 +7,13 @@ use crate::encoding::{
     evm::{
         constants::{
             BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
-            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
-            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
-            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
-            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, EXTERNALLY_ENCODED_PROTOCOLS,
+            FALLBACK_KEY, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+            NATIVE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_WRAPPER_PROTOCOL_SYSTEM,
+            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
+            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, SUBSIDY_KEY,
+            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
@@ -53,11 +54,19 @@ pub struct SwapEncoderRegistry {
     /// A hashmap containing the protocol system as a key and the `SwapEncoder` as a value.
     encoders: HashMap<String, Box<dyn SwapEncoder>>,
     subsidy_encoder: Option<SubsidyEncoder>,
+    /// The executor addresses of the configured protocols in [`EXTERNALLY_ENCODED_PROTOCOLS`],
+    /// whose encoders this crate does not build.
+    externally_encoded_executors: HashMap<String, Bytes>,
 }
 
 impl SwapEncoderRegistry {
     pub fn new(chain: Chain) -> Self {
-        Self { chain, encoders: HashMap::new(), subsidy_encoder: None }
+        Self {
+            chain,
+            encoders: HashMap::new(),
+            subsidy_encoder: None,
+            externally_encoded_executors: HashMap::new(),
+        }
     }
 
     /// Creates a new registry pre-populated with all default encoders for the given chain.
@@ -99,6 +108,11 @@ impl SwapEncoderRegistry {
             if protocol == SUBSIDY_KEY {
                 self.subsidy_encoder =
                     Some(SubsidyEncoder::from_config(executor_address, self.chain, config)?);
+                continue;
+            }
+            if EXTERNALLY_ENCODED_PROTOCOLS.contains(&protocol.as_str()) {
+                self.externally_encoded_executors
+                    .insert(protocol.to_string(), executor_address);
                 continue;
             }
             let encoder = self.create_encoder(protocol, executor_address, config.cloned())?;
@@ -195,6 +209,14 @@ impl SwapEncoderRegistry {
             .iter()
             .map(|(protocol, encoder)| (protocol.clone(), encoder.executor_address().clone()))
             .collect()
+    }
+
+    /// The configured executor address of `protocol` when it is one of
+    /// [`EXTERNALLY_ENCODED_PROTOCOLS`], whose encoder a caller registers with
+    /// [`Self::register_encoder`].
+    pub fn externally_encoded_executor(&self, protocol: &str) -> Option<&Bytes> {
+        self.externally_encoded_executors
+            .get(protocol)
     }
 
     fn create_encoder(
@@ -363,6 +385,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::encoding::evm::constants::KIPSELI_PROTOCOL_SYSTEM;
 
     /// A single `pricelevelstream` config entry serves the whole protocol family: the bare
     /// family key resolves as an exact entry, and every `pricelevelstream:{protocol}` protocol —
@@ -611,6 +634,34 @@ mod tests {
         assert!(registry
             .get_encoder("uniswap_v4")
             .is_none());
+    }
+
+    /// An externally encoded protocol's executor does not stop the registry from building: its
+    /// address is recorded, and no encoder is built until one is registered.
+    #[test]
+    fn test_externally_encoded_executor_is_recorded_without_an_encoder() {
+        let executor = "0x00000000000000000000000000000000004b1b5e";
+        let executors = format!(
+            r#"{{"base": {{"uniswap_v2": "0x0000000000000000000000000000000000000001", "{KIPSELI_PROTOCOL_SYSTEM}": "{executor}"}}}}"#
+        );
+
+        let registry = SwapEncoderRegistry::new(Chain::Base)
+            .add_default_encoders(Some(executors))
+            .expect("an externally encoded entry must not fail the registry");
+
+        assert!(registry
+            .get_encoder(KIPSELI_PROTOCOL_SYSTEM)
+            .is_none());
+        assert!(!registry
+            .executor_addresses()
+            .contains_key(KIPSELI_PROTOCOL_SYSTEM));
+        assert_eq!(
+            registry.externally_encoded_executor(KIPSELI_PROTOCOL_SYSTEM),
+            Some(&Bytes::from_str(executor).unwrap())
+        );
+        assert!(registry
+            .get_encoder("uniswap_v2")
+            .is_some());
     }
 
     #[test]

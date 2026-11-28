@@ -135,7 +135,9 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         if (chain.eq(ETHEREUM)) return 23_000_000;
         // No BSC or Robinhood constructor reads chain state yet, and the one Base constructor
         // that does pins its own block; these only pin the fork. All are past every address the
-        // deployment config names on the chain, except BaiBai's entrypoint on Base.
+        // deployment config names on the chain, except BaiBai's entrypoint on Base, whose fixture
+        // pins its own block, and Kipseli's router on BSC, which its constructor only checks is
+        // non-zero.
         if (chain.eq("base")) return 46_500_000;
         if (chain.eq("bsc")) return 46_793_446;
         if (chain.eq("robinhood")) return 80_000_000;
