@@ -938,8 +938,18 @@ mod test_support;
 
 #[cfg(test)]
 mod tests {
-    use tycho_execution::encoding::evm::{
-        EFFICIENT_PROP_PROTOCOL_SYSTEM, FALLBACK_PREFIX, PAMM_ADDRESS_ATTRIBUTE,
+    use alloy::primitives::address;
+    use num_bigint::BigUint;
+    use rstest::rstest;
+    use tycho_common::{
+        models::{protocol::ProtocolComponent, token::Token, Chain},
+        Bytes,
+    };
+    use tycho_execution::encoding::{
+        evm::{
+            gas_estimator, EFFICIENT_PROP_PROTOCOL_SYSTEM, FALLBACK_PREFIX, PAMM_ADDRESS_ATTRIBUTE,
+        },
+        models::{Solution, Strategy, Swap},
     };
 
     /// tycho-execution keys the generic pAMM encoder on the protocol system and reads the door
@@ -958,6 +968,76 @@ mod tests {
         assert_eq!(
             super::FALLBACK_PROTOCOL_SYSTEM,
             format!("{FALLBACK_PREFIX}{EFFICIENT_PROP_PROTOCOL_SYSTEM}")
+        );
+    }
+
+    /// A fallback component's swap is charged
+    /// [`FALLBACK_SWAP_GAS`](super::state::FALLBACK_SWAP_GAS) and whatever tycho-execution's gas
+    /// estimator adds for the fallback router: what it charges the same swap through the router
+    /// beyond sending it direct, for the fallback pool the swap's `user_data` names. On each kind
+    /// of pool measured, the two are never over the least fill measured falling back on it
+    /// (`state.rs`, [`FALLBACK_SWAP_GAS`](super::state::FALLBACK_SWAP_GAS)), which already holds
+    /// the router's own work and its quotes: 90,445 on a Uniswap V2 pair, 105,181 on a V3 pool.
+    /// An estimator that adds more for a `fallback:` component, as a budget for the router's quote
+    /// of the fallback pool does, fails here until the charge is stated less it.
+    #[rstest]
+    #[case::a_uniswap_v2_pair(
+        r#"{"fallback_protocol":"uniswap_v2","pair":"0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc","fee_bps":30}"#,
+        90_445
+    )]
+    #[case::a_uniswap_v3_pool(
+        r#"{"fallback_protocol":"uniswap_v3","pool":"0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"}"#,
+        105_181
+    )]
+    fn a_fallback_swap_is_never_charged_above_the_branch_it_falls_back_on(
+        #[case] user_data: &str,
+        #[case] least_measured: u32,
+    ) {
+        let token = |address: Bytes, symbol: &str, decimals: u32| {
+            Token::new(&address, symbol, decimals, 0, &[Some(10_000)], Chain::Ethereum, 100)
+        };
+        let (weth, usdc) = (
+            token(
+                Bytes::from(address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").as_slice()),
+                "WETH",
+                18,
+            ),
+            token(
+                Bytes::from(address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").as_slice()),
+                "USDC",
+                6,
+            ),
+        );
+        let estimated = |protocol_system: &str| {
+            let swap = Swap::new(
+                ProtocolComponent {
+                    protocol_system: protocol_system.to_string(),
+                    ..Default::default()
+                },
+                weth.clone(),
+                usdc.clone(),
+                BigUint::from(super::state::FALLBACK_SWAP_GAS),
+            )
+            .with_user_data(Bytes::from(user_data.as_bytes()));
+            let solution = Solution::new(
+                Bytes::from([0x00; 20]),
+                Bytes::from([0x00; 20]),
+                weth.address.clone(),
+                usdc.address.clone(),
+                BigUint::from(1u8),
+                BigUint::ZERO,
+                BigUint::ZERO,
+                vec![swap],
+            );
+            gas_estimator::estimate_gas_usage(&solution, Strategy::Single)
+        };
+        let router = estimated(super::FALLBACK_PROTOCOL_SYSTEM) - estimated(super::PROTOCOL_SYSTEM);
+
+        let charged = router.clone() + super::state::FALLBACK_SWAP_GAS;
+        assert!(
+            charged <= BigUint::from(least_measured),
+            "a fallback swap is charged {charged}, the estimator adding {router} for the router, \
+             above the {least_measured} its branch was measured at"
         );
     }
 }
