@@ -188,6 +188,10 @@
       "contract": "BaibaiFallbackExecutor",
       "args": ["0x3A57167E95a00c31fa86D93aDa39484CaD590Fb4"]
     },
+    "pamm:kipseli": {
+      "contract": "KipseliExecutor",
+      "args": ["0x71C2Ed90CC288229Be59F26b8B3EEF3C07d7ab99"]
+    },
     "fallback:rfq:metric": {
       "contract": "MetricFallbackExecutor",
       "args": ["0x5aF3b30cF847Cd2149C8b39641EfBb13458E9909"]
@@ -350,6 +354,10 @@
       ]
     },
     "lunarbase": { "contract": "LunarBaseExecutor", "args": [] },
+    "pamm:kipseli": {
+      "contract": "KipseliExecutor",
+      "args": ["0x4cb2140C29518db6203f661B9F6dD60B68BB7f0d"]
+    },
     "subsidy": {
       "contract": "TychoSubsidizingExecutor",
       "args": ["0xB4a06a31b74A5345EE5507593F77923b5E4f0ee7"]
@@ -407,6 +415,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x4Df7557734B382EB542BEa6c74786D398DF4CC19"]
+    },
+    "pamm:kipseli": {
+      "contract": "KipseliExecutor",
+      "args": ["0x4f1ce663bF2E5e3b4A4ba88F6D1BF227e5597402"]
     },
     "pancakeswap_infinity_cl": {
       "contract": "PancakeswapInfinityRobinhoodExecutor",
