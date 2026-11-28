@@ -107,6 +107,7 @@ reqwest = { version = "0.12.22", default-features = false, features = [
 tokio-tungstenite = { version = "0.28.0", features = [
     "native-tls",
 ], optional = true }
+tower-service = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tycho-execution = { workspace = true }
@@ -148,14 +149,21 @@ evm = [
 book-feeds = [
     # `bytes_to_address` and the providers' `alloy` address types.
     "evm",
+    # The Efficient pools feed reads the chain over JSON-RPC.
+    "alloy/provider-http",
+    "alloy/reqwest",
+    "alloy/rpc-types",
     "dep:async-stream",
     "dep:bytes",
     "dep:reqwest",
     "dep:async-trait",
     "dep:tokio-tungstenite",
     "dep:http",
+    # The listing doors' feed counts its polls and the listings it covers.
+    "dep:metrics",
     "dep:prost",
     "dep:serde_with",
+    "dep:tower-service",
 ]
 
 [[bench]]

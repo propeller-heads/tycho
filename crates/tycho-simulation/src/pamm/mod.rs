@@ -7,4 +7,5 @@
 //! [`crate::rfq`]. Titan's price-level stream serves pAMMs too but keeps its own module,
 //! `price_level_stream` (behind its own cargo feature), with a `Stream`-based API.
 
+mod node;
 pub mod protocols;

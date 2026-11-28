@@ -10133,6 +10133,7 @@ dependencies = [
  "tokio-test",
  "tokio-tungstenite 0.28.0",
  "toml 0.8.23",
+ "tower-service",
  "tracing",
  "tracing-appender",
  "tracing-subscriber 0.3.20",

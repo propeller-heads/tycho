@@ -7,12 +7,13 @@ use crate::encoding::{
     evm::{
         constants::{
             BAIBAI_FALLBACK_PROTOCOL_SYSTEM, BAIBAI_PROTOCOL_SYSTEM,
-            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX,
-            HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, LIQUORICE_FALLBACK_PROTOCOL_SYSTEM,
-            METRIC_FALLBACK_PROTOCOL_SYSTEM, NATIVE_FALLBACK_PROTOCOL_SYSTEM,
-            NATIVE_WRAPPER_PROTOCOL_SYSTEM, PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG, SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS,
-            SUBSIDY_KEY, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            BEBOP_FALLBACK_PROTOCOL_SYSTEM, DEFAULT_EXECUTORS_JSON, EFFICIENT_PROP_PROTOCOL_SYSTEM,
+            FALLBACK_KEY, FALLBACK_PREFIX, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM,
+            LIQUORICE_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
+            NATIVE_FALLBACK_PROTOCOL_SYSTEM, NATIVE_WRAPPER_PROTOCOL_SYSTEM,
+            PRICE_LEVEL_STREAM_KEY, PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG,
+            SIGNED_QUOTE_FALLBACK_PROTOCOL_SYSTEMS, SLIPSTREAMS_FORKS, SUBSIDY_KEY,
+            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         subsidy::SubsidyEncoder,
         swap_encoder::{
@@ -315,8 +316,14 @@ impl SwapEncoderRegistry {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             // The Biconomy venue on Base implements the same IPropAMM interface, indexed natively
-            // instead of through the price level stream.
-            "biconomy" => {
+            // instead of through the price level stream. Efficient pools (`flamm`) take the same
+            // route: each pool finds the input the router sends it.
+            "biconomy" | "flamm" => {
+                Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            // Each Efficient PropAMM listing door is its own IPropAMM venue, named by the
+            // component's `pamm_address`.
+            EFFICIENT_PROP_PROTOCOL_SYSTEM => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "lido_v4" => {
@@ -496,6 +503,154 @@ mod tests {
                 "chain {chain} is missing the uniswap_v3 encoder"
             );
         }
+    }
+
+    /// The listing doors published as `fallback:efficient_prop` resolve to Ethereum's deployed
+    /// fallback executor through the family entry, not to the doors' own PropAMMExecutor.
+    #[test]
+    fn test_efficient_prop_fallback_resolves_on_ethereum() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
+        let executor = |system: &str| {
+            registry
+                .get_encoder(system)
+                .unwrap_or_else(|| panic!("no encoder resolved for {system}"))
+                .executor_address()
+                .clone()
+        };
+
+        assert_eq!(
+            executor(&format!("{FALLBACK_PREFIX}{EFFICIENT_PROP_PROTOCOL_SYSTEM}")),
+            Bytes::from_str("0x355d1D7bd40330c235e1132de8D2314b956584c9").unwrap()
+        );
+        assert_ne!(executor("fallback:efficient_prop"), executor(EFFICIENT_PROP_PROTOCOL_SYSTEM));
+    }
+
+    /// Base lists no executor for the Efficient pools yet: they are not served there, so Base's
+    /// default registry resolves no encoder for them. They return as a row at the address of
+    /// Base's PropAMMExecutor once they are.
+    #[test]
+    fn test_flamm_has_no_executor_on_base_yet() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Base).unwrap();
+
+        assert!(registry.get_encoder("flamm").is_none(), "Base lists an executor for flamm");
+    }
+
+    /// On Base the listing doors encode through the generic pAMM encoder against the
+    /// PropAMMExecutor Base already runs for its native IPropAMM venue.
+    #[test]
+    fn test_efficient_prop_resolves_to_the_base_propamm_executor() {
+        /// The PropAMMExecutor on Base.
+        const PROPAMM_EXECUTOR: &str = "0xF30f4c985fCA63913f421F78058031FA6514eF7f";
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Base).unwrap();
+
+        let doors = registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .expect("Base configures the listing doors' executor");
+
+        assert_eq!(doors.executor_address(), &Bytes::from(PROPAMM_EXECUTOR));
+    }
+
+    /// On Base the listing doors are an alias of the chain's one PropAMMExecutor, the one its
+    /// native IPropAMM venue deploys: at its address in the executor addresses and the deployment
+    /// registry, with no deployment of their own. The router test setup deploys one
+    /// PropAMMExecutor, before any executor that depends on the chain, so on a Base fork it lands
+    /// where it lands on Ethereum, and the test addresses give the listing doors that one: the
+    /// doors' Base tests encode against it. Neither file lists the Efficient pools on Base.
+    #[test]
+    fn test_efficient_prop_is_listed_as_an_alias_of_the_base_propamm_executor() {
+        let config = |name: &str| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(format!("config/{name}.json")).unwrap())
+                .unwrap()
+        };
+        let (addresses, deployments, tests, registry) = (
+            config("executor_addresses"),
+            config("executor_deployments"),
+            config("test_executor_addresses"),
+            config("deployment_registry"),
+        );
+        let deploying = |chain: &str| -> Vec<String> {
+            deployments[chain]
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(_, deployment)| deployment["contract"] == "PropAMMExecutor")
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        let (base, ethereum) = (deploying("base"), deploying("ethereum"));
+        assert_eq!(base.len(), 1, "Base deploys one PropAMMExecutor");
+        assert_eq!(ethereum.len(), 1, "Ethereum deploys one PropAMMExecutor");
+        let base = &base[0];
+        let listed = &registry["chains"]["base"]["executors"];
+
+        assert_ne!(base, EFFICIENT_PROP_PROTOCOL_SYSTEM);
+        let door = &addresses["base"][EFFICIENT_PROP_PROTOCOL_SYSTEM];
+        assert!(door.is_string(), "Base lists the listing doors' executor");
+        assert_eq!(door, &addresses["base"][base]);
+        assert_eq!(&listed[EFFICIENT_PROP_PROTOCOL_SYSTEM], door);
+        assert_eq!(tests["base"][EFFICIENT_PROP_PROTOCOL_SYSTEM], tests["ethereum"][&ethereum[0]]);
+        assert!(addresses["base"]["flamm"].is_null());
+        assert!(listed["flamm"].is_null());
+    }
+
+    /// BNB Chain runs no PropAMMExecutor, and the generic pAMM encoder refuses the chain: its
+    /// default registry resolves no encoder for the listing doors, which are not encoded there.
+    #[test]
+    fn test_efficient_prop_has_no_executor_on_bsc() {
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Bsc).unwrap();
+
+        assert!(registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .is_none());
+    }
+
+    /// On Ethereum the listing doors encode through the generic pAMM encoder against the
+    /// PropAMMExecutor Ethereum already runs for its price level stream venues.
+    #[test]
+    fn test_efficient_prop_resolves_to_the_ethereum_propamm_executor() {
+        /// The PropAMMExecutor on Ethereum.
+        const PROPAMM_EXECUTOR: &str = "0xc196f22d69d41A2B1DbF6ef8d28C09bc2CA4E4fa";
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
+
+        let doors = registry
+            .get_encoder(EFFICIENT_PROP_PROTOCOL_SYSTEM)
+            .expect("Ethereum configures the listing doors' executor");
+
+        assert_eq!(doors.executor_address(), &Bytes::from(PROPAMM_EXECUTOR));
+    }
+
+    /// On Ethereum too the listing doors are an alias of the chain's one PropAMMExecutor: at its
+    /// address in the executor addresses, the deployment registry and the test addresses, with no
+    /// deployment of their own.
+    #[test]
+    fn test_efficient_prop_is_listed_as_an_alias_of_the_ethereum_propamm_executor() {
+        let config = |name: &str| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(format!("config/{name}.json")).unwrap())
+                .unwrap()
+        };
+        let (addresses, deployments, tests, registry) = (
+            config("executor_addresses"),
+            config("executor_deployments"),
+            config("test_executor_addresses"),
+            config("deployment_registry"),
+        );
+        let ethereum = deployments["ethereum"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, deployment)| deployment["contract"] == "PropAMMExecutor")
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ethereum.len(), 1, "Ethereum deploys one PropAMMExecutor");
+        let ethereum = &ethereum[0];
+        let listed = &registry["chains"]["ethereum"]["executors"];
+
+        assert_ne!(ethereum, EFFICIENT_PROP_PROTOCOL_SYSTEM);
+        let door = &addresses["ethereum"][EFFICIENT_PROP_PROTOCOL_SYSTEM];
+        assert!(door.is_string(), "Ethereum lists the listing doors' executor");
+        assert_eq!(door, &addresses["ethereum"][ethereum]);
+        assert_eq!(&listed[EFFICIENT_PROP_PROTOCOL_SYSTEM], door);
+        assert_eq!(tests["ethereum"][EFFICIENT_PROP_PROTOCOL_SYSTEM], tests["ethereum"][ethereum]);
     }
 
     /// A hooked V4 pool encodes through the Uniswap V4 encoder, at the chain's `uniswap_v4`

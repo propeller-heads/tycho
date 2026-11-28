@@ -11,9 +11,15 @@ Env vars (can be set in `.claude/settings.local.json`):
 | Variable | Purpose |
 |---|---|
 | `TYCHO_URL` | WebSocket endpoint of the Tycho server (required) |
-| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required); with `--pamm baibai`, BaiBai's feed also polls it every second |
+| `RPC_URL` | Ethereum-compatible JSON-RPC endpoint for on-chain validation (required); with `--pamm baibai`, BaiBai's feed also polls it every second, with `--pamm efficient-prop` the listing doors' feed every 250 ms, and with `--pamm flamm` the Efficient pools feed at every block |
 | `TYCHO_API_KEY` | Auth key; defaults to `sampletoken`, which works against local dev instances |
 | `TYCHO_NO_TLS` | Set to `true` to talk plain HTTP/WS (same as `--no-tls`) |
+| `EFFICIENT_PROP_FRONT`, `EFFICIENT_PROP_FACTORY`, `EFFICIENT_PROP_IMPLEMENTATIONS` | The Efficient PropAMM front, its listing-door factory and the accepted front implementations; required with `--pamm efficient-prop` (see README.md) |
+| `EFFICIENT_PROP_QUOTE_LAYOUT` | The quote contract's layout, `builder` only; required with `--pamm efficient-prop` on Ethereum, refused on Base, which reads no quote contract (see README.md) |
+| `EFFICIENT_PROP_CELL_CODEHASH` | The desk contracts' creation code hash; required with `--pamm efficient-prop` on Ethereum, refused on Base (see README.md) |
+| `EFFICIENT_PROP_STATE_URLS` | Comma-separated URLs of the next block's state map; required with `--pamm efficient-prop` on Ethereum, refused on Base |
+| `EFFICIENT_PROP_APPROVED_DESKS`, `EFFICIENT_PROP_APPROVED_DESKS_URL` | The makers' desk contracts whose listings are served (comma-separated), and a URL whose list replaces them while fresh; with neither, nothing is served (see README.md) |
+| `EFFICIENT_PROP_PRICE_SOURCES` | Comma-separated ids of the front's price sources a listing reading a price print may be bound to and be served; unset, only listings reading no print are served. A source's code runs inside the quote and again inside the fill and can tell the two apart, by what the call reads of its transaction and block and by state the fill has already changed when the source runs (the front's lock, the input already at the door), so approve a source only where its code cannot change and its answer comes from its own stored prices and the clock alone; a guarded source needs approval as any other. The same holds of a listing's two tokens, which are not screened: name only tokens in the book configuration whose code cannot change and moves exactly the amounts asked |
 
 Both the token loader and the protocol stream default to TLS (`https`/`wss`). Pass `--no-tls`
 (or set `TYCHO_NO_TLS=true`) when pointing at a local dev instance served over plain HTTP.
@@ -27,7 +33,8 @@ cargo run -p tycho-integration-test -- \
 ```
 
 Key optional flags: `--no-tls`, `--disable-onchain`, `--disable-rfq`, `--disable-pamm`,
-`--pamm metric,baibai`, `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
+`--pamm metric,baibai,efficient-prop,flamm` (`baibai` on Base only, `efficient-prop` on Ethereum (refused on Base for now),
+`flamm` on Base, Ethereum and BSC), `--rfq-all-pairs`, `--disable-price-level-stream`, `--disable-execution`,
 `--protocols uniswap_v2,curve`,
 `--protocol-tvl-thresholds lunarbase=10` (replaces `--tvl-threshold` for the named protocols;
 each one must be enabled),

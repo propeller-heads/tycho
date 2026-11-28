@@ -173,8 +173,99 @@ for any protocol indexed by Tycho.
   its decoding), `math.rs` (the CurveBook's arithmetic) and `feed.rs` (the feed, its builder and
   the book assembly), beside `state.rs`; its tests run on `test_support.rs` (the recordings and a
   fake node) and `testdata/` (the recordings and `record_fixture.py`, which makes them).
+  `efficient_prop/` serves the Efficient PropAMM listing doors on Ethereum, Base and BNB Chain (Base
+  samples the doors at the head, Ethereum and BNB Chain at the next block): one `IPropAMM` door per
+  listing and one book per door (the door in `pamm_address`, the listing's tip cap in
+  `tip_cap_wei`), filled by the generic `PropAMMSwapEncoder` and `PropAMMExecutor`, or on Ethereum
+  by default through `PropAMMFallbackRouter` (`fallback:efficient_prop`). Nothing of the
+  venue's pricing is ported: `reader.rs` finds the doors (the front's `doorView` scan, each door the
+  factory's CREATE2 child) and samples each door's own `quote`; `overrides.rs` reads the next
+  block's state maps (`titan_getPammStateOverrides`), since a maker's update lands only in a
+  builder's block (`Cadence`: Ethereum's slots, BNB Chain's 450 ms blocks); `slots.rs` is the quote
+  contract's slot rule; `ladder.rs` quotes the samples exactly and along floored chords, nothing
+  outside them; `state.rs` holds the gas and each side's deadline; `desks.rs` the approved makers;
+  `telemetry.rs` the feed's metrics (polls by outcome, listings covered or not by reason, the node's
+  answer age). `mod.rs` documents every rule; what a change must keep:
+  - a listing is served only where its maker's desk contract is approved (`with_approved_desks`,
+    or the list at `with_approved_desks_url` while its last read is fresh; neither: nothing is
+    served, and a read that fails brings no desk in), its price sources are in
+    `approved_price_sources`, and the front runs an allow-listed implementation
+  - a swap is never charged above what its fill costs its transaction: sent direct, on Ethereum
+    only figures measured on the listing's own pair (`ETHEREUM_MEASURED`), or the gas
+    `credit_listing` names for it (required for a credit listing, a stock listing and any other
+    pair); on Base and BNB Chain only the gas `credit_listing` names; a listing with neither is
+    left out (`has_gas`). On Ethereum every listing settles through the fallback router by
+    default and is charged its cheaper branch (`FALLBACK_SWAP_GAS`), needing no figure of its own
+    but a stock listing's named gas; a listing with a credit mode is always sent direct
+    (`efficient_prop`, its named gas), since the router's quote runs its route again;
+    `without_fallback_router()` sends every listing direct, and Base and BNB Chain refuse the
+    router (its figures are Ethereum's). The charge stays that floor: what a fill is expected to
+    cost and what its call adds to a gas limit go out as data beside it (`expected_gas`,
+    `gas_limit_addition`, `GasOutlook`), each only where a figure measured on the listing states
+    it, never under and never over: a listing with a credit mode names no expected gas, and an
+    addition only from the dearest fill `credit_listing` names (`CreditGas::most_before_refunds`),
+    not from a charge
+  - a size is quoted only where the door answered it at the read, in every block of the book's
+    life; a component names that life in `valid_from_block`, `bid_valid_until_ms` and
+    `ask_valid_until_ms`. A side on a depth post is also asked at each rung boundary its walk
+    crosses (`RungPost`, record words 8 and 9 for the fill memory): sizes only, never prices; a
+    credit listing keeps the grid
+  - a poll asks no door only where everything the doors' answers are read from equals the last
+    sampled poll's (`SampledOn` in `reader.rs`): the head's hash and number, the next block's
+    number and second, the whole state override sent, each listing taken with its `doorView`
+    bytes and its record's and desk's words, the implementation. Whatever a door's calls are
+    newly derived from joins that key. The doors' requests name their block by the head's hash
+    (EIP-1898), and a read is kept only where they did and the node answered all of it
+    (`Answered`); a node that names no block hash, or refuses one, is asked every door by number.
+    Only a refusal of the form itself (JSON-RPC -32602 or -32601) counts against the hash form,
+    and never for the reader's life: three in a row set it aside for 32 heads (`HashForm`)
+  - a next-block poll reads the latest header first and its listings and words at that hash
+    (`read_head`); `batch` answers a request naming a block by hash with no override from what
+    the node answered there before (`HeadAnswers`, one block), so a poll at a head already read
+    sends the header alone, or the doors' requests alone. Never key it by number or a tag, and
+    never keep a request under an override; a node naming no latest hash, or refusing one, reads
+    its listings at the latest block for 32 heads
+  - the quote layout, front, factory, desk contract code hash and allow-list are builder
+    arguments (`EfficientPropDeployment`); the one place that writes them down is the chain's
+    preset: `EfficientPropDeployment::ethereum()`, the deployed front as `testdata/`'s recordings
+    hold it (a test holds the two equal), `base()` from Base's deployment record and `bnb()` from
+    BNB Chain's protocol record (a test holds each desk contract code hash to its record's first desk),
+    which `EfficientPropFeedBuilder::ethereum`, `base` and `bnb` build on with the deployment's
+    price sources (none on BNB Chain, whose one registered source is the caller's to approve).
+    No other code reads them as constants; `with_door_code_hash` pins the doors'
+  - BNB Chain has no `PropAMMExecutor`, so its books are simulated and cannot be encoded. The
+    Base and BNB Chain paths run in the offline tests, and against the deployed fronts in ignored
+    tests
+  Its tests run on `test_support.rs` (a fake node, and a node replaying `testdata/`'s polls
+  recorded from local forks of Ethereum holding the deployed contracts, checked wei for wei).
   The line to `rfq/` is the counterparty: a maker who can decline a specific trade after pricing
   it makes an RFQ, a pool that fills any taker with fresh price data makes a pAMM
+  - **`pamm/protocols/flamm/`**: Efficient pools, read from the chain instead of a venue API.
+    `FlammFeed` polls the configured factories' pools over JSON-RPC and quotes each pool's hook
+    pair as a ladder of the pool's own `previewSwap` answers at one block, asked as Tycho's
+    router, by one `eth_call` per pool of a sampler the node runs by state override
+    (`assets/FlammSampler.sol`, never deployed, never reverts). It publishes one `flamm_pair`
+    book per pool with the pool as `pamm_address`, for the generic `PropAMMSwapEncoder` and
+    `PropAMMExecutor`. Nothing of the pools' pricing is ported; `mod.rs` and each file's module
+    docs hold the rules. What a change must keep:
+    - a pool is served only where its hook class and price feed are listed (`hook_classes`,
+      `price_feeds`, `price_feed_code_hashes`) or it is named (`pools`); a builder without lists
+      refuses to build, and a pool a front prices is never served
+    - `ladder::settle` turns a direction's answers into rungs by their route labels; a rung is
+      the pool's answer less the haircut; a swap leaves its own side empty until the next poll.
+      `guard.rs` keeps one piece of a ladder whose output a venue holding a minimum position
+      lends. Both rules have shared vectors in `testdata/`, pinned by hash
+    - gas is never over what a fill costs inside the pool's `swap()` net of its refund: the least
+      base of `gas_table.rs` (generated from measured fills, never edited) over the cells the
+      reads allow, the legs read on every walk among them; a pool is served only on the two
+      tokens its venues' kinds were measured on (`MEASURED_POOLS`)
+    - `reader.rs` classes a node's error as not run, skipped or missed, never as the pool's; a
+      pool that reverts a view is set aside with a growing backoff; books are reused only for
+      the same block hash
+    - the sampler's runtime and the fake pool's (`testdata/MaxOfTwoPool.sol`) come from
+      `assets/build_sampler.py` (solc 0.8.33, via IR, paris, no metadata; `--check` verifies the
+      committed bytes); `sampler_run.rs` runs the sampler's bytes on revm against the fake pool
+      and pins both runtimes' and sources' keccaks
 - **`price_level_stream/`**: Titan pAMM price level stream — `PriceLevelStreamBuilder` turns the
   Titan WebSocket's price level messages directly into `Update`s (no indexer feed
   round-trip); `PriceLevelStreamState` quotes by interpolating its quotes, records each swap's

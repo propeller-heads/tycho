@@ -309,6 +309,54 @@ BaiBai books do not include it, because the priority fee is set when the transac
 These values were measured on Base at block 53,545,000. The venue owner can change the threshold and the cap without a contract upgrade, and Tycho does not read them.
 {% endhint %}
 
+{% hint style="warning" %}
+**Efficient PropAMM: approved makers and gas**
+
+Anyone can reserve a listing and post quotes to it, so a feed serves a listing only where its maker's desk contract is approved: `EfficientPropFeedBuilder::with_approved_desks`, or the list at `with_approved_desks_url` (`{"chainId": 1, "updatedAt": <Unix seconds>, "desks": ["0x…"]}`), which replaces that set while its last read is under ten minutes old. A feed built with neither serves nothing, and a list that cannot be read brings no desk in. Without a list URL, the desks you give `with_approved_desks` are the whole set, and they rule.
+
+`EfficientPropFeedBuilder::ethereum` holds the front deployed on Ethereum, its listing-door factory, its quote layout, its desk contracts' code hash, the implementation the feed was checked against and the deployment's four price sources, so you set a node, one state URL (`state_urls`) and your approved desks.
+
+`EfficientPropFeedBuilder::base` holds the front deployed on Base and the deployment's one price source, the USDe/USDC lane. The deployment registered that source unguarded: a fill reads the lane's latest valid print, with no hold. That print caps the maker's signed levels in the pool's favour and can refuse a fill, so a post landing between the book's read and your fill can change what the fill pays, but never to better than the maker's signed levels. Base needs no state URL: you set a Base node, your approved desks and each listing's gas (`credit_listing`).
+
+`EfficientPropFeedBuilder::bnb` holds the front deployed on BNB Chain, and values books in USD1 beside the chain's curated stablecoins. It approves no price source: approve the deployment's one, the QQQB/USD1 price contract, with `approved_price_sources` once you have checked it. Each preset builds for its own chain alone and checks the front's implementation code against that chain's. Tycho runs no `PropAMMExecutor` on BNB Chain, so its pAMM encoder refuses the chain: books there are simulated and cannot be encoded.
+
+On Ethereum the feed charges a swap only gas measured on its listing's own pair, never above what the fill costs its transaction: it holds figures for wstETH/WETH, wstETH/USDC, wstETH/USDT and USDT/USDC, and serves any other listing only where `credit_listing` names it with gas measured on it. On Base and BNB Chain the feed holds no figure of its own: it serves a listing only where `credit_listing` names its gas.
+{% endhint %}
+
+{% hint style="warning" %}
+**Efficient PropAMM: taker tip cap**
+
+Each Efficient PropAMM listing door refuses a swap whose transaction pays a priority fee (gas price minus basefee) above its listing's taker tip cap, and the whole route reverts. The listing's operator sets the cap and can change it, and you choose the priority fee after the route is priced, so the books cannot hold a route to it.
+
+Each book carries its listing's cap at the read, in wei per gas, in the `tip_cap_wei` static attribute, which a listing with no cap leaves out. Send a route through listing doors with a priority fee at or under the lowest cap among them. If you always send above some priority fee, `EfficientPropFeedBuilder::min_tip_cap_wei` leaves out the listings that would refuse it.
+{% endhint %}
+
+{% hint style="warning" %}
+**Efficient PropAMM: fills that borrow, and gas limits**
+
+A listing with a credit mode fills its larger sizes through its pool's credit route: the pool borrows or repays at its lender inside the swap. On the first Ethereum pool's wstETH/WETH listing such a fill uses about 0.93M to 1.13M gas before refunds, against about 0.14M for a fill the pool's custody pays. Each fill is charged the figure of its path, measured on that listing's pool; the route's gas moves with the pool's state by several percent.
+
+The figures are what a fill costs its transaction after refunds, not a gas limit. The call uses more before the transaction ends: the figure plus its refund, 19,900 on a fill the pool's custody pays and 84,400 to 99,500 on the first pool's route. A fill also forwards its gas through three contracts, each keeping a 64th back, so the least limit that lets a fill through is above what it uses: 11% to 20% above the gas before refunds, measured through the `PropAMMExecutor`. Give a route through a listing door at least 25% over its estimate plus those refunds, or it can run out of gas and revert.
+
+Each book carries two static attributes beside its swaps' charges, each only where a figure measured on its listing, or named for it, states it. `expected_gas` is what a fill the pool's custody pays costs in the charge's own terms; through the fallback router it is at least the door's branch, 64,000 to 121,000 above the charge of the cheaper branch. A listing with a credit mode sent direct carries no `expected_gas`: each swap's charge is already its own path's figure. `gas_limit_addition` is what one swap's call adds to your gas limit, not the transaction's limit: the dearest fill the listing has a figure for, before refunds, with 25% on top. A listing in no credit mode sizes it from its custody fill and that fill's refund of 19,900, or from the dearest fill `credit_listing` names as a fifth figure where that is more. A listing with a credit mode carries it only where `credit_listing` names the dearest fill measured on that listing as a fifth figure (1,134,823 on the first pool's wstETH/WETH listing, which gives 1,418,529), whether its book serves a routed size or its custody sizes alone. The feed refuses a fifth figure under the dearest of the four charges plus 19,900: a charge is net of its refund, and every fill traced refunds at least that. A listing with no figure of its own carries neither attribute through the fallback router, and neither covers the pool you name to fall back on.
+
+On a listing with a credit mode, size the limit from the route's gas before refunds whatever the size: each figure is the least a first fill in a fresh block pays, and a size quoted inside custody fills through the route when another fill of the same block takes the pool's balance first.
+
+A side is quoted past its pool's custody only as far as the door answers at the read. On that listing a purchase of wstETH past custody fills by repaying what the pool owes in WETH, so those sizes are quoted while the pool owes and refused, in the book as at the door (`NotEnoughDepth`), while it owes nothing.
+{% endhint %}
+
+{% hint style="warning" %}
+**Efficient PropAMM on Ethereum and BNB Chain: `NoWord`**
+
+On Ethereum a maker's update reaches the chain only inside a builder's block, and a listing door fills only in the block that carries its maker's update, or, where the listing and the update carry, in the block after. In any other block the door reverts `NoWord`, the whole route reverts, and the taker pays the gas. The books are read from the `/state` answers for the next block (`EfficientPropFeedBuilder::state_urls`) and only quote a listing whose update an answer holds, but a book cannot know which builder wins the block: a route sent to a builder that does not carry the update, or one that lands a block late, reverts.
+
+Send routes through Ethereum listing doors only to the builders that carry the makers' updates, and only for the block the books were read for, which each component names in its `valid_from_block` static attribute. Each side quotes until its last block's time less a 1 s landing allowance, the Unix millisecond in `bid_valid_until_ms` and `ask_valid_until_ms`; after that the book refuses the route, before the chain does. Keep listing doors out of a route you cannot afford to revert, or send them as a route of their own.
+
+BNB Chain works the same way once its front lists: 48 Club carries the makers' updates, so send routes through BNB Chain listing doors to 48 Club alone, for the block in `valid_from_block`. A block lands every 450 ms, so each side quotes until the head's milliseconds and 450 ms (900 ms where the listing carries into the block after) less a 100 ms landing allowance.
+
+On Ethereum the feed publishes its books as `fallback:efficient_prop` by default, settled through the `PropAMMFallbackRouter`: where the door quotes nothing, or less than the fallback pool you name in the swap's `user_data` (required on this path), that pool fills and the route does not revert. Every swap on this path is charged what the cheaper branch, a fill on the fallback pool, cost on fork fills through the deployed router (83,181 on a Uniswap V2 pair and 105,181 on a V3 pool, with the 40,000 Tycho's gas estimator adds for the router and its budget for the router's quote of that pool; a fill at the door spent about 49,000 to 128,000 more). A listing with a credit mode is always published direct, as `efficient_prop`, charged the gas named for it: the router's quote would run its credit route again. `EfficientPropFeedBuilder::without_fallback_router()` publishes every listing direct, as `efficient_prop`, for a caller that names no fallback pool; the paragraphs above then hold for every route. Base and BNB Chain publish direct.
+{% endhint %}
+
 ## pAMM Price Level Stream
 
 Besides the book feeds above, Tycho Simulation consumes <a href="https://docs.titanbuilder.xyz/propamms/takers#pamm-price-level" target="_blank" rel="noopener noreferrer">Titan Builder's pAMM price level stream</a>: a WebSocket of per-pair quote ladders for the pAMMs Titan builds blocks with, on Ethereum Mainnet. `PriceLevelStreamBuilder` turns those frames into the same `Update` messages the protocol stream emits, so you consume it like any other stream, and it quotes venues no book feed above covers. The [pAMM Price Level Stream](price-level-stream.md) page covers its configuration, freshness contract, message format and metrics.
