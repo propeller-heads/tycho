@@ -159,6 +159,14 @@ impl FallbackProtocol {
             .get(&chain)
             .is_some_and(|protocols| protocols.contains(&self))
     }
+
+    /// The protocol a fallback swap's `user_data` names, `None` when it does not parse into a
+    /// fallback swap. The chain and the protocol's own limits are not checked.
+    pub(crate) fn from_user_data(user_data: Option<&Bytes>) -> Option<Self> {
+        FallbackSwap::from_user_data(user_data)
+            .ok()
+            .map(|fallback| fallback.protocol)
+    }
 }
 
 /// The fallback protocol and its pool, from the swap's `user_data` JSON, e.g.

@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use alloy::primitives::{Address, U256};
 use itertools::Itertools;
 use tycho_client::feed::{synchronizer::ComponentWithState, BlockHeader};
-use tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim, Bytes};
+use tycho_common::{
+    models::token::Token,
+    simulation::{errors::SimulationError, protocol_sim::ProtocolSim},
+    Bytes,
+};
 
 use super::state::UniswapV4State;
 use crate::{
@@ -249,6 +253,27 @@ impl TryFromWithBlock<ComponentWithState, BlockHeader> for UniswapV4State {
             state.set_hook_handler(hook_handler);
         };
 
+        // A pool whose hook refuses the pool's current terms (`spot_fees` fails with
+        // `InvalidInput`) cannot price until a delta changes those terms, so it skips the probe
+        // below and decodes: failing the decode would drop the pool, or stop the stream, and that
+        // delta would never reach it. Every quote of such a pool reports the refusal.
+        if let Some(hook) = &state.hook {
+            match hook.spot_fees(true) {
+                Ok(_) => {}
+                Err(SimulationError::InvalidInput(reason, _)) => {
+                    tracing::warn!(
+                        pool_id = %snapshot.component.id,
+                        %reason,
+                        "uniswap v4 pool decoded unpriced: its hook refuses the pool's terms"
+                    );
+                    return Ok(state);
+                }
+                Err(
+                    err @ (SimulationError::FatalError(_) | SimulationError::RecoverableError(_)),
+                ) => return Err(err.into()),
+            }
+        }
+
         for tokens in snapshot
             .component
             .tokens
@@ -449,7 +474,14 @@ mod tests {
     use super::*;
     use crate::evm::protocol::{
         test_utils::try_decode_snapshot_with_defaults,
-        uniswap_v4::hooks::pancakeswap_clalpha::hook_handler::CLALPHA_BEFORE_SWAP_GAS,
+        uniswap_v4::hooks::{
+            hook_handler_creator::register_hook_handler,
+            models::HookSpotFees,
+            pancakeswap_clalpha::hook_handler::CLALPHA_BEFORE_SWAP_GAS,
+            test_hook::{
+                ExtensionTestHook, ExtensionTestHookCreator, SpotFeesAnswer, TEST_HOOK_CHAIN,
+            },
+        },
     };
 
     fn usv4_component() -> ProtocolComponent {
@@ -1024,6 +1056,63 @@ mod tests {
         };
         assert!(message.contains(&address_sized.to_string()), "{message}");
         assert!(message.contains("u128"), "{message}");
+    }
+
+    /// A hook whose `spot_fees` refuses the pool's terms leaves the pool decoded and unpriced;
+    /// any other `spot_fees` failure fails the decode, and a hook that answers is probed as usual.
+    #[tokio::test]
+    #[rstest]
+    #[case::refusal(SpotFeesAnswer::Refuses, DecodeOutcome::DecodesUnpriced)]
+    #[case::failure(SpotFeesAnswer::Fails, DecodeOutcome::Fails)]
+    #[case::fees(
+        SpotFeesAnswer::Fees(HookSpotFees { lp_fee_override: None, hook_fee_pips: 0 }),
+        DecodeOutcome::DecodesPriced
+    )]
+    async fn test_hook_spot_fees_scope_the_decode(
+        #[case] answer: SpotFeesAnswer,
+        #[case] expected: DecodeOutcome,
+    ) {
+        // One address per case: the registry is shared by every test in the process.
+        let hook_address = match expected {
+            DecodeOutcome::DecodesUnpriced => "0x0000000000000000000000000000000000000e01",
+            DecodeOutcome::Fails => "0x0000000000000000000000000000000000000e02",
+            DecodeOutcome::DecodesPriced => "0x0000000000000000000000000000000000000e03",
+        };
+        let hook = ExtensionTestHook {
+            address: Address::from_str(hook_address).unwrap(),
+            spot_fees: answer,
+            ..Default::default()
+        };
+        register_hook_handler(
+            TEST_HOOK_CHAIN,
+            hook.address,
+            Box::new(ExtensionTestHookCreator(hook)),
+        )
+        .expect("registration should succeed");
+
+        let result =
+            decode_with_chain(hookless_snapshot_with_hook(hook_address), Some(TEST_HOOK_CHAIN))
+                .await;
+
+        match (expected, result) {
+            (DecodeOutcome::DecodesUnpriced, Ok(state)) => {
+                let (t0, t1) = (token0(), token1());
+                assert!(state.hook.is_some());
+                assert!(matches!(
+                    state.spot_price(&t0, &t1),
+                    Err(SimulationError::InvalidInput(..))
+                ));
+            }
+            (DecodeOutcome::Fails, Err(_)) | (DecodeOutcome::DecodesPriced, Ok(_)) => {}
+            (expected, result) => panic!("expected {expected:?}, got {:?}", result.map(|_| ())),
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum DecodeOutcome {
+        DecodesUnpriced,
+        Fails,
+        DecodesPriced,
     }
 
     #[tokio::test]

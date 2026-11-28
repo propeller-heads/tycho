@@ -1,8 +1,11 @@
 //! Solidity storage-slot arithmetic and word decoding over the storage writes that extended
 //! Substreams blocks carry per call.
 //!
-//! Every reader here is total: malformed input yields `None` rather than a panic, because a panic
-//! inside a Substreams module fails the block for every consumer of the stream.
+//! Every reader of a storage change here is total: malformed input yields `None` rather than a
+//! panic, because a panic inside a Substreams module fails the block for every consumer of the
+//! stream. The field types ([`Field`], [`SignedField`], [`BytesField`]) check their window when
+//! constructed; every field is a constant, so a bad window fails the build, and their readers are
+//! total.
 
 use std::collections::HashMap;
 
@@ -57,25 +60,115 @@ pub fn word_at_offset(slot: &Word, offset: u64) -> Word {
     slot
 }
 
+/// Whether [`read_uint`] reads the window `width` bytes wide starting `low_byte_offset` bytes from
+/// the low end of a word: `width` is 1 to 8, so the value fits a `u64`, and the window ends within
+/// the word.
+pub const fn is_uint_window(low_byte_offset: usize, width: usize) -> bool {
+    width >= 1 && width <= 8 && low_byte_offset <= 32 - width
+}
+
 /// Reads an unsigned big-endian integer packed into `word`, `width` bytes wide and starting
 /// `low_byte_offset` bytes from the low end of the word — the order Solidity packs struct members
-/// into a slot. Returns `None` when `width` is 0, when `width` exceeds 8, or when
-/// `low_byte_offset + width` reaches past the word.
+/// into a slot. Returns `None` unless [`is_uint_window`] holds for the window.
 pub fn read_uint(word: &Word, low_byte_offset: usize, width: usize) -> Option<u64> {
-    if width == 0 || width > 8 {
-        return None;
-    }
-    let high_byte_offset = low_byte_offset.checked_add(width)?;
-    if high_byte_offset > 32 {
+    if !is_uint_window(low_byte_offset, width) {
         return None;
     }
 
-    let start = 32 - high_byte_offset;
-    let mut value = 0u64;
-    for byte in &word[start..start + width] {
-        value = (value << 8) | u64::from(*byte);
+    Some(read_window(word, low_byte_offset, width))
+}
+
+/// The unsigned big-endian integer in a window [`is_uint_window`] admits.
+fn read_window(word: &Word, low_byte_offset: usize, width: usize) -> u64 {
+    let start = 32 - low_byte_offset - width;
+    word[start..start + width]
+        .iter()
+        .fold(0u64, |value, byte| (value << 8) | u64::from(*byte))
+}
+
+/// A field packed into a storage word: `width` bytes starting `low` bytes from the low end.
+#[derive(Clone, Copy)]
+pub(crate) struct Field {
+    low: usize,
+    width: usize,
+}
+
+impl Field {
+    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
+    /// [`is_uint_window`] holds for the window, the check `read_uint` makes. Every field is a
+    /// constant, so the panic fails the build.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(is_uint_window(low, width), "a field is a window read_uint reads");
+        Self { low, width }
     }
-    Some(value)
+
+    /// The field read as an unsigned big-endian integer.
+    pub(crate) fn unsigned(self, word: &Word) -> u64 {
+        read_window(word, self.low, self.width)
+    }
+
+    /// The field as the 8-byte big-endian `u64` the attributes carry.
+    pub(crate) fn u64_bytes(self, word: &Word) -> Vec<u8> {
+        self.unsigned(word)
+            .to_be_bytes()
+            .to_vec()
+    }
+}
+
+/// A two's-complement field packed into a storage word, at most 4 bytes wide so that it fits an
+/// `i32`.
+#[derive(Clone, Copy)]
+pub(crate) struct SignedField(Field);
+
+impl SignedField {
+    /// The signed field `width` bytes wide starting `low` bytes from the low end of a word. Panics
+    /// unless the field is at most 4 bytes wide and [`Field::new`] accepts it.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(width <= 4, "a signed field fits an i32");
+        Self(Field::new(low, width))
+    }
+
+    /// The field read as a two's-complement integer of its width, sign-extended.
+    pub(crate) fn read(self, word: &Word) -> i32 {
+        let shift = 64 - 8 * self.0.width as u32;
+        ((self.0.unsigned(word) << shift) as i64 >> shift) as i32
+    }
+
+    /// The field as the 4-byte big-endian `i32` the attributes carry.
+    pub(crate) fn i32_bytes(self, word: &Word) -> Vec<u8> {
+        self.read(word).to_be_bytes().to_vec()
+    }
+}
+
+/// A field wider than 8 bytes, which no [`Field`] reads, kept as its big-endian bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct BytesField {
+    low: usize,
+    width: usize,
+}
+
+impl BytesField {
+    /// The field `width` bytes wide starting `low` bytes from the low end of a word. Panics unless
+    /// it ends within the word; every field is a constant, so the panic fails the build.
+    pub(crate) const fn new(low: usize, width: usize) -> Self {
+        assert!(width >= 1 && low + width <= 32, "a field lies within a word");
+        Self { low, width }
+    }
+
+    /// The field's bytes, big-endian, as the attribute carries them.
+    pub(crate) fn bytes(self, word: &Word) -> Vec<u8> {
+        word[32 - self.low - self.width..32 - self.low].to_vec()
+    }
+}
+
+/// A watched word of a pool's hook storage and the state attributes it holds.
+pub(crate) trait StateWord: Copy + Eq + std::hash::Hash + 'static {
+    /// Every watched word of the layout, in the order their attributes are emitted.
+    const ALL: &'static [Self];
+
+    /// The attributes the word holds, as (name, value) pairs, in the formats the simulation
+    /// decoder reads. A byte the simulation does not read holds none.
+    fn attributes(self, value: &Word) -> Vec<(&'static str, Vec<u8>)>;
 }
 
 /// The net storage writes one transaction made to one contract, keyed by slot: the value the slot

@@ -1489,9 +1489,10 @@ async fn process_update(
     // state the quote was priced on (`account_overwrites`) whenever the stream attached one. So
     // they are simulated the way a consumer tests the quote before that block exists: on the
     // quoted block's parent, with the quoted block's number and timestamp. A full block's update
-    // of a protocol in `NEXT_BLOCK_PROTOCOLS` is priced for the block after it, where a swap
-    // quoted on it executes at the earliest, so those swaps are simulated on the block's state in
-    // the next block's context. Every other swap, a pinned component's say, is simulated on the
+    // of a protocol in `NEXT_BLOCK_PROTOCOLS`, or of a chain and protocol pair in
+    // `NEXT_BLOCK_CHAIN_PROTOCOLS`, is priced for the block after it. A swap quoted on it
+    // executes there at the earliest. So those swaps are simulated on the block's state in the
+    // next block's context. Every other swap, a pinned component's say, is simulated on the
     // block's own state.
     let (before_block, after_block): (HashMap<_, _>, HashMap<_, _>) = block_execution_info
         .clone()
@@ -1503,7 +1504,9 @@ async fn process_update(
     };
     let (next_block, after_block): (HashMap<_, _>, HashMap<_, _>) = after_block
         .into_iter()
-        .partition(|(_, info)| full_block_update && executes_in_next_block(&info.protocol_system));
+        .partition(|(_, info)| {
+            full_block_update && executes_in_next_block(chain, &info.protocol_system)
+        });
     record_swaps_without_simulation_overrides(&before_block);
     // A batch that fails ends the update: the probes of the batches before it are judged, and
     // the others' checks are recorded as not run.
@@ -1899,7 +1902,7 @@ async fn process_state(
         );
 
         if let Some(package) = package {
-            match unprobeable(&component.protocol_system) {
+            match unprobeable(chain, &component.protocol_system) {
                 Some(reason) => {
                     limit_probes::not_probed(strict, &component, token_in, token_out, reason)
                 }
@@ -2054,10 +2057,10 @@ async fn process_state(
 /// Why a strict protocol's swaps cannot be probed, if they cannot: a price level venue quotes a
 /// block not built yet, a next-block protocol's quote moves with the block it executes in, and
 /// CoWAMM is not executed at all.
-fn unprobeable(protocol_system: &str) -> Option<NotRun> {
+fn unprobeable(chain: Chain, protocol_system: &str) -> Option<NotRun> {
     if simulates_before_block(protocol_system) {
         Some(NotRun::BookVenue)
-    } else if executes_in_next_block(protocol_system) {
+    } else if executes_in_next_block(chain, protocol_system) {
         Some(NotRun::NextBlock)
     } else if protocol_system == COWAMM_PROTOCOL_SYSTEM {
         Some(NotRun::NotExecutable)
@@ -2330,16 +2333,24 @@ fn simulates_before_block(protocol_system: &str) -> bool {
 }
 
 /// Protocol systems whose quotes move with the block they execute in and that the decoder prices
-/// for the block after the update's, via `ProtocolSim::apply_block`. The v4 families stay out
-/// although the `pancakeswap_clalpha` hook implements it: their pools with VM hooks are priced on
-/// the update's block.
+/// for the block after the update's, via `ProtocolSim::apply_block`. The v4 families whose pools
+/// can carry VM hooks stay out although the `pancakeswap_clalpha` hook implements it: their pools
+/// with VM hooks are priced on the update's block.
 const NEXT_BLOCK_PROTOCOLS: [&str; 5] =
     ["aerodrome_slipstreams", "biconomy", "etherfi", "lido_v4", "lunarbase"];
 
+/// Protocol systems that execute in the next block on one chain only. `uniswap_v4_hooks` on
+/// Elysium is in, which holds while two facts of `tycho-simulation` do: Elysium is not in its
+/// `GENERIC_VM_HOOK_CHAINS`, and the hooks there are the native handlers registered for Elysium
+/// in `hook_handler_creator.rs`, whose quotes depend on the block timestamp. Revisit the entry
+/// when either changes.
+const NEXT_BLOCK_CHAIN_PROTOCOLS: [(Chain, &str); 1] = [(Chain::Elysium, "uniswap_v4_hooks")];
+
 /// Whether a swap of `protocol_system` from a full block's update is simulated in the next block's
 /// context, the block its quote priced.
-fn executes_in_next_block(protocol_system: &str) -> bool {
-    NEXT_BLOCK_PROTOCOLS.contains(&protocol_system)
+fn executes_in_next_block(chain: Chain, protocol_system: &str) -> bool {
+    NEXT_BLOCK_PROTOCOLS.contains(&protocol_system) ||
+        NEXT_BLOCK_CHAIN_PROTOCOLS.contains(&(chain, protocol_system))
 }
 
 /// The block a Tenderly link replays a swap of `block` in. `None` keeps the link's default, the
@@ -2534,19 +2545,39 @@ mod tests {
     }
 
     #[rstest]
-    #[case::aerodrome_slipstreams("aerodrome_slipstreams", true)]
-    #[case::biconomy("biconomy", true)]
-    #[case::etherfi("etherfi", true)]
-    #[case::lido_v4("lido_v4", true)]
-    #[case::lunarbase("lunarbase", true)]
-    #[case::uniswap_v4("uniswap_v4", false)]
-    #[case::unlisted_native("uniswap_v3", false)]
-    #[case::vm("vm:curve", false)]
+    #[case::aerodrome_slipstreams(Chain::Ethereum, "aerodrome_slipstreams", true)]
+    #[case::biconomy(Chain::Ethereum, "biconomy", true)]
+    #[case::etherfi(Chain::Ethereum, "etherfi", true)]
+    #[case::lido_v4(Chain::Ethereum, "lido_v4", true)]
+    #[case::lunarbase(Chain::Ethereum, "lunarbase", true)]
+    #[case::uniswap_v4_hooks_on_elysium(Chain::Elysium, "uniswap_v4_hooks", true)]
+    #[case::uniswap_v4_hooks_on_ethereum(Chain::Ethereum, "uniswap_v4_hooks", false)]
+    #[case::uniswap_v4_hooks_on_robinhood(Chain::Robinhood, "uniswap_v4_hooks", false)]
+    #[case::uniswap_v4_on_elysium(Chain::Elysium, "uniswap_v4", false)]
+    #[case::uniswap_v4(Chain::Ethereum, "uniswap_v4", false)]
+    #[case::unlisted_native(Chain::Ethereum, "uniswap_v3", false)]
+    #[case::vm(Chain::Ethereum, "vm:curve", false)]
     fn only_listed_protocols_execute_in_the_next_block(
+        #[case] chain: Chain,
         #[case] protocol_system: &str,
         #[case] expected: bool,
     ) {
-        assert_eq!(executes_in_next_block(protocol_system), expected);
+        assert_eq!(executes_in_next_block(chain, protocol_system), expected);
+    }
+
+    /// The `uniswap_v4_hooks` entries of `NEXT_BLOCK_CHAIN_PROTOCOLS` hold only while their chain
+    /// prices hook pools with native handlers alone: a chain the generic VM hook handler serves
+    /// prices its VM hook pools on the update's block.
+    #[test]
+    fn next_block_hook_chains_have_no_generic_vm_hooks() {
+        use tycho_simulation::evm::protocol::uniswap_v4::hooks::hook_handler_creator::GENERIC_VM_HOOK_CHAINS;
+        for (chain, protocol_system) in super::NEXT_BLOCK_CHAIN_PROTOCOLS {
+            assert!(
+                protocol_system != "uniswap_v4_hooks" || !GENERIC_VM_HOOK_CHAINS.contains(&chain),
+                "{chain} serves generic VM hooks, so its uniswap_v4_hooks pools are not all \
+                 priced for the next block"
+            );
+        }
     }
 
     #[rstest]

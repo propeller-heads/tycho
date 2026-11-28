@@ -3,7 +3,7 @@ const hre = require("hardhat");
 const {deployCreate2} = require("./utils");
 
 // Deploys the fallback router named by FALLBACK_ROUTER: `propamm` (the default),
-// `metric`, `bebop`, `hashflow`, `native` or `liquorice`.
+// `metric`, `bebop`, `hashflow`, `native`, `liquorice` or `baibai`.
 //
 // Every fallback router takes three per-chain singletons: Uniswap V4's PoolManager,
 // Fluid's liquidity layer and the Uniswap V3 static quoter. The first two come
@@ -18,14 +18,17 @@ const {deployCreate2} = require("./utils");
 // chain's `rfq:hashflow` entry. NativeFallbackRouter also takes the Native router, from
 // the chain's `rfq:native` entry. LiquoriceFallbackRouter also takes the Liquorice
 // settlement and balance manager, from the chain's `rfq:liquorice` entry; Liquorice
-// must then allow the router as a solver.
+// must then allow the router as a solver. BaibaiFallbackRouter also takes the BaiBai
+// entrypoint, from the chain's `pamm:baibai` entry; BaiBai charges the router its own
+// taker fee, so it should whitelist the router.
 //
 // Then deploy the matching executor with deploy-executors.js: add an entry with
 // the printed router address to executor_deployments.json (`fallback` for
 // PropAMMFallbackExecutor, `fallback:rfq:metric` for MetricFallbackExecutor,
 // `fallback:rfq:bebop` for BebopFallbackExecutor, `fallback:rfq:hashflow` for
 // HashflowFallbackExecutor, `fallback:rfq:native` for NativeFallbackExecutor,
-// `fallback:rfq:liquorice` for LiquoriceFallbackExecutor). A Bebop, Hashflow, Native or
+// `fallback:rfq:liquorice` for LiquoriceFallbackExecutor, `fallback:pamm:baibai` for
+// BaibaiFallbackExecutor). A Bebop, Hashflow, Native or
 // Liquorice router also needs its address as `fallback_router` under its protocol in
 // protocol_specific_addresses.json; Native also needs `router_v6` there.
 const executorDeployments = require("../../config/executor_deployments.json");
@@ -39,10 +42,13 @@ const ROUTERS = {
     hashflow: "HashflowFallbackRouter",
     native: "NativeFallbackRouter",
     liquorice: "LiquoriceFallbackRouter",
+    baibai: "BaibaiFallbackRouter",
 };
 
 // Eden Network's Uniswap V3 static quoter, per chain:
 // https://github.com/eden-network/uniswap-v3-static-quoter#deployments
+// `FALLBACK_STATIC_QUOTER_CHAINS` in the Rust gas estimator lists these chains, to budget
+// the Uniswap V3 fallback quote; change it with this map.
 const STATIC_QUOTERS = {
     ethereum: "0xc80f61d1bdAbD8f5285117e1558fDDf8C64870FE",
     base: "0x28aF629a9F3ECE3c8D9F0b7cCf6349708CeC8cFb",
@@ -115,6 +121,16 @@ async function main() {
         }
         args.push(...liquoriceArgs);
     }
+    if (kind === "baibai") {
+        const entrypoint = deployments["pamm:baibai"]?.args?.[0];
+        if (!entrypoint) {
+            throw new Error(
+                `No pamm:baibai entry for network '${base}' in ` +
+                "executor_deployments.json: the BaiBai entrypoint is needed"
+            );
+        }
+        args.push(entrypoint);
+    }
 
     console.log(`Deploying ${contractName} to ${network} with:`);
     console.log(
@@ -143,6 +159,9 @@ async function main() {
     if (kind === "liquorice") {
         console.log(`- liquoriceSettlement: ${args[3]}`);
         console.log(`- liquoriceBalanceManager: ${args[4]}`);
+    }
+    if (kind === "baibai") {
+        console.log(`- baibaiEntrypoint: ${args[3]}`);
     }
 
     await deployCreate2({

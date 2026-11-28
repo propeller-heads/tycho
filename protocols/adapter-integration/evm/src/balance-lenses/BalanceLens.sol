@@ -16,6 +16,8 @@ abstract contract BalanceLens is IBalanceLens {
     /// @notice The value is neither 20 bytes nor a 32-byte word holding an
     /// address.
     error NotAnAddress(bytes value);
+    /// @notice The value is longer than 32 bytes, so no uint256 holds it.
+    error NotAUint(bytes value);
 
     /// @notice `token.balanceOf(holder)`, or the native balance of `holder`
     /// for the zero address.
@@ -70,5 +72,16 @@ abstract contract BalanceLens is IBalanceLens {
             return address(bytes20(value[12:]));
         }
         revert NotAnAddress(value);
+    }
+
+    /// @notice `value` as a big-endian uint256 of at most 32 bytes; the empty
+    /// value is 0. Reverts with `NotAUint` for a longer value.
+    function toUint(bytes calldata value) internal pure returns (uint256 n) {
+        if (value.length > 32) {
+            revert NotAUint(value);
+        }
+        for (uint256 i = 0; i < value.length; i++) {
+            n = (n << 8) | uint8(value[i]);
+        }
     }
 }

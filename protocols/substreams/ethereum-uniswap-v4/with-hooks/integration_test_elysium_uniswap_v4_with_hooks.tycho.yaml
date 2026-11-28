@@ -1,0 +1,619 @@
+harness: strict
+substreams_yaml_path: ./elysium-uniswap-v4-with-hooks.yaml
+protocol_system: "uniswap_v4_hooks"
+protocol_type_names:
+  - "uniswap_v4_pool"
+module_name: "map_launchpad_enriched_block_changes"
+# Every direction of every pool: the hook reverts any input past the bound get_limits reports. A
+# buy past the seed's extreme tick reverts PartialFillRejected; a sell past the opening price
+# reverts PastOpening or PartialFillRejected. The exception is the dust band near the opening,
+# where the hook settles small sells with an output of 0: get_limits reports 0 there and the
+# simulation refuses a quote whose output is 0. The bound is exact in both directions on a pool with
+# no initialized tick whose net liquidity is 0 (two positions cancelling at one boundary). The
+# simulation drops such a tick, so on a pool that has one the limit falls short by up to 2 raw
+# input units per such tick crossed. Only outside liquidity can create one. The third test's pools
+# hold outside liquidity, none with such a tick, so no rounding is declared.
+# The Ascend pools (the last two tests) are hard too, with no rounding: the launchpad's one position
+# per pool is never removed, so no tick has zero net liquidity. A buy past the curve end or a sell
+# past the position's start edge leaves input unconsumed, and the PoolManager reverts
+# CurrencyNotSettled on it. The Elysium PoolManager's runtime code at block 8365800 equals
+# v4-core's PoolManager's but for the 20-byte self-address immutable. Its unlock reverts
+# CurrencyNotSettled (0x5212cba1) on any nonzero delta at the end of the callback, a credit
+# included. On Elysium at 8365800 and 8660000, an unlock whose callback settles 1 wei of native it
+# does not owe reverts so.
+limits:
+  kind: hard
+# The PoolManager holds every pool's tokens in one balance and accounts no per-pool amount; the
+# lens derives each pool's amounts from its ticks and liquidity at the current price.
+balance_lens: UniswapV4Balances
+# No initialized_accounts: the simulation is native and reads no contract storage, and the Elysium
+# RPC failed the debug_storageRangeAt calls that would seed them when probed (Readme.md, "What the
+# Elysium manifest emits", gives the date and error). Each expected pool launches inside its test's
+# range, so its hook state comes from the launch transaction's storage writes.
+tests:
+  # Native-quoted launches, one followed through its whole life: launch, graduation, the LP line,
+  # the 600 s hold and the LP fee switching on.
+  - name: test_native_pool_through_the_lp_fee_switch
+    start_block: 1029100
+    stop_block: 1037500
+    expected_components:
+      # native quote; graduates at 1030049, crosses the LP line, holds, LP fee on at 1037446; launched at block 1029110
+      - id: "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x32193afd14c53f12c45a4c04eca9f7ba98e3ec71"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x35bd0e6a8b82e0e18b0381757d97ba01cde11a02740f006132dd40395ffc8ce2"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xe69565883dcf7ff890325eb1bf34bed5c281be88e89ffebdbdddd9837134a255"
+        tvl_only: &montra_tvl_only
+          bps: 0.01
+          wei: 1000
+          reason: "the shared Uniswap v4 balance pipeline (5_map_store_balance_changes.rs) rounds each swap's estimated LP fee share to nearest and prices liquidity changes at the block's sqrt price, so indexed balances sit slightly above the UniswapV4Balances lens, never below it. Measured by a range --report run of all three tests with tvl_only removed, over the 37 entries they list (36 distinct pools; 0x4937bb23 is in two tests): at most 0.0028 bps (7 units of the 8-decimal EQSPCX, pool 0x0ee0fec1), and 1-4 wei on tokens the lens reads as 0. bps 0.01 is the smallest step. The drift grows with a pool's swaps and has no fixed bound, so wei 1000 is headroom over the 4 wei measured."
+      # native quote; launched at block 1032795
+      - id: "0x06602fee3eef46c193ab60f7b658a1254aa382dd0545d18a66c94f4f8a6337af"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xe7fc50d0cbc63b28e09eb9002380799c92f59162"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x06602fee3eef46c193ab60f7b658a1254aa382dd0545d18a66c94f4f8a6337af"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x7c0d9f7e2ba0e90e29e0d53760a3e1f4903f24efd0402a22af34a5a76f8b9099"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1036137
+      - id: "0x3bcbbe0f5f868d59acf47fb67b99b09eeccab7f7d6b90f76e8ce607a725852e9"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x628ec732d584cb7a7dd8547ddb1bf8449df80fe4"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x3bcbbe0f5f868d59acf47fb67b99b09eeccab7f7d6b90f76e8ce607a725852e9"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x227bea8c788621eec9a2e86fe4acc1fde200d5ee796c27c677df92269742ff06"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1032388
+      - id: "0x8b5bd523dbbdcdc84540a6765bd84558e887e34988bc17325c3cd1f68eab080f"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x647f35aea6436522e8054b059a7bf5ddec2e6f67"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x8b5bd523dbbdcdc84540a6765bd84558e887e34988bc17325c3cd1f68eab080f"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x9e2ba8784ec56f6e97069e4524c1169dff48f687bdfcb25ea6f7fbe558e84a0a"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1035235
+      - id: "0xe585f0b10e7ab3d13420d6d7f8e77a3c5706b6d32c6317f4278e93a26d96affa"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xf6114b5b6bb96f485b7ab77d649f8c3c7cedbde2"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xe585f0b10e7ab3d13420d6d7f8e77a3c5706b6d32c6317f4278e93a26d96affa"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x69086c0420a80f395a5524ad5eebe09d9fe5e642be28fbae7c388c06eec3baa5"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1031996
+      - id: "0xbd6c08f059fc9907610e420aa956a6dd4eff2f19bee411dc06a4553d5c409a15"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x9e4ec782d880a039e2b3017c389f966afe457c7f"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xbd6c08f059fc9907610e420aa956a6dd4eff2f19bee411dc06a4553d5c409a15"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x7162bd11f38c9eca8610e0af565f85e4a52be7e8cb5d9b0e91891378c0734057"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1034010
+      - id: "0xd13c08bb2c39af5d65d927c44aecbd5a3227427da9433ed08c94665f77c85aed"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x8bdbea1f0057b1ae85259978fa7609874ca680e2"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xd13c08bb2c39af5d65d927c44aecbd5a3227427da9433ed08c94665f77c85aed"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xd9a4c07a854ff186175197b94d0da49a205bdfff1789032a6e1ef00b872505bd"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1034403
+      - id: "0x4a97bb482a635aee2286c723ddb2c720a072ce153d7e950d4aa64983b042afc7"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xf8f711207541ecc672f3c21caf1d1a35c5405dff"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x4a97bb482a635aee2286c723ddb2c720a072ce153d7e950d4aa64983b042afc7"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x51ff21c04075cba69037bf22d52b0a9504eb9535198cd8b7cc84cec36e3bb4ec"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 1029463
+      - id: "0xce95886cfdd54d58167fc93e8e51e1f8a95ee002105b8a3bb662f499a8d40e24"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x48e18399d8d29179586de8eb50e5e490770f86a4"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xce95886cfdd54d58167fc93e8e51e1f8a95ee002105b8a3bb662f499a8d40e24"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xd56aa137f04889de3064471fe7081f3cfdf1087d529bfc267ebe7d7c6f93f9d0"
+        tvl_only: *montra_tvl_only
+  # ERC-20 quotes as currency0 and currency1, 8-decimal quotes in both orientations, a second
+  # native pool that graduates and switches its LP fee on, and every other pool launched in the
+  # range with at least 10 swaps in it.
+  - name: test_erc20_quotes_and_a_second_lp_fee_switch
+    start_block: 4963600
+    stop_block: 4987299
+    expected_components:
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4963670
+      - id: "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0xec8a718f0bc06c25b92082f7ba595931e0d579dc"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x33f724fd9727a72d72c2777a17577874e02fa4a6207f88177bedad3c207cc28a"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x937b06217ebc532751575dfd8075f4bbccfd19de322c00a27cf8f226f141069c"
+        tvl_only: *montra_tvl_only
+      # xyz:NVDA3L (18 decimals) quote as currency0; launched at block 4972411
+      - id: "0xfcb8f46f2972bfb84c5c204eef04c0df1c70dc95d9e2080ccd7aad92e775da47"
+        tokens:
+          - "0xc4be5f25dfaa81ed188db01fee37e2ed4163c8d5"
+          - "0xeb2e43637464b281a42062ec803c14c6e05010d3"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xfcb8f46f2972bfb84c5c204eef04c0df1c70dc95d9e2080ccd7aad92e775da47"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x249699380006bf389f8fba9353d08d66364e5e0b2517f3a4079fc17fb8c11642"
+        tvl_only: *montra_tvl_only
+      # EQSPCX (8 decimals) quote as currency1; launched at block 4966710
+      - id: "0x61379950571780e6649da42c72d93788a084b276b89bcddb4ba3c3a6a62a750e"
+        tokens:
+          - "0x54ca651a19c1ff0a75e77dfebcba6a3c77944625"
+          - "0x8264c91cedfe6cc078116083d5a3e198c16b1898"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x61379950571780e6649da42c72d93788a084b276b89bcddb4ba3c3a6a62a750e"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x4acdd66ae4c0b69ed427a09a01efb6189edff3dd33aa97d890ba31ed09385a1b"
+        tvl_only: *montra_tvl_only
+      # EQSPCX (8 decimals) quote as currency0; launched at block 4972968
+      - id: "0x0ee0fec1e1a3db8ea99daedfece3b81f8e16ed44a4df6f804280deeb5fbcd6d6"
+        tokens:
+          - "0x8264c91cedfe6cc078116083d5a3e198c16b1898"
+          - "0xb1cb8dccdc299e2b02c5ea74639fcdedd101e3ac"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x0ee0fec1e1a3db8ea99daedfece3b81f8e16ed44a4df6f804280deeb5fbcd6d6"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x898a19c66c1da372307681953b249fe62490f80e9940c33e1ffdd2fd59a7e86d"
+        tvl_only: *montra_tvl_only
+      # native quote; graduates in its launch block, LP fee on at 4987207; launched at block 4970022
+      - id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xe9c952cd198ff412113a465d34ff2c233f6f4ca1"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xc17ba1154b14f8befdfb761078fc7e0b0c0491b12d3fa3eeedfcab8af751e6a5"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4974877
+      - id: "0x18e4de4d3b11a1845e51885b1da7fd420ef1c3e4b88f66e5db7f4f1e2aa6652e"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x3ff278d710a34baa096cfc89ec817ee185fc58b4"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x18e4de4d3b11a1845e51885b1da7fd420ef1c3e4b88f66e5db7f4f1e2aa6652e"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xb56e40c2de333a28e6c0b4eab65c32a9a8ff80901cf87ee18835f146356887ce"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4966531
+      - id: "0x7b6c96bdf34e9369437c1a7955b2d94cbfbd30a690928fb9b57b6bf3d7d73371"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xb2c6527cc2c96d08dccb6a6a0ff56f2a4d323bd5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x7b6c96bdf34e9369437c1a7955b2d94cbfbd30a690928fb9b57b6bf3d7d73371"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xf725721f6e53c3ccf4dc3c63cf439666c82ffe29b7614e416be70f15de46ffe3"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4977700
+      - id: "0x2145174074fed5ffc5edebe98e8ee3df2969e46b2ce1f6a4d6d2cd74b843843f"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x8c9f7d5b854f6672db975d3cdfd256f7c57b8f29"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x2145174074fed5ffc5edebe98e8ee3df2969e46b2ce1f6a4d6d2cd74b843843f"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x5b91ba9e9e6255c0c917a480c6b2f963f35cde3ac2b90eb98dec582d1d8923f3"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4966346
+      - id: "0x807059f52db9f1da0520e0641d800ffde1a185d61f25ab1f2c5eccdaf2c6f444"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0x80d61210ad69efabfd0819e0e16491d1dbada8fa"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x807059f52db9f1da0520e0641d800ffde1a185d61f25ab1f2c5eccdaf2c6f444"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x44b987b0e3b62b41a67ee0201ad1e9bb8d31e21a5a3b97ff434b0353fc64c739"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4965239
+      - id: "0xec488b6640ea93b45e9f367b1457867d30e619615028bb94ba42fb1c72552346"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0x523cbc5d9c91eac77d5998c814c52c61b3dbff4a"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xec488b6640ea93b45e9f367b1457867d30e619615028bb94ba42fb1c72552346"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x53632617547795a17aed4fe78f072fa5fa02348f297b83a8e1d9c4a07d7d6c34"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4965646
+      - id: "0xac0bb6789bb75ad169567092edfe88cc5d3751b8bb991cbeaf0cec053bfbc284"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0xf6b4d47ba1b83bf7c21a7daeabd6b29f2389f9a8"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xac0bb6789bb75ad169567092edfe88cc5d3751b8bb991cbeaf0cec053bfbc284"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xbf78fb0e7d84aeb94fb0b82cd7a38ace957ef33a551233635fe9bc1ca8c29fd9"
+        tvl_only: *montra_tvl_only
+      # xyz:NVDA3L (18 decimals) quote as currency0; launched at block 4973062
+      - id: "0x600cb7d5e166d149d2456ab66b3e587bf512ad3503c458c8a01835d13720f2fb"
+        tokens:
+          - "0xc4be5f25dfaa81ed188db01fee37e2ed4163c8d5"
+          - "0xf205e3883d89272051dd98f9e29fb125c0372baa"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x600cb7d5e166d149d2456ab66b3e587bf512ad3503c458c8a01835d13720f2fb"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x8de4d66748fd0aa846eed2154729765138caf5b4f26105fba2bbfd8c12a51a35"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4969533
+      - id: "0x40643aad1554dbabfd709b419133358cb3d856f8c8ffac91c99348ecade5e291"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0xf83f86ab3cfbc520d46dc5b8da81d5807323cdd5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x40643aad1554dbabfd709b419133358cb3d856f8c8ffac91c99348ecade5e291"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xf6cafd7596e7b550489630651f6546f403ce7966863dfbd1b0a64b15d9a72946"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4968690
+      - id: "0x2550de8212a55d76dd1a04e082492cf7088119da8f76021d5650eedc68a57345"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0xc38716f98d2de13c0b81e2a576a97c7e351b7a16"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x2550de8212a55d76dd1a04e082492cf7088119da8f76021d5650eedc68a57345"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xdc867753c512ff38e4e33447017035cba8ac977fca4410b131b9e81004a82e91"
+        tvl_only: *montra_tvl_only
+      # xyz:NVDA3L (18 decimals) quote as currency1; launched at block 4975460
+      - id: "0x8b4d909a98d2d5e57d8dcfbee055a5eeaf7a03f35aa7c67dc60244666d36d0cc"
+        tokens:
+          - "0x4175fc06002bd1eb1286b5ded65163954e8d2c95"
+          - "0xc4be5f25dfaa81ed188db01fee37e2ed4163c8d5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x8b4d909a98d2d5e57d8dcfbee055a5eeaf7a03f35aa7c67dc60244666d36d0cc"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x0c5fc321a630ebf1b75f38762310d76badb9509624f0002aadcea95917ac1cc9"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4967809
+      - id: "0xd80851dd076f21507e5b9c35b8fb3ce009d7883bc9480ebf012a4cd337933af6"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0x27df4bb1b61898b8d7be0afac5204369307d514e"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xd80851dd076f21507e5b9c35b8fb3ce009d7883bc9480ebf012a4cd337933af6"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x71c7c19cdfe4246de4bd45d57d1d362b8dbb0efff408ad74e372bf4bbc111b27"
+        tvl_only: *montra_tvl_only
+      # xyz:NVDA3L (18 decimals) quote as currency1; launched at block 4975947
+      - id: "0xc193d2962c2428b20411c1b021d4319722f59fc3bba3d379216e3acc6bfe2ce9"
+        tokens:
+          - "0x749167b345908ed46f643a1dbc1ff7bd66a28083"
+          - "0xc4be5f25dfaa81ed188db01fee37e2ed4163c8d5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xc193d2962c2428b20411c1b021d4319722f59fc3bba3d379216e3acc6bfe2ce9"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x92bea914774dae48156e52c5d786f6a04dad079f757ed9f4c6fe2815d916629d"
+        tvl_only: *montra_tvl_only
+      # wNVDAx (18 decimals) quote as currency0; launched at block 4976351
+      - id: "0x5570d046a2864237a6c36009eefd52caac84065aedf1204bbdb579e20987f5bd"
+        tokens:
+          - "0x11265018bf2d5a99fb71efae73ad670203c1df44"
+          - "0x83a407cb8dfe1ca71d80ad7231f00c82ec199bd1"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x5570d046a2864237a6c36009eefd52caac84065aedf1204bbdb579e20987f5bd"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x7f1e416801175669ab3f4f879df249892cd1da36f58e29e5a488abea582be02f"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4986280
+      - id: "0xdd2320379dc29c5dd51191f3551d08ac8a2ad1cc6a9d68f729283cd498c5ac94"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x703ab11de0a3e8c8d7adc7ee286e332e9e716368"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xdd2320379dc29c5dd51191f3551d08ac8a2ad1cc6a9d68f729283cd498c5ac94"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x968ed5adaabf9e27fbeb22a66860a2d03e3cfbae00784984ffe45c9718bcad77"
+        tvl_only: *montra_tvl_only
+      # wSPYx (18 decimals) quote as currency0; launched at block 4979082
+      - id: "0x581c1b1bb9e389a01751156f199291adbac130615ec6dd52f0d8c5eb7d316ed1"
+        tokens:
+          - "0x437c847644ff22cbcf0ea56896aa25504aad93b4"
+          - "0xfd2fb79548043e7732bcc2741248cb3a0e8262d3"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x581c1b1bb9e389a01751156f199291adbac130615ec6dd52f0d8c5eb7d316ed1"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x478681cb86a360d92cf808d10514347d51d4c686d5d2e4165999d55977fa841e"
+        tvl_only: *montra_tvl_only
+      # EQSPCX (8 decimals) quote as currency1; launched at block 4969227
+      - id: "0xff8294a27d1ded2e04c43f2f5d9a3eff518455a656b3ae4a95f7c748e94a79bb"
+        tokens:
+          - "0x2b24988d68775e9ed02fe03f3a3159a02e1d9b7b"
+          - "0x8264c91cedfe6cc078116083d5a3e198c16b1898"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xff8294a27d1ded2e04c43f2f5d9a3eff518455a656b3ae4a95f7c748e94a79bb"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xa11f6e1c32fcd766336eb79aa05bdc705430bd7a83375a9d5feef21b379a25c1"
+        tvl_only: *montra_tvl_only
+      # xyz:NVDA3L (18 decimals) quote as currency1; launched at block 4985777
+      - id: "0x9573bd3c2f4daaa6dcb1e3efce796926f74f575096e064e2851901cb7df66aa6"
+        tokens:
+          - "0x84753c8b9c4b95c35f3b554c39471ddc5b9a7065"
+          - "0xc4be5f25dfaa81ed188db01fee37e2ed4163c8d5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x9573bd3c2f4daaa6dcb1e3efce796926f74f575096e064e2851901cb7df66aa6"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x4a6fe39219b4712940da32f74c2b3b4ffeb0dae1807fab5f6d03eb0bfc5a7ff7"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4985296
+      - id: "0x021a92899bf3d744fb56b6390f01b7ff10876a1e80b9aebdd42b6f57c1d7a9a2"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xe675938d9c7bdb80ae763300c55698d2eb0a5c31"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x021a92899bf3d744fb56b6390f01b7ff10876a1e80b9aebdd42b6f57c1d7a9a2"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x91dd1f6d2dbd35309add0845f33949a6baf6188cc226c1b0fb4333242008615a"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4970034
+      - id: "0x026a476de1ffcb04c30e87c40813b1835f4699f8483b0d23af74c6c0fc9286cf"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xbdc0dafb7a22e0825c95bc0b94937a79cf244d97"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x026a476de1ffcb04c30e87c40813b1835f4699f8483b0d23af74c6c0fc9286cf"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x771c54745d2ccc41b7a9e702b28849698ec949cded7a532b8c558932985ff152"
+        tvl_only: *montra_tvl_only
+      # native quote; launched at block 4977629
+      - id: "0x33d35fd85db100565472cfa45a42847b80bf147bf800ccdadbad38a1d0a525e5"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x35b8ac3ee2b24168945f45dcedf428a737635fd1"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x33d35fd85db100565472cfa45a42847b80bf147bf800ccdadbad38a1d0a525e5"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x5d6394e97605ec3c1d2e5d90305b1d1e06f9c80d0e115f58d444f3a5d88d01dc"
+        tvl_only: *montra_tvl_only
+  # Outside liquidity: positions added by other accounts than the hook, which the limits of the
+  # first two tests never meet. One pool takes full-range positions, which reach past the opening
+  # (the hook's PastOpening refusal); two take a 24-position ladder each, so a limit walks across
+  # 25 more initialized ticks. Counted from the PoolManager's ModifyLiquidity logs whose sender is
+  # not the hook (eth_getLogs on the PoolManager, topic0 ModifyLiquidity, blocks 588510-6001999).
+  - name: test_outside_liquidity
+    start_block: 4959600
+    stop_block: 5003000
+    expected_components:
+      # native quote; 23 full-range outside adds from 4995418 to 5002919; launched at block 4988300
+      - id: "0x6ea9f206ae9094a0b56cd85b1035611791b130cc8f4abb13aecdcf500fb6b958"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xeefeeb3ae68240834154360be335d0ff8950c6a6"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x6ea9f206ae9094a0b56cd85b1035611791b130cc8f4abb13aecdcf500fb6b958"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x6483abe7b89d3b7615241a4700089b6db7b066825dde50496d87443dc077661b"
+        tvl_only: *montra_tvl_only
+      # native quote; graduates and switches its LP fee on (second test), then a 24-position outside ladder at 5000076; launched at block 4970022
+      - id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0xe9c952cd198ff412113a465d34ff2c233f6f4ca1"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x4937bb23c0503b32cf26d119cdfa5772d40a3900f5a1783437546e2e52025764"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xc17ba1154b14f8befdfb761078fc7e0b0c0491b12d3fa3eeedfcab8af751e6a5"
+        tvl_only: *montra_tvl_only
+      # native quote; a 24-position outside ladder at 5002287; launched at block 4959653
+      - id: "0xa5499b0299a10dd35388d4c9517322aedd7f6682c226900062f8be2270733201"
+        tokens:
+          - "0x0000000000000000000000000000000000000000"
+          - "0x3780176bd3c7d89a123195a88ca5dd88d70c1bf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xa5499b0299a10dd35388d4c9517322aedd7f6682c226900062f8be2270733201"
+          hooks: "0x6b1216a40b65c83e9c9e18a562c446697b8cf8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xc994ae487ce2ec3a4901c477777cab1629bef76f89b0d23c014c49ee70443c44"
+        tvl_only: *montra_tvl_only
+  # Ascend launchpad pools (hook 0xe0def422...), whose hook state comes from the launch
+  # transaction's storage writes: every expected pool launches inside the range. Both token
+  # orientations, quotes USDC, WHYPE and KNTQ, fees 1-3%, one builder-fee pool, and pools with and
+  # without a dev buy.
+  - name: test_ascend_launches_in_both_orientations
+    start_block: 3255000
+    stop_block: 3275000
+    expected_components:
+      # USDC quote as currency1, 1.5% fee, with a dev buy; launched at block 3264034
+      - id: "0xea03c9c459b4457396aef2a54b563cfaf5c70bccf2c6babe09862f626ffb9998"
+        tokens:
+          - "0x660a22496a4ec7bcb5f6d6c0e3b8aa2550372a45"
+          - "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xea03c9c459b4457396aef2a54b563cfaf5c70bccf2c6babe09862f626ffb9998"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xbb63e0b09dfd0d1b506b5847b61291aeb82aeab42628b63819bbc8aa904e384a"
+        tvl_only: &ascend_tvl_only
+          bps: 0.01
+          wei: 1000
+          reason: "indexed balances are the summed Swap and ModifyLiquidity flows and sit above the UniswapV4Balances lens, which rounds down from the final price, by about one Q96 price step per swap, never below. Ascend swaps charge no LP fee. The measurements and their reproduction are in the package Readme, section Balances of Ascend pools."
+      # WHYPE quote as currency1, 2% fee; launched at block 3261205
+      - id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
+        tokens:
+          - "0x12ca80a21d7b779d65eb24da028377efda4c2a6d"
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x689110d756f397e134ca3e6a954e8b34bb3740756a2fea05633e4c94cd528a4a"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xe0cfec6208b92b324ef7fa7c97f62354823b97ae1c4e074183bdc8a332949bb7"
+        tvl_only: *ascend_tvl_only
+      # WHYPE quote as currency0, 3% fee; launched at block 3258042
+      - id: "0x2af577e53577561bd0d0d7d46fa697b03a74a31aa999498d6f7271a3afaebc03"
+        tokens:
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+          - "0xd86f8bfd7fd7748009075037fcfe78c3013f4224"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x2af577e53577561bd0d0d7d46fa697b03a74a31aa999498d6f7271a3afaebc03"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0xb9e481f26a78e7c32baa2d314a145cc058f0e93e61b36532b7c3853687d22de2"
+        tvl_only: *ascend_tvl_only
+      # KNTQ quote as currency1, 1% fee; launched at block 3268520
+      - id: "0x914d891afa8d95ee7ea5d3f255df4cccd12720a2b4448f914a8a262415c49f09"
+        tokens:
+          - "0x6a850ad1d445fa35d8e821acb773c261fa722e4b"
+          - "0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x914d891afa8d95ee7ea5d3f255df4cccd12720a2b4448f914a8a262415c49f09"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x194fccb73ff9dd1d0b71743a0cd59ad01c7b7620344ec1120a3e905f036bf15c"
+        tvl_only: *ascend_tvl_only
+      # USDC quote as currency0, 1.5% fee and a 0.5% builder fee; launched at block 3258830
+      - id: "0x723b1867f8a08a5ca91c53d256a66230c3d1bf3e65592327bbac2339d647dcf8"
+        tokens:
+          - "0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65"
+          - "0xdc1a596852fa3c7b722e19c0feadaba3ab6998b5"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x723b1867f8a08a5ca91c53d256a66230c3d1bf3e65592327bbac2339d647dcf8"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x8a12467a0ddff0859f72d17d41c7e3ddc242afde7ed9ecbd26247ae8b739846a"
+        tvl_only: *ascend_tvl_only
+      # WHYPE quote as currency0, 1% fee; launched at block 3266703
+      - id: "0x8ed85f008212d2ee1cb30d1fb241f77326d8597a8612ee14119ad69450094121"
+        tokens:
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+          - "0xd0a3b1ddcbc42e5e919a986a21c13b8dc9b10903"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x8ed85f008212d2ee1cb30d1fb241f77326d8597a8612ee14119ad69450094121"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x5aaa22676de68c3290909137ba58f68c6565f7ef83fdce05d7aa765643a660a3"
+        tvl_only: *ascend_tvl_only
+      # KNTQ quote as currency1, no dev buy; launched at block 3255759
+      - id: "0xd4916d4721c54d66ae4e594fb2ad2dbc12fd295cfd8e9a9359a7d0cfe271acd2"
+        tokens:
+          - "0xc19a4e7a028b3617b647997a22309a5233412154"
+          - "0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0xd4916d4721c54d66ae4e594fb2ad2dbc12fd295cfd8e9a9359a7d0cfe271acd2"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x54927397bb63df048da4b39e7bb4fda890d3697afec41354b2b5c4bc2b44db5f"
+        tvl_only: *ascend_tvl_only
+  # The one fill whose pool launches inside a bounded range: pool 0x21e12450... launched at 3437284,
+  # its bid funded at 3527638 and filled at 3527702, so the range covers the indexing of the bid
+  # words through a fund and a fill. The fill leaves an inventory of 1, so the quotes at the stop
+  # block take no fill: the simulated fill path (sizing, fill delta, fill gas) is covered by the
+  # simulation's golden vectors, not by this file. The hook emitted 777 Filled events on 43 pools
+  # to block 8365800; this is the only pool of them that launches inside a range this short.
+  - name: test_ascend_bid_funded_and_filled
+    start_block: 3437200
+    stop_block: 3528400
+    expected_components:
+      # WHYPE quote as currency1, launched at block 3437284, funded at 3527638, filled at 3527702
+      - id: "0x21e12450a086d030c8122c49bd1bc7444ffeee115a0bd979ddacc84af7c05188"
+        tokens:
+          - "0x16fe32c25de383bfd0a99ed56a5274deab0d6c94"
+          - "0xba876237b0f021a6c6d852d6c26e107997cc5e81"
+        static_attributes:
+          tick_spacing: "0x00c8"
+          pool_id: "0x21e12450a086d030c8122c49bd1bc7444ffeee115a0bd979ddacc84af7c05188"
+          hooks: "0xe0def4221b9840a610d4e7d55812a79a6431a8ec"
+          key_lp_fee: "0x00800000"
+        creation_tx: "0x8e7e10b5e1c9b73d035d68bbb021c21bc56e241de3786d3f7ebff091d533f500"
+        tvl_only: *ascend_tvl_only

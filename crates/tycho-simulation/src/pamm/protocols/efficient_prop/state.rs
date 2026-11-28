@@ -260,9 +260,11 @@ pub(super) const FIRST_BALANCE_WRITE_GAS: u64 = 16_964;
 pub(super) const LAST_CUSTODY_FILL_REFUND: u64 = 9_600;
 
 /// What a swap of a component settling through Tycho's fallback router is charged, whichever its
-/// listing: the least a transaction pays on either of the router's two branches, less the 40,000
-/// tycho-execution's gas estimator adds for every `fallback:` component
-/// (`FALLBACK_ROUTER_OVERHEAD_GAS`), so that the two together are never over what the swap costs.
+/// listing: the least a transaction pays on either of the router's two branches, less what
+/// tycho-execution's gas estimator adds for every `fallback:` component on the pool it falls back
+/// on (40,000 for the router, [`FALLBACK_ROUTER_OVERHEAD_GAS`], and its quote of that pool,
+/// [`FALLBACK_V2_QUOTE_GAS`] or [`FALLBACK_V3_QUOTE_GAS`]), so that the sum is never over what the
+/// swap costs on either kind of pool measured.
 ///
 /// Measured on 24 Nov with real transactions on a fork of Ethereum holding the deployed build,
 /// through the `PropAMMFallbackExecutor` (`0x355d…84c9`) and the router (`0xA4bC…f633`) deployed
@@ -275,15 +277,28 @@ pub(super) const LAST_CUSTODY_FILL_REFUND: u64 = 9_600;
 /// - where the door fills, the router first quotes the door and the pool, and the transaction pays
 ///   48,794 to 74,415 more than the direct fill (154,693 at the least).
 ///
-/// The charge is the least of them, 90,445. Which branch a swap takes is known only in the block
-/// it lands in, and the pool is the solver's: a swap that fills at the door costs about 64,000 to
-/// 121,000 more than it is charged, one that falls back to a dearer pool what that pool costs. A
-/// door refusing sooner than for a missing update (a stopped desk) was not measured.
-pub(super) const FALLBACK_SWAP_GAS: u64 = 90_445 - FALLBACK_ROUTER_OVERHEAD_GAS;
+/// Less the estimator's additions, the least is 90,445 - 48,000 = 42,445 on a V2 pair and
+/// 105,181 - 70,000 = 35,181 on a V3 pool, so the charge is 35,181: 83,181 in all on a V2 pair
+/// and 105,181 on a V3 pool. Which branch a swap takes is known only in the block it lands in,
+/// and the pool is the solver's: a swap that fills at the door costs about 49,000 to 128,000 more
+/// than it is charged, one that falls back to a dearer pool what that pool costs. The router's
+/// other fallback protocols, and a door refusing sooner than for a missing update (a stopped
+/// desk), were not measured.
+pub(super) const FALLBACK_SWAP_GAS: u64 =
+    105_181 - FALLBACK_ROUTER_OVERHEAD_GAS - FALLBACK_V3_QUOTE_GAS;
 
 /// What tycho-execution's gas estimator adds for every `fallback:` component, the router's own
 /// work: [`FALLBACK_SWAP_GAS`] and [`GasOutlook::expected`] are stated less it.
 pub(super) const FALLBACK_ROUTER_OVERHEAD_GAS: u64 = 40_000;
+
+/// What tycho-execution's gas estimator adds beside [`FALLBACK_ROUTER_OVERHEAD_GAS`] for the
+/// router's quote of a Uniswap V2 pair to fall back on (`fallback_quote_gas`), the least of the
+/// fallback protocols measured: [`FALLBACK_SWAP_GAS`] and [`GasOutlook::expected`] are stated
+/// less it or [`FALLBACK_V3_QUOTE_GAS`].
+pub(super) const FALLBACK_V2_QUOTE_GAS: u64 = 8_000;
+
+/// The same for a Uniswap V3 pool on Ethereum, which the router quotes through its static quoter.
+pub(super) const FALLBACK_V3_QUOTE_GAS: u64 = 30_000;
 
 /// What a fill at the door spends more through the fallback router than sent direct, the least
 /// and the most measured: the router's quotes of the door and of the pool, and its own work (see
@@ -304,8 +319,10 @@ pub(super) struct GasOutlook {
     /// What a fill the pool's custody pays is measured to cost its transaction, in the charge's
     /// own terms (beside what tycho-execution's estimator adds): the dearer direction's. Sent
     /// direct that is the charge of that direction. Through the fallback router it is at least
-    /// that fill and the least of the router's additions, less the estimator's own
-    /// ([`FALLBACK_ROUTER_OVERHEAD_GAS`]). `None` on a listing with a credit mode sent direct,
+    /// that fill and the least of the router's additions, less the least the estimator adds
+    /// ([`FALLBACK_ROUTER_OVERHEAD_GAS`] and [`FALLBACK_V2_QUOTE_GAS`]), so that with what it adds
+    /// on either kind of pool measured it stays within the door fills measured through the
+    /// router. `None` on a listing with a credit mode sent direct,
     /// whose routed fills cost several times a custody fill (each swap's charge is its own
     /// path's figure), and through the fallback router for a listing with no figure of its own.
     pub expected: Option<u64>,
@@ -780,7 +797,9 @@ impl EfficientPropState {
         if self.through_fallback {
             let (least, most) = FALLBACK_DOOR_FILL_EXTRA_GAS;
             return GasOutlook {
-                expected: Some(custody + least - FALLBACK_ROUTER_OVERHEAD_GAS),
+                expected: Some(
+                    custody + least - FALLBACK_ROUTER_OVERHEAD_GAS - FALLBACK_V2_QUOTE_GAS,
+                ),
                 limit: Some(with_headroom(named.unwrap_or(custody_fill) + most)),
             };
         }
@@ -1161,7 +1180,7 @@ mod tests {
                 .get_amount_out(amount(500_000_000_000_000_000), &base, &quote)
                 .unwrap()
                 .gas,
-            amount(50_445)
+            amount(35_181)
         );
     }
 
@@ -1294,17 +1313,17 @@ mod tests {
         false,
         (Some(113_203), Some(166_379))
     )]
-    // At least 96,239 + 48,794 - 40,000; (150,000 + 74,415) * 1.25, rounded up.
+    // At least 96,239 + 48,794 - 40,000 - 8,000; (150,000 + 74,415) * 1.25, rounded up.
     #[case::a_listing_in_no_credit_mode_naming_its_dearest_fill_through_the_fallback_router(
         stock_state_naming(Some(150_000)).with_fallback_router(true),
         false,
-        (Some(105_033), Some(280_519))
+        (Some(97_033), Some(280_519))
     )]
-    // At least 106,520 + 48,794 - 40,000; (106,520 + 74,415 + 19,900) * 1.25, rounded up.
+    // At least 106,520 + 48,794 - 40,000 - 8,000; (106,520 + 74,415 + 19,900) * 1.25, rounded up.
     #[case::a_measured_pair_through_the_fallback_router(
         wsteth_weth_state().with_fallback_router(true),
         false,
-        (Some(115_314), Some(251_044))
+        (Some(107_314), Some(251_044))
     )]
     #[case::a_pair_with_no_figure_through_the_fallback_router(
         {

@@ -136,12 +136,13 @@ must equal. The runner builds it with forge, as it builds an adapter, and calls 
 expected component with an `eth_call` at the snapshot block, placing the lens's code by a state
 override, so nothing is deployed and any RPC that serves overrides works.
 
-Two stock lenses cover the common cases:
+Three stock lenses cover the common cases:
 
 | Lens | Reads |
 |---|---|
 | `ComponentIdBalances` | each token's `balanceOf(component id)`, for a component that holds its own tokens |
 | `BalanceOwnerBalances` | each token's `balanceOf` of the address in the `balance_owner` attribute, for a component whose tokens sit at an address that holds only its own |
+| `UniswapV4Balances` | what a Uniswap V4 pool's liquidity holds at its current price, walked from its ticks through the `PoolManager` in the `balance_owner` attribute. LP and protocol fees and hooks' ERC-6909 claims are not counted, so a package whose indexed balances include them does not match it exactly. The component id must be the 32-byte pool id (otherwise it reverts `NotAPoolId`), and it reads the `tick_spacing` attribute. At tick spacing 1 a call costs tens of millions of gas (`testGasOfAnEmptyPoolAtTickSpacing1` measures it), more than some nodes' `eth_call` gas cap. A package that indexes fees in its balances pairs it with `tvl_only` |
 
 A package whose amounts sit elsewhere writes its own lens, next to its adapter under
 `protocols/adapter-integration/evm/src/`, inheriting `BalanceLens` for its helpers (a token's
@@ -527,3 +528,10 @@ The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op
 
 `UniswapV4Robinhood.runtime.json` builds like the others, from `(robinhood, uniswap_v4)` on a
 Robinhood fork, so `forge test` catches drift if the Robinhood executor changes.
+`UniswapV4Elysium.runtime.json` builds the same way from `(elysium, uniswap_v4)` on an Elysium fork
+(`ELYSIUM_RPC_URL`). Execution validation plants it for both `(Elysium, uniswap_v4)` and
+`(Elysium, uniswap_v4_hooks)` (`CHAIN_SPECIFIC_EXECUTORS` in `src/execution.rs`). Like every
+fixture it is built with the Foundry profile's compiler settings, so its bytecode differs from a
+deployment built with other settings (the Elysium executor at
+`0x74145BbB8F3E51f7138eD3F7C96dFb3d56F784b5` was built by Hardhat with 1000 optimizer runs) while
+the source is the same.

@@ -29,9 +29,9 @@ import {IEfficientPropDoor} from "./EfficientPropEthereum.t.sol";
 /// door, or a Uniswap V2 pair where `EFFICIENT_PROP_ETH_FALLBACK_V2_FEE_BPS`
 /// gives its fee, and is skipped without any of the three. Either branch
 /// costs its transaction at least what a `fallback:efficient_prop` swap is
-/// charged: tycho-simulation's `FALLBACK_SWAP_GAS` and the gas estimator's
-/// `FALLBACK_ROUTER_OVERHEAD_GAS`, held against this frame's gas less the
-/// refund the branch earns. In a block carrying the
+/// charged: tycho-simulation's `FALLBACK_SWAP_GAS`, and the gas estimator's
+/// `FALLBACK_ROUTER_OVERHEAD_GAS` and `fallback_quote_gas` for the pool,
+/// held against this frame's gas less the refund the branch earns. In a block carrying the
 /// maker's update the door fills, at exactly its quote, and the pool is left
 /// untouched. With `EFFICIENT_PROP_ETH_NO_UPDATE` true the latest block
 /// carries none: the door quotes nothing, the direct path would revert
@@ -47,11 +47,14 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
     uint8 constant UNISWAP_V2 = 0;
     uint8 constant UNISWAP_V3 = 1;
     /// `FALLBACK_SWAP_GAS` in tycho-simulation's `efficient_prop/state.rs`,
-    /// what the book charges every swap on this path, and
-    /// `FALLBACK_ROUTER_OVERHEAD_GAS` in tycho-execution's gas estimator,
-    /// which is added to it.
-    uint256 constant FALLBACK_SWAP_GAS = 50_445;
+    /// what the book charges every swap on this path, and what
+    /// tycho-execution's gas estimator adds to it: `FALLBACK_ROUTER_OVERHEAD_GAS`
+    /// and `fallback_quote_gas`, the router's quote of a Uniswap V2 pair or of
+    /// a V3 pool on Ethereum.
+    uint256 constant FALLBACK_SWAP_GAS = 35_181;
     uint256 constant FALLBACK_ROUTER_OVERHEAD_GAS = 40_000;
+    uint256 constant FALLBACK_V2_QUOTE_GAS = 8000;
+    uint256 constant FALLBACK_V3_QUOTE_GAS = 30_000;
     /// The most each branch earned back at its transaction's end in real
     /// transactions on the fork: a swap on the pool (the router's balance of
     /// the input written and cleared, and the guard), and a fill at the door
@@ -122,7 +125,8 @@ contract EfficientPropDoorFallbackEthereumForkTest is TestUtils, Constants {
 
         emit log_named_uint("executor swap gas", swapGas);
         assertGt(amountOut, 0);
-        uint256 charged = FALLBACK_SWAP_GAS + FALLBACK_ROUTER_OVERHEAD_GAS;
+        uint256 charged = FALLBACK_SWAP_GAS + FALLBACK_ROUTER_OVERHEAD_GAS
+            + (v2FeeBps == 0 ? FALLBACK_V3_QUOTE_GAS : FALLBACK_V2_QUOTE_GAS);
         if (noUpdate) {
             vm.expectRevert();
             IPropAMM(door).quote(tokenIn, tokenOut, amountIn);

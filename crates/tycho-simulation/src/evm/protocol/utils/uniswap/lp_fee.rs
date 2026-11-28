@@ -12,6 +12,10 @@ pub const MAX_LP_FEE: u32 = 1_000_000;
 /// When set in pool key, indicates the pool uses dynamic fees via hooks
 pub const DYNAMIC_FEE_FLAG: u32 = 0x800000;
 
+/// Override flag (bit 22: 0x400000) a hook sets on the fee `beforeSwap` returns to make the pool
+/// charge that fee for the swap instead of its stored LP fee (`LPFeeLibrary.OVERRIDE_FEE_FLAG`).
+pub const OVERRIDE_FEE_FLAG: u32 = 0x400000;
+
 /// Mask to remove the override flag (bit 22: 0x400000)
 const REMOVE_OVERRIDE_MASK: u32 = 0xBFFFFF;
 
@@ -46,10 +50,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
-    // Test constants matching Uniswap V4's LPFeeLibrary.sol
-    const OVERRIDE_FEE_FLAG: u32 = 0x400000;
-    const DYNAMIC_FEE_FLAG: u32 = 0x800000;
 
     // Tests inspired by https://github.com/Uniswap/v4-core/blob/main/test/libraries/LPFeeLibrary.t.sol
 

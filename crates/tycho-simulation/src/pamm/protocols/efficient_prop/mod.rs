@@ -395,17 +395,18 @@
 //! `PropAMMFallbackRouter`: it asks the door's `quote` in the block the swap lands in, fills there
 //! unless the pool the solver names quotes more, and swaps on that pool where the door quotes
 //! nothing. Which of the two fills is not known when the book is read, so every swap of such a
-//! component is charged the cheaper branch (`FALLBACK_SWAP_GAS` in [`state`]: 50,445, to which
-//! tycho-execution adds its 40,000 for the router, 90,445 in all): the least a fill on the
-//! fallback pool cost its transaction on fork fills through the router deployed on Ethereum,
-//! counted as the charge of the same swap sent direct plus the difference of the two receipts,
-//! over Uniswap V2 pairs (90,445 to 102,984) and Uniswap V3 pools (105,181 to 109,541). A fill at
-//! the door cost 154,693 at the least (the door's fill and its quote, the pool's quote and the
-//! router's work), so a door fill spends about 64,000 to 121,000 more than it is charged. The
-//! router's other fallback protocols, and a door refusing sooner than `NoWord`, were not
-//! measured. On this path a listing needs no measured or named figure. A listing with a credit
-//! mode is published direct, as [`PROTOCOL_SYSTEM`], whatever the builder says, and charged the
-//! gas named for it: the router's quote would run its route a second time, which that gas does
+//! component is charged the cheaper branch (`FALLBACK_SWAP_GAS` in [`state`]: 35,181, to which
+//! tycho-execution adds its 40,000 for the router and its budget for the router's quote of the
+//! fallback pool, 8,000 on a Uniswap V2 pair and 30,000 on a V3 pool: 83,181 and 105,181 in all):
+//! the least a fill on the fallback pool cost its transaction on fork fills through the router
+//! deployed on Ethereum, counted as the charge of the same swap sent direct plus the difference of
+//! the two receipts, over Uniswap V2 pairs (90,445 to 102,984) and Uniswap V3 pools (105,181 to
+//! 109,541). A fill at the door cost 154,693 at the least (the door's fill and its quote, the
+//! pool's quote and the router's work), so a door fill spends about 49,000 to 128,000 more than it
+//! is charged. The router's other fallback protocols, and a door refusing sooner than `NoWord`,
+//! were not measured. On this path a listing needs no measured or named figure. A listing with a
+//! credit mode is published direct, as [`PROTOCOL_SYSTEM`], whatever the builder says, and charged
+//! the gas named for it: the router's quote would run its route a second time, which that gas does
 //! not count. The fallback encoder needs the swap's `user_data` to name the pool to fall back on,
 //! so a caller that names none builds the feed `without_fallback_router()`. This default changes
 //! what existing Ethereum callers receive: their listings' components move from [`PROTOCOL_SYSTEM`]
@@ -786,10 +787,10 @@ pub const ASK_VALID_UNTIL_MS_ATTRIBUTE: &str = "ask_valid_until_ms";
 /// cost its transaction (on Base and BNB Chain, what its named gas says it costs), big-endian, in
 /// the terms of a swap's charge (beside what tycho-execution's gas estimator adds): the dearer
 /// direction's. Sent direct it is that direction's charge; through the fallback router it is the
-/// door's branch at the least, which the charge there, the cheaper branch's, is 64,000 to 121,000
-/// under. Absent on a listing with a credit mode sent direct, whose routed fills cost several times
-/// that, and through the fallback router for a listing with no figure of its own. See the module
-/// doc, Gas.
+/// door's branch at the least, which the charge there, the cheaper branch's, is about 49,000 to
+/// 128,000 under. Absent on a listing with a credit mode sent direct, whose routed fills cost
+/// several times that, and through the fallback router for a listing with no figure of its own. See
+/// the module doc, Gas.
 pub const EXPECTED_GAS_ATTRIBUTE: &str = "expected_gas";
 
 /// Static attribute holding what one swap's call adds to a transaction's gas limit, big-endian: the

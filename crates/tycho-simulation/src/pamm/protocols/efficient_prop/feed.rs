@@ -5305,7 +5305,7 @@ mod tests {
                     )
                     .unwrap()
                     .gas;
-                assert_eq!(gas, BigUint::from(50_445u64));
+                assert_eq!(gas, BigUint::from(35_181u64));
             }
             // Beside that floor the book names neither what a fill at the door is expected to
             // cost nor what its call adds to a gas limit: the listing has no figure of its own to
@@ -6372,7 +6372,7 @@ mod tests {
                 // credit listing).
                 let ask = samples(state, SwapDirection::QuoteToBase);
                 let gas = match (direct, listing.credit_mode) {
-                    (false, _) => 50_445u64,
+                    (false, _) => 35_181u64,
                     (true, 0) => 96_239,
                     (true, _) => 158_340,
                 };

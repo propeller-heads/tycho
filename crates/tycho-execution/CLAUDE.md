@@ -205,6 +205,7 @@ Each concrete router has its own executor, and each executor holds one router ad
 | `HashflowFallbackRouter` | `HashflowFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][quote: 345][fallback]` |
 | `NativeFallbackRouter` | `NativeFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][nativeDataLength: 4][nativeData][fallback]` |
 | `LiquoriceFallbackRouter` | `LiquoriceFallbackExecutor` | none: runs first | `[tokenIn: 20][tokenOut: 20][calldataLength: 4][settlement calldata][fallback]` |
+| `BaibaiFallbackRouter` | `BaibaiFallbackExecutor` | `quoteFor` with the router as taker | `[tokenIn: 20][tokenOut: 20][fallback]` |
 
 A router whose `_runsPrimaryFirst()` is true has its price signed off-chain: the primary runs first, neither side is
 quoted, and the fallback runs only when the primary fails.
@@ -247,6 +248,15 @@ as a solver. `swap` checks the `settle`/`settleSingle` selector before anything 
 settlement pulls the signed amount, so the rest of `amountIn` goes back to the caller, as for Bebop. An `amountIn` below
 the signed amount makes the pull revert, and the fallback fills the whole leg.
 
+`BaibaiFallbackRouter` runs one BaiBai entrypoint, an immutable together with the `quoteToken` it reads from it at
+construction. Every BaiBai pair trades a base token against that quote token, so the swap's tokens name the pair and
+the swap data carries no primary. The quote is a low-level `staticcall` to `quoteFor(base, tokenIn, amountIn, router)`:
+BaiBai charges each taker its own fee, and the router is the taker, so BaiBai must set the router's fee (whitelist it)
+for its quotes to match the direct executor's. A revert, fewer than two words returned, or tokens that are not a base
+and the quote token quote zero. The router approves the entrypoint for `amountIn`, calls `swapExactAmountIn` with a
+zero minimum and the receiver as recipient, and revokes the approval. Input the entrypoint does not pull goes back
+to the caller, as for Bebop.
+
 The sections below describe `PropAMMFallbackRouter`; "pAMM" is the primary there.
 
 A natively indexed `IPropAMM` venue uses the same pAMM lane: tycho-simulation publishes its
@@ -277,9 +287,8 @@ quoter there is the cheaper option. The pAMM quote is a low-level call whose ret
 is at least 32 bytes; the fallback quote runs in the self-only external `quoteFallback` under try/catch. A fallback
 quote that reverts, returns nothing decodable or gets malformed protocol data counts as zero, and equal quotes keep
 the pAMM. A pAMM that quotes zero skips the fallback quote and its own swap, so the fallback runs straight away. The
-fallback quote costs gas on every other leg, including the ones the pAMM fills: about 107k for a Uniswap V4
-simulation, about 44k for Fluid, about 39k for Curve, about 31k for Uniswap V3, about 11k for Uniswap V2 (router
-call, cold state, mainnet fork).
+fallback quote costs gas on every other leg, including the ones the pAMM fills; `fallback_quote_gas` in
+`gas_estimator.rs` gives the measured cost and the budget per protocol.
 
 `FallbackSwap(primary, tokenIn, tokenOut, amountIn, protocol, reason)` is emitted when the fallback runs. `reason` is
 `FallbackQuotedHigher` (the fallback quote beat the pAMM quote, a pAMM that cannot quote included) or
@@ -345,16 +354,16 @@ Constraints:
   on execution); a zero quoter quotes Uniswap V3 by simulation. Every other protocol is addressed per swap, so no chain
   needs a variant of the contract -- a protocol a chain needs is a new byte in the shared enum.
 - `scripts/deploy-fallback-router.js` deploys the router `FALLBACK_ROUTER` names (`propamm`, the default, `metric`,
-  `bebop`, `hashflow`, `native` or `liquorice`) through the CREATE2 factory, reading `poolManager` and
+  `bebop`, `hashflow`, `native`, `liquorice` or `baibai`) through the CREATE2 factory, reading `poolManager` and
   `fluidLiquidity` from the chain's `uniswap_v4` and `fluid_v1` entries in `config/executor_deployments.json` and the static quoter from the script's own
   `STATIC_QUOTERS` map (Eden Network's deployments), zeroing whichever is missing. Bebop adds the `rfq:bebop` settlement and router; Hashflow adds
   the `rfq:hashflow` router; Native adds the `rfq:native` router; Liquorice adds the `rfq:liquorice` settlement
-  and balance manager.
+  and balance manager; BaiBai adds the `pamm:baibai` entrypoint.
 - The executor then goes through `deploy-executors.js` like any executor: add an entry with the printed router address
   to `executor_deployments.json` and list it under the chain (`fallback` for `PropAMMFallbackExecutor`,
   `fallback:rfq:metric` for `MetricFallbackExecutor`, `fallback:rfq:bebop` for `BebopFallbackExecutor`,
   `fallback:rfq:hashflow` for `HashflowFallbackExecutor`, `fallback:rfq:native` for `NativeFallbackExecutor`,
-  `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`). An entry holds the zero address until its router is
+  `fallback:rfq:liquorice` for `LiquoriceFallbackExecutor`, `fallback:pamm:baibai` for `BaibaiFallbackExecutor`). An entry holds the zero address until its router is
   deployed; the executor constructor rejects it. A Bebop, Hashflow, Native or Liquorice router also needs its
   address as `fallback_router` under its protocol in `protocol_specific_addresses.json`; the Native entry also needs
   `router_v6`, and the Liquorice entry `settlement_address` and `balance_manager_address`. Liquorice must allow a
@@ -578,8 +587,10 @@ same `FallbackSwapData` `user_data`:
 
 The Metric router is deployed on Ethereum, Base, BSC, Robinhood, Arbitrum, Polygon and Elysium, Bebop's on Ethereum and Base,
 and Hashflow's on Ethereum. The Native and Liquorice routers are not deployed, so no chain lists their entries yet.
-The gas estimator charges a Metric leg its pool gas twice (the simulation runs the pool's swap), and a Bebop,
-Hashflow, Native or Liquorice leg the router's approval and output forward.
+The gas estimator charges every leg whose router quotes the fallback a budget for that quote, by fallback protocol
+and chain (`fallback_quote_gas`). It also charges a Metric leg its pool gas twice (the simulation runs the pool's
+swap), a BaiBai leg the entrypoint's `quoteFor`, and a Bebop, Hashflow, Native or Liquorice leg the router's
+approval and output forward.
 
 `SUPPORTED_PROTOCOLS` in `fallback.rs` lists the fallback protocols per chain, and `supported_on`
 reads it. A chain lists a protocol when its router has the protocol's singleton (Uniswap V4, Fluid
