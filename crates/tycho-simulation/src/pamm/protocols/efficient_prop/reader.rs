@@ -3525,14 +3525,7 @@ impl DoorsReader {
             .iter()
             .zip(&reaches)
             .flat_map(|(door, reach)| {
-                [true, false].map(|bid| {
-                    let sizes = self.side_sizes(door, bid, reach[usize::from(!bid)]);
-                    let mut calls = quote_calls(door, bid, &sizes);
-                    if door.credit.is_some() {
-                        calls.extend(self.plan_quotes(door, bid, &sizes));
-                    }
-                    (sizes, calls)
-                })
+                [true, false].map(|bid| self.side_quotes(door, bid, reach[usize::from(!bid)]))
             })
             .collect();
         // After every side's calls, what each door's pool holds of its two tokens.
