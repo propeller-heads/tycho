@@ -9,10 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use alloy::{
-    primitives::{Address, B256, U256},
-    providers::RootProvider,
-};
+use alloy::primitives::{Address, B256, U256};
 use chrono::Utc;
 use reqwest::Url;
 use tracing::debug;
@@ -23,17 +20,20 @@ use crate::{
         chain_id, component::pair_book, quote_tokens::usd_stablecoins_for_chain, Book,
         BookFeedConfig, BookSnapshot, Books, ReceivedAt,
     },
-    pamm::protocols::flamm::{
-        gas::{GasTable, Legs, SideGas},
-        guard,
-        ladder::{settle, Ladder},
-        reader::{
-            Admission, BookRead, DirectionRead, FlammReader, HookShape, PoolRead, ReaderSettings,
-            TokenInfo, SAMPLER_RESERVE_GAS,
+    pamm::{
+        node::node_provider,
+        protocols::flamm::{
+            gas::{GasTable, Legs, SideGas},
+            guard,
+            ladder::{settle, Ladder},
+            reader::{
+                Admission, BookRead, DirectionRead, FlammReader, HookShape, PoolRead,
+                ReaderSettings, TokenInfo, SAMPLER_RESERVE_GAS,
+            },
+            router,
+            state::FlammPairState,
+            POOL_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
         },
-        router,
-        state::FlammPairState,
-        POOL_ATTRIBUTE, PROTOCOL_SYSTEM, PROTOCOL_TYPE,
     },
     snapshot_feed::{
         errors::FeedError,
@@ -469,7 +469,7 @@ impl FlammFeedBuilder {
                 chain_id: chain_id(chain)?,
                 chain_checked: AtomicBool::new(false),
                 reader: Arc::new(FlammReader::new(
-                    RootProvider::new_http(url),
+                    node_provider(url),
                     settings,
                     self.max_in_flight,
                 )),
@@ -911,6 +911,24 @@ mod node_tests {
         let mut quoted: Vec<Address> = quoted.into_iter().collect();
         quoted.sort();
         quoted
+    }
+
+    /// The HTTP client quotes the URL a request failed on, and a node's URL commonly carries a
+    /// key: the poll's error, which the feed logs, does not.
+    #[tokio::test]
+    async fn a_failed_poll_does_not_report_the_rpc_url() {
+        let feed = FlammFeedBuilder::new(config(0.0), "http://127.0.0.1:1/secret_key".to_string())
+            .factories(vec![bytes(FACTORY)])
+            .hook_classes(vec![listed_hook()])
+            .price_feeds(vec![bytes(FEED)])
+            .gas_table(table_serving(hook_class(&HOOK_CODE)))
+            .build()
+            .unwrap();
+
+        let error = first_poll(&feed).await.unwrap_err();
+
+        assert!(matches!(error, FeedError::Connection(_)), "{error}");
+        assert!(!error.to_string().contains("secret_key"), "{error}");
     }
 
     /// One round of discovery, then a poll.

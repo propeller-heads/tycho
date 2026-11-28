@@ -46,13 +46,12 @@ use alloy::{
         Provider, RootProvider, MULTICALL3_ADDRESS,
     },
     rpc::{
-        client::{BatchRequest, RpcClient, Waiter},
-        json_rpc::{RequestPacket, ResponsePacket},
+        client::{BatchRequest, Waiter},
         types::{TransactionInput, TransactionRequest},
     },
     sol,
     sol_types::{SolCall, SolValue},
-    transports::{utils::guess_local_url, TransportError, TransportErrorKind, TransportFut},
+    transports::TransportError,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -60,13 +59,16 @@ use tracing::{debug, info, warn};
 use tycho_common::models::Chain;
 
 use crate::{
-    pamm::protocols::efficient_prop::{
-        desks::ApprovedDesks,
-        ladder::FillPath,
-        overrides::{Cadence, NextBlock, NextBlockReader, Wanted, SLOT_SECS},
-        slots::{HeadWords, ListingSlots, SLOT_RULE},
-        state::{CreditGas, FillReads, PairPlace},
-        telemetry::{self, NotCovered, NotKept, PollOutcome},
+    pamm::{
+        node::node_provider,
+        protocols::efficient_prop::{
+            desks::ApprovedDesks,
+            ladder::FillPath,
+            overrides::{Cadence, NextBlock, NextBlockReader, Wanted, SLOT_SECS},
+            slots::{HeadWords, ListingSlots, SLOT_RULE},
+            state::{CreditGas, FillReads, PairPlace},
+            telemetry::{self, NotCovered, NotKept, PollOutcome},
+        },
     },
     snapshot_feed::errors::FeedError,
 };
@@ -1368,55 +1370,6 @@ impl NextMoments {
     }
 }
 
-/// The node's JSON-RPC transport over HTTP: alloy's own, less the URL it records on every
-/// request's span. A node's URL commonly carries a key, in its query or its userinfo, and that
-/// span would print it to any log at debug level; nor does a failure here quote the URL.
-#[derive(Clone)]
-struct NodeTransport {
-    client: reqwest::Client,
-    url: Url,
-}
-
-impl tower_service::Service<RequestPacket> for NodeTransport {
-    type Response = ResponsePacket;
-    type Error = TransportError;
-    type Future = TransportFut<'static>;
-
-    fn poll_ready(
-        &mut self,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: RequestPacket) -> Self::Future {
-        let this = self.clone();
-        Box::pin(async move {
-            let response = this
-                .client
-                .post(this.url)
-                .json(&req)
-                .headers(req.headers())
-                .send()
-                .await
-                .map_err(|e| TransportErrorKind::custom(e.without_url()))?;
-            let status = response.status();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| TransportErrorKind::custom(e.without_url()))?;
-            if !status.is_success() {
-                return Err(TransportErrorKind::http_error(
-                    status.as_u16(),
-                    String::from_utf8_lossy(&body).into_owned(),
-                ));
-            }
-            serde_json::from_slice(&body)
-                .map_err(|e| TransportError::deser_err(e, String::from_utf8_lossy(&body)))
-        })
-    }
-}
-
 #[derive(Clone, derive_more::Debug)]
 pub(super) struct DoorsReader {
     #[debug(skip)]
@@ -1525,13 +1478,9 @@ impl DoorsReader {
         desks: ApprovedDesks,
         next_block: Option<NextBlockReader>,
     ) -> Self {
-        let is_local = guess_local_url(rpc_url.as_str());
         Self {
             rpc_url: rpc_url.to_string(),
-            provider: RootProvider::new(RpcClient::new(
-                NodeTransport { client: reqwest::Client::new(), url: rpc_url },
-                is_local,
-            )),
+            provider: node_provider(rpc_url),
             chain,
             front,
             factory,
@@ -4758,6 +4707,7 @@ fn to_u64(value: U256, what: &str) -> Result<u64, FeedError> {
 
 #[cfg(test)]
 mod tests {
+    use alloy::transports::TransportErrorKind;
     use rstest::rstest;
 
     use super::*;
