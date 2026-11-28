@@ -3759,11 +3759,16 @@ impl DoorsReader {
         };
         // The least the side fills: the ask's input is the quote token, and the bid's output is,
         // which an input paid at the full fill's average price, the worst of any smaller fill, at
-        // least reaches.
+        // least reaches. A product past 256 bits puts the floor above every size the side reports
+        // fillable.
         let floor = if bid && !door.min_fill.is_zero() {
             most_out
                 .checked_sub(U256::from(1u8))
-                .map_or(U256::ZERO, |_| (door.min_fill * most).div_ceil(most_out))
+                .map_or(U256::ZERO, |_| {
+                    door.min_fill
+                        .checked_mul(most)
+                        .map_or(U256::MAX, |input| input.div_ceil(most_out))
+                })
         } else {
             door.min_fill
         };
